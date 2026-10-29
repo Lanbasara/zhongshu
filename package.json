@@ -1,0 +1,14 @@
+{
+  "name": "zhongshu",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=24 <25" },
+  "scripts": {
+    "dev": "node --watch src/server.mjs",
+    "start": "node dist/server.mjs",
+    "build": "node scripts/build.mjs",
+    "test": "node --test"
+  },
+  "license": "MIT"
+}

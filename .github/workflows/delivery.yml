@@ -1,0 +1,99 @@
+name: Delivery
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: delivery-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm test && npm run build
+        env:
+          REVISION: ${{ github.sha }}
+      - name: Check deployment helper syntax
+        run: python3 -c "import ast,pathlib; ast.parse(pathlib.Path('deploy/release.py').read_text())"
+      - name: Build and check the actual container
+        env:
+          REVISION: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          docker build --build-arg REVISION="$REVISION" -t zhongshu-check .
+          docker run -d --name zhongshu-check --read-only --cap-drop ALL --security-opt no-new-privileges --memory 128m --cpus 0.5 --pids-limit 64 -p 127.0.0.1:8787:3000 zhongshu-check
+          trap 'docker rm -f zhongshu-check >/dev/null' EXIT
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:8787/api/version > /tmp/version.json; then break; fi
+            sleep 1
+          done
+          jq -e --arg revision "$REVISION" '.revision == $revision' /tmp/version.json
+
+  publish:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.reference.outputs.image }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Image repository
+        id: repository
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        id: image
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.repository.outputs.name }}:sha-${{ github.sha }}
+          build-args: REVISION=${{ github.sha }}
+          labels: org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Record immutable image
+        id: reference
+        env:
+          REPOSITORY: ${{ steps.repository.outputs.name }}
+          DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          echo "image=$REPOSITORY@$DIGEST" >> "$GITHUB_OUTPUT"
+          echo "Published: \`$REPOSITORY@$DIGEST\`" >> "$GITHUB_STEP_SUMMARY"
+
+  deploy:
+    if: vars.DEPLOY_ENABLED == 'true'
+    needs: publish
+    permissions:
+      contents: read
+      packages: read
+    uses: ./.github/workflows/deploy.yml
+    with:
+      image: ${{ needs.publish.outputs.image }}
+      revision: ${{ github.sha }}
+    secrets: inherit

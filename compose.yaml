@@ -1,0 +1,18 @@
+services:
+  app:
+    image: ${IMAGE:?Set IMAGE to a versioned image or digest}
+    restart: unless-stopped
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${PORT:-8787}:3000"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: [/tmp:size=16m,mode=1777]
+    mem_limit: ${MEMORY_LIMIT:-128m}
+    cpus: ${CPU_LIMIT:-0.5}
+    pids_limit: 64
+    logging:
+      driver: local
+      options:
+        max-size: "5m"
+        max-file: "2"

@@ -1,0 +1,76 @@
+name: Deploy an existing image
+on:
+  workflow_call:
+    inputs:
+      image:
+        type: string
+        required: true
+      revision:
+        type: string
+        required: true
+  workflow_dispatch:
+    inputs:
+      image:
+        description: Full image reference including @sha256 digest (from a Delivery run)
+        type: string
+        required: true
+      revision:
+        description: Full 40-character Git commit in that image
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: production-deployment
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment:
+      name: production
+      url: ${{ vars.PUBLIC_URL }}
+    steps:
+      - name: Deploy immutable image through restricted SSH
+        env:
+          IMAGE: ${{ inputs.image }}
+          REVISION: ${{ inputs.revision }}
+          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ vars.DEPLOY_PORT }}
+          DEPLOY_USER: ${{ vars.DEPLOY_USER }}
+          PUBLIC_URL: ${{ vars.PUBLIC_URL }}
+          DEPLOY_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$IMAGE" =~ ^ghcr\.io/[a-z0-9._/-]+@sha256:[a-f0-9]{64}$ ]]
+          [[ "$IMAGE" == "ghcr.io/${GITHUB_REPOSITORY,,}@"* ]]
+          [[ "$REVISION" =~ ^[a-f0-9]{40}$ ]]
+          [[ "$DEPLOY_HOST" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*$ ]]
+          [[ "$DEPLOY_USER" =~ ^[a-z_][a-z0-9_-]*$ ]]
+          [[ "$DEPLOY_PORT" =~ ^[0-9]{1,5}$ ]]
+          [[ "$PUBLIC_URL" == https://* ]]
+          umask 077
+          keydir=$(mktemp -d)
+          trap 'rm -rf -- "$keydir"' EXIT
+          printf '%s\n' "$DEPLOY_KEY" > "$keydir/key"
+          printf '%s\n' "$KNOWN_HOSTS" > "$keydir/known_hosts"
+          unset DEPLOY_KEY KNOWN_HOSTS
+          python3 -c 'import json,os; print(json.dumps({"username":os.environ["GITHUB_ACTOR"],"token":os.environ["REGISTRY_TOKEN"]}))' |
+            ssh -i "$keydir/key" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$keydir/known_hosts" -o ConnectTimeout=15 -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "deploy $IMAGE $REVISION"
+          unset REGISTRY_TOKEN
+          for attempt in $(seq 1 12); do
+            if curl --fail --silent --show-error --max-time 10 "${PUBLIC_URL%/}/api/version" > "$keydir/version.json" && jq -e --arg revision "$REVISION" '.revision == $revision' "$keydir/version.json"; then
+              echo "Deployed \`$REVISION\` to $PUBLIC_URL" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo 'Public version check failed' >&2
+          exit 1
