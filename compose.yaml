@@ -7,7 +7,7 @@ services:
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
-    tmpfs: [/tmp:size=16m,mode=1777]
+    tmpfs: ["/tmp:size=16m,mode=1777"]
     mem_limit: ${MEMORY_LIMIT:-128m}
     cpus: ${CPU_LIMIT:-0.5}
     pids_limit: 64

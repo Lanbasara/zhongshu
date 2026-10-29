@@ -35,8 +35,9 @@ jobs:
         run: |
           set -euo pipefail
           docker build --build-arg REVISION="$REVISION" -t zhongshu-check .
-          docker run -d --name zhongshu-check --read-only --cap-drop ALL --security-opt no-new-privileges --memory 128m --cpus 0.5 --pids-limit 64 -p 127.0.0.1:8787:3000 zhongshu-check
-          trap 'docker rm -f zhongshu-check >/dev/null' EXIT
+          export IMAGE=zhongshu-check
+          trap 'docker compose --project-name zhongshu-check down >/dev/null' EXIT
+          docker compose --project-name zhongshu-check up -d --wait --wait-timeout 60
           for attempt in $(seq 1 30); do
             if curl --fail --silent http://127.0.0.1:8787/api/version > /tmp/version.json; then break; fi
             sleep 1

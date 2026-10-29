@@ -13,6 +13,10 @@ import tempfile
 import urllib.request
 
 
+class DeploymentError(ValueError):
+    """A fixed, credential-free error safe to include in deployment logs."""
+
+
 def run(args, env, **kwargs):
     return subprocess.run(args, env=env, check=True, timeout=240, **kwargs)
 
@@ -29,28 +33,28 @@ def write_state(destination, value):
 
 def main():
     if os.geteuid() == 0 or len(sys.argv) != 2:
-        raise ValueError('Invalid deployment invocation')
+        raise DeploymentError('Invalid deployment invocation')
     command = re.fullmatch(r'deploy (ghcr\.io/[a-z0-9._/-]+@sha256:[a-f0-9]{64}) ([a-f0-9]{40})', sys.argv[1])
     if not command:
-        raise ValueError('Only deploy IMAGE@sha256:DIGEST COMMIT is accepted')
+        raise DeploymentError('Only deploy IMAGE@sha256:DIGEST COMMIT is accepted')
     image, revision = command.groups()
     # This file and all paths it names are provisioned by the host administrator.
     config = json.loads(Path('/etc/zhongshu-deploy/config.json').read_text(encoding='utf-8'))
     if image.split('@', 1)[0] != config['image_repository']:
-        raise ValueError('Image repository is not authorized on this host')
+        raise DeploymentError('Image repository is not authorized on this host')
     state_dir = Path(config['state_directory'])
     if not state_dir.is_dir():
-        raise ValueError('Deployment state directory must be initialized first')
+        raise DeploymentError('Deployment state directory must be initialized first')
     with (state_dir / 'deploy.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         # The workflow token is short-lived and scoped to package reads. It never
         # appears in argv or persistent host configuration. Public pulls need {}.
         data = sys.stdin.buffer.read(8193)
         if len(data) > 8192:
-            raise ValueError('Registry credential input is too large')
+            raise DeploymentError('Registry credential input is too large')
         credential = json.loads(data or b'{}')
         if not isinstance(credential, dict) or set(credential) - {'username', 'token'}:
-            raise ValueError('Invalid registry credential input')
+            raise DeploymentError('Invalid registry credential input')
         runtime_dir = f'/run/user/{os.geteuid()}'
         with tempfile.TemporaryDirectory(prefix='zhongshu-registry-', dir=runtime_dir) as registry_dir:
             env = {'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'HOME': pwd.getpwuid(os.geteuid()).pw_dir,
@@ -61,10 +65,12 @@ def main():
             token = credential.get('token')
             if token is not None:
                 username = credential.get('username', '')
-                if not isinstance(token, str) or not re.fullmatch(r'[A-Za-z0-9_]{20,2048}', token):
-                    raise ValueError('Invalid registry token format')
+                # Registry credentials are opaque: formats may include JWT punctuation.
+                # Bound their size and reject whitespace/control bytes; pass only on stdin.
+                if not isinstance(token, str) or not re.fullmatch(r'[\x21-\x7e]{20,4096}', token):
+                    raise DeploymentError('Invalid registry token format')
                 if not isinstance(username, str) or not re.fullmatch(r'[A-Za-z0-9_\[\]-]{1,100}', username):
-                    raise ValueError('Invalid registry username')
+                    raise DeploymentError('Invalid registry username')
                 run(['/usr/bin/docker', 'login', 'ghcr.io', '--username', username, '--password-stdin'],
                     env, input=token.encode(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             run(['/usr/bin/docker', 'pull', image], env)
@@ -72,7 +78,7 @@ def main():
                          '{{index .Config.Labels "org.opencontainers.image.revision"}}', image],
                         env, capture_output=True, text=True).stdout.strip()
             if label != revision:
-                raise ValueError('Image revision does not match the requested commit')
+                raise DeploymentError('Image revision does not match the requested commit')
             compose = ['/usr/bin/docker', 'compose', '--env-file', '/dev/null',
                        '--project-name', config['project_name'], '--file', config['compose_file']]
             current_file = state_dir / 'current.json'
@@ -85,7 +91,7 @@ def main():
                 with urllib.request.urlopen(url, timeout=10) as response:
                     metadata = json.load(response)
                 if metadata.get('revision') != expected_revision:
-                    raise ValueError('Running revision verification failed')
+                    raise DeploymentError('Running revision verification failed')
 
             try:
                 activate(image, revision)
@@ -109,5 +115,6 @@ if __name__ == '__main__':
         main()
     except Exception as error:
         # Avoid reflecting untrusted input or registry credentials into job logs.
-        print(f'Deployment failed ({type(error).__name__}); inspect the deployment job and host state.', file=sys.stderr)
+        detail = str(error) if isinstance(error, DeploymentError) else type(error).__name__
+        print(f'Deployment failed: {detail}.', file=sys.stderr)
         sys.exit(1)

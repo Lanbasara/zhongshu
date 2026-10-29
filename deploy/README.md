@@ -12,6 +12,10 @@ OS's supported method. Follow Docker's rootless setup for a dedicated SSH
 deployment user, including subordinate UID/GID ranges and user-service linger.
 Its socket must be `/run/user/<uid>/docker.sock`. Create an administrator-owned
 deployment directory and a release-state directory owned by the deployment user.
+Use cgroup v2 with the systemd driver and delegate `cpu memory pids` to this
+user's systemd manager. Check the effective controllers and the running
+container's limits; merely declaring limits in Compose is insufficient when the
+host has not delegated them. See [Docker's rootless resource-limit guidance](https://docs.docker.com/engine/security/rootless/tips/#limiting-resources).
 Install reviewed copies of:
 
 - `compose.yaml` into your deployment directory;
