@@ -1,52 +1,35 @@
-name: Delivery
+name: Release
 on:
   push:
-    branches: [main]
-  pull_request:
+    branches: [release]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: delivery-${{ github.ref }}
+  group: release
   cancel-in-progress: false
 
 jobs:
-  check:
+  eligible:
+    if: github.ref == 'refs/heads/release'
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version-file: .node-version
-      - run: npm ci --ignore-scripts --no-audit --no-fund
-      - run: npm test && npm run build
-        env:
-          REVISION: ${{ github.sha }}
-      - name: Check deployment helper syntax
-        run: python3 -c "import ast,pathlib; ast.parse(pathlib.Path('deploy/release.py').read_text())"
-      - name: Build and check the actual container
-        env:
-          REVISION: ${{ github.sha }}
-        run: |
-          set -euo pipefail
-          docker build --build-arg REVISION="$REVISION" -t zhongshu-check .
-          export IMAGE=zhongshu-check
-          trap 'docker compose --project-name zhongshu-check down >/dev/null' EXIT
-          docker compose --project-name zhongshu-check up -d --wait --wait-timeout 60
-          for attempt in $(seq 1 30); do
-            if curl --fail --silent http://127.0.0.1:8787/api/version > /tmp/version.json; then break; fi
-            sleep 1
-          done
-          jq -e --arg revision "$REVISION" '.revision == $revision' /tmp/version.json
+      - name: Require a commit integrated into main
+        run: git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+
+  check:
+    needs: eligible
+    uses: ./.github/workflows/ci.yml
 
   publish:
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
-    needs: check
+    needs: [eligible, check]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
