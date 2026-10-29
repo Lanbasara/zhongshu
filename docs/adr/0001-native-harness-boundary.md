@@ -21,6 +21,14 @@ status: accepted
 
 原生服务不直接暴露到公网。Agent 执行身份仅获得其 HOME、原生数据和允许的工作区，不获得中书认证存储、部署凭据或宿主管理能力；目录名称本身不构成权限隔离。
 
+## 接入模块与两个 adapter
+
+接入模块向应用提供中书需要的会话、操作、历史和能力契约；内部由 Codex、DSH 两个 adapter 解释原生协议。应用统一维护工作台状态与浏览器恢复，adapter 负责握手、原生配置、身份映射、订阅、原生恢复与错误解释。页面不依赖原生请求字段；两个 adapter 也不各自复制一套工作台业务逻辑。
+
+统一的是可依赖的语义，真实差异通过能力及结果表达。Codex 的 `turn/steer` 要求匹配活动轮次；DSH 的原生输入策略存在 next-step/next-turn 差别。DSH rc.4 的 API Peer 在拥有它的 WebSocket 关闭后失效，`follow` 重连从新快照开始，`cancel` 保留待处理 inbox。连接身份、会话身份和运行身份因此不能压成一个 ID；停止也不能统一承诺清空所有待办。[Codex App Server](https://learn.chatgpt.com/docs/app-server)、[DSH 连接](https://github.com/deepseek-ai/deepseek-harness/blob/504a01a9578abc2c6f1fb896b1dc322c9fe24f66/packages/client/connection/README.md#browser-authentication-and-request-trust)、[DSH 请求类型](https://github.com/deepseek-ai/deepseek-harness/blob/504a01a9578abc2c6f1fb896b1dc322c9fe24f66/packages/api/session-controller/src/types.ts)、[DSH 动作实现](https://github.com/deepseek-ai/deepseek-harness/blob/504a01a9578abc2c6f1fb896b1dc322c9fe24f66/packages/api/session-controller/src/commands.ts)
+
+具体 Interface 由[两端最小实验](../plans/first-harness-tracer.md)收敛，之后以共同的行为验证保护。固定已验证原生版本；升级先跑对应兼容检查，新语义经能力声明进入产品，不静默沿用旧假设。此边界不要求先建设通用插件平台或抹平全部原生能力。
+
 ## 对话约定
 
 一段对话固定工作区、Harness，以及新建时选择的模型和权限；首版需要其他配置时新建对话。跨设备继续、各轮输入及恢复原生会话都遵循同一配置；接入模块核实哪些字段须显式传递、哪些由原生继承。配置无法保持时明确失败，不能静默换模型或创建另一段原生会话。
