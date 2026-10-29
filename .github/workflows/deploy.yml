@@ -8,16 +8,6 @@ on:
       revision:
         type: string
         required: true
-  workflow_dispatch:
-    inputs:
-      image:
-        description: Full image reference including @sha256 digest (from a Delivery run)
-        type: string
-        required: true
-      revision:
-        description: Full 40-character Git commit in that image
-        type: string
-        required: true
 
 permissions:
   contents: read
@@ -29,6 +19,7 @@ concurrency:
 
 jobs:
   deploy:
+    if: github.ref == 'refs/heads/release'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     environment:
