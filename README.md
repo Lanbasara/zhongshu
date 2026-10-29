@@ -25,7 +25,8 @@ credentials or server access.
 ## Project guides
 
 - [Agent working agreement](AGENTS.md): boundaries, autonomy and task-based navigation.
-- [Architecture](docs/architecture.md): current structure, design reasons and evolution.
+- [Documentation](docs/README.md): task-based paths to architecture decisions, quality criteria and delivery plans.
+- [Architecture](docs/architecture.md): the current implementation and its code entry points.
 - [Development](docs/development.md): local builds, containers, verification and PRs to `main`.
 
 The guides are currently written in Chinese.
