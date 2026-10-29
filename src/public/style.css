@@ -15,7 +15,7 @@ section { padding: 28px; border: 1px solid #dcded5; background: #fcfcf8; border-
 dl { margin: 28px 0; font-size: 13px; }
 dl div { display: grid; grid-template-columns: 88px minmax(0, 1fr); gap: 12px; margin-top: 14px; }
 dt { color: #767d75; } dd { margin: 0; overflow-wrap: anywhere; } code { font-size: 12px; line-height: 1.6; }
-button { background: transparent; color: #385c49; border: 1px solid #b8c4b9; border-radius: 8px; padding: 10px 16px; cursor: pointer; font: inherit; font-size: 13px; }
-button:hover { background: #eef2e9; } button:focus-visible { outline: 3px solid #6b937b; outline-offset: 3px; } button:disabled { opacity: .55; cursor: wait; }
+button { background: #385c49; color: #fff; border: 1px solid #385c49; border-radius: 8px; padding: 10px 16px; cursor: pointer; font: inherit; font-size: 13px; }
+button:hover { background: #294737; } button:focus-visible { outline: 3px solid #6b937b; outline-offset: 3px; } button:disabled { opacity: .55; cursor: wait; }
 footer { margin-top: 48px; color: #8b9088; font-size: 12px; }
 @media (max-width: 480px) { main { padding-top: 32px; } .eyebrow { margin-top: 72px; } section { padding: 22px; } }
