@@ -31,11 +31,12 @@ jobs:
           set -euo pipefail
           docker build --build-arg REVISION="$REVISION" -t zhongshu-check .
           export IMAGE=zhongshu-check
-          trap 'docker compose --project-name zhongshu-check down >/dev/null' EXIT
+          trap 'timeout 30s docker compose --project-name zhongshu-check down --volumes >/dev/null' EXIT
           docker compose --project-name zhongshu-check up -d --wait --wait-timeout 60
           for attempt in $(seq 1 30); do
-            if curl --fail --silent http://127.0.0.1:8787/api/version > /tmp/version.json; then break; fi
+            if curl --fail --silent --connect-timeout 2 --max-time 5 http://127.0.0.1:8787/api/version > /tmp/version.json; then break; fi
             sleep 1
           done
           jq -e --arg revision "$REVISION" '.revision == $revision' /tmp/version.json
+          node scripts/check-container.mjs
 

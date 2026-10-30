@@ -26,6 +26,10 @@ IMAGE=zhongshu:local docker compose --project-name zhongshu-local down
 
 配置项见 [.env.example](../.env.example) 和 [compose.yaml](../compose.yaml)。后续引入外部依赖时，一并提供可复现的本地运行与必要数据准备方式；模拟反馈与真实集成验证要明确区分。
 
+[容器检查脚本](../scripts/check-container.mjs)用于已启动、具有全新数据卷的临时 `zhongshu-check` Compose 项目；可用 `ZHONGSHU_CHECK_PROJECT=zhongshu-check-<后缀>`指定同类测试项目。它会初始化随机测试密码，验证真实登录、生产 Cookie 属性、容器替换后的会话保留，以及在线备份、新目录恢复和旧会话吊销；随后清理自己创建的恢复容器与临时目录。它不会复用已有管理员的数据卷，也不用于真实实例。完整启动与销毁命令以 [CI](../.github/workflows/ci.yml)为准，临时 Compose 项目和数据卷由调用方清理。
+
+该脚本直接请求回环 HTTP 端口，模拟 TLS 终止后的内部链路，并验证配置的 HTTPS origin；它不证明浏览器已通过 TLS 收发 Secure Cookie。
+
 ## 决定怎样验证
 
 修改前明确预期行为、应保持的边界以及能够判断结果的证据。简单任务可以直接执行；复杂任务按需使用计划、原型或独立审查。
