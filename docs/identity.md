@@ -22,7 +22,7 @@
 
 `npm run admin -- backup /absolute/private/backup.sqlite` 使用 SQLite 在线备份 API，验证备份后保留，不覆盖已有文件。不要直接复制仍在运行的 WAL 数据库文件。备份包含密码摘要与私有状态，按身份数据保护和保留；无自动上传或自动清除策略。
 
-`npm run admin -- restore /absolute/private/backup.sqlite --data-dir /absolute/new/data` 仅恢复到尚不存在数据库的新目录。先在私有暂存库中吊销旧会话并验证，再原子发布，管理员必须重新登录。恢复后重新指向新目录启动应用；旧数据目录在确认恢复有效前保留。
+`npm run admin -- restore /absolute/private/backup.sqlite --data-dir /absolute/new/data` 仅恢复到尚不存在数据库的新目录。先在私有暂存库中吊销旧会话并执行产品恢复处理，再原子发布，管理员必须重新登录。待派发和派发中操作均转为待核实，原因见 [Harness 恢复边界](harnesses.md)。恢复后重新指向新目录启动应用；旧数据目录在确认恢复有效前保留。
 
 迁移有序执行，记录 SQL 摘要；不允许改写已应用迁移、跳号或用旧程序打开更新的 schema。失败回滚并拒绝启动私人服务。恢复程序版本不等于回退数据库，版本切换前使用匹配的备份与恢复路径。[database.ts](../src/server/database.ts) 负责这些机制。
 

@@ -3,8 +3,9 @@
 A small, self-hosted starting point for a personal agent workbench.
 
 The React frontend and Fastify application provide a single-administrator private
-entry backed by SQLite. Health and build-version endpoints remain public.
-Agent execution and workspace features are developed as subsequent slices.
+entry backed by SQLite. It connects to independently managed Codex and DSH
+hosts for persistent conversations, workspace tasks and recovery after leaving
+the page. Health and build-version endpoints remain public.
 
 ## Develop
 
@@ -22,6 +23,10 @@ Open `http://127.0.0.1:3000` and sign in with the password entered during local
 initialization. The development launcher enables HTTP only on loopback. Data is
 stored outside this checkout; set `ZHONGSHU_DATA_DIR` for a separate instance.
 Local development needs no production credentials or server access.
+
+To execute agent tasks, configure an existing native host and an allowed workspace
+as described in [Harness connections](docs/harnesses.md). Without this operator
+configuration, sign-in works but no execution workspace is available.
 
 For a production build, run `npm run build`, set `ZHONGSHU_ORIGIN` to the public
 HTTPS origin, then `npm start`. See [identity and data operations](docs/identity.md)
