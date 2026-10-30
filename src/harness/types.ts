@@ -28,6 +28,7 @@ export type NativeState = {
   runId?: string;
   /** Exact requested run whose terminal result was verified in native history during this read. Not tool-process termination. */
   terminalRunId?: string;
+  /** Queued work that blocks a new user prompt; excludes verified passive native context. */
   pendingInputs: number;
   configurationVerified: boolean;
   reason?: string;

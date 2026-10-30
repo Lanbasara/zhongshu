@@ -14,7 +14,7 @@ import { snapshotSchema, stateFrom, terminalRunFrom } from '../src/harness/dsh/n
 import type { Binding, NativeChange } from '../src/harness/types.ts';
 
 type Event = { type: string; seq: number; time: number; data: Record<string, unknown> };
-type Session = { id: string; cwd: string; model: { provider: string; model: string; reasoningEffort?: string }; permission: string; events: Event[]; turn: number; open: number | null; inbox: unknown[]; questions: unknown[] };
+type Session = { id: string; cwd: string; model: { provider: string; model: string; reasoningEffort?: string }; permission: string; events: Event[]; turn: number; open: number | null; inbox: unknown[]; stepInbox: unknown[]; questions: unknown[] };
 async function until(predicate: () => boolean, timeout = 4000): Promise<void> { const end = Date.now() + timeout; while (!predicate()) { if (Date.now() > end) assert.fail('condition did not become true'); await delay(10); } }
 
 /** Protocol fixture only. These tests make no claim about real model execution. */
@@ -29,7 +29,7 @@ async function host() {
     for (const [streamId, follow] of follows) if (follow.session === session.id && follow.socket.readyState === WebSocket.OPEN) follow.socket.send(JSON.stringify({ type: 'item', streamId, value: { type: 'event', event } }));
     return event;
   }
-  const projections = (session: Session) => ({ asOfSeq: Math.max(0, session.events.length - 1), values: { permissions: { currentValue: session.permission }, modelSelection: { next: session.model, lastUsed: session.turn ? session.model : null }, inbox: { 'next-turn': session.inbox, 'next-step': [] }, turnOutline: session.events.filter(event => event.type === 'turn/start').map(event => ({ turn: event.data.turn, seq: event.seq, prompt: '', response: '' })), userQuestions: { active: session.questions } } });
+  const projections = (session: Session) => ({ asOfSeq: Math.max(0, session.events.length - 1), values: { permissions: { currentValue: session.permission }, modelSelection: { next: session.model, lastUsed: session.turn ? session.model : null }, inbox: { 'next-turn': session.inbox, 'next-step': session.stepInbox }, turnOutline: session.events.filter(event => event.type === 'turn/start').map(event => ({ turn: event.data.turn, seq: event.seq, prompt: '', response: '' })), userQuestions: { active: session.questions } } });
   const server = createServer(async (request, response) => {
     const url = new URL(request.url ?? '/', 'http://127.0.0.1');
     if (url.pathname === '/connect') {
@@ -48,16 +48,23 @@ async function host() {
       switch (body.method) {
         case 'account/getState': value = { status: 'credential-stored' }; break;
         case 'session/modelCatalog': value = { groups: [{ id: 'deepseek-account', name: 'DeepSeek', models: [{ id: 'test-model', name: 'Test', reasoning: { efforts: [{ id: 'high', name: 'High' }] } }] }] }; break;
-        case 'permissionPresets/catalog': value = { options: [{ value: 'workspace-write', name: 'Workspace', description: 'Fixture permission' }] }; break;
+        case 'permissionPresets/catalog': value = { options: ['workspace-write', 'danger-full-access'].map(value => ({ value, name: value, description: 'Fixture permission' })) }; break;
         case 'session/create': {
-          const id = `session-${sessions.size + 1}`; const created: Session = { id, cwd: args.request.cwd, model: { provider: 'deepseek-account', model: 'test-model', reasoningEffort: 'high' }, permission: 'workspace-write', events: [], turn: 0, open: null, inbox: [], questions: [] };
+          const id = `session-${sessions.size + 1}`; const created: Session = { id, cwd: args.request.cwd, model: { provider: 'deepseek-account', model: 'test-model', reasoningEffort: 'high' }, permission: 'workspace-write', events: [], turn: 0, open: null, inbox: [], stepInbox: [], questions: [] };
           sessions.set(id, created); append(created, 'permission/preset', { preset: 'workspace-write' }); value = { sessionId: id }; break;
         }
         case 'session/selectModel': {
           if (rejectModel) { response.setHeader('Content-Type', 'application/json'); response.end(JSON.stringify({ type: 'server-response', rpcId: body.rpcId, result: { ok: false, error: { code: 'session/model-unavailable' } } })); return; }
           assert.ok(session); session.model = { provider: args.request.provider, model: args.request.model, reasoningEffort: args.request.reasoningEffort }; append(session, 'model/selection', session.model); value = { selected: session.model }; break;
         }
-        case 'commands/execute': assert.ok(session); assert.equal(args.line, '/permission workspace-write'); append(session, 'permission/preset', { preset: session.permission }); value = { result: { kind: 'success' } }; break;
+        case 'commands/execute': {
+          assert.ok(session); assert.ok(['/permission workspace-write', '/permission danger-full-access'].includes(args.line));
+          const permission = args.line.slice('/permission '.length); const changed = session.permission !== permission; session.permission = permission;
+          append(session, 'permission/preset', { preset: permission });
+          // Native rc.4 policy changes inject non-waking context into next-step.
+          if (changed) { const notification = approvalContext(); session.stepInbox.push(notification); append(session, 'agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [notification] }); }
+          value = { result: { kind: 'success' } }; break;
+        }
         case 'session/page': {
           assert.ok(session); const through = args.request.throughSeq; const before = args.request.beforeSeq ?? through + 1; const eligible = session.events.filter(event => event.seq <= through && event.seq < before); const records = eligible.slice(-args.request.maxMessages).map(event => ({ type: 'event', event })); value = { records, hasMore: eligible.length > records.length };
           const hook = nextPage; nextPage = undefined; hook?.(); break;
@@ -97,9 +104,50 @@ async function host() {
 async function setup() {
   const fixture = await host(); const directory = await mkdtemp(join(tmpdir(), 'zhongshu-dsh-test-')); const file = join(directory, 'launch'); await writeFile(file, fixture.launch, { mode: 0o600 });
   const adapter = createDshAdapter({ launchFile: file });
-  async function create(): Promise<Binding> { const catalog = await adapter.catalog(); assert.ok(catalog.available); const model = catalog.models[0]; assert.ok(model); return adapter.create({ cwd: directory, configuration: { modelId: model.id, permissionId: 'workspace-write' } }, () => {}); }
+  async function create(permissionId = 'workspace-write'): Promise<Binding> { const catalog = await adapter.catalog(); assert.ok(catalog.available); const model = catalog.models[0]; assert.ok(model); return adapter.create({ cwd: directory, configuration: { modelId: model.id, permissionId } }, () => {}); }
   return { fixture, directory, file, adapter, create, async close() { await adapter.close(); await fixture.close(); await rm(directory, { recursive: true, force: true }); } };
 }
+
+function approvalContext() { return { id: randomUUID(), role: 'user', source: { kind: 'user-approval' }, content: [{ type: 'text', text: 'The approval policy has changed.' }] }; }
+
+test('DSH permission setup context permits the first message without clearing native input', async () => {
+  const context = await setup();
+  try {
+    const binding = await context.create('danger-full-access'); const native = context.fixture.sessions.get(binding.id)!;
+    const retained = structuredClone(native.stepInbox); assert.equal(retained.length, 1);
+    assert.equal((await context.adapter.state(binding)).pendingInputs, 0);
+    const reconnected = createDshAdapter({ launchFile: context.file });
+    try { assert.equal((await reconnected.state(binding)).pendingInputs, 0); } finally { await reconnected.close(); }
+    assert.deepEqual(native.stepInbox, retained);
+    assert.equal((await context.adapter.submit(binding, { id: randomUUID(), text: 'First message' })).outcome, 'accepted');
+    assert.equal(context.fixture.calls.filter(call => call.method === 'session/prompt').length, 1);
+    assert.deepEqual(native.stepInbox, retained, 'adapter must not delete native context');
+  } finally { await context.close(); }
+});
+
+test('DSH passive context never hides queued user work or unknown next-step inputs', async () => {
+  const context = await setup();
+  try {
+    const binding = await context.create('danger-full-access'); const native = context.fixture.sessions.get(binding.id)!;
+    const passive = approvalContext();
+    const blocked = [
+      { ...approvalContext(), source: { kind: 'user', rpcId: randomUUID() } },
+      { ...approvalContext(), source: { kind: 'unknown' } },
+      { ...approvalContext(), role: undefined },
+      { ...approvalContext(), source: { kind: 'user-approval', rpcId: randomUUID() } },
+      { ...approvalContext(), content: [{ type: 'image', url: 'fixture' }] },
+    ];
+    for (const item of blocked) {
+      native.stepInbox = [passive, item]; assert.equal((await context.adapter.state(binding)).pendingInputs, 1);
+      assert.equal((await context.adapter.submit(binding, { id: randomUUID(), text: 'Must stay blocked' })).outcome, 'rejected');
+    }
+    native.stepInbox = [passive]; native.inbox = [approvalContext()];
+    assert.equal((await context.adapter.state(binding)).pendingInputs, 1, 'next-turn is never passive context');
+    native.inbox = []; native.questions = [{ callId: 'still-waiting' }];
+    assert.equal((await context.adapter.state(binding)).status, 'waiting');
+    assert.equal(context.fixture.calls.some(call => call.method === 'session/prompt'), false);
+  } finally { await context.close(); }
+});
 
 test('DSH launch files reject public endpoints, loose permissions, and symlinks without leaking tokens', async () => {
   const context = await setup();
