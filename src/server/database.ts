@@ -158,8 +158,8 @@ export async function backupDatabase(db: DatabaseSync, destination: string): Pro
   }
 }
 
-/** Restore only into a fresh target. Restored sessions are revoked to prevent token resurrection. */
-export async function restoreDatabase(source: string, destinationDirectory: string): Promise<void> {
+/** Restore into a fresh target. The trusted synchronous hook shares the session-revocation transaction. */
+export async function restoreDatabase(source: string, destinationDirectory: string, afterRestore?: (db: DatabaseSync) => void): Promise<void> {
   if (!z.string().min(1).max(4096).safeParse(source).success) throw new DatabaseError('invalid_backup');
   let sourceDb: DatabaseSync | undefined;
   let restored: DatabaseSync | undefined;
@@ -179,9 +179,18 @@ export async function restoreDatabase(source: string, destinationDirectory: stri
     verifyBackup(staging);
     restored = new DatabaseSync(staging);
     configure(restored);
-    restored.exec('BEGIN IMMEDIATE; DELETE FROM auth_sessions; DELETE FROM auth_login_limits; COMMIT;');
+    restored.exec('BEGIN IMMEDIATE');
+    try {
+      restored.exec('DELETE FROM auth_sessions; DELETE FROM auth_login_limits;');
+      afterRestore?.(restored);
+      restored.exec('COMMIT');
+    } catch (error) {
+      try { restored.exec('ROLLBACK'); } catch { /* do not publish this staging database */ }
+      throw error;
+    }
     restored.exec('PRAGMA wal_checkpoint(TRUNCATE)');
     restored.close(); restored = undefined;
+    verifyBackup(staging);
     syncFile(staging);
     // Publish only after token revocation is durable. link is atomic and refuses an existing target.
     linkSync(staging, target);

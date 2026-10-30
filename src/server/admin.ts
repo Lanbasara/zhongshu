@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { AuthError, createAuth } from './auth.ts';
 import { DatabaseError, backupDatabase, openDatabase, restoreDatabase } from './database.ts';
-import { productMigrations } from './migrations.ts';
+import { afterProductRestore, productMigrations } from './migrations.ts';
 
 async function stdinPassword(): Promise<string> {
   const parts: Buffer[] = [];
@@ -60,8 +60,8 @@ export async function runAdmin(argv: string[] = process.argv.slice(2)): Promise<
   const directory = z.string().min(1).max(4096).safeParse(directoryValue);
   if (!directory.success) throw new AuthError('invalid_data_directory');
   if (command.data === 'restore') {
-    await restoreDatabase(parsed.positionals[1]!, directory.data);
-    process.stdout.write('Database restored; all restored sessions are revoked.\n');
+    await restoreDatabase(parsed.positionals[1]!, directory.data, afterProductRestore);
+    process.stdout.write('Database restored; sessions are revoked and pending operations require reconciliation.\n');
     return;
   }
   const db = openDatabase(directory.data, productMigrations);
