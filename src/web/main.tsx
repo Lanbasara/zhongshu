@@ -1,7 +1,9 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { sessionSchema, versionSchema, errorSchema, identitySchema, type SessionView } from '../shared/http.ts';
+import { sessionSchema, versionSchema, errorSchema, type SessionView } from '../shared/http.ts';
 import './style.css';
+import { WorkbenchView } from './workbench.tsx';
+import { clearDrafts } from './workbench-client.ts';
 
 type Version = { version: string; revision: string };
 const failureText: Record<string, string> = {
@@ -17,7 +19,6 @@ function App() {
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
-  const [identity, setIdentity] = useState<string>();
   const authEpoch = useRef(0);
   const authPending = useRef(false);
   const refreshController = useRef<AbortController | undefined>(undefined);
@@ -40,18 +41,6 @@ function App() {
     window.addEventListener('pageshow', restore); document.addEventListener('visibilitychange', restore);
     return () => { refreshController.current?.abort(); window.removeEventListener('pageshow', restore); document.removeEventListener('visibilitychange', restore); };
   }, []);
-  useEffect(() => {
-    if (!session?.authenticated) { setIdentity(undefined); return; }
-    const controller = new AbortController();
-    const epoch = authEpoch.current;
-    void fetch('/api/private/identity', { cache: 'no-store', signal: AbortSignal.any([controller.signal, AbortSignal.timeout(8000)]) }).then(async response => {
-      if (response.status === 401) { if (epoch === authEpoch.current) setSession({ authenticated: false, initialized: true }); return; }
-      if (!response.ok) throw new Error();
-      const data = identitySchema.parse(await response.json());
-      if (!controller.signal.aborted) setIdentity(data.name);
-    }).catch(() => { if (!controller.signal.aborted) setError('身份暂时无法核实，请重新连接。'); });
-    return () => controller.abort();
-  }, [session?.authenticated, session?.authenticated ? session.csrfToken : undefined]);
   const login = async (event: React.FormEvent) => {
     event.preventDefault(); if (busy || !password) return;
     const epoch = ++authEpoch.current; authPending.current = true; refreshController.current?.abort();
@@ -73,20 +62,19 @@ function App() {
     try {
       const response = await fetch('/api/private/logout', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': session?.authenticated ? session.csrfToken : '' }, body: '{}', signal: AbortSignal.timeout(8000) });
       if (!response.ok && response.status !== 401) throw new Error();
-      if (epoch === authEpoch.current) { setSession({ authenticated: false, initialized: true }); setError(''); }
+      if (epoch === authEpoch.current) { setSession({ authenticated: false, initialized: true }); clearDrafts(); setError(''); }
     } catch { if (epoch === authEpoch.current) setError('退出尚未确认，请重试。'); }
     finally { authPending.current = false; setBusy(false); }
   };
+  const expired = useCallback(() => { ++authEpoch.current; setSession({ authenticated: false, initialized: true }); }, []);
+  if (session?.authenticated) return <WorkbenchView csrf={session.csrfToken} logout={() => void logout()} expired={expired} busy={busy} authError={error} />;
   return <main className="entry">
     <header className="brand"><img src="/icon.svg" width="36" height="36" alt="" /><span>中书 <small>ZHONGSHU</small></span></header>
     <p className="eyebrow">YOUR WORK, CONTINUED</p>
-    <h1>{session?.authenticated ? '回到你的工作。' : '从这里，接着做。'}</h1>
+    <h1>从这里，接着做。</h1>
     <p className="intro">让每一段思考，都有可以接续的地方。</p>
-    <section className="entry-card" aria-label={session?.authenticated ? '私人入口' : '登录中书'}>
-      {!session ? <><p role="status">正在连接服务…</p><button onClick={() => void refresh()}>重新连接</button></> : session.authenticated ? <>
-        <div className="status"><span className="dot" />已登录私人工作台</div>
-        <p>当前身份：{identity ?? '正在核实…'}</p><button className="secondary" onClick={() => void logout()} disabled={busy}>退出登录</button>
-      </> : <form onSubmit={event => void login(event)}>
+    <section className="entry-card" aria-label="登录中书">
+      {!session ? <><p role="status">正在连接服务…</p><button onClick={() => void refresh()}>重新连接</button></> : <form onSubmit={event => void login(event)}>
         <h2>登录中书</h2>
         {session.initialized === false ? <p>管理员尚未完成初始化。完成后即可登录。</p> : <>
           <label htmlFor="password">管理员密码</label>
