@@ -6,14 +6,14 @@
 
 首次启动按 [README](../README.md) 操作。Node 版本以 [.node-version](../.node-version) 为准，命令定义在 [package.json](../package.json)。当前本地运行不需要 Docker、部署账号或生产凭据。
 
-开发模式直接运行源码。当前静态资源在服务启动时载入；修改浏览器文件后重启开发服务，再刷新页面。验证生产目录布局时，先停止占用同一端口的开发服务，再执行：
+开发模式由 Node watch 运行服务端源码，Vite 提供前端热更新和同源代理。先按[身份说明](identity.md)初始化本地管理员。验证生产目录布局时，先停止占用同一端口的开发服务，再执行：
 
 ```sh
 npm run build
-npm start
+ZHONGSHU_ORIGIN=http://127.0.0.1:3000 ZHONGSHU_ALLOW_HTTP_LOOPBACK=true npm start
 ```
 
-默认访问 `http://127.0.0.1:3000`。`HOST`、`PORT` 通过进程环境传入；当前服务不自动读取 `.env`。构建默认标记为 `development`；对干净的已提交源码可用 `REVISION=$(git rev-parse HEAD) npm run build` 关联版本。提交标记本身不证明工作区没有未提交修改。
+默认本地访问 `http://127.0.0.1:3000`；生产使用配置的 HTTPS origin。环境通过进程传入，服务不自动读取 `.env`。构建默认标记为 `development`；对干净的已提交源码可用 `REVISION=$(git rev-parse HEAD) npm run build` 关联版本。提交标记本身不证明工作区没有未提交修改。
 
 涉及容器或交付边界时，在本地 Docker 可用的情况下验证实际 Compose 路径：
 
@@ -26,11 +26,15 @@ IMAGE=zhongshu:local docker compose --project-name zhongshu-local down
 
 配置项见 [.env.example](../.env.example) 和 [compose.yaml](../compose.yaml)。后续引入外部依赖时，一并提供可复现的本地运行与必要数据准备方式；模拟反馈与真实集成验证要明确区分。
 
+[容器检查脚本](../scripts/check-container.mjs)用于已启动、具有全新数据卷的临时 `zhongshu-check` Compose 项目；可用 `ZHONGSHU_CHECK_PROJECT=zhongshu-check-<后缀>`指定同类测试项目。它会初始化随机测试密码，验证真实登录、生产 Cookie 属性、容器替换后的会话保留，以及在线备份、新目录恢复和旧会话吊销；随后清理自己创建的恢复容器与临时目录。它不会复用已有管理员的数据卷，也不用于真实实例。完整启动与销毁命令以 [CI](../.github/workflows/ci.yml)为准，临时 Compose 项目和数据卷由调用方清理。
+
+该脚本直接请求回环 HTTP 端口，模拟 TLS 终止后的内部链路，并验证配置的 HTTPS origin；它不证明浏览器已通过 TLS 收发 Secure Cookie。
+
 ## 决定怎样验证
 
 修改前明确预期行为、应保持的边界以及能够判断结果的证据。简单任务可以直接执行；复杂任务按需使用计划、原型或独立审查。
 
-当前代码变更的基础检查是 `npm test` 与 `npm run build`；在此之上，根据影响选择接口、浏览器、容器或真实集成验证。纯文档改动检查内容准确性、入口和链接即可。测试应检验行为或契约，新增测试需要有实际保护价值。
+当前代码变更的基础检查是 `npm run typecheck`、`npm test` 与 `npm run build`；在此之上，根据影响选择接口、浏览器、容器或真实集成验证。纯文档改动检查内容准确性、入口和链接即可。测试应检验行为或契约，新增测试需要有实际保护价值。
 
 本地和 CI 复用仓库中的检查定义。自动检查适合稳定、可判定的约束；涉及取舍的经验通过理由和例子传递。发现验证遗漏时，改进最接近实际失败边界的反馈。
 

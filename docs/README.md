@@ -5,6 +5,7 @@
 | 要解决的问题 | 入口与知识归属 |
 | --- | --- |
 | 如何运行、验证、提交修改 | [开发流程](development.md) |
+| 初始化/重置管理员、保护会话、备份恢复数据 | [身份与数据操作](identity.md) |
 | 当前有哪些模块，去哪里修改 | [架构地图](architecture.md)，随实现更新代码入口 |
 | 为什么这样划分应用与 Agent | [ADR 0001：原生 Harness 边界](adr/0001-native-harness-boundary.md) |
 | React/Vite、服务端和 Next.js 如何取舍 | [ADR 0002：应用技术结构](adr/0002-application-stack.md) |

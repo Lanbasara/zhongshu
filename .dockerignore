@@ -5,3 +5,6 @@
 !src/**
 !scripts/
 !scripts/build.mjs
+!tsconfig.json
+!tsconfig.server.json
+!vite.config.ts

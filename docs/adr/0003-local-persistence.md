@@ -4,7 +4,7 @@ status: accepted
 
 # SQLite 保存中书状态，文件与原生上下文各有归属
 
-首版使用同机持久卷中的 SQLite。单用户、自托管、单应用实例使嵌入式数据库的运行与恢复成本更低；若需要多实例、跨主机数据库访问或实际写入压力超出适配范围，再评估 PostgreSQL。SQLite 方向已确认，驱动尚未选定。
+首版使用同机持久卷中的 SQLite。单用户、自托管、单应用实例使嵌入式数据库的运行与恢复成本更低；若需要多实例、跨主机数据库访问或实际写入压力超出适配范围，再评估 PostgreSQL。私人入口选用固定 Node 24 运行时自带的 `node:sqlite`。
 
 | 数据 | 权威归属 |
 | --- | --- |
@@ -20,7 +20,7 @@ status: accepted
 
 采用显式迁移、参数化 SQL、约束和短事务。WAL 可以改善读写并行，但同一时刻仍只有一个写者，且不支持跨主机共享 WAL；长读事务会影响 checkpoint。持久性参数必须按受理成功后的数据承诺选择，而非只追求写入速度。[适用范围](https://sqlite.org/whentouse.html)、[WAL](https://sqlite.org/wal.html)
 
-优先验证 `better-sqlite3`；同时保留 `node:sqlite` 作为减少原生依赖的候选。Node `24.21.0` 的 SQLite API 标为 Release candidate，不能称为稳定 API。两者的相关 API 都同步执行，换驱动不会自动消除阻塞；根据查询及流式负载测量决定是否使用数据库 worker。[Node 固定版本文档](https://github.com/nodejs/node/blob/v24.21.0/doc/api/sqlite.md)、[better-sqlite3](https://github.com/WiseLibs/better-sqlite3)
+首个切片使用 `node:sqlite`，使固定 Node 镜像与禁用依赖安装脚本的策略保持一致，免去额外 native addon 的下载和跨架构编译。代价是 Node `24.21.0` 的 SQLite API 仍为 Release candidate，不能称为稳定 API；将调用集中在数据库模块，并用真实持久化、迁移、备份与容器检查保护升级。`better-sqlite3` 保留为运行时兼容性或实际测量需要时的替代。两者相关 API 都同步执行，换驱动不会自动消除阻塞；根据查询及流式负载测量决定是否使用数据库 worker。[Node 固定版本文档](https://github.com/nodejs/node/blob/v24.21.0/doc/api/sqlite.md)、[better-sqlite3](https://github.com/WiseLibs/better-sqlite3)
 
 驱动须通过 [Dockerfile](../../Dockerfile) 的安装策略、基础镜像和目标架构构建；不能靠全局放开安装脚本跳过问题。运行数据独立于镜像，首个持久卷即验证迁移失败、重建保留、进程中断、备份和恢复。备份遵循 SQLite 一致性要求；恢复代码版本不等于恢复数据库。
 
