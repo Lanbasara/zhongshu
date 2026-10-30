@@ -37,6 +37,7 @@ before initializing a deployed instance or restoring data.
 - [Agent working agreement](AGENTS.md): boundaries, autonomy and task-based navigation.
 - [Documentation](docs/README.md): task-based paths to architecture decisions, quality criteria and delivery plans.
 - [Architecture](docs/architecture.md): the current implementation and its code entry points.
+- [Feature map](docs/features/README.md): user paths, implementation entries and how to verify affected behavior.
 - [Development](docs/development.md): local builds, containers, verification and PRs to `main`.
 
 The guides are currently written in Chinese.

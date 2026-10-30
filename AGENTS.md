@@ -25,6 +25,7 @@
 
 - 首次运行项目：读 [README](README.md)。
 - 理解术语或寻找知识归属：从 [领域语言](CONTEXT.md)和[文档入口](docs/README.md)进入。
+- 新增、修改或验证功能：先从 [feature-map](docs/features/README.md)选择受影响的用户路径，按其前提驱动验证；入口、行为或验证方法变化时，同一改动更新对应地图。
 - 改变职责、依赖或接口边界：读 [架构地图](docs/architecture.md)，再读文档入口中相关 ADR。
 - 修改网络、状态恢复、文件 I/O 或界面性能：读 [质量要求](docs/quality.md)中的适用项。
 - 修改认证、数据目录或管理员命令：读 [身份与数据操作](docs/identity.md)。
