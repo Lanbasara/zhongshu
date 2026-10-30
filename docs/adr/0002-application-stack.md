@@ -1,10 +1,10 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # React/Vite 工作台与常驻 Node 应用服务
 
-TypeScript、React + Vite 已由用户确认。建议保留同源交付，以 Node.js + Fastify 承担认证、HTTP 接口与更新流；原生执行边界见 [ADR 0001](0001-native-harness-boundary.md)。服务端框架及版本组合仍须通过首个切片验证，当前源码尚未迁移。
+采用 TypeScript、React + Vite 与同源交付，由 Node.js + Fastify 承担认证及 HTTP 接口；私人入口已迁移到该组合。原生执行边界见 [ADR 0001](0001-native-harness-boundary.md)，更新流仍须按相关切片验证。依赖版本固定于包清单及锁文件，升级验证不由框架支持声明代替。
 
 ## 服务端选择
 

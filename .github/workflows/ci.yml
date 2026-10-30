@@ -21,7 +21,7 @@ jobs:
         with:
           node-version-file: .node-version
       - run: npm ci --ignore-scripts --no-audit --no-fund
-      - run: npm test && npm run build
+      - run: npm run typecheck && npm test && npm run build
         env:
           REVISION: ${{ github.sha }}
       - name: Build and check the actual container
