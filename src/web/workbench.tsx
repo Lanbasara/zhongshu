@@ -113,8 +113,11 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
         if (latest || first) return pageItems;
         if (windowedRef.current) return previous;
         const merged = mergeItems(previous, pageItems);
-        if (!fitsWindow(merged)) { setBefore(pageBefore); setHasOlder(pageTrimmed || result.history.hasOlder); }
-        return fitsWindow(merged) ? merged : pageItems;
+        const next = fitsWindow(merged) ? merged : pageItems;
+        // Pagination belongs to the displayed left edge. Keep an earlier loaded
+        // anchor only while those earlier items remain in the current window.
+        if (next[0]?.id === pageItems[0]?.id) { setBefore(pageBefore); setHasOlder(pageTrimmed || result.history.hasOlder); }
+        return next;
       });
       if (latest || first) { setBefore(pageBefore); setHasOlder(pageTrimmed || result.history.hasOlder); setWindowed(false); }
       const pending = draftRef.current.pending;
@@ -289,6 +292,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
         <div className="composer-region">
           {moreOutput && <button className="new-output" onClick={() => { atBottom.current = true; if (scroll.current) scroll.current.scrollTop = scroll.current.scrollHeight; setMoreOutput(false); }}>↓ 有新内容</button>}
           {(conversation?.error || conversation?.state.reason) && <p className="state-notice">{explain(conversation.error ?? conversation.state.reason!)}</p>}
+          {conversation?.state.status === 'interrupted' && <p className="state-notice">本轮已中断。此前启动的后台工具可能仍在运行，已经产生的改动不会撤销。</p>}
           {snapshot?.history.liveItemsLimited && <p className="state-notice">部分实时输出较长，将在完成后从历史中读取完整内容。</p>}
           {!!conversation?.state.pendingInputs && <p className="state-notice">原生服务仍保留 {conversation.state.pendingInputs} 项待处理输入。停止当前轮不会清空它们。</p>}
           {(unresolved || conversation?.state.status === 'unknown' || (latestMessage && !latestMessage.runId)) && <div className="state-notice">正在核对执行结果。<button className="text-button" onClick={() => void reconcile()}>查询原生结果</button></div>}
