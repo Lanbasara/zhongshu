@@ -21,6 +21,14 @@ export const projectionsSchema = z.object({ asOfSeq: z.number().int().nonnegativ
 export const snapshotSchema = z.object({ type: z.literal('snapshot'), header: z.object({ id: identifier, cwd: z.string().max(4096).optional() }), cursor: z.number().int().nonnegative(), records: z.array(recordSchema).max(20000), hasMore: z.boolean(), projections: projectionsSchema, assistantStream: z.object({ revision: z.number().int(), activeAttempt: z.object({ attemptId: identifier, turn: z.number().int(), step: z.number().int(), nextIndex: z.number().int().nonnegative(), stream: z.array(z.unknown()).max(20000) }).optional() }).optional() });
 export type Snapshot = z.infer<typeof snapshotSchema>;
 export const pageSchema = z.object({ records: z.array(recordSchema).max(20000), hasMore: z.boolean() });
+// rc.4 approval-policy changes inject this non-waking context into next-step.
+// It is consumed with the next user prompt, so it must not block that prompt.
+// Other shapes and every next-turn entry remain blocking; never delete inbox data.
+const passiveApprovalContext = z.object({
+  id: identifier, role: z.literal('user'),
+  source: z.object({ kind: z.literal('user-approval') }).strict(),
+  content: z.array(z.object({ type: z.literal('text'), text: z.string().max(1024 * 1024) }).strict()).min(1).max(32),
+}).strict();
 export function object(value: unknown): Record<string, unknown> { return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
 export function modelId(model: Model): string { return Buffer.from(JSON.stringify(modelSchema.parse(model))).toString('base64url'); }
 export function decodeModel(id: string): Model {
@@ -90,7 +98,8 @@ export function stateFrom(binding: Binding, snapshot: Snapshot): NativeState {
   if (snapshot.header.id !== binding.id || snapshot.header.cwd !== binding.cwd) throw new HarnessError('DSH_BINDING_MISMATCH');
   const values = snapshot.projections.values; const selected = decodeModel(binding.configuration.modelId);
   const configurationVerified = sameModel(values.modelSelection?.next, selected) && (!values.modelSelection?.lastUsed || sameModel(values.modelSelection.lastUsed, selected)) && values.permissions?.currentValue === binding.configuration.permissionId;
-  const pendingInputs = (values.inbox?.['next-turn'].length ?? 0) + (values.inbox?.['next-step'].length ?? 0);
+  const pendingInputs = (values.inbox?.['next-turn'].length ?? 0)
+    + (values.inbox?.['next-step'].filter(input => !passiveApprovalContext.safeParse(input).success).length ?? 0);
   const boundary = boundaryFrom(snapshot);
   const latestRun = boundary && boundary.lastTurn > 0 ? runId(binding.id, boundary.lastTurn) : undefined;
   if (!configurationVerified) return { status: boundary?.openTurnStartSeq != null ? 'running' : 'unknown', runId: latestRun, pendingInputs, configurationVerified: false, reason: '原生模型或权限与对话配置不一致，已停止派发；正在执行的工作仍可停止。' };
