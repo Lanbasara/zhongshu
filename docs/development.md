@@ -32,7 +32,7 @@ IMAGE=zhongshu:local docker compose --project-name zhongshu-local down
 
 ## 决定怎样验证
 
-修改前明确预期行为、应保持的边界以及能够判断结果的证据。简单任务可以直接执行；复杂任务按需使用计划、原型或独立审查。
+修改前从 [feature-map](features/README.md)选受影响的行为，明确预期、边界及证据，再按[通用验证能力](verification.md)准备现场。简单任务可以直接执行；复杂任务按需使用计划、原型或独立审查。
 
 当前代码变更的基础检查是 `npm run typecheck`、`npm test` 与 `npm run build`；在此之上，根据影响选择接口、浏览器、容器或真实集成验证。纯文档改动检查内容准确性、入口和链接即可。测试应检验行为或契约，新增测试需要有实际保护价值。
 
