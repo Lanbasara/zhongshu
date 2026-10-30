@@ -4,7 +4,7 @@ import { HarnessError } from '../types.ts';
 import type { Binding, Catalog, Configuration, HarnessAdapter, HistoryPage, NativeChange, NativeState, Receipt } from '../types.ts';
 import { Connection, NativeRejection } from './connection.ts';
 import { LiveAssistant } from './live.ts';
-import { boundaryFrom, decodeModel, eventSchema, historyItems, identifier, itemFrom, modelId, modelSchema, object, pageSchema, snapshotSchema, stateFrom, turnAt } from './native.ts';
+import { boundaryFrom, decodeModel, eventSchema, historyItems, identifier, itemFrom, modelId, modelSchema, object, pageSchema, snapshotSchema, stateFrom, targetTurnRange, terminalRunFrom, turnAt } from './native.ts';
 import type { Snapshot, TurnOutline } from './native.ts';
 
 const modelCatalog = z.object({ groups: z.array(z.object({ id: identifier, name: z.string().max(240), models: z.array(z.object({ id: identifier, name: z.string().max(240), reasoning: z.object({ efforts: z.array(z.object({ id: identifier, name: z.string().max(240) })).max(32) }).optional() })).max(300) })).max(100) });
@@ -41,12 +41,12 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
     });
   }
 
-  async function state(binding: Binding): Promise<NativeState> {
+  async function state(binding: Binding, targetRunId?: string): Promise<NativeState> {
     try {
-      const current = await snapshot(binding, 5); let bytes = Buffer.byteLength(JSON.stringify(current.records));
+      let current = await snapshot(binding, 5); let bytes = Buffer.byteLength(JSON.stringify(current.records)); let pages = 0;
       // A running turn may start before the latest message window. Read only enough
       // durable events to prove its boundary; an exhausted bound remains unknown.
-      for (let count = 0; !boundaryFrom(current) && current.hasMore && count < 10; count++) {
+      for (; !boundaryFrom(current) && current.hasMore && pages < 10; pages++) {
         if (!current.projections.values.turnOutline?.length || !current.records.length) break;
         const before = Math.min(...current.records.map(record => record.event.seq));
         const page = pageSchema.parse(await connection.call('session/page', request(binding, { throughSeq: current.cursor, beforeSeq: before, maxMessages: 100 })));
@@ -55,7 +55,35 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
         if (bytes > 8 * 1024 * 1024 || current.records.length + page.records.length > 20_000) throw new HarnessError('DSH_STATE_HISTORY_LIMIT');
         current.records.unshift(...page.records); current.hasMore = page.hasMore;
       }
-      return remember(binding, stateFrom(binding, current));
+      let proofRecords = current.records;
+      let terminalRunId = terminalRunFrom(binding.id, current, targetRunId);
+      const range = targetTurnRange(binding.id, current, targetRunId);
+      // Automatic notification turns may follow the user's accepted turn. Query
+      // that exact interval without importing old approvals into current state.
+      let before = range?.before;
+      while (!terminalRunId && range && before !== undefined && before > range.start && pages < 10) {
+        pages++;
+        const page = pageSchema.parse(await connection.call('session/page', request(binding, { throughSeq: current.cursor, beforeSeq: before, maxMessages: 100 })));
+        if (!page.records.length) break;
+        const cut = before;
+        if (page.records.some(record => record.event.seq >= cut) || new Set(page.records.map(record => record.event.seq)).size !== page.records.length) throw new HarnessError('DSH_HISTORY_NO_PROGRESS');
+        bytes += Buffer.byteLength(JSON.stringify(page.records));
+        if (bytes > 8 * 1024 * 1024) throw new HarnessError('DSH_STATE_HISTORY_LIMIT');
+        terminalRunId = terminalRunFrom(binding.id, current, targetRunId, page.records);
+        if (terminalRunId) proofRecords = page.records;
+        before = Math.min(...page.records.map(record => record.event.seq));
+        if (!page.hasMore) break;
+      }
+      if (pages > 0) {
+        // Paging can outlive an idle period. Recheck current execution after
+        // looking up old evidence, without treating a later turn as that proof.
+        const latest = await snapshot(binding, 5);
+        if (latest.cursor < current.cursor) throw new HarnessError('DSH_HISTORY_CHANGED');
+        current = latest.cursor === current.cursor ? { ...latest, records: current.records, hasMore: current.hasMore } : latest;
+        terminalRunId = terminalRunFrom(binding.id, current, targetRunId, proofRecords);
+      }
+      const result = stateFrom(binding, current);
+      return remember(binding, { ...result, ...(terminalRunId ? { terminalRunId } : {}) });
     }
     catch (error) { if (error instanceof HarnessError && error.code === 'DSH_BINDING_INVALID') throw error; return disconnectedState(binding); }
   }
@@ -121,7 +149,7 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
     try { checkBinding(binding); identifier.parse(operation.id); z.string().min(1).max(100000).refine(text => text.trim().length > 0).parse(operation.text); }
     catch { return { outcome: 'rejected', reason: '消息或会话参数无效。' }; }
     const current = await state(binding);
-    if (!current.configurationVerified || current.status === 'unknown' || current.status === 'waiting') return { outcome: 'rejected', reason: current.reason ?? '原生对话尚未就绪。' };
+    if (!current.configurationVerified || current.pendingInputs > 0 || !['idle', 'interrupted', 'failed'].includes(current.status)) return { outcome: 'rejected', reason: current.reason ?? '原生对话尚未就绪。' };
     try {
       z.object({ accepted: z.literal(true) }).parse(await connection.call('session/prompt', { request: { sessionId: binding.id, requestId: operation.id, mode: 'queue', content: [{ type: 'text', text: operation.text }] } }));
       return { outcome: 'accepted' };

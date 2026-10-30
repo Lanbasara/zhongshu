@@ -11,6 +11,7 @@ import type { Binding, NativeItem } from '../src/harness/types.ts';
 import { backupDatabase, openDatabase, restoreDatabase } from '../src/server/database.ts';
 import { afterProductRestore, productMigrations } from '../src/server/migrations.ts';
 import { createWorkbenchStore, type CreateConversation, type OperationInput, type WorkbenchChange } from '../src/server/workbench-store.ts';
+import { stateSchema } from '../src/shared/workbench.ts';
 
 function fixture(t: TestContext) {
   const directory = mkdtempSync(join(tmpdir(), 'zhongshu-workbench-'));
@@ -45,6 +46,22 @@ test('conversation identity/configuration and an early native binding survive pa
   assert.throws(() => store.saveBinding(input.id, { ...native, cwd: '/another/workspace' }), { code: 'binding_configuration_conflict' });
   store.setConversationState(input.id, { readiness: 'ready', state: { status: 'idle', pendingInputs: 0, configurationVerified: true }, error: null });
   assert.equal(store.getConversation(input.id)?.readiness, 'ready');
+});
+
+test('target terminal proof persists with bounded identifiers, and a later state without proof clears it', t => {
+  const f = fixture(t); let db = f.open(); let store = createWorkbenchStore(db); const input = conversation();
+  store.createConversation(input); store.saveBinding(input.id, binding(input));
+  const state = { status: 'idle' as const, runId: 'notification-run', terminalRunId: 'user-run', pendingInputs: 0, configurationVerified: true };
+  store.setConversationState(input.id, { readiness: 'ready', state });
+  f.close(db); db = f.open(); store = createWorkbenchStore(db);
+  assert.deepEqual(store.getConversation(input.id)?.state, state); assert.deepEqual(stateSchema.parse(state), state);
+  for (const terminalRunId of ['', 'x'.repeat(1025), 'invalid\0id']) {
+    assert.equal(stateSchema.safeParse({ ...state, terminalRunId }).success, false);
+    assert.throws(() => store.setConversationState(input.id, { state: { ...state, terminalRunId } }));
+  }
+  const { terminalRunId: _proof, ...unproved } = state;
+  store.setConversationState(input.id, { state: unproved });
+  assert.equal(store.getConversation(input.id)?.state.terminalRunId, undefined);
 });
 
 test('globally unique operation IDs compare exact content and only a queued claim permits dispatch', t => {

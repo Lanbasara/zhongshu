@@ -68,7 +68,7 @@ const uuid = z.uuid();
 const configurationSchema = z.object({ modelId: identifier, permissionId: identifier }).strict();
 const nativeStateSchema = z.object({
   status: z.enum(['idle', 'running', 'waiting', 'interrupted', 'failed', 'unknown']),
-  runId: identifier.optional(), pendingInputs: z.number().int().min(0).max(1_000_000),
+  runId: identifier.optional(), terminalRunId: identifier.optional(), pendingInputs: z.number().int().min(0).max(1_000_000),
   configurationVerified: z.boolean(), reason: boundedText(4096).optional(),
 }).strict();
 const itemSchema = z.object({

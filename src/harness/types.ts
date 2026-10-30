@@ -26,6 +26,8 @@ export type NativeItem = {
 export type NativeState = {
   status: 'idle' | 'running' | 'waiting' | 'interrupted' | 'failed' | 'unknown';
   runId?: string;
+  /** Exact requested run whose terminal result was verified in native history during this read. Not tool-process termination. */
+  terminalRunId?: string;
   pendingInputs: number;
   configurationVerified: boolean;
   reason?: string;
@@ -49,7 +51,8 @@ export interface HarnessAdapter {
   catalog(): Promise<Catalog>;
   /** Persist the identity immediately, before later model/permission setup can fail. */
   create(input: { cwd: string; configuration: Configuration; title?: string }, onBound: (binding: Binding) => void): Promise<Binding>;
-  state(binding: Binding): Promise<NativeState>;
+  /** A target may precede the current/latest run (for example a later native notification turn). Never infer its terminal result from that ordering. */
+  state(binding: Binding, targetRunId?: string): Promise<NativeState>;
   history(binding: Binding, olderCursor?: string, limit?: number): Promise<HistoryPage>;
   /** operationId is retained in the native message for reconciliation. Never auto-resend. */
   submit(binding: Binding, operation: { id: string; text: string }): Promise<Receipt>;

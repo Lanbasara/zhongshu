@@ -7,7 +7,7 @@ export const revisionSchema = z.number().int().min(0).max(Number.MAX_SAFE_INTEGE
 export const configurationSchema = z.object({ modelId: identifierSchema, permissionId: identifierSchema }).strict();
 export const stateSchema = z.object({
   status: z.enum(['idle', 'running', 'waiting', 'interrupted', 'failed', 'unknown']),
-  runId: identifierSchema.optional(), pendingInputs: z.number().int().min(0).max(1_000_000),
+  runId: identifierSchema.optional(), terminalRunId: identifierSchema.optional(), pendingInputs: z.number().int().min(0).max(1_000_000),
   configurationVerified: z.boolean(), reason: boundedText(4096).optional(),
 }).strict();
 export const itemSchema = z.object({

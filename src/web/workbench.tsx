@@ -264,7 +264,8 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
   const unresolved = snapshot?.operations.some(op => ['queued', 'dispatching', 'unknown'].includes(op.status));
   const latestMessage = snapshot?.operations.find(op => op.type === 'message' && op.status === 'accepted');
   const rejectedDraft = draft.pending && snapshot?.operations.find(op => op.id === draft.pending!.id)?.status === 'rejected';
-  const ready = conversation?.readiness === 'ready' && conversation.state.configurationVerified && ['idle', 'interrupted', 'failed'].includes(conversation.state.status) && !conversation.state.pendingInputs && !unresolved && (!latestMessage || latestMessage.runId === conversation.state.runId);
+  const previousMessageSettled = !latestMessage || (latestMessage.runId !== null && (latestMessage.runId === conversation?.state.runId || latestMessage.runId === conversation?.state.terminalRunId));
+  const ready = conversation?.readiness === 'ready' && conversation.state.configurationVerified && ['idle', 'interrupted', 'failed'].includes(conversation.state.status) && !conversation.state.pendingInputs && !unresolved && previousMessageSettled;
   const live = windowed ? [] : snapshot?.history.liveItems.filter(item => !items.some(saved => saved.id === item.id && saved.status !== 'running')) ?? [];
   const visible = items.map(item => live.find(current => current.id === item.id) ?? item).concat(live.filter(item => !items.some(saved => saved.id === item.id)));
   return <div className="workbench">
@@ -295,7 +296,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
           {conversation?.state.status === 'interrupted' && <p className="state-notice">本轮已中断。此前启动的后台工具可能仍在运行，已经产生的改动不会撤销。</p>}
           {snapshot?.history.liveItemsLimited && <p className="state-notice">部分实时输出较长，将在完成后从历史中读取完整内容。</p>}
           {!!conversation?.state.pendingInputs && <p className="state-notice">原生服务仍保留 {conversation.state.pendingInputs} 项待处理输入。停止当前轮不会清空它们。</p>}
-          {(unresolved || conversation?.state.status === 'unknown' || (latestMessage && !latestMessage.runId)) && <div className="state-notice">正在核对执行结果。<button className="text-button" onClick={() => void reconcile()}>查询原生结果</button></div>}
+          {(unresolved || conversation?.state.status === 'unknown' || !previousMessageSettled) && <div className="state-notice">{!previousMessageSettled ? '正在核对上一条消息对应轮次的执行结果。' : '正在核对执行结果。'}<button className="text-button" onClick={() => void reconcile()}>查询原生结果</button></div>}
           {draft.pending && <div className="state-notice">{rejectedDraft ? '上次发送未被接受，原始输入已保留。' : '上次发送尚未确认，原始输入已保留。'}<button className="text-button" disabled={sending} onClick={() => { if (rejectedDraft && selected) { const next = { text: draft.text }; setDraft(next); saveDraft(selected, next); } else void send(); }}>{rejectedDraft ? '继续编辑' : '核对同一发送'}</button></div>}
           <form className="composer" onSubmit={e => { e.preventDefault(); if (ready || draft.pending) void send(); }}>
             <label className="sr-only" htmlFor="message">给 Agent 的消息</label><textarea id="message" name="message" value={draft.text} maxLength={16_000} placeholder="继续思考，或开始一件工作…" onChange={e => updateDraft(e.target.value)} onKeyDown={e => { if ((e.ctrlKey || e.metaKey) && e.key === 'Enter' && !e.nativeEvent.isComposing && (ready || draft.pending)) { e.preventDefault(); void send(); } }} rows={3} />

@@ -185,7 +185,7 @@ export class Workbench {
       if (pending.some(operation => operation.id !== current?.id && (status !== 'queued' || !current || operation.sequence < current.sequence))) return false;
     }
     const previous = this.store.listOperations({ conversationId: conversation.id, status: 'accepted', type: 'message', order: 'desc', limit: 1 })[0];
-    return !previous || (previous.runId !== null && previous.runId === conversation.state.runId);
+    return !previous || (previous.runId !== null && (previous.runId === conversation.state.runId || previous.runId === conversation.state.terminalRunId));
   }
   async enqueue(input: OperationInput) {
     this.assertOpen();
@@ -371,9 +371,11 @@ export class Workbench {
         runtime.dirty = false; const generation = runtime.generation; const stateGeneration = runtime.stateGeneration;
         try {
           const current = this.conversation(id); const adapter = this.adapter(current);
-          const results = await Promise.allSettled([adapter.state(current.binding!), this.readHistory(current, adapter)]);
+          const target = this.store.listOperations({ conversationId: id, status: 'accepted', type: 'message', order: 'desc', limit: 1 })[0]?.runId ?? undefined;
+          const results = await Promise.allSettled([adapter.state(current.binding!, target), this.readHistory(current, adapter)]);
           if (this.closed || this.runtimes.get(id) !== runtime) return;
-          if (runtime.stateGeneration !== stateGeneration) { runtime.dirty = true; continue; }
+          const currentTarget = this.store.listOperations({ conversationId: id, status: 'accepted', type: 'message', order: 'desc', limit: 1 })[0]?.runId ?? undefined;
+          if (runtime.stateGeneration !== stateGeneration || currentTarget !== target) { runtime.dirty = true; continue; }
           const [state, history] = results;
           if (state.status === 'rejected') throw state.reason;
           if (history.status === 'rejected') throw history.reason;

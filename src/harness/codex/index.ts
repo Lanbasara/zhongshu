@@ -154,13 +154,30 @@ class CodexAdapter implements HarnessAdapter {
     } finally { if (retained) await this.release(binding.id); else await this.releaseUnused(binding.id); }
   }
 
-  async state(input: Binding): Promise<NativeState> {
+  private async terminalRun(binding: Binding, targetRunId: string): Promise<string | undefined> {
+    const target = parse(nativeId, targetRunId); let next: string | undefined;
+    const cursors = new Set<string>();
+    for (let page = 0; page < 10; page++) {
+      const turns = parse(z.object({ data: z.array(turn).max(100), nextCursor: cursor.nullable() }), await this.rpc.request('thread/turns/list', {
+        threadId: binding.id, limit: 100, sortDirection: 'desc', itemsView: 'notLoaded', ...(next ? { cursor: next } : {}),
+      }));
+      const found = turns.data.find(value => value.id === target);
+      if (found) return found.status === 'inProgress' ? undefined : target;
+      if (!turns.nextCursor) return undefined;
+      if (cursors.has(turns.nextCursor)) throw new HarnessError('codex_history_no_progress');
+      cursors.add(turns.nextCursor); next = turns.nextCursor;
+    }
+    return undefined;
+  }
+
+  async state(input: Binding, targetRunId?: string): Promise<NativeState> {
     const binding = parse(bindingSchema, input);
     this.retain(binding.id);
     try {
       const verified = await this.load(binding);
-      const native = parse(z.object({ thread: z.object({ id: nativeId, status: threadStatus }) }), await this.rpc.request('thread/read', { threadId: binding.id, includeTurns: false }));
-      if (native.thread.id !== binding.id) throw new HarnessError('codex_native_identity_mismatch');
+      const terminalRunId = targetRunId ? await this.terminalRun(binding, targetRunId) : undefined;
+      // Read the current run, queue and status after the target lookup. A later
+      // native notification turn must not reuse an idle snapshot from before it.
       const turns = parse(z.object({ data: z.array(turn).max(100), nextCursor: cursor.nullable() }), await this.rpc.request('thread/turns/list', { threadId: binding.id, limit: 1, sortDirection: 'desc', itemsView: 'notLoaded' }));
       const latest = turns.data[0];
       let pendingInputs = 0; let next: string | undefined;
@@ -170,8 +187,10 @@ class CodexAdapter implements HarnessAdapter {
         if (!next) break;
       }
       if (next) return { status: 'unknown', pendingInputs, configurationVerified: verified, reason: 'codex_queue_limit' };
+      const native = parse(z.object({ thread: z.object({ id: nativeId, status: threadStatus }) }), await this.rpc.request('thread/read', { threadId: binding.id, includeTurns: false }));
+      if (native.thread.id !== binding.id) throw new HarnessError('codex_native_identity_mismatch');
       const status = native.thread.status;
-      const common = { pendingInputs, configurationVerified: verified, ...(latest ? { runId: latest.id } : {}) };
+      const common = { pendingInputs, configurationVerified: verified, ...(latest ? { runId: latest.id } : {}), ...(terminalRunId ? { terminalRunId } : {}) };
       if (!verified) return { ...common, status: 'unknown', reason: 'codex_configuration_mismatch' };
       if (status.type === 'active') return { ...common, status: status.activeFlags?.length ? 'waiting' : 'running' };
       if (status.type === 'systemError') return { ...common, status: 'failed', reason: 'codex_native_failure' };

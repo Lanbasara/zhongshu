@@ -10,7 +10,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { createDshAdapter } from '../src/harness/dsh/index.ts';
 import { readLaunchFile } from '../src/harness/dsh/connection.ts';
 import { LiveAssistant } from '../src/harness/dsh/live.ts';
-import { snapshotSchema, stateFrom } from '../src/harness/dsh/native.ts';
+import { snapshotSchema, stateFrom, terminalRunFrom } from '../src/harness/dsh/native.ts';
 import type { Binding, NativeChange } from '../src/harness/types.ts';
 
 type Event = { type: string; seq: number; time: number; data: Record<string, unknown> };
@@ -22,7 +22,7 @@ async function host() {
   const token = randomUUID(); const sessions = new Map<string, Session>(); const peers = new Map<string, WebSocket | null>();
   const follows = new Map<string, { socket: WebSocket; session: string }>();
   const calls: { method: string; args: Record<string, any> }[] = [];
-  let rejectModel = false; let losePromptReceipt = false; let exchanges = 0;
+  let rejectModel = false; let losePromptReceipt = false; let exchanges = 0; let nextPage: (() => void) | undefined;
   const wss = new WebSocketServer({ noServer: true });
   function append(session: Session, type: string, data: Record<string, unknown>): Event {
     const event = { type, data, seq: session.events.length, time: Date.now() }; session.events.push(event);
@@ -59,7 +59,8 @@ async function host() {
         }
         case 'commands/execute': assert.ok(session); assert.equal(args.line, '/permission workspace-write'); append(session, 'permission/preset', { preset: session.permission }); value = { result: { kind: 'success' } }; break;
         case 'session/page': {
-          assert.ok(session); const through = args.request.throughSeq; const before = args.request.beforeSeq ?? through + 1; const eligible = session.events.filter(event => event.seq <= through && event.seq < before); const records = eligible.slice(-args.request.maxMessages).map(event => ({ type: 'event', event })); value = { records, hasMore: eligible.length > records.length }; break;
+          assert.ok(session); const through = args.request.throughSeq; const before = args.request.beforeSeq ?? through + 1; const eligible = session.events.filter(event => event.seq <= through && event.seq < before); const records = eligible.slice(-args.request.maxMessages).map(event => ({ type: 'event', event })); value = { records, hasMore: eligible.length > records.length };
+          const hook = nextPage; nextPage = undefined; hook?.(); break;
         }
         case 'session/prompt': {
           assert.ok(session); const message = { source: { kind: 'user', rpcId: args.request.requestId }, content: args.request.content };
@@ -90,7 +91,7 @@ async function host() {
   });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve)); const address = server.address(); assert.ok(address && typeof address !== 'string');
   const launch = `http://127.0.0.1:${address.port}/?token=${token}`;
-  return { launch, sessions, calls, peers, follows, append, exchanges: () => exchanges, rejectModel: () => { rejectModel = true; }, losePromptReceipt: () => { losePromptReceipt = true; }, live(session: string, frame: unknown) { for (const [streamId, follow] of follows) if (follow.session === session) follow.socket.send(JSON.stringify({ type: 'item', streamId, value: { type: 'assistant-stream', frame } })); }, disconnect() { for (const peer of peers.values()) peer?.terminate(); }, async close() { for (const peer of peers.values()) peer?.terminate(); await new Promise<void>(resolve => wss.close(() => resolve())); await new Promise<void>(resolve => server.close(() => resolve())); } };
+  return { launch, sessions, calls, peers, follows, append, onNextPage(hook: () => void) { nextPage = hook; }, exchanges: () => exchanges, rejectModel: () => { rejectModel = true; }, losePromptReceipt: () => { losePromptReceipt = true; }, live(session: string, frame: unknown) { for (const [streamId, follow] of follows) if (follow.session === session) follow.socket.send(JSON.stringify({ type: 'item', streamId, value: { type: 'assistant-stream', frame } })); }, disconnect() { for (const peer of peers.values()) peer?.terminate(); }, async close() { for (const peer of peers.values()) peer?.terminate(); await new Promise<void>(resolve => wss.close(() => resolve())); await new Promise<void>(resolve => server.close(() => resolve())); } };
 }
 
 async function setup() {
@@ -274,5 +275,109 @@ test('DSH user messages without turn fields keep exact turn identities across pa
     assert.deepEqual(await context.adapter.reconcile(binding, first), { outcome: 'accepted', runId: seen.get(first) });
     assert.equal((await context.adapter.state(binding)).runId, seen.get(second));
     assert.equal(context.fixture.calls.filter(call => call.method === 'session/prompt').length, 2);
+  } finally { await context.close(); }
+});
+
+test('DSH proves the accepted turn ended even after an automatic turn, including a fresh adapter', async () => {
+  const context = await setup(); let replacement: ReturnType<typeof createDshAdapter> | undefined;
+  try {
+    const binding = await context.create(); const native = context.fixture.sessions.get(binding.id)!;
+    await context.adapter.submit(binding, { id: randomUUID(), text: 'Synthetic user turn' });
+    const target = `dsh:${binding.id}:turn:1`;
+    context.fixture.append(native, 'turn/end', { turn: 1, reason: { kind: 'completed' } }); native.open = null;
+    for (let index = 0; index < 120; index++) context.fixture.append(native, 'synthetic/metadata', { index });
+    native.turn = 2; context.fixture.append(native, 'turn/start', { turn: 2 });
+    context.fixture.append(native, 'turn/end', { turn: 2, reason: { kind: 'completed' } });
+    const recovered = await context.adapter.state(binding, target);
+    assert.equal(recovered.status, 'idle'); assert.equal(recovered.runId, `dsh:${binding.id}:turn:2`);
+    assert.equal(recovered.terminalRunId, target); assert.equal(recovered.configurationVerified, true);
+    const pages = context.fixture.calls.filter(call => call.method === 'session/page'); assert.ok(pages.length >= 2);
+    assert.equal(pages[0]!.args.request.beforeSeq, native.events.find(event => event.type === 'turn/start' && event.data.turn === 2)!.seq);
+    await context.adapter.close(); replacement = createDshAdapter({ launchFile: context.file });
+    assert.equal((await replacement.state(binding, target)).terminalRunId, target);
+    assert.equal((await replacement.state(binding, `dsh:${binding.id}:turn:3`)).terminalRunId, undefined);
+    assert.equal((await replacement.state(binding)).terminalRunId, undefined);
+    assert.equal((await replacement.state(binding, 'dsh:another-session:turn:1')).terminalRunId, undefined);
+    assert.equal(context.fixture.calls.filter(call => call.method === 'session/prompt').length, 1);
+  } finally { await replacement?.close(); await context.close(); }
+});
+
+test('DSH never infers target completion from a later turn or a closer outside its outline interval', async () => {
+  const context = await setup();
+  try {
+    const binding = await context.create(); const native = context.fixture.sessions.get(binding.id)!;
+    await context.adapter.submit(binding, { id: randomUUID(), text: 'Synthetic unfinished turn' });
+    const target = `dsh:${binding.id}:turn:1`;
+    const running = await context.adapter.state(binding, target); assert.equal(running.status, 'running'); assert.equal(running.terminalRunId, undefined);
+    native.turn = 2; context.fixture.append(native, 'turn/start', { turn: 2 });
+    context.fixture.append(native, 'turn/end', { turn: 2, reason: { kind: 'completed' } }); native.open = null;
+    const later = await context.adapter.state(binding, target); assert.equal(later.status, 'idle'); assert.equal(later.terminalRunId, undefined);
+    context.fixture.append(native, 'turn/end', { turn: 1, reason: { kind: 'completed' } });
+    assert.equal((await context.adapter.state(binding, target)).terminalRunId, undefined);
+    assert.equal((await context.adapter.state(binding, `dsh:${binding.id}:turn:01`)).terminalRunId, undefined);
+  } finally { await context.close(); }
+});
+
+test('DSH target completion queries are bounded and missing old proof stays absent', async () => {
+  const context = await setup();
+  try {
+    const binding = await context.create(); const native = context.fixture.sessions.get(binding.id)!;
+    await context.adapter.submit(binding, { id: randomUUID(), text: 'Synthetic old turn' });
+    context.fixture.append(native, 'turn/end', { turn: 1, reason: { kind: 'completed' } }); native.open = null;
+    for (let index = 0; index < 1050; index++) context.fixture.append(native, 'synthetic/metadata', { index });
+    native.turn = 2; context.fixture.append(native, 'turn/start', { turn: 2 });
+    context.fixture.append(native, 'turn/end', { turn: 2, reason: { kind: 'completed' } });
+    const before = context.fixture.calls.filter(call => call.method === 'session/page').length;
+    const current = await context.adapter.state(binding, `dsh:${binding.id}:turn:1`);
+    assert.equal(current.status, 'idle'); assert.equal(current.runId, `dsh:${binding.id}:turn:2`); assert.equal(current.terminalRunId, undefined);
+    assert.equal(context.fixture.calls.filter(call => call.method === 'session/page').length - before, 10);
+  } finally { await context.close(); }
+});
+
+test('DSH target proof requires a known durable reason, matching session, and matching snapshot cut', () => {
+  const session = 'synthetic-session'; const target = `dsh:${session}:turn:1`;
+  const snapshot = snapshotSchema.parse({ type: 'snapshot', header: { id: session, cwd: '/synthetic' }, cursor: 8, hasMore: false,
+    projections: { asOfSeq: 8, values: { turnOutline: [{ turn: 1, seq: 3 }, { turn: 2, seq: 6 }] } },
+    records: [{ type: 'event', event: { type: 'turn/end', seq: 5, time: 1, data: { turn: 1, reason: { kind: 'completed' } } } }] });
+  for (const kind of ['completed', 'aborted', 'interrupted', 'error', 'blocked', 'max-tokens', 'forked']) {
+    snapshot.records[0]!.event.data.reason = { kind }; assert.equal(terminalRunFrom(session, snapshot, target), target);
+  }
+  snapshot.records[0]!.event.data.reason = { kind: 'unknown-extension' }; assert.equal(terminalRunFrom(session, snapshot, target), undefined);
+  snapshot.records[0]!.event.data.reason = { kind: 'completed' };
+  assert.equal(terminalRunFrom(session, snapshot, `dsh:${session}:turn:2`), undefined);
+  assert.equal(terminalRunFrom('other-session', snapshot, target), undefined);
+  snapshot.projections.asOfSeq = 7; assert.equal(terminalRunFrom(session, snapshot, target), undefined);
+  snapshot.projections.asOfSeq = 8; snapshot.records[0]!.event.seq = 9; assert.equal(terminalRunFrom(session, snapshot, target), undefined);
+});
+
+test('DSH rechecks current execution after target paging and refuses to queue behind new work', async () => {
+  const context = await setup();
+  try {
+    const binding = await context.create(); const native = context.fixture.sessions.get(binding.id)!;
+    await context.adapter.submit(binding, { id: randomUUID(), text: 'Synthetic user turn' });
+    context.fixture.append(native, 'turn/end', { turn: 1, reason: { kind: 'completed' } }); native.open = null;
+    for (let index = 0; index < 12; index++) context.fixture.append(native, 'synthetic/metadata', { index });
+    native.turn = 2; context.fixture.append(native, 'turn/start', { turn: 2 }); context.fixture.append(native, 'turn/end', { turn: 2, reason: { kind: 'completed' } });
+    context.fixture.onNextPage(() => { native.turn = 3; native.open = native.events.length; context.fixture.append(native, 'turn/start', { turn: 3 }); });
+    const result = await context.adapter.state(binding, `dsh:${binding.id}:turn:1`);
+    assert.equal(result.terminalRunId, `dsh:${binding.id}:turn:1`); assert.equal(result.status, 'running'); assert.equal(result.runId, `dsh:${binding.id}:turn:3`);
+    assert.equal((await context.adapter.submit(binding, { id: randomUUID(), text: 'Must not queue behind native work' })).outcome, 'rejected');
+    context.fixture.append(native, 'turn/end', { turn: 3, reason: { kind: 'completed' } }); native.open = null; native.inbox = [{ source: { rpcId: randomUUID() } }];
+    assert.equal((await context.adapter.submit(binding, { id: randomUUID(), text: 'Must not queue behind native input' })).outcome, 'rejected');
+    assert.equal(context.fixture.calls.filter(call => call.method === 'session/prompt').length, 1);
+  } finally { await context.close(); }
+});
+
+test('DSH discards target proof if the Host history moves backwards during lookup', async () => {
+  const context = await setup();
+  try {
+    const binding = await context.create(); const native = context.fixture.sessions.get(binding.id)!;
+    await context.adapter.submit(binding, { id: randomUUID(), text: 'Synthetic user turn' });
+    context.fixture.append(native, 'turn/end', { turn: 1, reason: { kind: 'completed' } }); native.open = null;
+    for (let index = 0; index < 12; index++) context.fixture.append(native, 'synthetic/metadata', { index });
+    native.turn = 2; context.fixture.append(native, 'turn/start', { turn: 2 }); context.fixture.append(native, 'turn/end', { turn: 2, reason: { kind: 'completed' } });
+    context.fixture.onNextPage(() => { native.events.splice(3); native.turn = 0; });
+    const result = await context.adapter.state(binding, `dsh:${binding.id}:turn:1`);
+    assert.equal(result.status, 'unknown'); assert.equal(result.terminalRunId, undefined); assert.equal(result.configurationVerified, false);
   } finally { await context.close(); }
 });

@@ -232,6 +232,50 @@ test('An idle completed readback retains the latest native run identity', async 
   assert.deepEqual(await p.adapter.state(saved), { status: 'idle', runId: 'completed-run', pendingInputs: 0, configurationVerified: true });
 });
 
+test('Codex proves the exact older target through native turn pages and does not reuse it for another target', async t => {
+  const p = await peer(t, request => {
+    if (request.method !== 'thread/turns/list') return undefined;
+    if (request.params.limit === 1) return { data: [{ id: 'notification-run', status: 'completed' }], nextCursor: null };
+    return request.params.cursor === 'older-turns'
+      ? { data: [{ id: 'user-run', status: 'interrupted' }], nextCursor: null }
+      : { data: [{ id: 'notification-run', status: 'completed' }], nextCursor: 'older-turns' };
+  });
+  assert.deepEqual(await p.adapter.state(saved, 'user-run'), { status: 'idle', runId: 'notification-run', terminalRunId: 'user-run', pendingInputs: 0, configurationVerified: true });
+  assert.equal(p.calls.filter(call => call.method === 'thread/turns/list' && call.params.limit === 100).length, 2);
+  assert.equal((await p.adapter.state(saved, 'newly-accepted-run')).terminalRunId, undefined);
+  assert.equal((await p.adapter.state(saved)).terminalRunId, undefined);
+  assert.equal(p.calls.some(call => call.method === 'turn/start'), false);
+});
+
+test('Codex rereads current activity after target proof, so a notification turn started during lookup stays running', async t => {
+  let targetRead = false;
+  const p = await peer(t, request => {
+    if (request.method === 'thread/turns/list') {
+      if (request.params.limit === 100) { targetRead = true; return { data: [{ id: 'user-run', status: 'completed' }], nextCursor: null }; }
+      return { data: [{ id: 'notification-run', status: 'inProgress' }], nextCursor: null };
+    }
+    if (request.method === 'thread/read') { assert.equal(targetRead, true); return { thread: { id: saved.id, status: { type: 'active', activeFlags: [] } } }; }
+    return undefined;
+  });
+  const state = await p.adapter.state(saved, 'user-run');
+  assert.equal(state.terminalRunId, 'user-run'); assert.equal(state.status, 'running'); assert.equal(state.runId, 'notification-run');
+});
+
+test('Codex target proof requires an exact terminal record and remains bounded when it is absent', async t => {
+  let unfinished = true; let pages = 0;
+  const p = await peer(t, request => {
+    if (request.method !== 'thread/turns/list') return undefined;
+    if (request.params.limit === 1) return { data: [{ id: 'notification-run', status: 'completed' }], nextCursor: null };
+    pages++;
+    return unfinished ? { data: [{ id: 'user-run', status: 'inProgress' }], nextCursor: null }
+      : { data: [{ id: 'unrelated-' + pages, status: 'completed' }], nextCursor: 'page-' + pages };
+  });
+  assert.equal((await p.adapter.state(saved, 'user-run')).terminalRunId, undefined);
+  unfinished = false; pages = 0;
+  const missing = await p.adapter.state(saved, 'missing-run');
+  assert.equal(missing.status, 'idle'); assert.equal(missing.terminalRunId, undefined); assert.equal(pages, 10);
+});
+
 test('Watch streams stable live items, rejects interactive requests, invalidates disconnects and releases without cancelling', async t => {
   const p = await peer(t);
   const changes: NativeChange[] = [];

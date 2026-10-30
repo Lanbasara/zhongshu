@@ -21,9 +21,9 @@ async function until(predicate: () => boolean) { const until = Date.now() + 2000
 class Peer implements HarnessAdapter {
   readonly id = 'codex' as const;
   current = terminal(); records: NativeItem[] = []; listener?: (change: NativeChange) => void;
-  stateCalls = 0; historyCalls: (string | undefined)[] = []; submitCalls: string[] = []; stopCalls: string[] = []; reconcileCalls: string[] = [];
+  stateCalls = 0; stateTargets: (string | undefined)[] = []; historyCalls: (string | undefined)[] = []; submitCalls: string[] = []; stopCalls: string[] = []; reconcileCalls: string[] = [];
   createCalls = 0; closed = false; unwatchCount = 0;
-  stateRead?: () => Promise<NativeState>;
+  stateRead?: (targetRunId?: string) => Promise<NativeState>;
   historyRead?: (cursor?: string) => Promise<HistoryPage>;
   submitRead?: (id: string) => Promise<Receipt>;
   createRead?: (input: { cwd: string; configuration: Configuration }, bound: (value: Binding) => void) => Promise<Binding>;
@@ -33,7 +33,7 @@ class Peer implements HarnessAdapter {
     this.createCalls++; if (this.createRead) return this.createRead(input, bound);
     const binding = { id: 'native-' + randomUUID(), cwd: input.cwd, configuration: input.configuration, details: {} }; bound(binding); return binding;
   }
-  async state(): Promise<NativeState> { this.stateCalls++; return this.stateRead ? this.stateRead() : this.current; }
+  async state(_binding: Binding, targetRunId?: string): Promise<NativeState> { this.stateCalls++; this.stateTargets.push(targetRunId); return this.stateRead ? this.stateRead(targetRunId) : this.current; }
   async history(_binding: Binding, cursor?: string, limit = 100): Promise<HistoryPage> {
     this.historyCalls.push(cursor); if (this.historyRead) return this.historyRead(cursor);
     const end = cursor ? Number(cursor) : this.records.length; const start = Math.max(0, end - limit);
@@ -71,6 +71,73 @@ test('accepted ACK cannot open the next send until the same native run reaches a
   f.peer.current = terminal(runId); await f.service.reconcile(f.id);
   const second = operation(f.id); await f.service.enqueue(second); await until(() => f.peer.submitCalls.length === 2);
   assert.deepEqual(f.peer.submitCalls, [first.id, second.id]);
+});
+
+test('a later native notification turn permits another message only with exact terminal evidence for the accepted user run', async t => {
+  const f = fixture(t); const first = operation(f.id);
+  f.store.enqueueOperation(first); f.store.claimOperation(first.id); f.store.settleOperation(first.id, { outcome: 'accepted', runId: 'user-run' });
+  f.peer.current = terminal('notification-run'); await f.service.reconcile(f.id);
+  assert.equal(f.peer.stateTargets.at(-1), 'user-run');
+  await assert.rejects(f.service.enqueue(operation(f.id)), { code: 'operation_needs_reconciliation' });
+  f.peer.current = { ...terminal('notification-run'), terminalRunId: 'user-run' }; await f.service.reconcile(f.id);
+  const before = f.peer.stateCalls; const second = operation(f.id); await f.service.enqueue(second); await until(() => f.peer.submitCalls.length === 1);
+  assert.ok(f.peer.stateCalls > before, 'dispatch rechecks the native target immediately before submit');
+  assert.equal(f.peer.stateTargets[before], 'user-run');
+  await until(() => f.store.getOperation(second.id)?.status === 'accepted');
+  await f.service.reconcile(f.id);
+  assert.equal(f.peer.stateTargets.at(-1), 'run-' + second.id);
+  await assert.rejects(f.service.enqueue(operation(f.id)), { code: 'operation_needs_reconciliation' });
+  assert.deepEqual(f.peer.submitCalls, [second.id], 'the preceding target proof cannot authorize a newer accepted run');
+});
+
+test('an accepted target changed during a state read fences the old target proof before it reaches snapshots', async t => {
+  const f = fixture(t); const first = operation(f.id);
+  f.store.enqueueOperation(first); f.store.claimOperation(first.id); f.store.settleOperation(first.id, { outcome: 'accepted', runId: 'user-run-1' });
+  const old = deferred<NativeState>(); const fresh = deferred<NativeState>();
+  f.peer.stateRead = async target => target === 'user-run-1' ? old.promise : fresh.promise;
+  const syncing = f.service.reconcile(f.id);
+  try {
+    await until(() => f.peer.stateTargets.includes('user-run-1'));
+    const next = operation(f.id); f.store.enqueueOperation(next); f.store.claimOperation(next.id); f.store.settleOperation(next.id, { outcome: 'accepted', runId: 'user-run-2' });
+    old.resolve({ ...terminal('stale-notification'), terminalRunId: 'user-run-1' });
+    await until(() => f.peer.stateTargets.includes('user-run-2'));
+    assert.notEqual(f.store.getConversation(f.id)?.state.runId, 'stale-notification');
+    fresh.resolve(terminal('current-notification')); await syncing;
+    assert.equal(f.store.getConversation(f.id)?.state.terminalRunId, undefined);
+    await assert.rejects(f.service.enqueue(operation(f.id)), { code: 'operation_needs_reconciliation' });
+  } finally { old.resolve(terminal()); fresh.resolve(terminal()); await syncing; }
+});
+
+test('terminal target evidence cannot override a current running, waiting, pending or unverified native state', async t => {
+  const f = fixture(t); const first = operation(f.id);
+  f.store.enqueueOperation(first); f.store.claimOperation(first.id); f.store.settleOperation(first.id, { outcome: 'accepted', runId: 'user-run' });
+  for (const state of [
+    { ...terminal('notification-run'), status: 'running' as const },
+    { ...terminal('notification-run'), status: 'waiting' as const },
+    { ...terminal('notification-run'), pendingInputs: 1 },
+    { ...terminal('notification-run'), configurationVerified: false },
+  ]) {
+    f.peer.current = { ...state, terminalRunId: 'user-run' }; await f.service.reconcile(f.id);
+    await assert.rejects(f.service.enqueue(operation(f.id)), { code: 'operation_needs_reconciliation' });
+  }
+  assert.equal(f.peer.submitCalls.length, 0);
+});
+
+test('a restarted service rechecks a persisted target proof before dispatch and clears absent proof', async t => {
+  const f = fixture(t); const first = operation(f.id);
+  f.store.enqueueOperation(first); f.store.claimOperation(first.id); f.store.settleOperation(first.id, { outcome: 'accepted', runId: 'user-run' });
+  f.store.setConversationState(f.id, { state: { ...terminal('notification-run'), terminalRunId: 'user-run' } });
+  const next = operation(f.id); f.store.enqueueOperation(next); await f.service.close();
+  const peer = new Peer(); peer.current = terminal('notification-run');
+  const restarted = new Workbench(f.store, f.workspaces, new Map([['codex', peer]]));
+  try {
+    await restarted.start(); await restarted.reconcile(f.id);
+    assert.equal(peer.stateTargets.at(-1), 'user-run');
+    assert.equal(f.store.getConversation(f.id)?.state.terminalRunId, undefined);
+    assert.equal(f.store.getOperation(next.id)?.status, 'queued'); assert.equal(peer.submitCalls.length, 0);
+    peer.current = { ...terminal('notification-run'), terminalRunId: 'user-run' }; await restarted.reconcile(f.id);
+    await until(() => peer.submitCalls.length === 1); assert.deepEqual(peer.submitCalls, [next.id]);
+  } finally { await restarted.close(); }
 });
 
 test('unique user operationId evidence fills accepted runId and reconciles unknown without a duplicate submit', async t => {

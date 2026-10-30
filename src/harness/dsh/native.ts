@@ -30,6 +30,29 @@ export function decodeModel(id: string): Model {
 export function sameModel(left: Model | null | undefined, right: Model): boolean { return left?.provider === right.provider && left?.model === right.model && left?.reasoningEffort === right.reasoningEffort; }
 export const runId = (session: string, turn: number) => `dsh:${session}:turn:${turn}`;
 export const assistantId = (session: string, turn: number, step: number) => `dsh:${session}:assistant:${turn}:${step}`;
+const terminalReasons = new Set(['completed', 'aborted', 'blocked', 'error', 'max-tokens', 'interrupted', 'forked']);
+/** Locate only an exact run in this session's authoritative outline at this cut. */
+export function targetTurnRange(session: string, snapshot: Snapshot, targetRunId?: string): { turn: number; start: number; before: number } | undefined {
+  if (!targetRunId || targetRunId.length > 300 || snapshot.header.id !== session || snapshot.projections.asOfSeq !== snapshot.cursor) return;
+  const prefix = `dsh:${session}:turn:`;
+  if (!targetRunId.startsWith(prefix)) return;
+  const turn = Number(targetRunId.slice(prefix.length));
+  if (!Number.isSafeInteger(turn) || turn <= 0 || runId(session, turn) !== targetRunId) return;
+  const outline = snapshot.projections.values.turnOutline;
+  const index = outline?.findIndex(entry => entry.turn === turn) ?? -1;
+  if (!outline || index < 0) return;
+  const start = outline[index]!.seq; const before = outline[index + 1]?.seq ?? snapshot.cursor + 1;
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(before) || start > snapshot.cursor || before > snapshot.cursor + 1) return;
+  return { turn, start, before };
+}
+/** A later turn alone is insufficient: require the target's own durable closer. */
+export function terminalRunFrom(session: string, snapshot: Snapshot, targetRunId?: string, records = snapshot.records): string | undefined {
+  const range = targetTurnRange(session, snapshot, targetRunId);
+  if (!range) return;
+  return records.some(({ event }) => event.type === 'turn/end' && event.data.turn === range.turn
+    && event.seq > range.start && event.seq < range.before && event.seq <= snapshot.cursor
+    && terminalReasons.has(String(object(event.data.reason).kind))) ? targetRunId : undefined;
+}
 export function turnAt(outline: TurnOutline, seq: number): number | undefined {
   let low = 0; let high = outline.length - 1; let turn: number | undefined;
   while (low <= high) { const middle = Math.floor((low + high) / 2); const entry = outline[middle]!;
