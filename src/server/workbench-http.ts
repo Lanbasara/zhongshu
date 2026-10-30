@@ -56,7 +56,7 @@ function snapshotView(value: ReturnType<Workbench['snapshot']>): WorkbenchSnapsh
   const trimmed = items.length < history.items.length;
   const hasOlder = trimmed || Boolean(history.olderBeforeItemId || history.nativeOlderCursor);
   return { conversation, history: {
-    items, liveItems, liveItemsLimited: liveItems.length < history.liveItems.length, loaded: history.historyLoaded,
+    items, liveItems, liveItemsLimited: history.liveItemsLimited || liveItems.length < history.liveItems.length, loaded: history.historyLoaded,
     olderBeforeItemId: hasOlder ? (trimmed ? items[0]?.id : history.olderBeforeItemId) ?? items[0]?.id ?? null : null, hasOlder,
   }, operations, revision: value.revision };
 }

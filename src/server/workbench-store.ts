@@ -24,6 +24,7 @@ export type WorkbenchChange = { sequence: number; conversationId: string; itemId
 export type HistorySnapshot = {
   revision: number;
   items: NativeItem[]; liveItems: NativeItem[]; olderBeforeItemId: string | null;
+  liveItemsLimited: boolean;
   historyLoaded: boolean; nativeOlderCursor: string | null; nativeOlderBeforeItemId: string | null;
 };
 export type ListOperations = { conversationId?: string; status?: OperationStatus; type?: 'message' | 'stop'; order?: 'asc' | 'desc'; afterId?: string; limit?: number };
@@ -490,13 +491,26 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
         const conversation = requireConversation(conversationId);
         const before = input.beforeItemId === undefined ? null : db.prepare('SELECT position FROM workbench_items WHERE conversation_id=? AND id=?').get(conversationId, input.beforeItemId);
         if (input.beforeItemId !== undefined && !before) throw new StoreError('history_anchor_not_found', 404);
+        // Iterate rows so a valid page of many maximum-size bodies cannot allocate them all
+        // before the HTTP layer applies its wire budget. Every returned body remains complete.
         const rows = before
-          ? db.prepare('SELECT * FROM workbench_items WHERE conversation_id=? AND position<? ORDER BY position DESC LIMIT ?').all(conversationId, Number(before.position), input.limit + 1)
-          : db.prepare('SELECT * FROM workbench_items WHERE conversation_id=? ORDER BY position DESC LIMIT ?').all(conversationId, input.limit + 1);
-        const hasOlder = rows.length > input.limit;
-        const items = rows.slice(0, input.limit).reverse().map(itemFromRow);
-        const liveItems = db.prepare('SELECT * FROM workbench_live_items WHERE conversation_id=? ORDER BY updated_at,id LIMIT ?').all(conversationId, MAX_LIVE_ITEMS).map(itemFromRow);
-        return { revision: version(), items, liveItems, olderBeforeItemId: hasOlder ? items[0]!.id : null, historyLoaded: conversation.historyLoaded,
+          ? db.prepare('SELECT * FROM workbench_items WHERE conversation_id=? AND position<? ORDER BY position DESC LIMIT ?').iterate(conversationId, Number(before.position), input.limit + 1)
+          : db.prepare('SELECT * FROM workbench_items WHERE conversation_id=? ORDER BY position DESC LIMIT ?').iterate(conversationId, input.limit + 1);
+        const items: NativeItem[] = []; let bytes = 0; let hasOlder = false;
+        for (const row of rows) {
+          const item = itemFromRow(row); bytes += Buffer.byteLength(item.text) + 2048;
+          if (items.length >= input.limit || bytes > 8 * 1024 * 1024) { hasOlder = true; break; }
+          items.push(item);
+        }
+        items.reverse();
+        const liveItems: NativeItem[] = []; let liveBytes = 0; let liveItemsLimited = false;
+        for (const row of db.prepare('SELECT * FROM workbench_live_items WHERE conversation_id=? ORDER BY updated_at DESC,id DESC LIMIT ?').iterate(conversationId, MAX_LIVE_ITEMS)) {
+          const item = itemFromRow(row); liveBytes += Buffer.byteLength(item.text) + 2048;
+          if (liveBytes > 4 * 1024 * 1024) { liveItemsLimited = true; break; }
+          liveItems.push(item);
+        }
+        liveItems.reverse();
+        return { revision: version(), items, liveItems, liveItemsLimited, olderBeforeItemId: hasOlder ? items[0]!.id : null, historyLoaded: conversation.historyLoaded,
           nativeOlderCursor: conversation.nativeOlderCursor, nativeOlderBeforeItemId: conversation.nativeOlderBeforeItemId };
       }, 'read');
     },

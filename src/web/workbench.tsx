@@ -32,6 +32,15 @@ const mergeItems = (older: WorkbenchItem[], newer: WorkbenchItem[]): WorkbenchIt
 };
 // Bound both the number of DOM entries and retained UTF-16 text, including long replies.
 const fitsWindow = (items: WorkbenchItem[]) => items.length <= 500 && items.reduce((bytes, item) => bytes + item.text.length * 2 + 2048, 0) <= 8 * 1024 * 1024;
+const boundedPage = (items: WorkbenchItem[]) => {
+  let bytes = 0; let start = items.length;
+  while (start > 0 && items.length - start < 500) {
+    const next = items[start - 1]!; bytes += next.text.length * 2 + 2048;
+    if (bytes > 8 * 1024 * 1024) break;
+    start--;
+  }
+  return items.slice(start);
+};
 
 export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf: string; logout(): void; expired(): void; busy: boolean; authError: string }) {
   const [configuration, setConfiguration] = useState<WorkbenchConfiguration>();
@@ -96,15 +105,18 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
       if (!alive.current || gen !== generation.current || serial !== requestSerial.current || id !== selectedRef.current) return;
       if (snapshotRef.current && result.revision < snapshotRef.current.revision) return;
       const first = !snapshotRef.current || snapshotRef.current.conversation.id !== id;
-      setSnapshot(result);
+      const pageItems = boundedPage(result.history.items);
+      const pageTrimmed = pageItems.length < result.history.items.length;
+      const pageBefore = pageTrimmed ? pageItems[0]?.id ?? null : result.history.olderBeforeItemId ?? pageItems[0]?.id ?? null;
+      setSnapshot({ ...result, history: { ...result.history, items: pageItems } });
       setItems(previous => {
-        if (latest || first) return result.history.items;
+        if (latest || first) return pageItems;
         if (windowedRef.current) return previous;
-        const merged = mergeItems(previous, result.history.items);
-        if (!fitsWindow(merged)) { setBefore(result.history.olderBeforeItemId ?? result.history.items[0]?.id ?? null); setHasOlder(result.history.hasOlder); }
-        return fitsWindow(merged) ? merged : result.history.items;
+        const merged = mergeItems(previous, pageItems);
+        if (!fitsWindow(merged)) { setBefore(pageBefore); setHasOlder(pageTrimmed || result.history.hasOlder); }
+        return fitsWindow(merged) ? merged : pageItems;
       });
-      if (latest || first) { setBefore(result.history.olderBeforeItemId ?? result.history.items[0]?.id ?? null); setHasOlder(result.history.hasOlder); setWindowed(false); }
+      if (latest || first) { setBefore(pageBefore); setHasOlder(pageTrimmed || result.history.hasOlder); setWindowed(false); }
       const pending = draftRef.current.pending;
       if (pending) {
         const operation = result.operations.find(op => op.id === pending.id);
@@ -238,8 +250,10 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
       if (!alive.current || gen !== generation.current) return;
       if (scroll.current) anchor.current = { height: scroll.current.scrollHeight, top: scroll.current.scrollTop };
       atBottom.current = false;
-      setItems(current => { const merged = mergeItems(result.history.items, current); if (!fitsWindow(merged)) { anchor.current = null; setWindowed(true); return result.history.items; } return merged; });
-      setBefore(result.history.olderBeforeItemId ?? result.history.items[0]?.id ?? null); setHasOlder(result.history.hasOlder);
+      const pageItems = boundedPage(result.history.items);
+      const trimmed = pageItems.length < result.history.items.length;
+      setItems(current => { const merged = mergeItems(pageItems, current); if (!fitsWindow(merged)) { anchor.current = null; setWindowed(true); return pageItems; } return merged; });
+      setBefore(trimmed ? pageItems[0]?.id ?? null : result.history.olderBeforeItemId ?? pageItems[0]?.id ?? null); setHasOlder(trimmed || result.history.hasOlder);
     } catch (reason) { report(reason); }
     finally { if (alive.current) setLoadingOlder(false); }
   };

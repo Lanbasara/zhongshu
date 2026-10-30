@@ -317,3 +317,20 @@ test('a restore hook failure rolls back and never publishes the staging database
   assert.equal(existsSync(join(target, 'zhongshu.sqlite')), false); assert.deepEqual(readdirSync(target), []);
   assert.equal(store.getOperation(operation.id)?.status, 'queued');
 });
+
+test('large history and live reads have byte bounds before HTTP serialization and retain complete paging', t => {
+  const f = fixture(t); const store = createWorkbenchStore(f.open()); const input = conversation(); store.createConversation(input);
+  const body = 'x'.repeat(512 * 1024); const records = Array.from({ length: 20 }, (_, index) => item('large-' + index, body));
+  store.mergeHistory(input.id, records);
+  const first = store.readHistory(input.id);
+  assert(first.items.length > 0 && first.items.length < records.length);
+  assert(first.items.reduce((bytes, entry) => bytes + Buffer.byteLength(entry.text) + 2048, 0) <= 8 * 1024 * 1024);
+  assert.equal(first.items.at(-1)?.id, 'large-19'); assert(first.olderBeforeItemId);
+  const older = store.readHistory(input.id, { beforeItemId: first.olderBeforeItemId });
+  assert.deepEqual([...older.items, ...first.items].map(entry => entry.id), records.map(entry => entry.id));
+  assert([...older.items, ...first.items].every(entry => entry.text === body));
+  for (let index = 0; index < 12; index++) store.saveLiveItem(input.id, { ...item('live-' + index, body), status: 'running' });
+  const live = store.readHistory(input.id); assert.equal(live.liveItemsLimited, true);
+  assert(live.liveItems.reduce((bytes, entry) => bytes + Buffer.byteLength(entry.text) + 2048, 0) <= 4 * 1024 * 1024);
+  assert(live.liveItems.every(entry => entry.text === body));
+});
