@@ -22,10 +22,10 @@ status: accepted
 | 类型 | 位置 | 回答什么 | 时态 | 寿命 |
 | --- | --- | --- | --- | --- |
 | 宪法/路由 | `AGENTS.md`、`docs/README.md` | 边界、去哪读 | 恒常 | 极少改 |
-| 领域语言 | `CONTEXT.md` | 这个词什么意思 | 恒常 | 慢 |
-| 决策 | `docs/adr/` | 为什么做难逆转的决定 | 过去 | 永久/被替代 |
-| 工作单 | `docs/spec/` | 接下来建什么、怎样算完成 | 未来 | 临时 |
-| 功能地图 | `docs/features/` | 现在怎么到达、驱动、证伪 | 现在 | 随行为变 |
+| 领域语言 | `CONTEXT.md` | 与用户确认的词汇含义 | 恒常 | 慢 |
+| 决策 | `docs/adr/` | 与用户确认的难逆转决定及取舍 | 过去 | 永久/被替代 |
+| 约定/工作单 | `docs/spec/` | 与用户确认要建什么、范围与完成条件 | 未来 | 临时 |
+| 功能地图 | `docs/features/` | 独立验证 Agent 怎么到达、驱动、证伪 | 现在 | 随行为变 |
 | 共享地图 | `docs/architecture.md` | 现在代码在哪、依赖怎么走 | 现在 | 随代码变 |
 
 产品仓库只记录产品真相；实例真相和证据真相在仓库外，由工作区 `AGENTS.md` 路由。产品文档不写某个人的 VPS、账号、试用状态或一次运行结果。
@@ -40,6 +40,18 @@ status: accepted
 6. 证据不进入产品文档：版本、环境、观察、清理放在 PR/CI 或操作者实验记录中，文档只链接。
 7. 能机械检查的事实进 `npm run check:docs`：链接、文件可达性、feature 标题、spec 字段、ADR 编号。
 8. 产品文档使用中文，代码与注释使用英文。语言变更同样走 ADR。
+9. `CONTEXT.md`、spec 和 ADR 只记录与用户讨论后确认的内容；Agent 可以提出草案，但不能把未确认的内容写成事实。
+10. `AGENTS.md` 只指向稳定的类别入口，不枚举单个 ADR；具体决策由所属 architecture / feature / spec 链接。新增 ADR 不需要修改 `AGENTS.md`。
+
+### 渐进式获取
+
+```text
+AGENTS.md → 类别索引（docs/README.md、features/README.md、spec/README.md）
+          → 所属文档（architecture / feature map / spec）
+          → 文档内链接的 ADR
+```
+
+任何一层都不维护全量 ADR 清单；新 ADR 只进入 `docs/adr/` 和所属文档。feature map 只服务独立验证 Agent，不承担需求或设计说明。
 
 ### 为什么不放在 `.agents/`
 

@@ -1,6 +1,6 @@
 # 工作单索引
 
-spec 是临时工作单：它回答“接下来建什么、怎样算完成”。当前事实在 [feature maps](../features/README.md)，长期取舍在 [ADR](../adr/)。状态只在这里维护。
+spec 是与用户讨论后确认的临时约定：它回答“接下来建什么、范围是什么、怎样算完成”。Agent 可以起草，但未确认的内容不能写成事实。当前事实在 [feature maps](../features/README.md)，长期取舍在 [ADR](../adr/)。状态只在这里维护。
 
 ## 当前切片
 
@@ -49,6 +49,7 @@ evidence: <链接或 none yet>
 ## 规则
 
 - 一活跃切片一份 spec；不超过一页。
+- spec 只记录用户确认的范围、验收和退出条件；Agent 不自行修改未被确认的内容。
 - 不写易腐烂的文件路径和代码片段；需要时链接 feature map / architecture。
 - ticket 放 GitHub Issues：垂直切片、blocked by、验收标准；spec 只维护切片级退出条件。
 - 完成后：耐久知识折入 feature map / ADR；删除 spec；ledger 标 `done`。

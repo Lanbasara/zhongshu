@@ -28,17 +28,21 @@
 
 新建文档前先问：属于哪类？这个事实是否已有唯一归属？有没有明确更新触发？归不进去就不建；新增顶层文档需要 ADR。同一事实只写一处，其他位置链接。
 
+涉及需求、范围、术语或不可逆取舍时，先与用户讨论。`CONTEXT.md`、`spec`、`ADR` 只记录已经确认的内容；Agent 可以提出草案，但不能把未确认的内容写成事实。`docs/features/` 是给独立验证 Agent 使用的当前行为地图，不是需求或设计文档。
+
 ## 按任务读取
+
+本表只指向稳定的类别入口；具体 ADR 由所属文档链接。新增 ADR 不需要修改本表。
 
 | 任务 | 先读 |
 | --- | --- |
 | 改一个用户能力 | [docs/features/README.md](docs/features/README.md) → 对应能力页 |
-| 做新功能 | [docs/spec/README.md](docs/spec/README.md) → 当前 spec |
-| 改模块、依赖或数据归属 | [docs/architecture.md](docs/architecture.md) → 相关 ADR |
-| 改认证、会话或数据操作 | [ADR 0006](docs/adr/0006-auth-session-data.md) + [docs/features/access.md](docs/features/access.md) |
-| 改 Harness 接入、发送、停止或恢复 | [ADR 0001](docs/adr/0001-native-harness-boundary.md)、[ADR 0004](docs/adr/0004-recoverable-communication.md) + 对应功能页 |
+| 做新需求 | 先与用户确认范围/术语；再读 [docs/spec/README.md](docs/spec/README.md) → 当前 spec |
+| 改架构、边界或数据归属 | [docs/architecture.md](docs/architecture.md) → 该边界链接的决策 |
+| 改认证、会话或数据操作 | [docs/features/access.md](docs/features/access.md) |
+| 改 Harness 接入、发送、停止或恢复 | [docs/features/execution.md](docs/features/execution.md)（创建/接续见 [conversations](docs/features/conversations.md) / [continuity](docs/features/continuity.md)） |
 | 运行、构建、提交 | [README](README.md) |
-| 写文档或改文档系统 | 本文档系统节 + ADR 0005 |
+| 写文档或改文档系统 | 本文档系统节 + [docs/README.md](docs/README.md) |
 | 发布或实例运维 | 本仓库之外的操作者入口 |
 
 ## 完成的定义
@@ -47,7 +51,7 @@
 
 1. `npm run typecheck`、`npm test`、`npm run build`、`npm run check:docs` 通过；
 2. 受影响的用户路径有真实运行证据；不能只凭模型自述或 HTTP 200；
-3. 相关 feature map / ADR / spec ledger 已更新，或明确说明无需更新；
+3. 相关 feature map 已更新；spec / ADR 的变更已与用户确认，或明确说明无需更新；
 4. 未运行、受阻和未覆盖的部分写清楚，不把“尚未验证”写成“通过”。
 
 ## 判断空间

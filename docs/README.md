@@ -15,6 +15,8 @@
 
 - 先归类，再新建；新文档三问见 ADR 0005。
 - 一个事实只有一个家；其他文档链接。
+- `CONTEXT.md`、spec 和 ADR 只记录与用户讨论后确认的内容。
+- 具体 ADR 由所属 architecture / feature / spec 链接；本表不枚举单个 ADR。
 - spec 完成后折入 feature map / ADR 并删除。
 - 能机械检查的事实进 `npm run check:docs`。
 
