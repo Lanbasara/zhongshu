@@ -10,7 +10,8 @@
     "admin": "node src/server/admin.ts",
     "typecheck": "tsc --noEmit",
     "build": "node scripts/build.mjs",
-    "test": "node --test test/*.test.ts"
+    "test": "node --test test/*.test.ts",
+    "check:docs": "node scripts/check-docs.mjs"
   },
   "dependencies": {
     "@fastify/cookie": "11.1.5",
