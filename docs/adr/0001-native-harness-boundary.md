@@ -17,7 +17,7 @@ status: accepted
 | 阅读与编辑 | 中书提供成果入口与条件保存；工作区文件保存实际内容 |
 | 浏览器 | 维护当前端未发送输入、未保存编辑、焦点和阅读位置；已提交状态由服务端恢复 |
 
-这些是职责边界，按实际切片长出模块。中书应用先保持一个服务，原生 Harness 是独立执行单元。浏览器连接不拥有任务生命周期；页面关闭不能取消任务。进程监管、重启恢复能力和文件访问通道由[接入实验](../plans/integration-probes.md)确定。
+这些是职责边界，按实际切片长出模块。中书应用先保持一个服务，原生 Harness 是独立执行单元。浏览器连接不拥有任务生命周期；页面关闭不能取消任务。进程监管、重启恢复能力和文件访问通道由[接入实验](../spec/integration-probes.md)确定。
 
 原生服务不直接暴露到公网。Agent 执行身份仅获得其 HOME、原生数据和允许的工作区，不获得中书认证存储、部署凭据或宿主管理能力；目录名称本身不构成权限隔离。
 
@@ -29,7 +29,7 @@ status: accepted
 
 统一的是可依赖的语义，真实差异通过能力及结果表达。Codex 的 `turn/steer` 要求匹配活动轮次；DSH 的原生输入策略存在 next-step/next-turn 差别。DSH rc.4 的 API Peer 在拥有它的 WebSocket 关闭后失效，`follow` 重连从新快照开始，`cancel` 保留待处理 inbox。连接身份、会话身份和运行身份因此不能压成一个 ID；停止也不能统一承诺清空所有待办。[Codex App Server](https://learn.chatgpt.com/docs/app-server)、[DSH 连接](https://github.com/deepseek-ai/deepseek-harness/blob/504a01a9578abc2c6f1fb896b1dc322c9fe24f66/packages/client/connection/README.md#browser-authentication-and-request-trust)、[DSH 请求类型](https://github.com/deepseek-ai/deepseek-harness/blob/504a01a9578abc2c6f1fb896b1dc322c9fe24f66/packages/api/session-controller/src/types.ts)、[DSH 动作实现](https://github.com/deepseek-ai/deepseek-harness/blob/504a01a9578abc2c6f1fb896b1dc322c9fe24f66/packages/api/session-controller/src/commands.ts)
 
-具体 Interface 由[两端最小实验](../plans/first-harness-tracer.md)收敛，之后以共同的行为验证保护。固定已验证原生版本；升级先跑对应兼容检查，新语义经能力声明进入产品，不静默沿用旧假设。此边界不要求先建设通用插件平台或抹平全部原生能力。
+具体 Interface 由[两端最小实验](../spec/first-harness-tracer.md)收敛，之后以共同的行为验证保护。固定已验证原生版本；升级先跑对应兼容检查，新语义经能力声明进入产品，不静默沿用旧假设。此边界不要求先建设通用插件平台或抹平全部原生能力。
 
 ## 对话约定
 

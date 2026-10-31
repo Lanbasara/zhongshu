@@ -21,6 +21,8 @@ jobs:
         with:
           node-version-file: .node-version
       - run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Check documentation
+        run: npm run check:docs
       - run: npm run typecheck && npm test && npm run build
         env:
           REVISION: ${{ github.sha }}

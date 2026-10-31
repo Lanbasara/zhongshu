@@ -14,7 +14,7 @@ Node.js 是服务端运行环境，Fastify 是运行其上的 HTTP 框架。认�
 
 Fastify 5 的维护政策覆盖支持期内的 Node LTS，其 `v5.12.7` CI 已包含 Node 24；这证明上游支持范围，不证明中书的插件组合与容器路径已通过。依赖在首次使用时锁定，升级复跑相关行为。[维护政策](https://fastify.dev/docs/latest/Reference/LTS/)、[固定版本 CI](https://github.com/fastify/fastify/blob/v5.12.7/.github/workflows/ci.yml)
 
-稳定性主要取决于有界工作量、阻塞控制和失败恢复。CPU 密集处理及大文件扫描不占用 HTTP 事件循环；短数据库操作也要在流式负载下测量。资源上限、关闭/取消、进程恢复与诊断从相关能力首次交付时验收，按[质量要求](../quality.md)判断。[Node 事件循环说明](https://nodejs.org/en/learn/asynchronous-work/dont-block-the-event-loop)
+稳定性主要取决于有界工作量、阻塞控制和失败恢复。CPU 密集处理及大文件扫描不占用 HTTP 事件循环；短数据库操作也要在流式负载下测量。资源上限、关闭/取消、进程恢复与诊断从相关能力首次交付时验收，按[跨功能验收](../features/README.md)判断。[Node 事件循环说明](https://nodejs.org/en/learn/asynchronous-work/dont-block-the-event-loop)
 
 ## 为什么当前不加入 Next.js
 
