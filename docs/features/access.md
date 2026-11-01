@@ -1,50 +1,52 @@
 # 私人入口：feature map
 
-范围：单管理员登录、身份恢复与退出；初始化、密码重置和备份恢复的操作细节在外层实例运维记录中。身份与会话决策归 [ADR 0006](../adr/0006-auth-session-data.md)。
+当前能力：单管理员初始化后登录、刷新/普通应用重启保留有效身份、当前端退出、密码重置后全部失效。决策归 [ADR 0006](../adr/0006-auth-session-data.md)。通用管理员命令属于产品能力，见 [admin.ts](../../src/server/admin.ts)；生产实例位置与凭据由操作者维护。
 
 ## Sub-features
 
-- 初始化前与首次登录：全新数据目录显示“管理员尚未完成初始化”；按可信 CLI 初始化后登录。
-- 刷新与普通重启：有效身份保留。
-- 多端与退出：两个独立浏览器上下文分别登录；退出只吊销当前会话。
-- 重置与过期：CLI 重置或过期后，私有请求和对应更新流失效。
-- 登录状态竞争：延迟旧的 session 查询，再登录/退出，旧响应不得覆盖新身份。
+| 场景 | 要证明的行为 |
+| --- | --- |
+| A01 | 未初始化时没有密码登录入口；CLI 初始化后可以登录 |
+| A02 | 错误密码拒绝；正确登录后刷新与普通应用重启保持身份 |
+| A03 | 两端身份独立；退出 A 不影响 B，A 私有读取与 SSE 失效 |
+| A04 | CLI 重置密码后，两端旧身份都失效 |
+| A05 | 旧 session 响应不能覆盖刚完成的登录或退出 |
 
 ## How to get to it (user POV)
 
-1. 打开应用进入“登录中书”，填写管理员密码，点“进入工作台”。
-2. 已登录时从侧栏“退出登录”。
-3. 没有公开注册或浏览器密码重置入口；初始化和重置只在可信终端。
+打开本次 origin →“登录中书”→“管理员密码”→“进入工作台”。已登录时侧栏“退出登录”。未初始化时显示“管理员尚未完成初始化。完成后即可登录。”；没有浏览器注册、初始化或重置密码入口。
 
 ## Driving it with Harness
 
-本节不需要 Harness；先按 [features/README](README.md) 的 Launch/Doctor 准备独立数据目录和端口。
+本页无需真实 Harness。先按 [共同入口](README.md) 启动 fixture，**A01 之前不要运行 init**。使用两个独立浏览器上下文 A/B。
+
+| 场景 | 初始条件与动作 | 必须观察；如何识别失败 |
+| --- | --- | --- |
+| A01 | 新 root 启动，打开页面；另一个终端运行 `node test/support/feature-fixture.ts init --root "$zh_verify_root"`，刷新页面并登录 | 初始化前只有说明、没有密码输入；之后出现密码字段并能进入工作台。服务 ready 或初始化命令成功不能替代页面结果 |
+| A02 | 输入一次错误密码，再输入私密文件中的随机密码；刷新；停止本次应用并用相同 root/port 重启，再刷新 | 错误密码显示“密码不正确，请重试。”，仍在登录页；正确密码出现工作台。刷新/普通重启后仍可读取私有目录；另用全新上下文打开应仍需登录 |
+| A03 | B 单独登录；两个页面均建立更新流。在 A 点退出，再刷新 A；在 B 打开新对话框 | A 回到登录页，A 的同源 `fetch('/api/private/identity')` 状态为 401；原 SSE 结束且不再收到私有 change。B 仍能打开目录，私有 identity 为 200。两个普通标签共享 Cookie，不是两个独立端 |
+| A04 | A/B 重新独立登录并连上 SSE；终端运行下面的 reset 命令 | 两条旧流在下次鉴权时结束（默认心跳上限约 15 秒；条件等待上限 20 秒），两端刷新均回登录页，旧私有 identity 为 401。新随机密码能重新登录；不使用真实实例 reset |
+| A05 | 安装共同入口的浏览器故障工具；用以下步骤分别制造登录和退出前的旧 session 查询 | 旧响应释放后页面仍保持刚完成的身份；同时私有 identity 状态与页面一致。记录 `held` 的捕获条件，否则没有证明竞态 |
 
 ```sh
-export ZHONGSHU_DATA_DIR="$(mktemp -d)/data"
-npm run admin -- init
-REVISION="$(git rev-parse HEAD)" npm run build
-node dist/server/main.js
+node test/support/feature-fixture.ts reset --root "$zh_verify_root"
 ```
 
-1. 在全新目录启动，确认“管理员尚未完成初始化”；按 CLI 初始化，再重开页面登录。
-2. 登录后刷新，只重启本次中书进程并重开页面；确认有效身份保留。
-3. 两个独立浏览器上下文分别登录；A 退出后，其私有请求和 SSE 拒绝，B 仍可访问；刷新 A 确认没有复活。
-4. 本次隔离 CLI 重置后，两个端的私有请求/流都失效。
-5. 有能力控制响应顺序时，延迟旧的 session 查询，再登录/退出并释放旧响应；页面不得退回旧身份。
+A05 的登录分支：在已初始化的未登录页执行 `zhVerify.holdNext('/api/session')`，触发 `window.dispatchEvent(new Event('pageshow'))`；等待 `zhVerify.status().held === '/api/session'`，再通过密码字段登录。进入工作台后执行 `zhVerify.release()`，页面不能退回登录页。退出分支：在已登录页按同样方法捕获旧 session，再点退出、等待登录页、释放旧响应；页面不能恢复工作台。故障工具忽略被测读请求的取消信号，只让真实旧响应迟到，不伪造身份数据。结束执行 `zhVerify.restore()`。
+
+SSE 观察在浏览器网络面板或自动化的 EventSource 事件记录中进行；保存状态码、打开/关闭时间和合成 change 的数量，不保存请求 Cookie。没有流观察能力时，该子断言单列 `BLOCKED`，不以页面刷新成功替代。
 
 ## Gotchas
 
-- **刷新后仍登录，不等于重新登录成功。** 记录浏览器与数据目录身份，区分“恢复”与“重新认证”。
-- **退出只吊销当前会话。** 另一端的会话独立存在；重置密码或恢复备份才吊销全部。
-- **重置后旧页面可能看起来还在。** 私有请求和 SSE 必须失效；刷新核对没有复活。
-- **初始化/重置只能从可信终端。** 不暴露成公网操作，不把密码放命令参数、仓库或日志。
-- **隐藏按钮不是授权。** 服务端必须认证；浏览器隐藏只影响可见性。
-- **只做一次顺序登录不能证明竞态分支。** 需要可控的旧响应延迟。
+- 页面收到 401 才会退出旧视图；CLI 重置后不能要求页面在零延迟内主动消失。
+- 退出只吊销当前会话；重置或恢复备份才使全部旧身份失效。
+- 登录会轮换当前 Cookie；另一个共享 Cookie 的标签页不是独立会话。
+- 退出清除当前标签页草稿；会话失效不会承诺跨端草稿同步。
+- 绝对过期、持久限速、备份恢复与恢复后会话吊销由下方回归覆盖；这里的普通刷新不是这些分支的证据。
 
 ## Implementation and regression
 
-- 认证、会话、限速与密码散列：[auth.ts](../../src/server/auth.ts)
-- 初始化、重置、备份与恢复 CLI：[admin.ts](../../src/server/admin.ts)
-- 数据库与迁移：[database.ts](../../src/server/database.ts)、[migrations.ts](../../src/server/migrations.ts)
-- 回归：[auth.test.ts](../../test/auth.test.ts)、[http.test.ts](../../test/http.test.ts)、[workbench-store.test.ts](../../test/workbench-store.test.ts)
+- 页面身份时序：[main.tsx](../../src/web/main.tsx)；HTTP/Cookie/来源/CSRF：[app.ts](../../src/server/app.ts)。
+- 认证、到期与限速：[auth.ts](../../src/server/auth.ts)；可信 CLI：[admin.ts](../../src/server/admin.ts)；数据库：[database.ts](../../src/server/database.ts)。
+- `node --test test/auth.test.ts test/http.test.ts test/workbench-http.test.ts`：包含双端/重置/绝对过期、真实 HTTP/SSE 吊销。A05 需要上述页面时序，现有服务端测试不替代它。
+- 容器中的 CLI 备份/恢复、Cookie 与替换后身份：构建后按 [README](../../README.md#container) 使用 [check-container.mjs](../../scripts/check-container.mjs)，仅针对本次新建 Compose 项目。

@@ -1,50 +1,64 @@
 # 执行与停止：feature map
 
-范围：发送文本、观察真实工作、接续下一轮和停止当前轮。发送/停止契约归 [ADR 0001](../adr/0001-native-harness-boundary.md) 与 [ADR 0004](../adr/0004-recoverable-communication.md)。
+当前能力：发送文本、观察正文/工具活动、终态核实后在同对话继续，以及停止当前轮。发送与恢复决策见 [ADR 0004](../adr/0004-recoverable-communication.md)，原生语义见 [ADR 0001](../adr/0001-native-harness-boundary.md)。
 
 ## Sub-features
 
-- 发送消息：文本进入当前对话，取得稳定操作编号。
-- 真实工作：模型读取工作区文件并把结果写回。
-- 同会话接续：在原对话追问，复用原生上下文和固定配置。
-- 接收与完成分开：原生已接收不提前开放下一轮。
-- 回执未知：按同一编号核对，不重复派发。
-- 停止当前轮：目标当前运行编号，等待原生终态。
-- 后台通知轮次：原生后台任务完成后可能产生后继轮，界面不能永久卡住。
+| 场景 | 要证明的行为 |
+| --- | --- |
+| E01 | 发送进入同一对话；接收回执不等于本轮完成 |
+| E02 | 原生结果未知时核对原操作，不重复派发 |
+| E03 | 停止指向当前轮，显示中断及后台工具限制；之后可接续 |
+| E04 | 无法保留发送编号时不派发；明确拒绝后保留可编辑输入 |
+| E05 | 两个真实 Harness 分别读写文件、同会话回忆，并核验真实停止 |
 
 ## How to get to it (user POV)
 
-1. 登录后从侧栏进入一段配置已核实的对话。
-2. 在“给 Agent 的消息”输入文本，点“发送消息”或按 ⌘/Ctrl + Enter；Enter 换行。
-3. 运行时入口变为“停止当前轮”；回执未知时使用“查询原生结果”或“核对同一发送”。
-4. 完成后继续追问；需要中止时点停止。
+进入配置已核实的对话 →“给 Agent 的消息”→“发送消息”（视觉文字“发送 ↑”），或 ⌘/Ctrl + Enter。Enter 换行。运行/等待且有运行 ID 时显示“停止当前轮”。未知状态可见“查询原生结果”；未确认草稿可见“核对同一发送”。没有运行中追加、回答问题或审批的操作入口。
 
 ## Driving it with Harness
 
-先按 [features/README](README.md) 的 Launch/Doctor 准备独立现场，再准备真实原生 Host 和合成工作区。
+先完成 [共同入口](README.md) 和 C01。fixture 收到文本后保持运行，只有 CLI complete 或页面停止会到终态；这样无需靠消息长度或固定 sleep 猜测运行窗口。
 
-1. 在两个内容相同、目录独立的合成工作区各放一份 `notes.md`，写入三条本轮自定事实。
-2. 分别创建 Codex 与 DSH 对话，选择实际可用的模型和权限。
-3. 发送“读 notes.md，把三条事实写入 result.md”，观察正文、工具活动和终态。
-4. 在同一对话追加一个只在首轮消息里出现过的随机标记，确认原生上下文复用。
-5. 停止场景准备一个有独立启动信号、释放条件和外部清理手段的短小受控工具；先确认确实处于运行中，再点停止。
-6. 回执未知场景精确地让原生已收到、但回执未被确认，再点核对；确认没有第二次派发。
+| 场景 | 初始条件与动作 | 判据和独立观察 |
+| --- | --- | --- |
+| E01 | 建“执行 A”，输入含本轮独有标记的两行文本；先按 Enter，再发送。运行中尝试 ⌘/Ctrl + Enter；CLI complete 后输入新文本再发送 | Enter 不派发；首次发送 inspect 的 submitCalls=1、正文有两行用户输入、出现停止按钮。运行中快捷键不增加次数。complete 后出现 `FIXTURE COMPLETED <runId>`、恢复发送，再发后 submitCalls=2；两轮同原生身份、配置不变 |
+| E02 | 建“未知回执”；先运行 unknown-receipt，再发送唯一文本。保存产品操作 ID、inspect 调用数；在“核对同一发送”重试两次；再运行 prove，点“查询原生结果” | 未发布证据前，操作 unknown、保留 pending 草稿，同编号重试不增加 submitCalls。发布后 accepted，草稿中的 pending 被清除；inspect 始终只调用一次，原生 operationIds 只有原 ID。最后 complete 收尾 |
+| E03 | 在已接受且 running 的 fixture 对话点“停止当前轮” | inspect 的 stopCalls 加一、目标 runId 等于被停止轮，产品操作 type=stop；页面变“已中断”，显示后台工具可能仍运行/改动不撤销的提示。发下一条能再次运行；fixture 不证明真实工具退出 |
+| E04 | 安装故障工具，执行 `zhVerify.denyDraftStorage()`；输入新文本并发送。恢复工具后重试 | 输入保留并显示浏览器无法保存草稿/发送编号，inspect submitCalls 不变；恢复后可发送。页面超出编码预算也必须在派发前保留输入。服务端 400/413 和原生 rejected 分支用下方定向回归核对，不能由存储失败外推 |
+| E05 | 按下面真实分支分别使用 Codex、DSH | 文件字节独立读回、原生身份/配置及正文共同符合预期；每个 Harness 单独结论 |
+
+```sh
+node test/support/feature-fixture.ts complete --root "$zh_verify_root" --title '执行 A'
+node test/support/feature-fixture.ts unknown-receipt --root "$zh_verify_root" --title '未知回执'
+# 页面发送、核对同一发送后，再发布同一操作的原生历史证据：
+node test/support/feature-fixture.ts prove --root "$zh_verify_root" --title '未知回执'
+node test/support/feature-fixture.ts inspect --root "$zh_verify_root" --title '未知回执'
+```
+
+E02 另外可用 browser-faults 的 `dropNext('/api/private/workbench/conversations/' + id + '/operations')` 丢一次浏览器 HTTP 回执。若服务端状态已自动核实，pending 提示可很快消失；这是有效恢复，不要求提示必定停留。核对同一 operation ID、次数与最终用户正文是否恰好一份，才是判据。
+
+真实分支 E05：
+
+1. 按共同入口准备受限原生 Host 与两个独立合成工作区。各写 `notes.md`，含执行者本轮确定的三条事实；创建前确认 `result.md` 不存在。记录预期字节/事实，不让模型生成预期。
+2. 第一轮消息要求读取 notes、把事实写入 result，并只在首轮消息中给一个随机标记。终态后用工作区外的可信读取核对文件三条事实。不能采信“已写入”的自然语言。
+3. 第二轮只问“上一轮我给的标记是什么”，不再次提供标记、不让首轮写入文件。核对正文与首轮保存的预期一致，且原生身份/模型/权限未变。
+4. 为停止场景把 [workspace-gate.mjs](../../test/support/workspace-gate.mjs) 复制进本次合成目录，给 8–40 位小写字母数字标记。页面要求真实运行 `node workspace-gate.mjs <标记>`，等待 `gate-<标记>.started.json`，从可信端核对 PID/目录和进程存活，再点停止。
+5. 等原生本轮 terminal/interrupted、页面中断提示；同时独立检查工具是否仍存活，单独记录。退出工具可在本次目录创建 `gate-<标记>.release`，等待 finished 文件与 PID 退出；脚本最多 90 秒自终止，`outcome: timeout` 不算释放成功。不要把清理动作当作原生 stop 的效果。
+
+真实后台通知产生后继轮后，继续发送需要核实“上一条用户消息对应轮”的终态与当前空闲，不能只比较最新 runId。此反例的精确历史/竞争分支由定向回归提供；未实际触发真实后台通知时不宣称该原生分支通过。
 
 ## Gotchas
 
-- **HTTP 接收回执不是完成证据。** 只有原生轮次终态被核实后，才能开放下一轮。
-- **模型说“已写入”“已停止”不是独立证据。** 读回工作区文件、核对原生状态。
-- **“已中断”不代表所有后台工具已退出。** 两个 Harness 都可能保留已经启动的后台工具；界面必须提示这一限制。
-- **最终文件只有一份，不能证明没有重复执行。** 回执未知时必须核对操作编号和原生消息身份。
-- **DSH 权限设置产生的被动上下文不是阻塞消息。** 但原生真实待处理输入仍须阻塞，不能为了放行而忽略。
-- **后台通知会产生后继轮。** 不能只比较“最新轮次”和“最后用户轮次”；要分别核实上一条消息的终态和当前空闲。
-- 空历史不表示读取失败；Codex 空会话也可能有有效原生绑定。
+- `accepted` 是原生接收，操作记录不会为了表示工作结束而改成 completed；终态来自对话 state/原生历史。
+- 停止按钮针对当前 runId；“已中断”不承诺撤销文件副作用、清空待处理输入或终止全部后台进程。
+- 最终文件只有一份不能证明没有重复执行。E02 必须检查调用数和操作身份。
+- 一般输入上限为 16,000 字符，服务端另有 UTF-8 与请求体上限；中文和特殊字符的编码长度可先触发拒绝。不能靠截断输入掩盖失败。
+- fixture 的正文、权限和停止都是确定性边界数据，不证明真实模型、工具权限或原生通知行为。
 
 ## Implementation and regression
 
-- 派发、回执、恢复与观察生命周期：[workbench.ts](../../src/server/workbench.ts)
-- 操作记录、历史投影与持久水位：[workbench-store.ts](../../src/server/workbench-store.ts)
-- Codex 适配：[codex/index.ts](../../src/harness/codex/index.ts)
-- DSH 适配：[dsh/index.ts](../../src/harness/dsh/index.ts)
-- 共同语义：[harness/types.ts](../../src/harness/types.ts)
-- 回归：[workbench.test.ts](../../test/workbench.test.ts)、[codex.test.ts](../../test/codex.test.ts)、[dsh.test.ts](../../test/dsh.test.ts)
+- 页面门禁、草稿、发送/停止：[workbench.tsx](../../src/web/workbench.tsx)；请求与 pending 草稿：[workbench-client.ts](../../src/web/workbench-client.ts)。
+- 持久队列、claim、终态核对与 reconcile：[workbench.ts](../../src/server/workbench.ts)、[workbench-store.ts](../../src/server/workbench-store.ts)。
+- 原生派发/停止：[Codex](../../src/harness/codex/index.ts)、[DSH](../../src/harness/dsh/index.ts)。
+- `node --test test/workbench.test.ts test/workbench-store.test.ts test/workbench-http.test.ts test/codex.test.ts test/dsh.test.ts`：覆盖 ACK 门禁、目标轮终态、目标变化、未知回执、重复提交、当前停止目标与派发中崩溃。实际浏览器判据仍是 E01–E04。

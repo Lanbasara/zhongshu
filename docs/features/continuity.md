@@ -1,48 +1,61 @@
 # 接续与阅读：feature map
 
-范围：恢复同一对话、保留未确认输入、读取完整历史。持久化与恢复语义归 [ADR 0003](../adr/0003-local-persistence.md) 与 [ADR 0004](../adr/0004-recoverable-communication.md)。
+当前能力：恢复同一对话、当前标签页保留草稿/未确认发送、读取更早历史与处理晚到响应。持久化和恢复语义见 [ADR 0003](../adr/0003-local-persistence.md)、[ADR 0004](../adr/0004-recoverable-communication.md)。
 
 ## Sub-features
 
-- 关页再回来：运行中关闭页面，重开后恢复输出和真实状态。
-- 中书中断：只终止中书进程，重启后恢复原生身份、历史和结果。
-- 原生断连/重启：Host 单独中断后的未知/受阻与恢复。
-- 草稿与未知回执：切换对话、刷新后保留当前端草稿；未知发送按编号核对。
-- 历史阅读：查看更早内容、回到最新、旧响应不覆盖新页面。
-- 多端阅读：另一独立登录端可读取同一对话，不共享未发送草稿。
+| 场景 | 要证明的行为 |
+| --- | --- |
+| R01 | 关页后工作不被浏览器取消；重开同一地址能读回结果 |
+| R02 | 中书进程中断后保留绑定和操作，核对原生结果，不盲目重派 |
+| R03 | 草稿按对话保存在当前标签页，支持刷新/切换；独立端不共享 |
+| R04 | 完整分页读取历史；超过窗口时只保留有界页面，并能回到最新 |
+| R05 | 旧对话/旧版本快照不能覆盖当前页面和较新结果 |
+| R06 | 原生断连时保留历史、阻止新发；恢复后沿原身份核对 |
 
 ## How to get to it (user POV)
 
-1. 侧栏选择既有对话；带对话 hash 的地址也应落回同一身份。
-2. 恢复网络后观察自动重连；也可点“重新连接”主动刷新快照和目录。
-3. 历史顶部点“查看更早的内容”；旧窗口中点“回到最新内容”。
-4. 运行中关闭自己创建的页面，重新打开同一对话。
+侧栏选择对话，或打开带该对话 hash 的地址。“重新连接”刷新当前快照和目录；历史顶部“查看更早的内容”；进入旧窗口后“回到最新内容”；滚离底部后新输出显示“↓ 有新内容”。没有成果文件阅读器；这里阅读的是对话正文和可展开的“工具活动”。
 
 ## Driving it with Harness
 
-先按 [features/README](README.md) 的 Launch/Doctor 准备独立现场，再按 [execution](execution.md) 建立有确定内容和稳定条目身份的历史。
+按 [共同入口](README.md) 建 fixture；先用 E01 建立有已知内容与身份的对话。关闭/重开必须复用本次浏览器上下文，另一个独立上下文用于检验服务端读回。每次保存 hash、fixture 原生 ID、operation ID 和条目 ID/正文。
 
-1. 启动一个有独立启动信号的受控工具，确认原生工作已经开始。
-2. 关闭本次创建的浏览器页面；独立确认原生 Host 和工具继续运行。
-3. 重开同一对话，核对正文、状态和历史；另一独立登录端也在不共享草稿的前提下读取同一对话。
-4. 中书中断场景记录产品/原生身份，只终止本次中书进程，保持原生 Host 存活；用相同数据目录重启，核对无替代对话、无盲目重派。
-5. 原生断连/重启场景单独操作本次拥有的 Host，观察未知/受阻，再按原生持久状态核对恢复。
-6. 长历史使用明确标记的原生替身准备，但仍由真实应用、HTTP 和页面读取。
+| 场景 | 初始条件与动作 | 判据和反例 |
+| --- | --- | --- |
+| R01 | 在“离开恢复”发消息，确认 inspect 已调用一次且 running；关闭该页，CLI complete，再在同一上下文新页打开原 URL；B 另开新页或完整刷新原 URL | 两端均读到同一用户条目和完整完成正文，原生身份相同、submitCalls 仍为 1。关页之后才执行 complete，避免把关闭前已完成误认为离开期间完成 |
+| R02 | 在“中断恢复”发消息，确认 running；只 SIGKILL 本次 READY 给出的应用 PID。应用不存在时由独立 CLI complete，再以相同 root/port 启动，重新打开原 hash | 同一原生 ID、同一 operation ID，accepted 与终态被核实，用户/助手正文各一份，submitCalls=1。fixture 原生状态在独立数据库；这只证明应用对边界持久状态的恢复 |
+| R03 | 当前页 A 输入独有草稿但不发送，切换另一对话再回来，刷新；在独立端 B 打开相同 hash；A 退出后重新登录 | A 切换/刷新后草稿逐字相同，B 无此草稿；A 明确退出后草稿清空。pending 发送的保留与核对另跑 E02。新标签/关页后的 sessionStorage 生命周期不作为持久化承诺 |
+| R04 | 新建空“短历史”，seed 650 条；点击重新连接，再逐次“查看更早的内容”，读取到 0000 后返回最新。另建“长正文”，seed 150 条、每条 50,000 字符后同样读取 | 初始末条 0649/0149；服务端每页最多 100 条，浏览器再按正文预算缩窗。分页能到 0000，不重复 ID、不丢正文尾部。超过 500 条或正文预算后显示旧页提示与“回到最新内容”，可见条目≤500，返回后末条恢复。记录 DOM 与公共快照，不能只统计数据库行 |
+| R05 | 创建标题/内容不同的 A、B；用故障工具捕获 A 的下一次 GET 快照，切 B 后再释放。另在运行中的 A 捕获旧快照，切 B，CLI complete A，再从侧栏切回 A，等新正文到达后释放旧响应 | 第一分支仍显示 B 标题/正文/hash，不混入 A；第二分支仍显示完成正文/终态。切走/切回使新一代读取能越过被挂起的旧请求；同一视图的读取会合并，不能等一个被合并的请求自行超车。必须先确认 held 捕获、后观察新状态、再 release |
+| R06 | 对已有正文的“断连恢复”执行 disconnect，等产品 unknown；尝试发送，再 reconnect 并“查询原生结果”/“重新连接” | 断连时正文保留、显示待核实且新文本不派发；恢复后原生身份与历史保持，submitCalls 不变，状态核实后可发。fixture 的断连不是实际 Host 崩溃，不能宣称原生进程恢复 |
+
+```sh
+node test/support/feature-fixture.ts seed --root "$zh_verify_root" --title '短历史' --count 650 --chars 80
+node test/support/feature-fixture.ts seed --root "$zh_verify_root" --title '长正文' --count 150 --chars 50000
+node test/support/feature-fixture.ts disconnect --root "$zh_verify_root" --title '断连恢复'
+node test/support/feature-fixture.ts reconnect --root "$zh_verify_root" --title '断连恢复'
+```
+
+seed 仅允许没有消息和既有历史的 fixture 对话，不写产品历史表。每条已知正文是 `HISTORY NNNN ` 右补 `x` 到指定字符数，预期直接由输入条件确定。R04 在浏览器可用 `.message-text` 读取每条完整 `textContent`，检查长度、编号与末字符；这属于结果观察，不通过内部写入制造成功。
+
+R05：在对应 A 页面安装 browser-faults，执行 `zhVerify.holdNext('/api/private/workbench/conversations/' + location.hash.slice(1))`，点“重新连接”，等待 held，再按表中顺序通过侧栏切换。确认新结果可见后 `release()`，等待 held 清空再检查标题、正文与快照。若页面工具无法控制该顺序，单列 `BLOCKED`；直接快速点击不等于确定覆盖。
+
+R01/R02 的 native 分支使用 [E05 的受控 gate](execution.md)：确认真实工具已启动后关页或只停中书；从可信端确认本次 Host 与 gate 仍存活，再创建 release 文件；读回 finished 文件、重新打开同一对话。保存实际进程身份。真实 Host 单独突然崩溃需要操作者提供可销毁的独立 Host；有权限且实际完成该实验前，不能用中书进程崩溃替代。Android 后台/回收和移动网络也需在真机另跑。
 
 ## Gotchas
 
-- **中书重启不等于原生 Host 崩溃。** 不能用 Host 从未停止的运行证明 Host 崩溃恢复。
-- **关闭页面不等于取消任务。** 原生工作独立于浏览器和观察连接。
-- **温和退出与突然终止是不同证据。** 分别记录。
-- **草稿只在当前标签页。** 不做跨设备草稿同步；不要承诺另一端能看到未发送输入。
-- **旧响应不能覆盖新状态。** 切换对话、快速事件和慢快照并发时要防止旧响应回写。
-- **历史缺口要明确暴露。** 超出恢复窗口时保留待核实状态，不把缺口伪装成完整历史。
-- **固定 sleep 不是通过条件。** 等待具体状态或内容；超时保留最后事实。
+- 关页不取消任务；但未提交草稿只在当前标签页，不承诺关页后恢复，也不跨设备同步。
+- hash 只在页面初次装载读取。已打开页面直接改变 hash（包括自动化工具的同文档导航）会改变地址但不切换内容；用侧栏切换，或新页打开/完整刷新目标地址。这是当前导航限制，不能记录为 hash-only 导航通过。
+- “回到最新内容”只在有界旧窗口状态出现，普通加载一页更早历史不一定出现该按钮。
+- 应用启动只急切恢复最近一组对话，其他对话在打开时恢复；不能仅看启动瞬间侧栏状态判失败。
+- 中书重启、浏览器离线、原生连接断开、真实 Host 崩溃是四种实验。历史可读不等于原生执行仍继续。
+- 历史缺口、原生历史分歧或超过补齐窗口时可能明确待核实；不能把显式缺口改写成“完整恢复”。
+- “工具活动”正文默认折叠；查看其完整内容需展开。fixture 历史样本只覆盖文本阅读，真实工具显示需 E05。
 
 ## Implementation and regression
 
-- HTTP 校验、公开数据与有界更新流：[workbench-http.ts](../../src/server/workbench-http.ts)
-- 共享契约：[shared/workbench.ts](../../src/shared/workbench.ts)
-- 页面恢复、草稿、阅读和发送反馈：[workbench.tsx](../../src/web/workbench.tsx)、[workbench-client.ts](../../src/web/workbench-client.ts)
-- 持久化与迁移：[database.ts](../../src/server/database.ts)、[migrations.ts](../../src/server/migrations.ts)
-- 回归：[workbench-http.test.ts](../../test/workbench-http.test.ts)、[workbench-store.test.ts](../../test/workbench-store.test.ts)、[http.test.ts](../../test/http.test.ts)
+- 页面时序/窗口/阅读锚点：[workbench.tsx](../../src/web/workbench.tsx)；标签页草稿：[workbench-client.ts](../../src/web/workbench-client.ts)。
+- 持久投影/操作/水位：[workbench-store.ts](../../src/server/workbench-store.ts)、[migrations.ts](../../src/server/migrations.ts)；恢复与补齐：[workbench.ts](../../src/server/workbench.ts)。
+- 公共分页/有界 SSE：[workbench-http.ts](../../src/server/workbench-http.ts)；契约：[shared/workbench.ts](../../src/shared/workbench.ts)。
+- `node --test test/workbench-store.test.ts test/workbench.test.ts test/workbench-http.test.ts`：覆盖 SIGKILL 后未知派发、历史空页/游标循环/补齐预算、过期 SSE 水位重置、慢端背压、断流后连接名额释放。它们不证明 R03–R05 的浏览器状态。
