@@ -38,6 +38,8 @@ node test/support/feature-fixture.ts inspect --root "$zh_verify_root" --title '�
 
 E02 另外可用 browser-faults 的 `dropNext('/api/private/workbench/conversations/' + id + '/operations')` 丢一次浏览器 HTTP 回执。若服务端状态已自动核实，pending 提示可很快消失；这是有效恢复，不要求提示必定停留。核对同一 operation ID、次数与最终用户正文是否恰好一份，才是判据。
 
+`unknown-receipt` 只设置下一次回执，不改变已观察到的原生状态；控制命令完成后直接按 E02 发送，不需要额外 GET 或等待来同步控制命令。
+
 真实分支 E05：
 
 1. 按共同入口准备受限原生 Host 与两个独立合成工作区。各写 `notes.md`，含执行者本轮确定的三条事实；创建前确认 `result.md` 不存在。记录预期字节/事实，不让模型生成预期。

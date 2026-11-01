@@ -95,9 +95,9 @@ async function main() {
     return recordSchema.parse(JSON.parse(String(row.body)));
   };
   const save = (value: Native) => native.prepare('INSERT INTO sessions (id, body) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET body = excluded.body').run(value.id, JSON.stringify(recordSchema.parse(value)));
-  function change(id: string, action: (value: Native) => void) {
+  function change(id: string, action: (value: Native) => void, notify = true) {
     native.exec('BEGIN IMMEDIATE');
-    try { const value = load(id); action(value); value.revision++; save(value); native.exec('COMMIT'); }
+    try { const value = load(id); action(value); if (notify) value.revision++; save(value); native.exec('COMMIT'); }
     catch (error) { native.exec('ROLLBACK'); throw error; }
   }
   function prove(value: Native) {
@@ -132,7 +132,9 @@ async function main() {
             if (input.count * input.chars > 12 * 1024 * 1024) throw new Error('fixture_seed_byte_budget');
             value.items = Array.from({ length: input.count }, (_, number): NativeItem => ({ id: 'history:' + number.toString().padStart(4, '0'), kind: 'assistant', status: 'completed', text: ('HISTORY ' + number.toString().padStart(4, '0') + ' ').padEnd(input.chars, 'x') }));
           }
-        });
+        // Arming a future receipt does not change observed native state. An
+        // invalidation here would briefly fence the very send being tested.
+        }, input.command !== 'unknown-receipt');
       }
       console.log(JSON.stringify({ event: input.command, title: input.title }));
     } finally { native.close(); }
