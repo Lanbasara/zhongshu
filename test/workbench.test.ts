@@ -191,6 +191,64 @@ test('invalidate during sync forces another read, and a late state result cannot
   await syncing; assert.ok(f.peer.stateCalls >= 2); assert.equal(f.store.getConversation(f.id)?.state.runId, 'new-run'); assert.equal(f.store.getConversation(f.id)?.state.status, 'running');
 });
 
+test('unavailable immediately clears verification while retaining the last known run, queue and saved content', async t => {
+  const f = fixture(t);
+  f.peer.records = [nativeItem('saved')];
+  f.peer.current = { status: 'running', runId: 'known-run', terminalRunId: 'older-terminal', pendingInputs: 3, configurationVerified: true };
+  await f.service.reconcile(f.id);
+  const before = f.service.snapshot(f.id);
+  f.peer.stateRead = async () => { throw new Error('synthetic_offline'); };
+  f.peer.historyRead = async () => { throw new Error('synthetic_offline'); };
+  f.peer.emit({ type: 'unavailable', reason: 'synthetic_connection_lost' });
+  const lost = f.service.snapshot(f.id);
+  assert.deepEqual(lost.conversation.state, { status: 'unknown', runId: 'known-run', pendingInputs: 3, configurationVerified: false, reason: 'synthetic_connection_lost' });
+  assert.deepEqual(lost.conversation.binding, before.conversation.binding);
+  assert.deepEqual(lost.history.items, before.history.items);
+  assert.ok(lost.revision > before.revision);
+  await assert.rejects(f.service.enqueue(operation(f.id)), { code: 'operation_needs_reconciliation' });
+  await f.service.reconcile(f.id);
+  assert.equal(f.store.getConversation(f.id)?.state.status, 'unknown');
+  assert.equal(f.peer.submitCalls.length, 0);
+});
+
+test('a late successful transport read cannot revive a disconnected run', async t => {
+  const f = fixture(t); await f.service.reconcile(f.id);
+  const old = deferred<NativeState>(); let reads = 0;
+  f.peer.stateRead = async () => { if (++reads === 1) return old.promise; throw new Error('still_offline'); };
+  const syncing = f.service.reconcile(f.id);
+  try {
+    await until(() => reads === 1);
+    f.peer.emit({ type: 'unavailable', reason: 'synthetic_connection_lost' });
+    old.resolve({ status: 'running', runId: 'stale-run', pendingInputs: 0, configurationVerified: true });
+    await syncing;
+    assert.equal(f.store.getConversation(f.id)?.state.status, 'unknown');
+    assert.equal(f.store.getConversation(f.id)?.state.configurationVerified, false);
+    assert.notEqual(f.store.getConversation(f.id)?.state.runId, 'stale-run');
+  } finally { old.resolve(terminal()); await syncing; }
+});
+
+for (const outcome of ['success', 'failure'] as const) test(`late transport ${outcome} cannot overwrite a newer recovered state`, async t => {
+  const f = fixture(t); await f.service.reconcile(f.id);
+  const old = deferred<NativeState>(); const fresh = deferred<NativeState>(); let reads = 0;
+  f.peer.stateRead = async () => ++reads === 1 ? old.promise : fresh.promise;
+  const syncing = f.service.reconcile(f.id);
+  try {
+    await until(() => reads === 1);
+    f.peer.emit({ type: 'unavailable', reason: 'synthetic_connection_lost' });
+    assert.equal(f.store.getConversation(f.id)?.state.status, 'unknown');
+    const recovered = terminal('new-run');
+    f.peer.emit({ type: 'state', state: recovered });
+    if (outcome === 'success') old.resolve({ status: 'running', runId: 'stale-run', pendingInputs: 0, configurationVerified: true });
+    else old.reject(new Error('synthetic_old_failure'));
+    await until(() => reads >= 2);
+    assert.deepEqual(f.store.getConversation(f.id)?.state, recovered, 'old read must not overwrite the new native event');
+    fresh.resolve(recovered);
+    await syncing;
+    assert.deepEqual(f.store.getConversation(f.id)?.state, recovered);
+    assert.equal(f.peer.submitCalls.length, 0);
+  } finally { old.resolve(terminal()); fresh.resolve(terminal('new-run')); await syncing; }
+});
+
 test('continuous text during every read cannot starve running state or cancellation', async t => {
   const f = fixture(t); await f.service.reconcile(f.id);
   const before = f.peer.stateCalls; let updates = 0;

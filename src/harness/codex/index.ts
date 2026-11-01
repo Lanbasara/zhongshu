@@ -58,7 +58,7 @@ class CodexAdapter implements HarnessAdapter {
       },
       disconnected: () => {
         this.live.clear(); this.liveBytes = 0;
-        for (const [id, watch] of this.watches) { watch.verified = false; this.emit(id, { type: 'invalidate' }); }
+        for (const [id, watch] of this.watches) { watch.verified = false; this.emit(id, { type: 'unavailable', reason: 'codex_disconnected' }); }
         this.scheduleReconnect();
       },
     });

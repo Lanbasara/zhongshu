@@ -43,6 +43,17 @@ R05：在对应 A 页面安装 browser-faults，执行 `zhVerify.holdNext('/api/
 
 R01/R02 的 native 分支使用 [E05 的受控 gate](execution.md)：确认真实工具已启动后关页或只停中书；从可信端确认本次 Host 与 gate 仍存活，再创建 release 文件；读回 finished 文件、重新打开同一对话。保存实际进程身份。真实 Host 单独突然崩溃需要操作者提供可销毁的独立 Host；有权限且实际完成该实验前，不能用中书进程崩溃替代。Android 后台/回收和移动网络也需在真机另跑。
 
+R06 的真实 Codex Host 分支按下面的独立判据执行；使用同一应用、数据目录和对话，给本次模型/环境确定并记录等待预算：
+
+1. 先按共同 Native 入口建立受限的自有 Host 与标准应用；通过页面启动 gate，独立核对真实 Host/socket owner、gate PID/cwd、已接受操作、原生身份及当前 run。另建一段可从侧栏切换的合成对话。
+2. 安装共同 browser-faults，hold 当前运行对话的 GET 快照；确认 `held` 已捕获真实响应，再 SIGKILL 本次 Host（保留应用）。独立核对 Host 退出、socket 无 owner、应用端口和登录仍正常。
+3. 通过独立同源读回确认对话 `unknown / configurationVerified=false`；保存原 runId、最后已知待处理数、绑定和历史，确认没有第二次派发。由侧栏切走再切回，使新一代页面读取真正到达“待核实”，新文本不可发送；不要只改 hash。
+4. 释放失联前的旧 running 响应，确认页面/公共快照仍待核实，旧响应未复活 running/verified。保留 held、新状态到达、release 和最终状态的顺序；restore 后才能安装下一故障。
+5. 再 hold 一份失联期间的旧 unknown 响应，确认已捕获。对残留 gate 单独按归属释放/确认退出；使用相同账号/临时权限、工作区与连接地址重启自己的 Host，核对实际新 owner。应用沿原绑定重新核实；从侧栏切走/切回，等真实新状态与配置核实完成。
+6. 释放旧 unknown 响应，页面不能退回旧状态；独立原生历史/配置与公共快照均保持同一身份、原操作和确切轮次结果，无替代对话或重派。记录实际新终态，不预先把断连等同于 interrupted 或工具退出。
+
+浏览器交错场景覆盖快照响应；后端旧连接/旧读取的成功与失败隔离另由 [组合回归](../../test/codex-workbench.test.ts) 和 [Workbench 回归](../../test/workbench.test.ts) 保护，不能相互替代。缺少可独立控制的 Host、有效权限边界或故障工具时，明确子断言 `BLOCKED`。
+
 ## Gotchas
 
 - 关页不取消任务；但未提交草稿只在当前标签页，不承诺关页后恢复，也不跨设备同步。
@@ -59,4 +70,4 @@ R01/R02 的 native 分支使用 [E05 的受控 gate](execution.md)：确认真�
 - 页面时序/窗口/阅读锚点：[workbench.tsx](../../src/web/workbench.tsx)；标签页草稿：[workbench-client.ts](../../src/web/workbench-client.ts)。
 - 持久投影/操作/水位：[workbench-store.ts](../../src/server/workbench-store.ts)、[migrations.ts](../../src/server/migrations.ts)；恢复与补齐：[workbench.ts](../../src/server/workbench.ts)。
 - 公共分页/有界 SSE：[workbench-http.ts](../../src/server/workbench-http.ts)；契约：[shared/workbench.ts](../../src/shared/workbench.ts)。
-- `node --test test/workbench-store.test.ts test/workbench.test.ts test/workbench-http.test.ts`：覆盖 SIGKILL 后未知派发、历史空页/游标循环/补齐预算、过期 SSE 水位重置、慢端背压、断流后连接名额释放。它们不证明 R03–R05 的浏览器状态。
+- `node --test test/codex-workbench.test.ts test/workbench-store.test.ts test/workbench.test.ts test/workbench-http.test.ts`：覆盖真实 RPC/adapter 失联落库、失败重连不重复失效、旧连接/迟到读取隔离、SIGKILL 后未知派发、历史补齐预算、SSE 水位重置、慢端背压与连接回收。协议 peer 是替身；这些不证明真实 Host/模型或 R03–R05 的浏览器状态。

@@ -62,6 +62,7 @@ export class CodexRpc {
     });
     this.socket = ws;
     let ended = false;
+    let established = false;
     const disconnect = () => {
       if (ended) return;
       ended = true;
@@ -71,12 +72,16 @@ export class CodexRpc {
       this.heartbeat = undefined;
       for (const request of this.pending.values()) { clearTimeout(request.timer); request.reject(new RpcError('codex_disconnected')); }
       this.pending.clear();
-      this.hooks.disconnected();
+      // Failed offline attempts are request errors, not new losses of verified
+      // observation. Repeated loss signals would fence every state read.
+      if (established && !this.permanentlyClosed) this.hooks.disconnected();
+      established = false;
     };
     ws.on('close', disconnect);
     ws.on('error', () => { disconnect(); ws.terminate(); });
-    ws.on('pong', () => { this.awaitingPong = false; });
+    ws.on('pong', () => { if (this.socket === ws && !this.permanentlyClosed) this.awaitingPong = false; });
     ws.on('message', (bytes, binary) => {
+      if (this.socket !== ws || this.permanentlyClosed) return;
       try {
         const buffer = Buffer.isBuffer(bytes) ? bytes : bytes instanceof ArrayBuffer ? Buffer.from(bytes) : Buffer.concat(bytes);
         if (binary || buffer.byteLength > MAX_FRAME) throw new RpcError('codex_invalid_frame');
@@ -105,6 +110,7 @@ export class CodexRpc {
       await this.send('initialize', { clientInfo: { name: 'zhongshu', version: '0.1.0' }, capabilities: { experimentalApi: true } });
       if (ws.readyState !== WebSocket.OPEN) throw new RpcError('codex_disconnected');
       ws.send(JSON.stringify({ method: 'initialized', params: {} }));
+      established = true;
       this.awaitingPong = false;
       this.heartbeat = setInterval(() => {
         if (this.awaitingPong) { disconnect(); ws.terminate(); return; }
