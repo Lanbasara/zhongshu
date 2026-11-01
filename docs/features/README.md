@@ -53,12 +53,15 @@ node test/support/feature-fixture.ts init --root "$zh_verify_root"
 
 1. 保存 `git rev-parse HEAD`、`git status --short`、diff，以及 Node/浏览器版本；工作树有改动时保存补丁和涉及文件的哈希。构建标签只能关联 HEAD，不能证明未提交内容。
 2. READY 应给出 `mode: fixture`、本次 PID、root、origin。检查本次 `/api/health` 与 `/api/version`，再打开该 origin；不能用健康接口代替页面验收。
-3. 初始化并登录后，应能看到“＋ 新对话”。对话框应列出 Fixture A/B、Codex/DSH、Fixture 模型和两项 fixture 权限。保存实际选值；不能用默认选中推断原生配置。
+3. 初始化并登录后，应能看到“＋ 新对话”。对话框应列出 Fixture A/B、Codex/DSH、Fixture 模型和两项 fixture 权限。保存实际选值；创建/核对后先等表单关闭、hash 等于本次对话 ID，再等对应标题与状态。旧对话的输入框仍存在，不能证明新对话就绪。
 4. 一般条件等待上限为 10 秒；登录与操作请求上限为 20 秒。fixture 等待的是明确 DOM/接口状态，超时保留最后状态并判失败。真实模型另记录本轮时间预算，超时不自动宣称产品失败。
+5. 进程中断前，核对应用自身 PID、实际端口监听者和本次数据目录。`spawn` 返回的 PID 可能只是 Node/Volta 启动器；不能只杀启动器就宣称应用中断。停止后需确认实际监听者退出、端口无监听且健康请求连接被拒绝，再执行停机期间的动作。重启后同样记录新监听者与版本。
 
 ## Drive：控制与读回
 
 以下命令在仓库根目录执行，使用同一 root。`--title` 必须精确匹配唯一的对话名称；不要复用名称。
+
+页内切换使用侧栏。hash 只在页面初次装载读取；已打开页面直接改变 hash（包括自动化工具的同文档导航）会改变地址但不切换内容。恢复指定地址时新页打开或完整刷新，不能以地址变化代替标题/内容变化。这是当前导航限制，hash-only 导航不记录为通过。
 
 ```sh
 node test/support/feature-fixture.ts inspect --root "$zh_verify_root"
@@ -83,6 +86,8 @@ await page.evaluate(() => window.zhVerify.dropNext('/api/private/workbench/conve
 ## Native：真实接入分支
 
 使用 [README 的连接配置](../../README.md#harness-connections)，为本次现场准备操作者所有的连接文件，以及两个目录独立、内容相同的合成工作区。不要复制真实数据目录；不要借用正在试用的实例。原生 Host 的启动、登录与执行身份由操作者入口负责，产品仓库不包含本机账号路径。配置中只连接本次明确允许使用的 Host。
+
+操作者明确用于实验的既有登录可以复用；本次 Host 使用独占连接地址，只创建本轮会话，不操作既有会话或改账号配置。不同 OS UID 不是唯一隔离方式；同 UID、HOME 目录隔离、权限 profile 名称也不能单独证明有效边界。按 [ADR 0001](../adr/0001-native-harness-boundary.md) 核对实际 HOME、原生数据、工作区及必要系统依赖；使用本次明确不允许区域的合成 canary，从原生工具结果核验读/写限制，不接触真实凭据。只限制写入但仍能读取认证数据所在区域，不满足所需读取边界。行为已观察到、环境隔离前提合格，是两项分别记录的结论。
 
 另建空 root，显式设置数据目录、空闲端口、origin 和 `ZHONGSHU_HARNESS_CONFIG`，再启动标准应用：
 

@@ -25,7 +25,7 @@
 | C01 | 建“配置 A”：Fixture A / Codex / Fixture 模型 / Fixture write；再建“配置 B”：Fixture B / DSH / Fixture read | 页面进入对应标题、工作区和就绪状态；`inspect` 中两条身份不同、配置分别与所选一致；产品快照 `workspaceId/harnessId/configuration` 一致。完整快照不含 `cwd/binding/details`；fixture 结果只证明应用选择与绑定语义 |
 | C02 | 建“空对话”，先不发消息；保存 hash 和 fixture 身份，刷新，然后停止应用并用相同 root/port 重启；再进入此 hash，发送“首条消息” | 恢复后仍为空且就绪；fixture 身份不变，只有一条会话；首次提交只产生一次 submit，进入运行中。随后按 E01 complete 收尾 |
 | C03 | 安装 browser-faults，执行 `zhVerify.dropNext('/api/private/workbench/conversations')`，建“丢创建回执”；等错误后不关对话框，再次 arm 同一 drop 并点“核对创建结果”。保存 journal，再 restore 并第三次核对 | journal 中两次创建请求使用同一 `id`；正常返回后产品列表只有一条该 ID，`inspect` 只有一个对应原生身份。首次原生创建可能延后，条件等待就绪；不能以一次侧栏出现判通过 |
-| C04 | 运行下面的 fail-create，再建“部分创建”；等待“准备未完成”，记录 inspect 身份；运行 repair，再点“查询原生结果”或“重新连接” | 失败时输入可保留但不能派发消息，`configurationVerified: false`；恢复后 ready、可发送。前后 `inspect` 同一原生 ID，未增加会话；已有绑定不能被第二次 create 替代 |
+| C04 | 运行下面的 fail-create，再建“部分创建”；等待“准备未完成”，记录 inspect 身份；输入唯一合成文本并尝试发送快捷键；运行 repair，再点“查询原生结果”或“重新连接” | 失败时输入保留、按钮禁用且 submitCalls 不增，`configurationVerified: false`；恢复后等当前标题/就绪状态和发送启用，刷新核对文本，再实际首发。前后 `inspect` 同一原生 ID、始终一条会话，首发只有一次 submit；已有绑定不能被第二次 create 替代 |
 | C05 | 按共同入口准备真实 DSH；选与 Host 默认不同的权限，创建空对话并发送合成请求；独立读回原生身份/配置与首条消息 | 首条消息实际进入原生历史并完成；被动上下文不使页面永久禁发。真实 queued user work / 未知 next-step 输入仍须阻止下一轮；不要清空它们来换取通过 |
 
 ```sh
