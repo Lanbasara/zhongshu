@@ -53,6 +53,7 @@ E02 另外可用 browser-faults 的 `dropNext('/api/private/workbench/conversati
 ## Gotchas
 
 - `accepted` 是原生接收，操作记录不会为了表示工作结束而改成 completed；终态来自对话 state/原生历史。
+- POST 202 可能先返回 `queued/dispatching` 且 runId 为空；保存操作 ID，随后等待回执核实。不能要求首个 HTTP 正文立即成为 unknown/accepted 或包含目标原生 runId。
 - 停止按钮针对当前 runId；“已中断”不承诺撤销文件副作用、清空待处理输入或终止全部后台进程。
 - 最终文件只有一份不能证明没有重复执行。E02 必须检查调用数和操作身份。
 - 一般输入上限为 16,000 字符，服务端另有 UTF-8 与请求体上限；中文和特殊字符的编码长度可先触发拒绝。不能靠截断输入掩盖失败。
