@@ -276,7 +276,7 @@ test('Codex target proof requires an exact terminal record and remains bounded w
   assert.equal(missing.status, 'idle'); assert.equal(missing.terminalRunId, undefined); assert.equal(pages, 10);
 });
 
-test('Watch streams stable live items, rejects interactive requests, invalidates disconnects and releases without cancelling', async t => {
+test('Watch streams stable live items, rejects interactive requests, reports unavailability and releases without cancelling', async t => {
   const p = await peer(t);
   const changes: NativeChange[] = [];
   const release = await p.adapter.watch(saved, change => changes.push(change));
@@ -289,9 +289,9 @@ test('Watch streams stable live items, rejects interactive requests, invalidates
   await until(() => p.clientResponses.length > 0);
   assert.deepEqual(p.clientResponses[0], { id: 'approval-1', error: { code: -32601, message: 'This client does not support this interaction and grants no additional permissions.' } });
   assert.equal(changes.some(change => change.type === 'state' && change.state.status === 'waiting'), true);
-  const before = changes.filter(change => change.type === 'invalidate').length;
+  const before = changes.filter(change => change.type === 'unavailable').length;
   for (const socket of p.sockets) socket.terminate();
-  await until(() => changes.filter(change => change.type === 'invalidate').length > before);
+  await until(() => changes.filter(change => change.type === 'unavailable').length > before);
   await until(() => p.calls.filter(call => call.method === 'initialize').length === 2);
   release();
   await until(() => p.calls.some(call => call.method === 'thread/unsubscribe'));
@@ -320,12 +320,12 @@ test('Concurrent calls share one bounded connection and close rejects outstandin
   assert.equal(p.calls.filter(call => call.method === 'thread/resume').length, 64);
 });
 
-test('Invalid native frames invalidate observers without exposing the malformed payload', async t => {
+test('Invalid native frames revoke observation without exposing the malformed payload', async t => {
   const p = await peer(t); const changes: NativeChange[] = [];
   const release = await p.adapter.watch(saved, change => changes.push(change));
-  const before = changes.filter(change => change.type === 'invalidate').length;
+  const before = changes.filter(change => change.type === 'unavailable').length;
   for (const socket of p.sockets) socket.send('synthetic-private-malformed-frame');
-  await until(() => changes.filter(change => change.type === 'invalidate').length > before);
+  await until(() => changes.filter(change => change.type === 'unavailable').length > before);
   assert.equal(JSON.stringify(changes).includes('synthetic-private'), false);
   release();
 });

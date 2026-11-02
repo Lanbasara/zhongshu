@@ -45,6 +45,8 @@ export type Receipt =
 export type NativeChange =
   | { type: 'item'; item: NativeItem }
   | { type: 'state'; state: NativeState }
+  /** A confirmed loss of observation; retain last-known facts but revoke verification immediately. */
+  | { type: 'unavailable'; reason: string }
   | { type: 'invalidate' };
 
 export interface HarnessAdapter {

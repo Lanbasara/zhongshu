@@ -321,6 +321,9 @@ export class Workbench {
           } else {
             runtime.stateGeneration++;
             if (change.type === 'state') this.store.setConversationState(id, { state: change.state });
+            // Transport loss is a fact, not a hint to wait for a successful read.
+            // Keep saved history/identity while fencing reads from before loss.
+            if (change.type === 'unavailable') this.unknown(id, change.reason);
             this.scheduleSync(id);
           }
         } catch { this.unknown(id, 'native_update_requires_sync'); this.scheduleSync(id); }
