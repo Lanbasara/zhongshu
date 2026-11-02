@@ -6,7 +6,7 @@ spec 是与用户讨论后确认的临时约定：它回答“接下来建什么
 
 | 切片 | 用户行为 | 状态 | 退出条件 | 证据 | 更新 |
 | --- | --- | --- | --- | --- | --- |
-| 首条 Agent 曳光弹 | 选 Codex 或 DSH，完成真实工作，关页后接续；必要时停止 | active | 本机两 Harness 完成真实工作、关页或应用中断后接续；目标设备与部署链路分别有证据 | PR #5、#6、CI；目标环境未验收 | 2026-10-31 |
+| 首条 Agent 曳光弹 | 选 Codex 或 DSH，完成真实工作，关页后接续；必要时停止 | done | 本机两 Harness 完成真实工作、关页或应用中断后接续；目标设备与部署链路分别有证据 | PR #5、#6、#9；[发布检查](https://github.com/Lanbasara/zhongshu/actions/runs/41433423972)；目标设备与部署链路已由用户验收 | 2026-11-02 |
 | 会改变架构的接入实验 | 回答追加、文件保存、HTML 阅读等会改变实现的问题 | next | 每个问题有结论，决定进入 ADR | none yet | 2026-10-31 |
 | 多工作区 | 在多个自选工作区开展工作 | next | 页面可选择已登记目录并完成一轮真实工作 | none yet | 2026-10-31 |
 | 运行中追加与审批 | 执行中追加、回答问题或审批 | next | 两个 Harness 的原生语义分别接通并有真实证据 | none yet | 2026-10-31 |
@@ -18,7 +18,6 @@ Ledger 状态只允许 `next / active / blocked / done`；spec front matter 使�
 
 ## 文件
 
-- [first-harness-tracer.md](first-harness-tracer.md) — active
 - [integration-probes.md](integration-probes.md) — next
 
 ## spec 模板

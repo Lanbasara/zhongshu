@@ -29,7 +29,7 @@ status: accepted
 
 统一的是可依赖的语义，真实差异通过能力及结果表达。Codex 的 `turn/steer` 要求匹配活动轮次；DSH 的原生输入策略存在 next-step/next-turn 差别。DSH rc.4 的 API Peer 在拥有它的 WebSocket 关闭后失效，`follow` 重连从新快照开始，`cancel` 保留待处理 inbox。连接身份、会话身份和运行身份因此不能压成一个 ID；停止也不能统一承诺清空所有待办。[Codex App Server](https://learn.chatgpt.com/docs/app-server)、[DSH 连接](https://github.com/deepseek-ai/deepseek-harness/blob/504a01a9578abc2c6f1fb896b1dc322c9fe24f66/packages/client/connection/README.md#browser-authentication-and-request-trust)、[DSH 请求类型](https://github.com/deepseek-ai/deepseek-harness/blob/504a01a9578abc2c6f1fb896b1dc322c9fe24f66/packages/api/session-controller/src/types.ts)、[DSH 动作实现](https://github.com/deepseek-ai/deepseek-harness/blob/504a01a9578abc2c6f1fb896b1dc322c9fe24f66/packages/api/session-controller/src/commands.ts)
 
-具体 Interface 由[两端最小实验](../spec/first-harness-tracer.md)收敛，之后以共同的行为验证保护。固定已验证原生版本；升级先跑对应兼容检查，新语义经能力声明进入产品，不静默沿用旧假设。此边界不要求先建设通用插件平台或抹平全部原生能力。
+具体 Interface 以[当前执行路径及两端行为验证](../features/execution.md)维护和保护。固定已验证原生版本；升级先跑对应兼容检查，新语义经能力声明进入产品，不静默沿用旧假设。此边界不要求先建设通用插件平台或抹平全部原生能力。
 
 ## 对话约定
 
