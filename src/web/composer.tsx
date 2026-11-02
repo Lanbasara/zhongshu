@@ -5,12 +5,12 @@ import { imageSchema } from '../shared/content.ts';
 import { imageUrl } from './conversation-content.tsx';
 import { putUpload, removeUpload, uploadDrafts, type UploadDraft } from './upload-drafts.ts';
 
-type Props = { conversation: string; csrf: string; draft: Draft; onChange(draft: Draft): boolean; onSend(): void; onStop(): void; onFiles(): void; ready: boolean; sending: boolean; running: boolean; model: string };
+type Props = { conversation: string; csrf: string; draft: Draft; onChange(draft: Draft, requireDurable?: boolean): boolean; onSend(): void; onStop(): void; onFiles(): void; ready: boolean; sending: boolean; running: boolean; model: string };
 type Upload = UploadDraft & { status: 'uploading' | 'failed' };
 export function Composer(props: Props) {
   const { conversation, csrf, draft, onChange, onSend, onStop, onFiles, ready, sending, running, model } = props;
   const current = useRef(draft); current.current = draft;
-  const change = (next: Draft) => { if (!onChange(next)) return false; current.current = next; return true; };
+  const change = (next: Draft, requireDurable = false) => { const saved = onChange(next, requireDurable); if (!saved && requireDurable) return false; current.current = next; return saved; };
   const textarea = useRef<HTMLTextAreaElement>(null);
   const picker = useRef<HTMLInputElement>(null);
   const alive = useRef(true);
@@ -28,7 +28,7 @@ export function Composer(props: Props) {
       const image = imageSchema.parse(await response.json());
       // This component is keyed by conversation: late uploads never enter another draft.
       if (!alive.current) return;
-      if (!change({ ...current.current, images: [...(current.current.images ?? []), image] })) throw Error('draft_storage_failed');
+      if (!change({ ...current.current, images: [...(current.current.images ?? []), image] }, true)) throw Error('draft_storage_failed');
       await removeUpload(item.id);
       setUploads(old => old.filter(u => u.id !== item.id));
     } catch { if (alive.current) { setUploads(old => old.map(u => u.id === item.id ? { ...u, status: 'failed' } : u)); setError('图片上传失败，文件已保留；可以重试或移除。'); } }

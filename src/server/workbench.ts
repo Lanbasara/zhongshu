@@ -404,7 +404,7 @@ export class Workbench {
               }
             }
             const prior = runtime.live.get(change.item.id);
-            if (change.item.tool && prior?.tool) change.item.tool = { ...prior.tool, ...change.item.tool, name: prior.tool.name };
+            if (change.item.tool && prior?.tool) { change.item.tool = { ...prior.tool, ...change.item.tool, name: prior.tool.name }; if (!change.item.text) change.item.text = prior.text; if (change.item.tool.exitCode !== undefined && change.item.tool.exitCode !== 0) change.item.status = 'failed'; }
             if (runtime.live.size >= 64 && !runtime.live.has(change.item.id)) throw new StoreError('live_item_limit', 429);
             runtime.live.set(change.item.id, change.item);
             if (!runtime.flush) { runtime.flush = setTimeout(() => this.flushLive(id, runtime), 40); runtime.flush.unref(); }

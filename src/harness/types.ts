@@ -25,7 +25,7 @@ export type NativeItem = {
   operationId?: string;
   images?: ImageAttachment[];
   references?: InputContent['references'];
-  tool?: { name: string; input?: string; output?: string };
+  tool?: { name: string; exitCode?: number; input?: string; output?: string };
   /** Transient native image sources: materialized before persistence or HTTP. */
   imageSources?: { data?: string; path?: string; mediaType?: string }[];
 };

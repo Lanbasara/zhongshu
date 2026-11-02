@@ -76,7 +76,7 @@
 - [正文与工具组件](../../src/web/conversation-content.tsx)、[输入组件](../../src/web/composer.tsx)、[上传暂存](../../src/web/upload-drafts.ts)、[页面恢复](../../src/web/workbench.tsx)为实际页面入口。
 - 定向运行 `node --test test/markdown.test.ts test/resources.test.ts test/workbench.test.ts test/codex.test.ts test/dsh.test.ts`；资源测试覆盖认证/CSRF、归属、文件越界与符号链接、资源引用/回收、备份恢复、Markdown 原生读取及快照。它不证明真实模型识图或浏览器交互。
 
-独立观察：在已登录页面读当前 snapshot，查看操作 payload 的图片/引用及 history 的 images/tool；资源 URL 为 `/api/private/workbench/conversations/:id/resources/:resourceId`。工作区 Markdown 图片由 `/api/private/workbench/conversations/:id/workspace-image?item=条目ID&source=原相对路径`取得，只接受该对话消息已出现的来源。用独立未登录上下文重读相同 URL 应拒绝。不要保存认证头。
+独立观察：在已登录页面读当前 snapshot，查看 operations 的编号/状态/轮次及 history 的 images/references/tool；公开 operations 不含输入 payload，实际原生提交须通过原生接口或持久消息记录独立核对；资源 URL 为 `/api/private/workbench/conversations/:id/resources/:resourceId`。工作区 Markdown 图片由 `/api/private/workbench/conversations/:id/workspace-image?item=条目ID&source=原相对路径`取得，只接受该对话消息已出现的来源。用独立未登录上下文重读相同 URL 应拒绝。不要保存认证头。
 
 U04 的拒绝可通过请求拦截给**上传请求**加入未知字段，取得服务端真实 400 后恢复；点击“重试上传：名称”并重新加载检查保留文件。它不替代 E04 的发送故障；丢回执须先等待原请求抵达服务端且应答已被丢弃，再恢复拦截。
 

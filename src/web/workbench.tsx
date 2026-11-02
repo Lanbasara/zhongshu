@@ -210,10 +210,14 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
     else setMoreOutput(true);
   }, [items, snapshot?.history.liveItems]);
   const choose = (id: string) => { history.replaceState(null, '', `#${id}`); setSelected(id); setNavigation(false); };
-  const updateDraft = (next: Draft): boolean => {
+  const updateDraft = (next: Draft, requireDurable = false): boolean => {
     if (!selected) return false;
-    if (!saveDraft(selected, next)) { setError('浏览器无法保留草稿，请先复制输入。'); return false; }
-    setDraft(next); draftRef.current = next; return true;
+    const saved = saveDraft(selected, next);
+    if (!saved) setError('浏览器无法保留草稿，请先复制输入。');
+    // Storage denial must not erase newly typed text. Uploaded files stay in
+    // IndexedDB until their metadata can be retained durably in the draft.
+    if (saved || !requireDurable) { setDraft(next); draftRef.current = next; }
+    return saved;
   };
   const send = async () => {
     if (!selected || sendingRef.current || (!draft.text.trim() && !draft.images?.length && !draft.references?.length && !draft.pending)) return;
