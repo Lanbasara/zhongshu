@@ -9,7 +9,8 @@ const envelope = z.object({
   method: z.string().max(200).optional(), params: z.unknown().optional(), result: z.unknown().optional(),
   error: z.object({ code: z.number().int(), message: z.string().max(100_000) }).optional(),
 });
-const MAX_FRAME = 8 * 1024 * 1024;
+// Two native image results can each carry up to 8 MiB of base64.
+const MAX_FRAME = 20 * 1024 * 1024;
 const MAX_PENDING = 64;
 
 export class RpcError extends HarnessError {

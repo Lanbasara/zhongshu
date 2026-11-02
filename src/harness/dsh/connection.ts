@@ -42,7 +42,17 @@ async function jsonBody(response: Response): Promise<unknown> {
   const chunks: Uint8Array[] = []; let bytes = 0;
   try {
     while (true) { const part = await reader.read(); if (part.done) break; bytes += part.value.byteLength; if (bytes > MAX_BODY) { await reader.cancel(); throw new HarnessError('DSH_RESPONSE_TOO_LARGE'); } chunks.push(part.value); }
-    return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown;
+    const body = Buffer.concat(chunks);
+    const contentType = response.headers.get('content-type') ?? '';
+    if (contentType.startsWith('multipart/form-data;')) {
+      const form = await new Response(body, { headers: { 'Content-Type': contentType } }).formData();
+      const metadata = form.get('metadata'); if (typeof metadata !== 'string') throw new HarnessError('DSH_RESPONSE_INVALID');
+      const value = z.object({ result: z.object({ ok: z.literal(true), value: z.object({ data: z.null(), absolutePath: z.string().max(4096) }).passthrough() }), attachments: z.array(z.object({ path: z.tuple([z.literal('data')]), codec: z.literal('bytes'), part: z.string().max(100) })).length(1) }).passthrough().parse(JSON.parse(metadata));
+      const part = form.get(value.attachments[0]!.part);
+      if (!(part instanceof Blob) || part.size > 6 * 1024 * 1024) throw new HarnessError('DSH_RESPONSE_TOO_LARGE');
+      return { ...value, result: { ...value.result, value: { ...value.result.value, data: Buffer.from(await part.arrayBuffer()).toString('base64') } } };
+    }
+    return JSON.parse(body.toString('utf8')) as unknown;
   } finally { reader.releaseLock(); }
 }
 
@@ -116,7 +126,7 @@ export class Connection {
     const timer = setTimeout(() => controller.abort(), 15000);
     try {
       const rpcId = randomUUID(); const body = JSON.stringify({ type: 'client-request', rpcId, method: endpoint, payload: { args } });
-      if (Buffer.byteLength(body) > 1024 * 1024) throw new HarnessError('DSH_REQUEST_TOO_LARGE');
+      if (Buffer.byteLength(body) > 12 * 1024 * 1024) throw new HarnessError('DSH_REQUEST_TOO_LARGE');
       const response = await fetch(`${this.origin}/api/${endpoint}`, { method: 'POST', headers: { Cookie: this.cookie, 'Content-Type': 'application/json' }, body, redirect: 'manual', signal: controller.signal });
       if (!response.ok) throw new HarnessError('DSH_RPC_UNAVAILABLE');
       const parsed = responseSchema.parse(await jsonBody(response));

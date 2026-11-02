@@ -19,6 +19,8 @@ Open `http://127.0.0.1:3000` and sign in with the password entered during local 
 
 To execute agent tasks, configure an existing native host and an allowed workspace as described below. Without this operator configuration, sign-in works but no execution workspace is available.
 
+Conversation reading, images and original-file references are described in the [conversation feature map](docs/features/conversation-usability.md); resource limits, retention and backup ownership are in the [architecture](docs/architecture.md#消息与资源).
+
 ## Harness connections
 
 Set `ZHONGSHU_HARNESS_CONFIG` to an absolute, operator-owned `0600` file. The workspace list is an allowlist, not an OS sandbox. Paths are normalized and must not overlap the data directory. Do not put connection secrets in the browser, git or logs.

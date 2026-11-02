@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { contentFields, toolSchema } from './content.ts';
 
 const utf8 = new TextEncoder();
 const boundedText = (bytes: number) => z.string().max(bytes).refine(value => utf8.encode(value).byteLength <= bytes);
@@ -14,6 +15,7 @@ export const itemSchema = z.object({
   id: identifierSchema, kind: z.enum(['user', 'assistant', 'tool', 'notice']),
   text: boundedText(1_048_576), status: z.enum(['running', 'completed', 'failed']),
   runId: identifierSchema.optional(), operationId: identifierSchema.optional(),
+  ...contentFields, tool: toolSchema.optional(),
 }).strict();
 export const conversationSchema = z.object({
   id: z.uuid(), title: boundedText(200), harnessId: z.enum(['codex', 'dsh']), workspaceId: identifierSchema,
@@ -33,7 +35,7 @@ export const createConversationSchema = z.object({
   id: z.uuid(), harnessId: z.enum(['codex', 'dsh']), workspaceId: identifierSchema,
   configuration: configurationSchema, title: boundedText(200).min(1).optional(),
 }).strict();
-const messagePayload = z.object({ text: boundedText(48 * 1024).max(16_000).min(1).refine(value => value.trim().length > 0) }).strict();
+const messagePayload = z.object({ text: boundedText(48 * 1024).max(16_000), ...contentFields }).strict().refine(v => v.text.trim() || v.images?.length || v.references?.length);
 const stopPayload = z.object({ runId: identifierSchema }).strict();
 export const enqueueOperationSchema = z.discriminatedUnion('type', [
   z.object({ id: z.uuid(), type: z.literal('message'), payload: messagePayload }).strict(),

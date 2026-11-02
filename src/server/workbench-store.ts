@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import { z } from 'zod';
+import { contentFields, toolSchema, type InputContent } from '../shared/content.ts';
+import { createResourceStore } from './resources.ts';
 import type { Binding, Configuration, HarnessId, NativeItem, NativeState, Receipt } from '../harness/types.ts';
 
 export type Readiness = 'preparing' | 'ready' | 'blocked';
@@ -13,7 +15,7 @@ export type Conversation = {
 export type CreateConversation = Pick<Conversation, 'id' | 'harnessId' | 'workspaceId' | 'cwd' | 'configuration'> & { title?: string };
 export type OperationStatus = 'queued' | 'dispatching' | 'accepted' | 'unknown' | 'rejected';
 export type OperationInput = { id: string; conversationId: string } & (
-  { type: 'message'; payload: { text: string } } | { type: 'stop'; payload: { runId: string } }
+  { type: 'message'; payload: InputContent } | { type: 'stop'; payload: { runId: string } }
 );
 export type Operation = OperationInput & {
   sequence: number;
@@ -29,6 +31,7 @@ export type HistorySnapshot = {
 };
 export type ListOperations = { conversationId?: string; status?: OperationStatus; type?: 'message' | 'stop'; order?: 'asc' | 'desc'; afterId?: string; limit?: number };
 export interface WorkbenchStore {
+  resources: ReturnType<typeof createResourceStore>;
   createConversation(input: CreateConversation): { conversation: Conversation; created: boolean };
   getConversation(id: string): Conversation | null;
   listConversations(options?: { beforeId?: string; limit?: number }): Conversation[];
@@ -74,6 +77,7 @@ const nativeStateSchema = z.object({
 const itemSchema = z.object({
   id: identifier, kind: z.enum(['user', 'assistant', 'tool', 'notice']), text: boundedText(MAX_TEXT_BYTES),
   status: z.enum(['running', 'completed', 'failed']), runId: identifier.optional(), operationId: identifier.optional(),
+  ...contentFields, tool: toolSchema.optional(),
 }).strict();
 const bindingSchema = z.object({
   id: identifier, cwd: boundedText(4096).min(1), configuration: configurationSchema, details: z.record(z.string(), z.unknown()),
@@ -83,7 +87,7 @@ const createConversationSchema = z.object({
   configuration: configurationSchema, title: boundedText(200).min(1).optional(),
 }).strict();
 const operationInputSchema = z.discriminatedUnion('type', [
-  z.object({ id: uuid, conversationId: uuid, type: z.literal('message'), payload: z.object({ text: boundedText(MAX_TEXT_BYTES).min(1) }).strict() }).strict(),
+  z.object({ id: uuid, conversationId: uuid, type: z.literal('message'), payload: z.object({ text: boundedText(MAX_TEXT_BYTES), ...contentFields }).strict().refine(v => v.text.trim() || v.images?.length || v.references?.length) }).strict(),
   z.object({ id: uuid, conversationId: uuid, type: z.literal('stop'), payload: z.object({ runId: identifier }).strict() }).strict(),
 ]);
 const statusSchema = z.enum(['queued', 'dispatching', 'accepted', 'unknown', 'rejected']);
@@ -138,6 +142,7 @@ function bindingJson(value: Binding): string {
 }
 function itemFromRow(row: Row): NativeItem {
   return parse(itemSchema, {
+    ...JSON.parse(String(row.metadata_json ?? '{}')),
     id: row.id, kind: row.kind, text: row.text, status: row.status,
     ...(row.run_id === null ? {} : { runId: row.run_id }), ...(row.operation_id === null ? {} : { operationId: row.operation_id }),
   }, 'corrupt_workbench_data');
@@ -192,14 +197,17 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
   const requireOperation = (id: string): Operation => {
     const row = operationRow(id); if (!row) throw new StoreError('operation_not_found', 404); return operationFromRow(row);
   };
-  const upsertItem = db.prepare(`INSERT INTO workbench_items(conversation_id,id,position,kind,text,status,run_id,operation_id)
-    VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(conversation_id,id) DO UPDATE SET kind=excluded.kind,text=excluded.text,
-    status=excluded.status,run_id=excluded.run_id,operation_id=excluded.operation_id
+  const upsertItem = db.prepare(`INSERT INTO workbench_items(conversation_id,id,position,kind,text,status,run_id,operation_id,metadata_json)
+    VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(conversation_id,id) DO UPDATE SET kind=excluded.kind,text=excluded.text,
+    status=excluded.status,run_id=excluded.run_id,operation_id=excluded.operation_id,metadata_json=excluded.metadata_json
     WHERE workbench_items.kind IS NOT excluded.kind OR workbench_items.text IS NOT excluded.text
       OR workbench_items.status IS NOT excluded.status OR workbench_items.run_id IS NOT excluded.run_id
-      OR workbench_items.operation_id IS NOT excluded.operation_id`);
+      OR workbench_items.operation_id IS NOT excluded.operation_id OR workbench_items.metadata_json IS NOT excluded.metadata_json`);
   const deleteLive = db.prepare('DELETE FROM workbench_live_items WHERE conversation_id = ? AND id = ?');
+  const resources = createResourceStore(db);
+  const metadata = (item: NativeItem) => JSON.stringify({ ...(item.images?.length ? { images: item.images } : {}), ...(item.references?.length ? { references: item.references } : {}), ...(item.tool ? { tool: item.tool } : {}) });
   const store: WorkbenchStore = {
+    resources,
     createConversation(value) {
       const input = parse(createConversationSchema, value);
       const creationDigest = digest([input.harnessId, input.workspaceId, input.cwd, input.configuration.modelId, input.configuration.permissionId]);
@@ -285,6 +293,7 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
         requireConversation(input.conversationId);
         const count = Number(db.prepare('SELECT COUNT(*) AS count FROM workbench_operations WHERE conversation_id=?').get(input.conversationId)!.count);
         if (count >= 50_000) throw new StoreError('operation_capacity_reached', 409);
+        if (input.type === 'message') for (const image of input.payload.images ?? []) resources.pin(input.conversationId, image.id, input.id);
         const at = now();
         db.prepare(`INSERT INTO workbench_operations(id,conversation_id,type,payload_json,digest,status,created_at,updated_at)
           VALUES(?,?,?,?,?,'queued',?,?)`).run(input.id, input.conversationId, input.type, JSON.stringify(input.payload), contentDigest, at, at);
@@ -431,7 +440,7 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
           }
         }
         for (const item of incoming.values()) {
-          const written = upsertItem.run(conversationId, item.id, positions.get(item.id)!, item.kind, item.text, item.status, item.runId ?? null, item.operationId ?? null);
+          const written = upsertItem.run(conversationId, item.id, positions.get(item.id)!, item.kind, item.text, item.status, item.runId ?? null, item.operationId ?? null, metadata(item));
           const removed = deleteLive.run(conversationId, item.id);
           if (Number(written.changes) + Number(removed.changes) > 0) changed(conversationId);
         }
@@ -443,7 +452,7 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
         requireConversation(conversationId);
         const canonical = db.prepare('SELECT position FROM workbench_items WHERE conversation_id=? AND id=?').get(conversationId, item.id);
         if (canonical) {
-          const written = upsertItem.run(conversationId, item.id, Number(canonical.position), item.kind, item.text, item.status, item.runId ?? null, item.operationId ?? null);
+          const written = upsertItem.run(conversationId, item.id, Number(canonical.position), item.kind, item.text, item.status, item.runId ?? null, item.operationId ?? null, metadata(item));
           const removed = deleteLive.run(conversationId, item.id);
           if (Number(written.changes) + Number(removed.changes) > 0) changed(conversationId, item.id);
           return;
@@ -451,13 +460,13 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
         const existing = db.prepare('SELECT id FROM workbench_live_items WHERE conversation_id=? AND id=?').get(conversationId, item.id);
         if (!existing && Number(db.prepare('SELECT COUNT(*) AS count FROM workbench_live_items WHERE conversation_id=?').get(conversationId)!.count) >= MAX_LIVE_ITEMS)
           throw new StoreError('live_history_capacity_reached', 409);
-        const written = db.prepare(`INSERT INTO workbench_live_items(conversation_id,id,kind,text,status,run_id,operation_id,updated_at) VALUES(?,?,?,?,?,?,?,?)
+        const written = db.prepare(`INSERT INTO workbench_live_items(conversation_id,id,kind,text,status,run_id,operation_id,updated_at,metadata_json) VALUES(?,?,?,?,?,?,?,?,?)
           ON CONFLICT(conversation_id,id) DO UPDATE SET kind=excluded.kind,text=excluded.text,status=excluded.status,
-          run_id=excluded.run_id,operation_id=excluded.operation_id,updated_at=excluded.updated_at
+          run_id=excluded.run_id,operation_id=excluded.operation_id,updated_at=excluded.updated_at,metadata_json=excluded.metadata_json
           WHERE workbench_live_items.kind IS NOT excluded.kind OR workbench_live_items.text IS NOT excluded.text
             OR workbench_live_items.status IS NOT excluded.status OR workbench_live_items.run_id IS NOT excluded.run_id
-            OR workbench_live_items.operation_id IS NOT excluded.operation_id`)
-          .run(conversationId, item.id, item.kind, item.text, item.status, item.runId ?? null, item.operationId ?? null, now());
+            OR workbench_live_items.operation_id IS NOT excluded.operation_id OR workbench_live_items.metadata_json IS NOT excluded.metadata_json`)
+          .run(conversationId, item.id, item.kind, item.text, item.status, item.runId ?? null, item.operationId ?? null, now(), metadata(item));
         if (Number(written.changes) > 0) changed(conversationId, item.id);
       });
     },
@@ -478,8 +487,8 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
     getItem(conversationId, itemId) {
       parse(uuid, conversationId); parse(identifier, itemId);
       return storage(() => {
-        const row = db.prepare(`SELECT id,kind,text,status,run_id,operation_id FROM workbench_live_items WHERE conversation_id=? AND id=?
-          UNION ALL SELECT id,kind,text,status,run_id,operation_id FROM workbench_items WHERE conversation_id=? AND id=? LIMIT 1`)
+        const row = db.prepare(`SELECT id,kind,text,status,run_id,operation_id,metadata_json FROM workbench_live_items WHERE conversation_id=? AND id=?
+          UNION ALL SELECT id,kind,text,status,run_id,operation_id,metadata_json FROM workbench_items WHERE conversation_id=? AND id=? LIMIT 1`)
           .get(conversationId, itemId, conversationId, itemId);
         return row ? itemFromRow(row) : null;
       });

@@ -1,5 +1,6 @@
 import { isAbsolute, normalize } from 'node:path';
 import { z } from 'zod';
+import type { InputContent } from '../../shared/content.ts';
 import { HarnessError } from '../types.ts';
 import type { Binding, Catalog, Configuration, HarnessAdapter, HistoryPage, NativeChange, NativeState, Receipt } from '../types.ts';
 import { Connection, NativeRejection } from './connection.ts';
@@ -145,13 +146,19 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
     } catch (error) { throw nativeError(error); }
   }
 
-  async function submit(binding: Binding, operation: { id: string; text: string }): Promise<Receipt> {
-    try { checkBinding(binding); identifier.parse(operation.id); z.string().min(1).max(100000).refine(text => text.trim().length > 0).parse(operation.text); }
+  async function readImage(binding: Binding, path: string): Promise<string> {
+    checkBinding(binding);
+    const value = z.object({ absolutePath: z.string().max(4096), data: z.string().max(8 * 1024 * 1024), eof: z.literal(true) }).parse(await connection.call('workspaceFiles/readBytes', { workspaceFileScopeId: binding.id, path, options: {} }));
+    if (value.absolutePath !== path) throw new HarnessError('DSH_IMAGE_PATH_CHANGED');
+    return value.data;
+  }
+  async function submit(binding: Binding, operation: InputContent & { id: string; imageData?: { mediaType: string; data: string }[] }): Promise<Receipt> {
+    try { checkBinding(binding); identifier.parse(operation.id); z.string().max(100000).parse(operation.text); if (!operation.text.trim() && !operation.imageData?.length) throw new Error('empty_input'); }
     catch { return { outcome: 'rejected', reason: '消息或会话参数无效。' }; }
     const current = await state(binding);
     if (!current.configurationVerified || current.pendingInputs > 0 || !['idle', 'interrupted', 'failed'].includes(current.status)) return { outcome: 'rejected', reason: current.reason ?? '原生对话尚未就绪。' };
     try {
-      z.object({ accepted: z.literal(true) }).parse(await connection.call('session/prompt', { request: { sessionId: binding.id, requestId: operation.id, mode: 'queue', content: [{ type: 'text', text: operation.text }] } }));
+      z.object({ accepted: z.literal(true) }).parse(await connection.call('session/prompt', { request: { sessionId: binding.id, requestId: operation.id, mode: 'queue', content: [...(operation.text ? [{ type: 'text', text: operation.text }] : []), ...(operation.imageData ?? []).map(image => ({ type: 'image', mediaType: image.mediaType, data: image.data }))] } }));
       return { outcome: 'accepted' };
     } catch (error) { return error instanceof NativeRejection ? { outcome: 'rejected', reason: 'DSH 拒绝了这条输入。' } : { outcome: 'unknown', reason: '无法确认 DSH 是否接收；保留原操作身份核对，未自动重发。' }; }
   }
@@ -251,5 +258,5 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
     subscriptions.add(dispose); await start(); return dispose;
   }
 
-  return { id: 'dsh', catalog, create, state, history, submit, reconcile, stop, watch, async close() { closed = true; for (const dispose of [...subscriptions]) dispose(); lastStates.clear(); await connection.close(); } };
+  return { id: 'dsh', catalog, create, state, history, submit, readImage, reconcile, stop, watch, async close() { closed = true; for (const dispose of [...subscriptions]) dispose(); lastStates.clear(); await connection.close(); } };
 }
