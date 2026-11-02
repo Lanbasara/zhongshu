@@ -51,7 +51,7 @@
 
 1. `npm run typecheck`、`npm test`、`npm run build`、`npm run check:docs` 通过；
 2. 受影响的用户路径有真实运行证据；不能只凭模型自述或 HTTP 200；
-3. 相关 feature map 已更新；spec / ADR 的变更已与用户确认，或明确说明无需更新；
+3. 相关 feature map 已更新，并按[共同入口的独立执行验收](docs/features/README.md#独立执行验收)取得证据；spec / ADR 的变更已与用户确认，或明确说明无需更新；
 4. 未运行、受阻和未覆盖的部分写清楚，不把“尚未验证”写成“通过”。
 
 ## 判断空间
