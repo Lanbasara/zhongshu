@@ -25,7 +25,7 @@ import { itemSchema, stateSchema } from '../../src/shared/workbench.ts';
 process.umask(0o077);
 const repository = fileURLToPath(new URL('../../', import.meta.url));
 const cliSchema = z.object({
-  command: z.enum(['serve', 'init', 'reset', 'inspect', 'complete', 'prove', 'seed', 'disconnect', 'reconnect', 'unknown-receipt', 'fail-create', 'repair']),
+  command: z.enum(['serve', 'init', 'reset', 'inspect', 'complete', 'prove', 'seed', 'disconnect', 'reconnect', 'unknown-receipt', 'reject-next', 'fail-create', 'repair']),
   root: z.string().min(1).max(4096).refine(isAbsolute),
   port: z.coerce.number().int().min(1024).max(65535).default(4391),
   title: z.string().min(1).max(200).optional(),
@@ -37,6 +37,7 @@ const recordSchema = z.object({
   cwd: z.string().max(4096), configuration: z.object({ modelId: z.string(), permissionId: z.string() }),
   state: stateSchema, items: z.array(itemSchema).max(1000),
   submissions: z.array(z.object({ id: z.string(), text: z.string().max(16_000), runId: z.string() })).max(100),
+  rejectedOperationIds: z.array(z.uuid()).max(100).default([]), rejectNext: z.boolean().default(false),
   submitCalls: z.number().int().min(0), stopCalls: z.number().int().min(0),
   offline: z.boolean(), unknownReceipt: z.boolean(), hidden: z.boolean(), revision: z.number().int().min(0),
 });
@@ -51,7 +52,7 @@ function privateFile(path: string): void {
 async function main() {
   const args = parseArgs({ options: { root: { type: 'string' }, port: { type: 'string' }, title: { type: 'string' }, count: { type: 'string' }, chars: { type: 'string' }, help: { type: 'boolean' } }, allowPositionals: true, strict: true });
   if (args.values.help) {
-    console.log('node test/support/feature-fixture.ts <serve|init|reset|inspect|complete|prove|seed|disconnect|reconnect|unknown-receipt|fail-create|repair> --root ABSOLUTE_DIRECTORY [--port 4391] [--title TITLE] [--count 650 --chars 80]');
+    console.log('node test/support/feature-fixture.ts <serve|init|reset|inspect|complete|prove|seed|disconnect|reconnect|unknown-receipt|reject-next|fail-create|repair> --root ABSOLUTE_DIRECTORY [--port 4391] [--title TITLE] [--count 650 --chars 80]');
     return;
   }
   if (args.positionals.length !== 1) throw new Error('one_command_required');
@@ -110,7 +111,7 @@ async function main() {
     try {
       if (input.command === 'fail-create') { native.prepare('UPDATE settings SET fail_create = 1 WHERE id = 1').run(); }
       else if (input.command === 'inspect') {
-        console.log(JSON.stringify(all().filter(value => !input.title || value.title === input.title).map(value => ({ id: value.id, title: value.title, harnessId: value.harnessId, configuration: value.configuration, state: value.state, submitCalls: value.submitCalls, stopCalls: value.stopCalls, operationIds: value.submissions.map(item => item.id), historyCount: value.items.length, offline: value.offline }))));
+        console.log(JSON.stringify(all().filter(value => !input.title || value.title === input.title).map(value => ({ id: value.id, title: value.title, harnessId: value.harnessId, configuration: value.configuration, state: value.state, submitCalls: value.submitCalls, stopCalls: value.stopCalls, operationIds: value.submissions.map(item => item.id), rejectedOperationIds: value.rejectedOperationIds, nextReceipt: value.rejectNext ? 'rejected' : value.unknownReceipt ? 'unknown' : 'accepted', revision: value.revision, historyCount: value.items.length, offline: value.offline }))));
         return;
       } else {
         const matches = all().filter(value => value.title === input.title);
@@ -119,7 +120,9 @@ async function main() {
           if (input.command === 'disconnect') value.offline = true;
           if (input.command === 'reconnect') value.offline = false;
           if (input.command === 'repair') value.state = idle();
-          if (input.command === 'unknown-receipt') value.unknownReceipt = true;
+          if (input.command === 'unknown-receipt' || input.command === 'reject-next') {
+            value.unknownReceipt = input.command === 'unknown-receipt'; value.rejectNext = input.command === 'reject-next';
+          }
           if (input.command === 'prove' || input.command === 'complete') prove(value);
           if (input.command === 'complete') {
             if (value.state.status !== 'running') throw new Error('fixture_must_be_running');
@@ -134,7 +137,7 @@ async function main() {
           }
         // Arming a future receipt does not change observed native state. An
         // invalidation here would briefly fence the very send being tested.
-        }, input.command !== 'unknown-receipt');
+        }, !['unknown-receipt', 'reject-next'].includes(input.command));
       }
       console.log(JSON.stringify({ event: input.command, title: input.title }));
     } finally { native.close(); }
@@ -164,7 +167,7 @@ async function main() {
       async create(input, onBound) {
         const fail = native.prepare('SELECT fail_create FROM settings WHERE id = 1').get()!.fail_create === 1;
         native.prepare('UPDATE settings SET fail_create = 0 WHERE id = 1').run();
-        const value: Native = { id: randomUUID(), title: input.title ?? 'Untitled', harnessId: id, cwd: input.cwd, configuration: input.configuration, state: fail ? { ...idle(), status: 'unknown', configurationVerified: false } : idle(), items: [], submissions: [], submitCalls: 0, stopCalls: 0, offline: false, unknownReceipt: false, hidden: false, revision: 0 };
+        const value: Native = { id: randomUUID(), title: input.title ?? 'Untitled', harnessId: id, cwd: input.cwd, configuration: input.configuration, state: fail ? { ...idle(), status: 'unknown', configurationVerified: false } : idle(), items: [], submissions: [], rejectedOperationIds: [], rejectNext: false, submitCalls: 0, stopCalls: 0, offline: false, unknownReceipt: false, hidden: false, revision: 0 };
         save(value);
         const binding: Binding = { id: value.id, cwd: input.cwd, configuration: input.configuration, details: {} };
         onBound(binding);
@@ -181,15 +184,17 @@ async function main() {
         return { items: value.items.slice(start, end), olderCursor: start ? String(start) : null };
       },
       async submit(binding, operation) {
-        checked(binding); let unknown = false; const runId = 'fixture-run:' + operation.id;
+        checked(binding); let unknown = false; let rejected = false; const runId = 'fixture-run:' + operation.id;
         change(binding.id, value => {
+          if (value.submissions.some(item => item.id === operation.id) || value.rejectedOperationIds.includes(operation.id)) throw new Error('duplicate_fixture_dispatch');
           value.submitCalls++;
-          if (value.submissions.some(item => item.id === operation.id)) throw new Error('duplicate_fixture_dispatch');
+          rejected = value.rejectNext; value.rejectNext = false;
+          if (rejected) { value.rejectedOperationIds.push(operation.id); return; }
           value.submissions.push({ ...operation, runId }); unknown = value.unknownReceipt; value.unknownReceipt = false; value.hidden = unknown;
           value.state = { status: 'running', runId, pendingInputs: 0, configurationVerified: true };
           if (!unknown) prove(value);
         });
-        return unknown ? { outcome: 'unknown', reason: 'fixture_receipt_lost' } : { outcome: 'accepted', runId };
+        return rejected ? { outcome: 'rejected', reason: 'Fixture 拒绝了本次输入，未接收执行。' } : unknown ? { outcome: 'unknown', reason: 'fixture_receipt_lost' } : { outcome: 'accepted', runId };
       },
       async reconcile(binding, operationId) {
         const value = checked(binding); const message = value.submissions.find(item => item.id === operationId);

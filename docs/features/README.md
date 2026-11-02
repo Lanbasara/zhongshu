@@ -72,7 +72,7 @@ node test/support/feature-fixture.ts complete --root "$zh_verify_root" --title '
 
 需要独立读回产品结果时，在已登录页面同源执行 `fetch('/api/private/workbench/conversations/' + id).then(r => r.json())`，其中 `id` 来自当前地址的 `location.hash.slice(1)`。保存 `conversation`、`operations`、历史条目 ID/正文等合成证据；不要导出 `/api/session` 正文或完整浏览器存储。
 
-受控的丢响应/旧响应与草稿存储故障使用 [browser-faults.js](../../test/support/browser-faults.js)：工具把其导出的 `installBrowserFaults` 函数传入页面执行一次。Playwright 示例（复用执行者已有的浏览器工具）：
+受控的丢响应/旧响应、草稿存储和发送请求拒绝故障使用 [browser-faults.js](../../test/support/browser-faults.js)：工具把其导出的 `installBrowserFaults` 函数传入页面执行一次。Playwright 示例（复用执行者已有的浏览器工具）：
 
 ```js
 const { installBrowserFaults } = await import('./test/support/browser-faults.js');
@@ -81,7 +81,7 @@ await page.evaluate(installBrowserFaults);
 await page.evaluate(() => window.zhVerify.dropNext('/api/private/workbench/conversations'));
 ```
 
-其他工具可读取该文件，去掉导出关键字后执行函数。`status()` 的 `held` 非空才表示已捕获响应；`release()` 释放它，`restore()` 恢复 fetch 和存储方法。drop 在服务端应答后丢弃一次响应；hold 故意让旧响应在应用取消后仍返回，以检验时序保护。两者均不改变响应正文。每个故障单独安装/恢复，刷新也会清除注入。
+其他工具可读取该文件，去掉导出关键字后执行函数。`status()` 的 `held` 非空才表示已捕获响应；`release()` 释放它，`restore()` 恢复 fetch 和存储方法。drop 在服务端应答后丢弃一次响应；hold 故意让旧响应在应用取消后仍返回，以检验时序保护。`rejectNextRequest(path, 400或413)` 只匹配同源指定对话的下一次发送POST，通过未知字段/超限字段触发真实服务端拒绝，见 [E04](execution.md)。这些工具均不改变响应正文，journal只留路径/方法/状态/操作ID，不记认证头或消息。每个故障单独安装/恢复，刷新也会清除注入。
 
 ## Native：真实接入分支
 

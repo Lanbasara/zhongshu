@@ -25,7 +25,7 @@
 | E01 | 建“执行 A”，输入含本轮独有标记的两行文本；先按 Enter，再发送。运行中尝试 ⌘/Ctrl + Enter；CLI complete 后输入新文本再发送 | Enter 不派发；首次发送 inspect 的 submitCalls=1、正文有两行用户输入、出现停止按钮。运行中快捷键不增加次数。complete 后出现 `FIXTURE COMPLETED <runId>`、恢复发送，再发后 submitCalls=2；两轮同原生身份、配置不变 |
 | E02 | 建“未知回执”；先运行 unknown-receipt，再发送唯一文本。保存产品操作 ID、inspect 调用数；在“核对同一发送”重试两次；再运行 prove，点“查询原生结果” | 未发布证据前，操作 unknown、保留 pending 草稿，同编号重试不增加 submitCalls。发布后 accepted，草稿中的 pending 被清除；inspect 始终只调用一次，原生 operationIds 只有原 ID。最后 complete 收尾 |
 | E03 | 在已接受且 running 的 fixture 对话点“停止当前轮” | inspect 的 stopCalls 加一、目标 runId 等于被停止轮，产品操作 type=stop；页面变“已中断”，显示后台工具可能仍运行/改动不撤销的提示。发下一条能再次运行；fixture 不证明真实工具退出 |
-| E04 | 安装故障工具，执行 `zhVerify.denyDraftStorage()`；输入新文本并发送。恢复工具后重试 | 输入保留并显示浏览器无法保存草稿/发送编号，inspect submitCalls 不变；恢复后可发送。页面超出编码预算也必须在派发前保留输入。服务端 400/413 和原生 rejected 分支用下方定向回归核对，不能由存储失败外推 |
+| E04 | 按下方五个独立分支，分别驱动存储失败、编码预算、HTTP 400、HTTP 413、原生 rejected | 每个分支都核对输入、pending、原操作编号、独立调用计数与编辑后再次发送；不能用其中一条代替其他分支 |
 | E05 | 按下面真实分支分别使用 Codex、DSH | 文件字节独立读回、原生身份/配置及正文共同符合预期；每个 Harness 单独结论 |
 
 ```sh
@@ -39,6 +39,27 @@ node test/support/feature-fixture.ts inspect --root "$zh_verify_root" --title '�
 E02 另外可用 browser-faults 的 `dropNext('/api/private/workbench/conversations/' + id + '/operations')` 丢一次浏览器 HTTP 回执。若服务端状态已自动核实，pending 提示可很快消失；这是有效恢复，不要求提示必定停留。核对同一 operation ID、次数与最终用户正文是否恰好一份，才是判据。
 
 `unknown-receipt` 只设置下一次回执，不改变已观察到的原生状态；控制命令完成后直接按 E02 发送，不需要额外 GET 或等待来同步控制命令。
+
+E04：每个分支新建一个名称唯一、已就绪的空 fixture 对话，保存对话 ID、配置、初始快照和 inspect（submitCalls=0、operationIds/rejectedOperationIds 为空）。输入使用本轮独有的合成文本。按共同入口安装 [browser-faults.js](../../test/support/browser-faults.js)，HTTP 场景中的 `id` 必须来自该对话的实际 hash。所有动作仍使用页面输入框与按钮。
+
+| 分支 | 驱动 | 拒绝后的判据 |
+| --- | --- | --- |
+| E04-storage | `zhVerify.denyDraftStorage()`，输入并发送；观察后 `zhVerify.restore()` | 输入完整、可编辑；提示无法保留发送编号/尚未发送；submitCalls=0，产品无 message operation，不出现 pending 发送。恢复存储后可发送 |
+| E04-budget | 输入 11,000 个 U+0001 字符并发送（可用浏览器工具填入 `'\u0001'.repeat(11000)`） | 编码预算提示“本次尚未发送”；输入仍为11,000字符；submitCalls=0、产品无 message operation、无 pending。这是客户端拦截，不是 HTTP413 |
+| E04-400 | `zhVerify.rejectNextRequest('/api/private/workbench/conversations/' + id + '/operations', 400)`，再输入短文本并发送 | 浏览器实际收到服务端 JSON400；journal 保存原发送 ID，产品没有该 operation、submitCalls=0、原生历史为空；输入完整、可编辑，pending 已清除，未留下“核对同一发送” |
+| E04-413 | 同上，将400改为413，仍输入短文本并发送 | 实际收到服务端 JSON413，其余判据同400。工具在页面预算检查之后给请求增加70KiB字段，不能用预算提示代替收到HTTP413 |
+| E04-rejected | 下列 CLI 装载 `reject-next`，命令返回后直接输入短文本并发送 | 产品操作最终 rejected（首个HTTP202可先 queued），inspect submitCalls=1、rejectedOperationIds 只有原ID、operationIds为空、历史为空、原生状态仍idle；输入和 pending 原ID保留，出现“继续编辑”。再点一次“发送消息”只核对同ID，submitCalls仍1。随后点“继续编辑”，pending清除，输入完整且可编辑 |
+
+```sh
+node test/support/feature-fixture.ts reject-next --root "$zh_verify_root" --title '本轮唯一拒绝对话名'
+node test/support/feature-fixture.ts inspect --root "$zh_verify_root" --title '本轮唯一拒绝对话名'
+```
+
+`reject-next` 和 `unknown-receipt` 都只装载下一次回执，后装载者替换前者；不改变 inspect 的 revision/state，不触发状态失效。rejected 消费一次提交尝试但不接收消息、不产生 run/用户历史；`submitCalls` 包含拒绝尝试，`operationIds` 只列已接收的输入，拒绝编号另列在 `rejectedOperationIds`。
+
+每个分支在保存拒绝证据后，改成新的短合成文本并发送；确认 accepted、pending清除、用户正文恰一份且是新文本、同原生绑定与配置。HTTP拒绝后的新ID应不同于journal里的失败ID；原生拒绝后的新ID应不同于rejected原ID。最终 storage/budget/400/413 的 submitCalls=1、operationIds只有新ID；rejected 的 submitCalls=2、operationIds只有新ID、rejectedOperationIds仍只有旧ID。最后用 complete 收尾并恢复故障工具。
+
+只读本对话的草稿可在页面执行 `JSON.parse(sessionStorage.getItem('zhongshu:draft:v1:' + id) || 'null')`，核对 text/pending；不要导出全部存储。HTTP故障的 `zhVerify.status().journal` 应有匹配路径、POST、400/413和原ID，故障只消费一次。未知字段/超限字段仅改变出站请求，真实Fastify/Workbench响应正文不被替换。不能把手写响应或底层测试通过当成这些浏览器分支通过。此方法覆盖应用的JSON错误契约，非JSON代理错误和真实Harness拒绝需另建现场。
 
 真实分支 E05：
 
@@ -64,4 +85,5 @@ E02 另外可用 browser-faults 的 `dropNext('/api/private/workbench/conversati
 - 页面门禁、草稿、发送/停止：[workbench.tsx](../../src/web/workbench.tsx)；请求与 pending 草稿：[workbench-client.ts](../../src/web/workbench-client.ts)。
 - 持久队列、claim、终态核对与 reconcile：[workbench.ts](../../src/server/workbench.ts)、[workbench-store.ts](../../src/server/workbench-store.ts)。
 - 原生派发/停止：[Codex](../../src/harness/codex/index.ts)、[DSH](../../src/harness/dsh/index.ts)。
+- E04 永久故障入口与真实HTTP/CLI回归：[feature-fixture.ts](../../test/support/feature-fixture.ts)、[browser-faults.js](../../test/support/browser-faults.js)、[feature-fixture.test.ts](../../test/feature-fixture.test.ts)。运行 `node --test test/feature-fixture.test.ts`；覆盖两个替身的单次拒绝/同ID不重派/新ID恢复、装载不失效、真实400/413及故障只消费一次；Node中的最小页面表面不证明DOM行为，仍须跑上述真实浏览器分支。
 - `node --test test/workbench.test.ts test/workbench-store.test.ts test/workbench-http.test.ts test/codex.test.ts test/dsh.test.ts`：覆盖 ACK 门禁、目标轮终态、目标变化、未知回执、重复提交、当前停止目标与派发中崩溃。实际浏览器判据仍是 E01–E04。
