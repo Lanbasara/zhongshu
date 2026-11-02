@@ -2,7 +2,7 @@
 status: active
 started: 2026-11-02
 exit: 两个真实 Harness 的对话阅读、图片收发、输入与引用通过用户路径验收，既有发送与恢复语义不退化
-evidence: none yet
+evidence: https://github.com/Lanbasara/zhongshu/pull/13
 ---
 
 # 对话基本可用性
