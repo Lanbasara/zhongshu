@@ -37,6 +37,7 @@
 | 任务 | 先读 |
 | --- | --- |
 | 改一个用户能力 | [docs/features/README.md](docs/features/README.md) → 对应能力页 |
+| 改界面或组件 | [界面与设计系统（含 Storybook）](docs/architecture.md#界面与设计系统) |
 | 做新需求 | 先与用户确认范围/术语；再读 [docs/spec/README.md](docs/spec/README.md) → 当前 spec |
 | 改架构、边界或数据归属 | [docs/architecture.md](docs/architecture.md) → 该边界链接的决策 |
 | 改认证、会话或数据操作 | [docs/features/access.md](docs/features/access.md) |
