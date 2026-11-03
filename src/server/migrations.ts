@@ -102,12 +102,33 @@ export const productMigrations: Migration[] = [{ version: 2, sql: `
     removed INTEGER NOT NULL DEFAULT 0 CHECK (removed IN (0, 1))
   ) STRICT;
   CREATE INDEX workbench_workspaces_directory ON workbench_workspaces(directory);
+` }, { version: 6, sql: `
+  CREATE TABLE workbench_queues (
+    conversation_id TEXT PRIMARY KEY REFERENCES workbench_conversations(id) ON DELETE CASCADE,
+    after_run_id TEXT,
+    pause TEXT CHECK (pause IN ('stopped', 'failed', 'rejected', 'missed', 'restored')),
+    version INTEGER NOT NULL DEFAULT 0
+  ) STRICT;
+  CREATE TABLE workbench_queue_entries (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    id TEXT NOT NULL UNIQUE,
+    conversation_id TEXT NOT NULL REFERENCES workbench_queues(conversation_id) ON DELETE CASCADE,
+    content_json TEXT,
+    admission_digest TEXT NOT NULL,
+    operation_id TEXT REFERENCES workbench_operations(id),
+    held INTEGER NOT NULL DEFAULT 0 CHECK (held IN (0, 1)),
+    version INTEGER NOT NULL DEFAULT 0
+  ) STRICT;
+  CREATE INDEX workbench_queue_entries_active ON workbench_queue_entries(conversation_id, sequence) WHERE content_json IS NOT NULL;
+  CREATE UNIQUE INDEX workbench_queue_entries_operation ON workbench_queue_entries(operation_id) WHERE operation_id IS NOT NULL;
 ` }];
 
 /** Runs inside restoreDatabase's private staging transaction, before the database is published. */
 export function afterProductRestore(db: DatabaseSync): void {
   // Auth-only backups predate the workbench; normal startup will apply its migration.
   if (!db.prepare('SELECT version FROM app_migrations WHERE version=2').get()) return;
+  if (db.prepare('SELECT version FROM app_migrations WHERE version=6').get())
+    db.exec("UPDATE workbench_queues SET pause='restored',version=version+1 WHERE EXISTS (SELECT 1 FROM workbench_queue_entries WHERE conversation_id=workbench_queues.conversation_id AND content_json IS NOT NULL)");
   const conversations = db.prepare("SELECT DISTINCT conversation_id FROM workbench_operations WHERE status IN ('queued','dispatching') LIMIT 10000").all();
   const at = Date.now();
   db.prepare("UPDATE workbench_operations SET status='unknown',reason='database_restored_requires_reconciliation',updated_at=? WHERE status IN ('queued','dispatching')").run(at);

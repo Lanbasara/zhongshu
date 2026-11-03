@@ -7,10 +7,10 @@ import { putUpload, removeUpload, uploadDrafts, type UploadDraft } from './uploa
 
 import { ComposerView } from './patterns/composer.tsx';
 
-type Props = { conversation: string; csrf: string; draft: Draft; onChange(draft: Draft, requireDurable?: boolean): boolean; onSend(): void; onStop(): void; onFiles(): void; ready: boolean; sending: boolean; running: boolean; model: string; permission: string; configurationNote: string };
+type Props = { conversation: string; csrf: string; draft: Draft; onChange(draft: Draft, requireDurable?: boolean): boolean; onSend(): void; onStop(): void; onFiles(): void; ready: boolean; sending: boolean; running: boolean; queueing: boolean; model: string; permission: string; configurationNote: string };
 type Upload = UploadDraft & { status: 'uploading' | 'failed' };
 export function Composer(props: Props) {
-  const { conversation, csrf, draft, onChange, onSend, onStop, onFiles, ready, sending, running, model, permission, configurationNote } = props;
+  const { conversation, csrf, draft, onChange, onSend, onStop, onFiles, ready, sending, running, queueing, model, permission, configurationNote } = props;
   const current = useRef(draft); current.current = draft;
   const change = (next: Draft, requireDurable = false) => { const saved = onChange(next, requireDurable); if (!saved && requireDurable) return false; current.current = next; return saved; };
   const alive = useRef(true);
@@ -48,7 +48,7 @@ export function Composer(props: Props) {
   return <ComposerView value={draft.text} onChange={text => { change({ ...draft, text }); if (text.endsWith('@') && (draft.references?.length ?? 0) < 8) onFiles(); }}
     onSend={onSend} onStop={onStop} onFiles={onFiles} onImages={files => void add(files)}
     editDisabled={!!draft.pending} imagesDisabled={!!draft.pending || sending} filesDisabled={!!draft.pending || (draft.references?.length ?? 0) >= 8}
-    sendDisabled={!!disabled} sending={sending} running={running} model={model} permission={permission} configurationNote={configurationNote}
+    sendDisabled={!!disabled} sending={sending} running={running} queueing={queueing} model={model} permission={permission} configurationNote={configurationNote}
     error={error} hasMaterials={!!(draft.images?.length || uploads.length || draft.references?.length)} materials={<>
     {(draft.images?.length || uploads.length) ? <div className="attachment-tray">{draft.images?.map(image => <div className="attachment-card" key={image.id}><img src={imageUrl(conversation,image)} alt={image.name}/><span>{image.name}<small>已准备好</small></span><button type="button" aria-label={`移除图片：${image.name}`} disabled={!!draft.pending} onClick={() => { change({ ...draft, images: draft.images?.filter(i => i.id !== image.id) }); }}><X size={14}/></button></div>)}{uploads.map(item => <div className="attachment-card upload-card" key={item.id}><ImagePlus size={22}/><span>{item.file.name}<small>{item.status === 'failed' ? '上传失败 · 已保留' : '正在上传…'}</small></span>{item.status === 'failed' ? <><button type="button" aria-label={`重试上传：${item.file.name}`} onClick={() => void upload(item)}><RotateCcw size={14}/></button><button type="button" aria-label={`移除待上传图片：${item.file.name}`} onClick={() => { void removeUpload(item.id).then(() => setUploads(old => old.filter(u => u.id !== item.id))).catch(() => setError('无法移除待上传图片。')); }}><X size={14}/></button></> : <LoaderCircle size={16} className="spin"/>}</div>)}</div> : null}
     {draft.references?.length ? <div className="composer-references">{draft.references.map((r,index) => <div className="reference-card" key={index}>{r.type === 'file' ? <FileText size={15}/> : <Quote size={15}/>}<span>{r.type === 'file' ? r.path : r.text}<small>{r.type === 'file' ? '工作区原文件' : '消息选段'}</small></span><button type="button" aria-label="移除引用" disabled={!!draft.pending} onClick={() => change({ ...draft, references: draft.references?.filter((_,i) => i !== index) })}><X size={14}/></button></div>)}</div> : null}

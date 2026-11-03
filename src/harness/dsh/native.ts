@@ -55,11 +55,19 @@ export function targetTurnRange(session: string, snapshot: Snapshot, targetRunId
 }
 /** A later turn alone is insufficient: require the target's own durable closer. */
 export function terminalRunFrom(session: string, snapshot: Snapshot, targetRunId?: string, records = snapshot.records): string | undefined {
+  return terminalStatusFrom(session, snapshot, targetRunId, records) ? targetRunId : undefined;
+}
+export function terminalStatusFrom(session: string, snapshot: Snapshot, targetRunId?: string, records = snapshot.records): NativeState['terminalStatus'] {
   const range = targetTurnRange(session, snapshot, targetRunId);
   if (!range) return;
-  return records.some(({ event }) => event.type === 'turn/end' && event.data.turn === range.turn
+  const record = records.find(({ event }) => event.type === 'turn/end' && event.data.turn === range.turn
     && event.seq > range.start && event.seq < range.before && event.seq <= snapshot.cursor
-    && terminalReasons.has(String(object(event.data.reason).kind))) ? targetRunId : undefined;
+    && terminalReasons.has(String(object(event.data.reason).kind)));
+  if (!record) return;
+  const kind = object(record.event.data.reason).kind;
+  if (kind === 'completed') return 'completed';
+  if (kind === 'aborted' || kind === 'interrupted') return 'interrupted';
+  return 'failed';
 }
 export function turnAt(outline: TurnOutline, seq: number): number | undefined {
   let low = 0; let high = outline.length - 1; let turn: number | undefined;

@@ -28,7 +28,7 @@ export async function request<T>(path: string, schema: z.ZodType<T>, options: { 
 }
 
 const prefix = 'zhongshu:draft:v1:';
-const draftSchema = z.object({ text: z.string().max(16_000), ...contentFields, pending: z.object({ id: z.uuid(), text: z.string().max(16_000), ...contentFields }).optional() });
+const draftSchema = z.object({ text: z.string().max(16_000), ...contentFields, pending: z.object({ id: z.uuid(), text: z.string().max(16_000), ...contentFields, queued: z.literal(true).optional() }).optional() });
 export type Draft = z.infer<typeof draftSchema>;
 export function readDraft(id: string): Draft {
   try { return draftSchema.parse(JSON.parse(sessionStorage.getItem(prefix + id) ?? '{}')); } catch { return { text: '' }; }

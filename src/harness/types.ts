@@ -1,5 +1,6 @@
 /** Product-facing semantics. Native protocol types stay inside each adapter. */
 import type { ImageAttachment, InputContent } from '../shared/content.ts';
+import type { QueueDelivery } from '../shared/workbench.ts';
 export type HarnessId = 'codex' | 'dsh';
 export type Configuration = { modelId: string; permissionId: string };
 export type Catalog = {
@@ -34,6 +35,7 @@ export type NativeState = {
   runId?: string;
   /** Exact requested run whose terminal result was verified in native history during this read. Not tool-process termination. */
   terminalRunId?: string;
+  terminalStatus?: 'completed' | 'interrupted' | 'failed';
   /** Queued work that blocks a new user prompt; excludes verified passive native context. */
   pendingInputs: number;
   configurationVerified: boolean;
@@ -48,6 +50,7 @@ export type Receipt =
   | { outcome: 'accepted'; runId?: string }
   | { outcome: 'rejected'; reason: string }
   | { outcome: 'unknown'; reason: string };
+export type HarnessInput = InputContent & { id: string; imageData?: { mediaType: string; data: string }[] };
 export type NativeChange =
   | { type: 'item'; item: NativeItem }
   | { type: 'state'; state: NativeState }
@@ -57,6 +60,7 @@ export type NativeChange =
 
 export interface HarnessAdapter {
   readonly id: HarnessId;
+  readonly earlyInput?: 'current' | 'soon';
   catalog(): Promise<Catalog>;
   /** Persist the identity immediately, before later model/permission setup can fail. */
   create(input: { cwd: string; configuration: Configuration; title?: string }, onBound: (binding: Binding) => void): Promise<Binding>;
@@ -64,7 +68,10 @@ export interface HarnessAdapter {
   state(binding: Binding, targetRunId?: string): Promise<NativeState>;
   history(binding: Binding, olderCursor?: string, limit?: number): Promise<HistoryPage>;
   /** operationId is retained in the native message for reconciliation. Never auto-resend. */
-  submit(binding: Binding, operation: InputContent & { id: string; imageData?: { mediaType: string; data: string }[] }): Promise<Receipt>;
+  submit(binding: Binding, operation: HarnessInput): Promise<Receipt>;
+  submitQueued?(binding: Binding, operation: HarnessInput, delivery: QueueDelivery): Promise<Receipt>;
+  /** Wake a previously admitted item parked by a native interruption. This never submits input. */
+  wakeQueued?(binding: Binding, operationId: string): Promise<void>;
   readImage?(binding: Binding, path: string): Promise<string>;
   reconcile(binding: Binding, operationId: string): Promise<Receipt>;
   stop(binding: Binding, runId: string): Promise<Receipt>;

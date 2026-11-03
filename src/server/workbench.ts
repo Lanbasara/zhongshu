@@ -6,10 +6,10 @@ import { nativeText } from '../shared/content.ts';
 import { referenceSchema } from '../shared/content.ts';
 import { isAbsolute, relative } from 'node:path';
 import { listWorkspaceDocuments, openWorkspaceDocument, saveWorkspaceDocument } from './workspace-documents.ts';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { StoreError, type WorkbenchStore, type CreateConversation, type OperationInput, type Conversation, type Operation } from './workbench-store.ts';
 import type { WorkspaceRegistry } from './workspace-registry.ts';
-import type { WorkbenchConfiguration, workspaceAddSchema, workspaceManagementSchema } from '../shared/workbench.ts';
+import type { QueueCommand, QueueView, WorkbenchConfiguration, workspaceAddSchema, workspaceManagementSchema } from '../shared/workbench.ts';
 import type { z } from 'zod';
 
 const TERMINAL = new Set<NativeState['status']>(['idle', 'interrupted', 'failed']);
@@ -43,6 +43,8 @@ export class Workbench {
   private catalogCache?: Catalog[];
   private catalogAt = 0;
   private catalogLoading?: Promise<Catalog[]>;
+  private queueRecovery?: NodeJS.Timeout;
+  private queueRecoveryCursor = '';
 
   constructor(store: WorkbenchStore, initialWorkspaces: Workspace[], adapters: Map<HarnessId, HarnessAdapter>, registry?: WorkspaceRegistry) {
     this.store = store; this.adapters = adapters;
@@ -453,6 +455,10 @@ export class Workbench {
         if (workspace.maintenance) this.maintenancePhases.set(workspace.id, await workspace.maintenance('status'));
       }
       this.store.recoverDispatching();
+      this.restoreQueuedConversations();
+      this.queueRecovery ??= setInterval(() => {
+        try { this.restoreQueuedConversations(); } catch { /* Retry on the next recovery pass. */ }
+      }, 5000).unref();
       // The most recent bounded set restores eagerly. Other conversations restore when opened.
       for (const conversation of this.store.listConversations({ limit: 16, archived: false })) {
         if (this.workspaceUnavailable(conversation.workspaceId)) continue;
@@ -461,6 +467,19 @@ export class Workbench {
         else if (!conversation.binding && conversation.readiness === 'preparing') this.store.setConversationState(conversation.id, { readiness: 'blocked', error: 'native_creation_result_unknown' });
       }
     });
+  }
+  private restoreQueuedConversations() {
+    if (this.closed) return;
+    const pending = this.store.queuedConversations(this.queueRecoveryCursor);
+    this.queueRecoveryCursor = pending.length === 64 ? pending.at(-1)! : '';
+    for (const id of pending) {
+      if (this.runtimes.has(id)) continue;
+      const conversation = this.conversation(id);
+      if (!conversation.binding || !this.configured(conversation) || this.workspaceUnavailable(conversation.workspaceId) ||
+        this.executionBlocked(conversation.cwd)) continue;
+      try { this.runtime(id); } catch { this.queueRecoveryCursor = ''; break; }
+      this.launch(this.restoreConversation(id));
+    }
   }
   private restoreConversation(id: string): Promise<void> {
     return this.task(async () => {
@@ -481,7 +500,7 @@ export class Workbench {
     else if (!this.configured(conversation)) { try { this.adapter(conversation); } catch { conversation = this.conversation(id); } }
     const history = this.store.readHistory(id, { limit: 100, ...(beforeItemId ? { beforeItemId } : {}) });
     if (unavailable) history.nativeOlderCursor = null;
-    return { conversation, history, operations: this.store.listOperations({ conversationId: id, order: 'desc', limit: 100 }), revision: history.revision };
+    return { conversation, history, operations: this.store.listOperations({ conversationId: id, order: 'desc', limit: 100 }), queue: this.queue(id), revision: history.revision };
   }
 
   older(id: string, beforeItemId?: string) {
@@ -523,9 +542,100 @@ export class Workbench {
   private latestAcceptedMessage(id: string): Operation | undefined {
     return this.store.listOperations({ conversationId: id, status: 'accepted', type: 'message', order: 'desc', limit: 1 })[0];
   }
+  queue(id: string): QueueView {
+    const conversation = this.conversation(id);
+    const { entries, pause, version } = this.store.readQueue(id);
+    const mode = this.configured(conversation) ? this.adapters.get(conversation.harnessId)?.earlyInput ?? null : null;
+    return { entries, pause, version, mode };
+  }
+  async changeQueue(id: string, command: QueueCommand): Promise<QueueView> {
+    this.assertOpen();
+    const conversation = this.conversation(id);
+    this.assertWorkspaceAvailable(conversation.workspaceId);
+    if (command.action === 'send') {
+      const existing = this.store.getOperation(command.operationId);
+      if (existing) {
+        const input = existing.type === 'message' ? existing.queuedInput : undefined;
+        if (existing.conversationId !== id || input?.entryId !== command.entryId || input.version !== command.version ||
+          input.delivery.mode !== command.mode || input.delivery.target !== command.target)
+          throw new StoreError('operation_id_conflict', 409);
+        return this.queue(id);
+      }
+      const adapter = this.adapter(conversation);
+      if (!adapter.submitQueued || adapter.earlyInput !== command.mode) throw new StoreError('queue_mode_unavailable', 409);
+      this.assertQueueDispatchable(conversation);
+      if (conversation.state.status === 'unknown') throw new StoreError('operation_needs_reconciliation', 409);
+      const operation = this.store.claimQueue(id, command.entryId, command.version, command.operationId, { mode: command.mode, target: command.target });
+      this.launch(this.deliverQueued(operation));
+    } else {
+      if (command.action === 'add' || command.action === 'edit') {
+        if (command.action === 'add' && this.store.queueAdmissionExists(id, command.entryId, command.content)) return this.queue(id);
+        if (!conversation.binding) throw new StoreError('conversation_not_ready', 409);
+        if (!this.adapter(conversation).submitQueued) throw new StoreError('queue_mode_unavailable', 409);
+        await this.validateReferences(conversation, { id: command.entryId, conversationId: id, type: 'message', payload: command.content });
+        this.assertOpen();
+      }
+      if (command.action === 'resume') {
+        this.assertQueueDispatchable(conversation);
+        if (conversation.state.status === 'unknown' || !conversation.state.configurationVerified)
+          throw new StoreError('operation_needs_reconciliation', 409);
+      }
+      this.store.changeQueue(id, command);
+      if (!this.executionBlocked(conversation.cwd)) this.launch(this.restoreConversation(id));
+    }
+    return this.queue(id);
+  }
+  private assertQueueDispatchable(conversation: Conversation) {
+    this.assertWorkspaceAvailable(conversation.workspaceId);
+    if (!conversation.binding || conversation.readiness !== 'ready') throw new StoreError('conversation_not_ready', 409);
+    if (conversation.archived) throw new StoreError('conversation_archived', 409);
+    if (this.removing.has(conversation.workspaceId)) throw new StoreError('workspace_remove_busy', 409);
+    if (this.executionBlocked(conversation.cwd)) throw new StoreError('workspace_execution_blocked', 409);
+  }
+  private deliverQueued(operation: Operation): Promise<void> {
+    if (operation.type !== 'message' || !operation.queuedInput) return Promise.resolve();
+    const id = operation.conversationId;
+    const delivery = operation.queuedInput.delivery;
+    this.busyConversations.set(id, (this.busyConversations.get(id) ?? 0) + 1);
+    return this.task(async () => {
+      try {
+        let receipt: Receipt;
+        let conversation: Conversation;
+        try {
+          conversation = this.conversation(id);
+          this.assertQueueDispatchable(conversation);
+          await this.validateReferences(conversation, operation);
+          this.assertOpen();
+          conversation = this.conversation(id);
+          this.assertQueueDispatchable(conversation);
+        } catch (error) {
+          this.store.settleOperation(operation.id, { outcome: 'rejected', reason: error instanceof StoreError ? error.code : 'queue_content_unavailable' });
+          return;
+        }
+        try {
+          const adapter = this.adapter(conversation);
+          receipt = adapter.submitQueued
+            ? await adapter.submitQueued(conversation.binding!, this.messageInput(operation), delivery)
+            : { outcome: 'rejected', reason: 'queue_mode_unavailable' };
+        } catch { receipt = { outcome: 'unknown', reason: 'native_receipt_unknown' }; }
+        this.store.settleOperation(operation.id, receipt);
+      } finally {
+        const count = (this.busyConversations.get(id) ?? 1) - 1;
+        if (count) this.busyConversations.set(id, count); else this.busyConversations.delete(id);
+        if (!this.closed) await this.sync(id);
+      }
+    });
+  }
+  private messageInput(operation: Extract<Operation, { type: 'message' }>) {
+    return { ...operation.payload, id: operation.id, text: nativeText(operation.payload), imageData: operation.payload.images?.map(image => {
+      const resource = this.store.resources.get(operation.conversationId, image.id);
+      return { mediaType: resource.mediaType, data: resource.data.toString('base64') };
+    }) };
+  }
   private messageAllowed(conversation: Conversation, current?: Operation, freshState = false): boolean {
     if (!conversation.binding || conversation.readiness !== 'ready' || !conversation.state.configurationVerified ||
       !TERMINAL.has(conversation.state.status) || conversation.state.pendingInputs !== 0 || (!freshState && this.runtimes.get(conversation.id)?.dirty)) return false;
+    if (!current && this.store.readQueue(conversation.id).entries.length) return false;
     for (const status of ['queued', 'dispatching', 'unknown'] as const) {
       const pending = this.store.listOperations({ conversationId: conversation.id, status, limit: 2 });
       if (pending.some(operation => operation.id !== current?.id && (status !== 'queued' || !current || operation.sequence < current.sequence))) return false;
@@ -596,7 +706,7 @@ export class Workbench {
         let receipt: Receipt;
         try {
           receipt = operation.type === 'message'
-            ? await adapter.submit(conversation.binding, { ...operation.payload, id: operation.id, text: nativeText(operation.payload), imageData: operation.payload.images?.map(image => { const r = this.store.resources.get(conversation.id, image.id); return { mediaType: r.mediaType, data: r.data.toString('base64') }; }) })
+            ? await adapter.submit(conversation.binding, this.messageInput(operation))
             : await adapter.stop(conversation.binding, operation.payload.runId);
         } catch { receipt = { outcome: 'unknown', reason: 'native_receipt_unknown' }; }
         this.store.settleOperation(id, receipt); claimed = false;
@@ -619,6 +729,26 @@ export class Workbench {
     for (const operation of this.store.listOperations({ conversationId: id, status: 'queued', limit: 100 })) {
       if (!this.processing.has(operation.id)) this.launch(this.dispatch(operation.id));
     }
+    const queue = this.store.readQueue(id);
+    const head = queue.entries[0];
+    if (!head || queue.pause || this.busyConversations.has(id)) return;
+    const conversation = this.conversation(id);
+    const { state } = conversation;
+    if (!state.configurationVerified || conversation.readiness !== 'ready' || conversation.archived ||
+      this.workspaceUnavailable(conversation.workspaceId) || this.removing.has(conversation.workspaceId)) return;
+    const outcome = state.terminalRunId === queue.afterRunId ? state.terminalStatus : undefined;
+    if (head.status !== 'waiting' || state.pendingInputs || !TERMINAL.has(state.status)) return;
+    if (queue.afterRunId && (state.status !== 'idle' || (state.runId !== queue.afterRunId && outcome !== 'completed'))) return;
+    try {
+      const operation = this.store.claimQueue(id, head.entryId, head.version, randomUUID(), { mode: 'next' });
+      this.launch(this.deliverQueued(operation));
+    } catch (error) {
+      if (!(error instanceof StoreError) || !['operation_needs_reconciliation', 'queue_entry_changed'].includes(error.code)) this.store.pauseQueue(id, 'rejected');
+    }
+  }
+  private observationTarget(id: string) {
+    const queue = this.store.readQueue(id);
+    return (queue.entries.length ? queue.afterRunId : null) ?? this.latestAcceptedMessage(id)?.runId ?? undefined;
   }
   private enrichReceipts(id: string): void {
     const pending = this.store.listOperations({ conversationId: id, status: 'unknown', order: 'desc', limit: 100 });
@@ -653,6 +783,15 @@ export class Workbench {
         const receipt = await adapter.reconcile(conversation.binding!, latest.id);
         // An inconclusive lookup cannot revoke an already established acceptance.
         if (receipt.outcome === 'accepted' && receipt.runId) this.store.settleOperation(latest.id, receipt);
+        else if (receipt.outcome === 'accepted' && latest.type === 'message' && latest.queuedInput?.delivery.mode === 'next' &&
+          adapter.wakeQueued && conversation.state.status === 'interrupted') {
+          const queue = this.store.readQueue(id);
+          if (!queue.pause && !queue.afterRunId && !this.executionBlocked(conversation.cwd)) {
+            // A user explicitly resumed this queue before the reply was lost.
+            // Start only an already admitted item, using its native queue identity.
+            await adapter.wakeQueued(conversation.binding!, latest.id).catch(() => {});
+          }
+        }
       }
       if (!this.closed) await this.sync(id);
     });
@@ -760,10 +899,10 @@ export class Workbench {
         runtime.dirty = false; const generation = runtime.generation; const stateGeneration = runtime.stateGeneration;
         try {
           const current = this.conversation(id); const adapter = this.adapter(current);
-          const target = this.store.listOperations({ conversationId: id, status: 'accepted', type: 'message', order: 'desc', limit: 1 })[0]?.runId ?? undefined;
+          const target = this.observationTarget(id);
           const results = await Promise.allSettled([adapter.state(current.binding!, target), this.readHistory(current, adapter)]);
           if (this.closed || this.runtimes.get(id) !== runtime) return;
-          const currentTarget = this.store.listOperations({ conversationId: id, status: 'accepted', type: 'message', order: 'desc', limit: 1 })[0]?.runId ?? undefined;
+          const currentTarget = this.observationTarget(id);
           if (runtime.stateGeneration !== stateGeneration || currentTarget !== target) { runtime.dirty = true; continue; }
           const [state, history] = results;
           if (state.status === 'rejected') throw state.reason;
@@ -773,6 +912,12 @@ export class Workbench {
           // verified state read; newer state/invalidate events still fence both.
           this.store.setConversationState(id, { state: state.value, readiness: state.value.configurationVerified ? 'ready' : 'blocked',
             error: state.value.configurationVerified ? null : 'native_configuration_unverified' });
+          const queue = this.store.readQueue(id);
+          if (queue.entries.length && !queue.pause && queue.afterRunId && state.value.configurationVerified) {
+            const outcome = state.value.terminalRunId === queue.afterRunId ? state.value.terminalStatus : undefined;
+            if (outcome === 'failed' || state.value.status === 'failed') this.store.pauseQueue(id, 'failed');
+            else if (outcome === 'interrupted' || state.value.status === 'interrupted') this.store.pauseQueue(id, 'stopped');
+          }
           if (runtime.generation !== generation) { runtime.dirty = true; continue; }
           const items = history.value.items.map(item => {
             const live = runtime.live.get(item.id);
@@ -794,11 +939,11 @@ export class Workbench {
       }
     });
     const result = runtime.syncing;
-    void result.then(() => {
+    this.launch(result.then(() => {
       runtime.syncing = undefined;
       if (this.closed || this.runtimes.get(id) !== runtime) return;
       if (runtime.dirty) this.scheduleSync(id); else this.drain(id);
-    }, () => { runtime.syncing = undefined; if (!this.closed) this.scheduleSync(id); });
+    }, () => { runtime.syncing = undefined; if (!this.closed) this.scheduleSync(id); }));
     return result;
   }
   private disposeRuntime(id: string): void {
@@ -809,6 +954,7 @@ export class Workbench {
   close(): Promise<void> {
     if (this.closing) return this.closing;
     this.closed = true;
+    if (this.queueRecovery) clearInterval(this.queueRecovery);
     this.closing = (async () => {
       for (const [id, runtime] of this.runtimes) {
         try { for (const item of runtime.live.values()) this.store.saveLiveItem(id, item); }

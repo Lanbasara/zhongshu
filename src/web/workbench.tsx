@@ -5,8 +5,8 @@ import { WorkspaceReader } from './workspace-reader.tsx';
 import { useCallback, useEffect, useMemo, useLayoutEffect, useRef, useState } from 'react';
 import {
   workbenchConfigurationSchema, conversationResponseSchema, operationResponseSchema,
-  snapshotSchema, changeEventSchema, resetEventSchema,
-  type WorkbenchConfiguration, type Conversation, type WorkbenchSnapshot, type WorkbenchItem,
+  snapshotSchema, changeEventSchema, resetEventSchema, queueViewSchema,
+  type WorkbenchConfiguration, type Conversation, type WorkbenchSnapshot, type WorkbenchItem, type QueueCommand,
 } from '../shared/workbench.ts';
 import { request, RequestError, readDraft, saveDraft, type Draft } from './workbench-client.ts';
 import { sessionSchema } from '../shared/http.ts';
@@ -16,6 +16,7 @@ import { Composer } from './composer.tsx';
 import { ConversationNavigation, useSidebarWidth } from './conversation-navigation.tsx';
 import type { MessageReference } from '../shared/content.ts';
 import { WorkspaceManagement, type WorkspaceAction } from './workspace-management.tsx';
+import { InputQueue } from './input-queue.tsx';
 
 const states = { idle: '就绪', running: '运行中', waiting: '等待处理', interrupted: '已中断', failed: '执行失败', unknown: '待核实' };
 const stateLabel = (c: Conversation) => c.readiness === 'preparing' ? '正在准备' : c.readiness === 'blocked' ? '准备未完成' : states[c.state.status];
@@ -30,6 +31,9 @@ const failures: Record<string, string> = {
   workspace_identity_unavailable: '当前文件系统无法核实工作区目录。',
   conversation_not_ready: '对话尚未就绪，请等待状态核实。', operation_needs_reconciliation: '上一项操作尚未核实，请先查询结果。',
   operation_conflict: '操作编号与内容不一致；已保留输入。', configuration_unavailable: '所选配置暂时不可用，请刷新后重试。',
+  operation_id_conflict: '操作编号与原内容不一致，请刷新后重试。',
+  queue_entry_changed: '这条排队消息已变化，请查看最新队列。',
+  queue_mode_unavailable: '此对话暂时无法使用该发送方式。', queue_full: '队列已满，请先处理已排队的消息。',
   active_conversation_limit: '当前观察的运行中对话较多，请稍后再试。', invalid_request: '输入未被接受，请检查内容与长度。',
   file_reference_unavailable: '引用文件已删除或无法读取，请重新选择；输入已保留。', file_reference_forbidden: '该文件不在可引用的工作区范围内。',
   quote_source_changed: '引用的原消息无法读取，请重新选择。', image_unavailable: '图片暂时无法读取，请重新添加；文字和引用已保留。',
@@ -146,7 +150,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
       });
       if (latest || first) { setBefore(pageBefore); setHasOlder(pageTrimmed || result.history.hasOlder); setWindowed(false); }
       const pending = draftRef.current.pending;
-      if (pending) {
+      if (pending && !pending.queued) {
         const operation = result.operations.find(op => op.id === pending.id);
         if (operation?.status === 'accepted') {
           setDraft(current => { const { pending: _pending, ...editable } = current; const same = editable.text === pending.text && JSON.stringify(editable.images ?? []) === JSON.stringify(pending.images ?? []) && JSON.stringify(editable.references ?? []) === JSON.stringify(pending.references ?? []); const next = same ? { text: '' } : editable; saveDraft(id, next); return next; });
@@ -243,28 +247,49 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
   const send = async () => {
     if (!selected || sendingRef.current || (!draft.text.trim() && !draft.images?.length && !draft.references?.length && !draft.pending)) return;
     const id = selected; const gen = generation.current;
-    const operation = draft.pending ?? { id: crypto.randomUUID(), text: draft.text, ...(draft.images?.length ? { images: draft.images } : {}), ...(draft.references?.length ? { references: draft.references } : {}) };
-    const { id: _operationId, ...payload } = operation;
-    const body = { id: operation.id, type: 'message', payload };
+    const operation: NonNullable<Draft['pending']> = draft.pending ?? {
+      id: crypto.randomUUID(), text: draft.text, ...(draft.images?.length ? { images: draft.images } : {}),
+      ...(draft.references?.length ? { references: draft.references } : {}), ...(queueing ? { queued: true } : {}),
+    };
+    const { id: _operationId, queued, ...payload } = operation;
+    const body = queued ? { action: 'add', entryId: operation.id, content: payload } : { id: operation.id, type: 'message', payload };
     if (new TextEncoder().encode(JSON.stringify(body)).length > 60 * 1024) { setError('输入编码后较长，请减少内容再发送；本次尚未发送。'); return; }
     const next = { ...draft, pending: operation };
     if (!saveDraft(id, next)) { setError('浏览器无法保留本次发送编号，本次尚未发送。请保留输入后重新打开页面。'); return; }
     setDraft(next); draftRef.current = next;
     sendingRef.current = true; setSending(true); setError('');
     try {
-      const result = await request(`/conversations/${id}/operations`, operationResponseSchema, { csrf, body });
+      let result;
+      if (queued) await request(`/conversations/${id}/queue`, queueViewSchema, { csrf, body });
+      else result = await request(`/conversations/${id}/operations`, operationResponseSchema, { csrf, body });
       if (!alive.current || gen !== generation.current) return;
-      if (result.operation.status === 'accepted') {
+      if (queued || result?.operation.status === 'accepted') {
         setDraft(current => { const { pending: _pending, ...editable } = current; const same = editable.text === operation.text && JSON.stringify(editable.images ?? []) === JSON.stringify(operation.images ?? []) && JSON.stringify(editable.references ?? []) === JSON.stringify(operation.references ?? []); const clean = same ? { text: '' } : editable; saveDraft(id, clean); return clean; });
-      } else if (['unknown', 'rejected'].includes(result.operation.status)) setError(result.operation.reason ?? '操作结果待核实。');
+      } else if (result && ['unknown', 'rejected'].includes(result.operation.status)) setError(result.operation.reason ?? '操作结果待核实。');
       atBottom.current = true; await load(id);
     } catch (reason) {
-      if (gen === generation.current && reason instanceof RequestError && ([400, 413].includes(reason.status) || ['conversation_archived','workspace_save_in_progress','workspace_execution_blocked','workspace_removed','workspace_remove_busy','workspace_directory_changed','workspace_directory_unavailable','workspace_identity_unavailable','operation_needs_reconciliation','file_reference_unavailable','file_reference_forbidden','quote_source_changed','image_reference_changed','image_unavailable'].includes(reason.code))) {
+      if (gen === generation.current && reason instanceof RequestError && ([400, 413].includes(reason.status) || ['conversation_archived','workspace_save_in_progress','workspace_execution_blocked','workspace_removed','workspace_remove_busy','workspace_directory_changed','workspace_directory_unavailable','workspace_identity_unavailable','operation_needs_reconciliation','file_reference_unavailable','file_reference_forbidden','quote_source_changed','image_reference_changed','image_unavailable','queue_full','queue_mode_unavailable'].includes(reason.code))) {
         setDraft(current => { const { pending: _pending, ...editable } = current; saveDraft(id, editable); return editable; });
       }
       report(reason);
     }
     finally { sendingRef.current = false; if (alive.current) setSending(false); }
+  };
+  const changeQueue = async (command: QueueCommand): Promise<boolean> => {
+    if (!selected || sendingRef.current) return false;
+    const id = selected; const gen = generation.current;
+    sendingRef.current = true; setSending(true); setError('');
+    try {
+      await request(`/conversations/${id}/queue`, queueViewSchema, { csrf, body: command });
+      return generation.current === gen;
+    } catch (reason) {
+      if (generation.current === gen) report(reason);
+      return false;
+    } finally {
+      sendingRef.current = false;
+      if (alive.current) setSending(false);
+      if (generation.current === gen) scheduleRefresh(id);
+    }
   };
   const stop = async () => {
     const conversation = snapshot?.conversation; if (!conversation?.state.runId || sendingRef.current) return;
@@ -300,7 +325,12 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
   const previousMessageSettled = !latestMessage || (latestMessage.runId !== null && (latestMessage.runId === conversation?.state.runId || latestMessage.runId === conversation?.state.terminalRunId));
   const removedWorkspace = configuration?.removedWorkspaces?.find(workspace => workspace.id === conversation?.workspaceId);
   const workspaceRemoved = !!removedWorkspace || conversation?.error === 'workspace_removed';
-  const ready = !workspaceRemoved && !conversation?.archived && conversation?.readiness === 'ready' && conversation.state.configurationVerified && ['idle', 'interrupted', 'failed'].includes(conversation.state.status) && !conversation.state.pendingInputs && !unresolved && previousMessageSettled;
+  const running = !!conversation?.state.runId && ['running', 'waiting'].includes(conversation.state.status);
+  const queue = snapshot?.queue;
+  const queueing = !!(draft.pending ? draft.pending.queued : queue?.mode && (running || queue.entries.length));
+  const usable = !workspaceRemoved && !conversation?.archived && conversation?.readiness === 'ready' && conversation.state.configurationVerified;
+  const ready = usable && (queueing || (['idle', 'interrupted', 'failed'].includes(conversation.state.status) && !conversation.state.pendingInputs && !unresolved && previousMessageSettled));
+  const lastEarly = snapshot?.operations.find(op => op.delivery && op.delivery.mode !== 'next' && op.status === 'accepted' && op.runId);
   const liveItems = snapshot?.history.liveItems;
   const visible = useMemo(() => {
     const live = windowed ? [] : liveItems?.filter(item => !items.some(saved => saved.id === item.id && saved.status !== 'running')) ?? [];
@@ -346,8 +376,18 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
           {!workspaceRemoved && (unresolved || conversation?.state.status === 'unknown' || !previousMessageSettled) && <div className="state-notice">{!previousMessageSettled ? '正在核对上一条消息对应轮次的执行结果。' : '正在核对执行结果。'}<button className="text-button" onClick={() => void reconcile()}>查询原生结果</button></div>}
           {removedWorkspace && <button className="text-button" onClick={() => setWorkspaceAction({ kind: 'restore', workspace: removedWorkspace })}>恢复工作区</button>}
           {conversation?.archived && <p className="state-notice">这段对话已归档。可在侧栏恢复后继续。</p>}
+          {lastEarly?.delivery && lastEarly.delivery.mode !== 'next' && <div className="state-notice" role="status">
+            <span>{lastEarly.runId === lastEarly.delivery.target ? '提前发送的消息已送达目标轮。' : '提前发送的消息已送达后续轮。'}</span>
+            {visible.some(item => item.operationId === lastEarly.id) && <button type="button" className="text-button" onClick={() => {
+              const item = visible.find(value => value.operationId === lastEarly.id);
+              if (item) scroll.current?.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(item.id)}"]`)?.focus();
+            }}>查看消息</button>}
+          </div>}
+          {!workspaceRemoved && !conversation?.archived && queue && <InputQueue key={`queue:${selected}`} queue={queue} busy={sending}
+            target={running && usable && !unresolved ? conversation.state.runId : undefined} canResume={!!usable && !unresolved}
+            onCommand={changeQueue}/>}
           {!workspaceRemoved && !conversation?.archived && draft.pending && <div className="state-notice">{rejectedDraft ? '上次发送未被接受，原始输入已保留。' : '上次发送尚未确认，原始输入已保留。'}<button className="text-button" disabled={sending} onClick={() => { if (rejectedDraft && selected) { const { pending: _pending, ...next } = draft; setDraft(next); saveDraft(selected, next); } else void send(); }}>{rejectedDraft ? '继续编辑' : '核对同一发送'}</button></div>}
-          {!workspaceRemoved && !conversation?.archived && <Composer key={selected} conversation={selected} csrf={csrf} draft={draft} onChange={updateDraft} onSend={() => { if (ready || draft.pending) void send(); }} onStop={() => void stop()} onFiles={() => setPickingFile(true)} ready={ready} sending={sending} running={!!conversation && ['running','waiting'].includes(conversation.state.status) && !!conversation.state.runId} permission={conversation?.state.configurationVerified ? permission?.label ?? '配置按对话固定' : '配置待核实'} configurationNote={conversation?.state.configurationVerified ? permission?.description ?? '配置在本对话中保持不变。' : '正在核实当前对话的原生配置，核实后可继续工作。'} model={configuration?.harnesses.find(h => h.id === conversation?.harnessId)?.models.find(m => m.id === conversation?.configuration.modelId)?.label ?? '配置按对话固定'}/>}
+          {!workspaceRemoved && !conversation?.archived && <Composer key={selected} conversation={selected} csrf={csrf} draft={draft} onChange={updateDraft} onSend={() => { if (ready || draft.pending) void send(); }} onStop={() => void stop()} onFiles={() => setPickingFile(true)} ready={ready} sending={sending} running={running} queueing={queueing} permission={conversation?.state.configurationVerified ? permission?.label ?? '配置按对话固定' : '配置待核实'} configurationNote={conversation?.state.configurationVerified ? permission?.description ?? '配置在本对话中保持不变。' : '正在核实当前对话的原生配置，核实后可继续工作。'} model={configuration?.harnesses.find(h => h.id === conversation?.harnessId)?.models.find(m => m.id === conversation?.configuration.modelId)?.label ?? '配置按对话固定'}/>}
         </div>
       </>}
       {(error || authError) && <div className="workbench-error" role="alert"><span>{error || authError}</span><button className="text-button" onClick={() => setError('')}>关闭</button></div>}

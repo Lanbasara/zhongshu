@@ -9,13 +9,15 @@ export type ComposerViewProps = {
   value: string; onChange(value: string): void; onSend(): void; onStop(): void;
   onImages(files: File[]): void; onFiles(): void;
   editDisabled: boolean; imagesDisabled: boolean; filesDisabled: boolean; sendDisabled: boolean;
-  sending: boolean; running: boolean; model: string; permission: string; configurationNote: string;
+  sending: boolean; running: boolean; queueing?: boolean; model: string; permission: string; configurationNote: string;
   materials?: ReactNode; hasMaterials: boolean; error?: string;
 };
 
 /** Presentation only: the caller owns submission, upload and persistence decisions. */
 export function ComposerView(props: ComposerViewProps) {
-  const { value, onChange, onSend, onStop, onImages, onFiles, editDisabled, imagesDisabled, filesDisabled, sendDisabled, sending, running, model, permission, configurationNote, materials, hasMaterials, error } = props;
+  const { value, onChange, onSend, onStop, onImages, onFiles, editDisabled, imagesDisabled, filesDisabled, sendDisabled, sending, running, queueing, model, permission, configurationNote, materials, hasMaterials, error } = props;
+  const canSubmit = !sendDisabled && (!running || queueing);
+  const sendLabel = queueing ? '加入队列' : '发送消息';
   const field = useRef<HTMLTextAreaElement>(null);
   const picker = useRef<HTMLInputElement>(null);
   const depth = useRef(0);
@@ -40,17 +42,17 @@ export function ComposerView(props: ComposerViewProps) {
     return () => observer.disconnect();
   }, []);
   return <div className="writing-region">
-    <form className="writing-surface" data-dragging={dragging && !imagesDisabled} onSubmit={event => { event.preventDefault(); if (!sendDisabled && !running) onSend(); }}
+    <form className="writing-surface" data-dragging={dragging && !imagesDisabled} onSubmit={event => { event.preventDefault(); if (canSubmit) onSend(); }}
       onDragEnter={event => { if (!imagesDisabled && event.dataTransfer.types.includes('Files')) { event.preventDefault(); depth.current++; setDragging(true); } }}
       onDragOver={event => { if (event.dataTransfer.types.includes('Files')) event.preventDefault(); }}
       onDragLeave={() => { depth.current = Math.max(0, depth.current - 1); if (!depth.current) setDragging(false); }}
       onDrop={event => { event.preventDefault(); depth.current = 0; setDragging(false); if (!imagesDisabled) onImages([...event.dataTransfer.files]); }}>
       <AnimatePresence initial={false}>{hasMaterials && <motion.div className="writing-materials" initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }} transition={transition}>{materials}</motion.div>}</AnimatePresence>
       <textarea ref={field} aria-label="给 Agent 的消息" aria-describedby={`${hintId}${error ? ` ${errorId}` : ''}`} rows={2} value={value} disabled={editDisabled} maxLength={16000}
-        placeholder={running ? '可以先写下下一步，完成后继续…' : '继续思考，或开始一件新工作…'}
+        placeholder={queueing ? '写下下一条消息，加入队列…' : running ? '可以先写下下一步，完成后继续…' : '继续思考，或开始一件新工作…'}
         onChange={event => onChange(event.target.value)}
         onPaste={event => { const files = [...event.clipboardData.items].filter(item => item.kind === 'file').map(item => item.getAsFile()).filter((file): file is File => !!file); if (files.length) { event.preventDefault(); if (!imagesDisabled) onImages(files); } }}
-        onKeyDown={event => { if ((event.metaKey || event.ctrlKey) && event.key === 'Enter' && !event.nativeEvent.isComposing) { event.preventDefault(); if (!sendDisabled && !running) onSend(); } }}/>
+        onKeyDown={event => { if ((event.metaKey || event.ctrlKey) && event.key === 'Enter' && !event.nativeEvent.isComposing) { event.preventDefault(); if (canSubmit) onSend(); } }}/>
       {error && <p id={errorId} className="writing-error" role="alert">{error}</p>}
       <div className="writing-toolbar">
         <input ref={picker} type="file" accept="image/png,image/jpeg,image/webp" multiple hidden onChange={event => { onImages([...event.target.files ?? []]); event.target.value = ''; }}/>
@@ -62,13 +64,17 @@ export function ComposerView(props: ComposerViewProps) {
         <Information label="当前对话配置" summary={<span>{model}</span>}><dl><div><dt>模型</dt><dd>{model}</dd></div><div><dt>权限</dt><dd>{permission}</dd></div></dl><p>{configurationNote}</p></Information>
         <span className="writing-spacer"/>
         {running && <span className="writing-running" role="status"><LoaderCircle size={13} className="spin"/><span>执行中</span></span>}
-        <motion.button className="writing-send" type={running ? 'button' : 'submit'} aria-label={running ? '停止当前轮' : '发送消息'} disabled={running ? sending : sendDisabled}
-          onClick={running ? event => { event.preventDefault(); onStop(); } : undefined} whileTap={reduce ? undefined : { scale: .94 }} transition={transitions.state}>
-          {sending ? <LoaderCircle size={18} className="spin"/> : running ? <Square size={13} fill="currentColor"/> : <ArrowUp size={19}/>}
-        </motion.button>
+        {running && <motion.button className="writing-send" type="button" aria-label="停止当前轮" disabled={sending}
+          onClick={onStop} whileTap={reduce ? undefined : { scale: .94 }} transition={transitions.state}>
+          <Square size={13} fill="currentColor"/>
+        </motion.button>}
+        {(!running || queueing) && <motion.button className="writing-send" type="submit" aria-label={sendLabel} title={sendLabel} disabled={sendDisabled}
+          whileTap={reduce ? undefined : { scale: .94 }} transition={transitions.state}>
+          {sending ? <LoaderCircle size={18} className="spin"/> : <ArrowUp size={19}/>}
+        </motion.button>}
       </div>
       {dragging && !imagesDisabled && <div className="writing-drop"><ImagePlus size={24}/><span>松开，添加图片</span></div>}
     </form>
-    <div className="writing-footnote"><span title={configurationNote}><ShieldCheck size={12}/>{permission}</span><span id={hintId}><kbd>⌘ / Ctrl</kbd><kbd>↵</kbd>发送</span></div>
+    <div className="writing-footnote"><span title={configurationNote}><ShieldCheck size={12}/>{permission}</span><span id={hintId}><kbd>⌘ / Ctrl</kbd><kbd>↵</kbd>{queueing ? '排队' : '发送'}</span></div>
   </div>;
 }

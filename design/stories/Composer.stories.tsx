@@ -12,7 +12,7 @@ function Example(args: Partial<ComposerViewProps>) {
     onChange={setText} editDisabled={false} imagesDisabled={false} filesDisabled={false} sendDisabled={!text.trim() && !material}
     sending={false} model="示例模型" permission="配置按对话固定" configurationNote="这里展示产品使用的同一个输入组件。"
     onImages={files => { setMaterial(!!files.length); setStatus('仅演示材料状态，不上传文件。'); }} onFiles={() => setMaterial(true)}
-    onSend={() => { setRunning(true); setText(''); setStatus('演示执行中，可以写下一条草稿或停止。'); }} onStop={() => { setRunning(false); setStatus('演示已停止，当前草稿保留。'); }}
+    onSend={() => { setRunning(true); setText(''); setStatus(args.queueing ? '演示消息已入队。' : '演示执行中，可以写下一条草稿或停止。'); }} onStop={() => { setRunning(false); setStatus('演示已停止，当前草稿保留。'); }}
     hasMaterials={material} materials={<div className="reference-card"><span>研究笔记.md<small>工作区原文件</small></span><Button onClick={() => setMaterial(false)}>移除</Button></div>}
     {...args} value={text} running={running}/><p role="status" style={{ color:'var(--zs-text-muted)', fontSize:12, marginTop:20 }}>{status}</p></div>;
 }
@@ -21,6 +21,7 @@ export default meta;
 type Story = StoryObj<typeof meta>;
 export const Interactive: Story = {};
 export const Running: Story = { args: { running:true, value:'执行期间先写下一步，草稿保留。' } };
+export const Queueing: Story = { args: { running:true, queueing:true, value:'本轮结束后补一组测试。' } };
 export const Pending: Story = { args: { value:'原始提交内容', editDisabled:true, imagesDisabled:true, filesDisabled:true, sendDisabled:true, configurationNote:'发送结果尚未确认。由功能层提供核对同一发送的操作。' } };
 export const UploadFailure: Story = { args: { value:'请结合材料整理', error:'图片上传失败，文件已保留；可以重试或移除。', sendDisabled:true } };
 export const LongModel: Story = { args: { model:'非常长的模型名称 · 固定配置与运行环境的说明', permission:'配置待核实', sendDisabled:true } };
