@@ -1,8 +1,11 @@
+import type { HostPhase } from './workspace-maintenance.ts';
 import type { Catalog, HarnessAdapter, HarnessId, HistoryPage, NativeItem, NativeState, Receipt } from '../harness/types.ts';
 import type { Workspace } from './harness-config.ts';
-import { decodeImage, workspacePath, workspaceFiles } from './resources.ts';
+import { decodeImage, ResourceError, workspacePath, workspaceFiles } from './resources.ts';
 import { nativeText } from '../shared/content.ts';
 import { referenceSchema } from '../shared/content.ts';
+import { isAbsolute, relative } from 'node:path';
+import { listWorkspaceDocuments, openWorkspaceDocument, saveWorkspaceDocument } from './workspace-documents.ts';
 import { createHash } from 'node:crypto';
 import { StoreError, type WorkbenchStore, type CreateConversation, type OperationInput, type Conversation, type Operation } from './workbench-store.ts';
 
@@ -27,6 +30,8 @@ export class Workbench {
   private readonly tasks = new Set<Promise<unknown>>();
   private readonly processing = new Map<string, Promise<void>>();
   private readonly busyConversations = new Map<string, number>();
+  private readonly maintenancePhases = new Map<string, HostPhase | 'transition'>();
+  private readonly savingDirectories = new Set<string>();
   private readonly preparing = new Set<string>();
   private closed = false;
   private closing?: Promise<void>;
@@ -84,6 +89,178 @@ export class Workbench {
       void this.catalogLoading.then(() => { this.catalogLoading = undefined; }, () => { this.catalogLoading = undefined; });
     }
     return this.catalogLoading;
+  }
+
+  private workspace(id: string): Workspace {
+    this.assertOpen();
+    const workspace = this.workspaces.find(item => item.id === id);
+    if (!workspace) throw new StoreError('workspace_not_found', 404);
+    return workspace;
+  }
+  private overlaps(left: string, right: string): boolean {
+    const contains = (parent: string, child: string) => {
+      const path = relative(parent, child);
+      return path !== '..' && !path.startsWith('../') && !isAbsolute(path);
+    };
+    return contains(left, right) || contains(right, left);
+  }
+  private saving(directory: string): boolean {
+    return [...this.savingDirectories].some(root => this.overlaps(root, directory));
+  }
+  private executionBlocked(directory: string): boolean {
+    return this.saving(directory) || this.workspaces.some(workspace => workspace.maintenance &&
+      this.overlaps(directory, workspace.directory) && this.maintenancePhases.get(workspace.id) !== 'online');
+  }
+  changeWorkspaceMaintenance(id: string, action: 'pause' | 'resume') {
+    const workspace = this.workspace(id);
+    const controller = workspace.maintenance;
+    const { directory } = workspace;
+    if (!controller) throw new StoreError('workspace_maintenance_unavailable', 409);
+    const previous = this.maintenancePhases.get(id);
+    if (previous === 'transition' || this.saving(directory)) throw new StoreError('workspace_maintenance_busy', 409);
+    if (action === 'pause' && previous === 'paused') return this.workspaceEditStatus(id);
+    if (action === 'pause' && previous !== 'online') throw new StoreError('workspace_maintenance_unavailable', 409);
+    this.maintenancePhases.set(id, 'transition');
+    return this.task(async () => {
+      let next: HostPhase = 'unknown';
+      try {
+        if (action === 'pause' && !await this.confirmWorkspaceIdle(directory)) {
+          next = 'online';
+          throw new StoreError('workspace_not_idle', 409);
+        }
+        const expected = action === 'pause' ? 'paused' : 'online';
+        if (await controller(action) !== expected || await controller('status') !== expected)
+          throw new StoreError('workspace_maintenance_unavailable', 409);
+        if (action === 'pause') {
+          for (const conversation of this.workspaceConversations(directory)) {
+            const runtime = this.runtimes.get(conversation.id);
+            if (runtime) {
+              for (const item of runtime.live.values()) this.store.saveLiveItem(conversation.id, item);
+              this.disposeRuntime(conversation.id);
+            }
+          }
+        }
+        if (action === 'resume' && !await this.confirmWorkspaceIdle(directory, true) &&
+          !await this.confirmWorkspaceIdle(directory, true))
+          throw new StoreError('workspace_maintenance_unavailable', 409);
+        next = expected;
+      } finally {
+        this.maintenancePhases.set(id, next);
+      }
+      return this.workspaceEditStatus(id);
+    });
+  }
+  private *workspaceConversations(directory: string) {
+    let beforeId: string | undefined;
+    for (;;) {
+      const page: Conversation[] = this.store.listConversations({ beforeId, limit: 100 });
+      for (const conversation of page) if (this.overlaps(directory, conversation.cwd)) yield conversation;
+      if (page.length < 100) return;
+      beforeId = page.at(-1)!.id;
+    }
+  }
+  // Maintenance owns the execution gate while reading native state. History
+  // delivery and observation-slot eviction do not participate in this proof.
+  private async confirmWorkspaceIdle(directory: string, publish = false): Promise<boolean> {
+    const check = async (conversation: Conversation) => {
+      if (!conversation.binding || !this.configured(conversation) ||
+        this.preparing.has(conversation.id) || this.busyConversations.has(conversation.id)) return false;
+      const id = conversation.id;
+      const runtime = this.runtimes.get(id);
+      const generation = runtime?.stateGeneration;
+      const target = this.latestAcceptedMessage(id)?.runId;
+      try {
+        const state = await this.adapter(conversation).state(conversation.binding, target ?? undefined);
+        this.assertOpen();
+        const current = this.conversation(id);
+        if (this.runtimes.get(id) !== runtime || runtime?.stateGeneration !== generation ||
+          this.latestAcceptedMessage(id)?.runId !== target || this.busyConversations.has(id) ||
+          !this.configured(current) || current.binding?.id !== conversation.binding.id ||
+          state.status !== 'idle' || !this.messageAllowed({ ...current, state, readiness: 'ready' }, undefined, true)) return false;
+        if (publish) {
+          if (runtime) runtime.stateGeneration++;
+          this.store.setConversationState(id, { state, readiness: 'ready', error: null });
+        }
+        return true;
+      } catch { return false; }
+    };
+    let batch: Promise<boolean>[] = [];
+    for (const conversation of this.workspaceConversations(directory)) {
+      batch.push(check(conversation));
+      if (batch.length === 4) {
+        if (!(await Promise.all(batch)).every(Boolean)) return false;
+        batch = [];
+      }
+    }
+    return (await Promise.all(batch)).every(Boolean);
+  }
+
+  private idleForEditing(conversation: Conversation): boolean {
+    const runtime = this.runtimes.get(conversation.id);
+    return this.configured(conversation) && !this.preparing.has(conversation.id) &&
+      !this.busyConversations.has(conversation.id) && !!runtime?.stop && !runtime.syncing &&
+      conversation.state.status === 'idle' && this.messageAllowed(conversation);
+  }
+  workspaceEditStatus(id: string) {
+    const { directory, managedWrites, maintenance } = this.workspace(id);
+    if (!managedWrites) return { editable: false, reason: 'workspace_writes_unmanaged' };
+    if (this.saving(directory)) return { editable: false, reason: 'workspace_save_in_progress' };
+    const phase = maintenance ? this.maintenancePhases.get(id) ?? 'unknown' : undefined;
+    if (phase && phase !== 'online') {
+      return { editable: phase === 'paused', reason: phase === 'paused' ? null : 'workspace_maintenance_' + phase, maintenance: phase };
+    }
+    let idle = true;
+    let restoring = 0;
+    for (const conversation of this.workspaceConversations(directory)) {
+      if (phase === 'online') {
+        if (!this.configured(conversation) || this.preparing.has(conversation.id) || this.busyConversations.has(conversation.id) ||
+          ['running', 'waiting', 'interrupted', 'failed'].includes(conversation.state.status) || conversation.state.pendingInputs) idle = false;
+        continue;
+      }
+      if (this.idleForEditing(conversation)) continue;
+      idle = false;
+      if (restoring < 4 && this.configured(conversation) && conversation.binding &&
+        !this.runtimes.get(conversation.id)?.stop && !this.runtimes.get(conversation.id)?.watching) {
+        restoring++;
+        this.launch(this.restoreConversation(conversation.id));
+      }
+    }
+    if (phase === 'online') {
+      return { editable: false, reason: idle ? 'workspace_maintenance_online' : 'workspace_not_idle', maintenance: phase, canPause: idle };
+    }
+    return { editable: idle, reason: idle ? null : 'workspace_not_idle' };
+  }
+  listWorkspaceFiles(id: string, directory: string) {
+    return listWorkspaceDocuments(this.workspace(id).directory, directory);
+  }
+  openWorkspaceFile(id: string, path: string) {
+    return openWorkspaceDocument(this.workspace(id).directory, path);
+  }
+  saveWorkspaceFile(id: string, path: string, version: string, text: string) {
+    const { directory, maintenance } = this.workspace(id);
+    const status = this.workspaceEditStatus(id);
+    if (!status.editable) throw new StoreError(status.reason!, 409);
+    this.savingDirectories.add(directory);
+    return this.task(async () => {
+      try {
+        if (maintenance) {
+          if (await maintenance('status') !== 'paused') {
+            this.maintenancePhases.set(id, 'unknown');
+            throw new StoreError('workspace_maintenance_unavailable', 409);
+          }
+          return await saveWorkspaceDocument(directory, path, version, text, () => this.assertOpen());
+        }
+        for (const conversation of this.workspaceConversations(directory)) await this.sync(conversation.id);
+        const assertWritable = () => {
+          this.assertOpen();
+          for (const conversation of this.workspaceConversations(directory)) {
+            if (!this.idleForEditing(conversation)) throw new ResourceError('workspace_not_idle', 409);
+          }
+        };
+        assertWritable();
+        return await saveWorkspaceDocument(directory, path, version, text, assertWritable);
+      } finally { this.savingDirectories.delete(directory); }
+    });
   }
 
   async files(id: string, directory = '') {
@@ -160,6 +337,7 @@ export class Workbench {
     this.assertOpen();
     const workspace = this.workspaces.find(item => item.id === input.workspaceId);
     if (!workspace || this.adapters.get(input.harnessId)?.id !== input.harnessId) throw new StoreError('configuration_unavailable', 400);
+    if (!this.store.getConversation(input.id) && this.executionBlocked(workspace.directory)) throw new StoreError('workspace_execution_blocked', 409);
     const result = this.store.createConversation({ ...input, cwd: workspace.directory });
     if (result.created) this.launch(this.prepare(result.conversation));
     return result.conversation;
@@ -190,12 +368,15 @@ export class Workbench {
   start(): Promise<void> {
     this.assertOpen();
     return this.task(async () => {
+      for (const workspace of this.workspaces) {
+        if (workspace.maintenance) this.maintenancePhases.set(workspace.id, await workspace.maintenance('status'));
+      }
       this.store.recoverDispatching();
       // The most recent bounded set restores eagerly. Other conversations restore when opened.
       for (const conversation of this.store.listConversations({ limit: 16, archived: false })) {
         if (!this.configured(conversation)) { try { this.adapter(conversation); } catch { /* durable blocked state */ } continue; }
-        if (conversation.binding) this.launch(this.restoreConversation(conversation.id));
-        else if (conversation.readiness === 'preparing') this.store.setConversationState(conversation.id, { readiness: 'blocked', error: 'native_creation_result_unknown' });
+        if (conversation.binding && !this.executionBlocked(conversation.cwd)) this.launch(this.restoreConversation(conversation.id));
+        else if (!conversation.binding && conversation.readiness === 'preparing') this.store.setConversationState(conversation.id, { readiness: 'blocked', error: 'native_creation_result_unknown' });
       }
     });
   }
@@ -207,7 +388,7 @@ export class Workbench {
   }
   async open(id: string) {
     this.assertOpen(); const conversation = this.conversation(id);
-    if (conversation.binding) this.launch(this.restoreConversation(id));
+    if (conversation.binding && !this.executionBlocked(conversation.cwd)) this.launch(this.restoreConversation(id));
     return this.snapshot(id);
   }
   snapshot(id: string, beforeItemId?: string) {
@@ -252,14 +433,17 @@ export class Workbench {
     });
   }
 
-  private messageAllowed(conversation: Conversation, current?: Operation): boolean {
+  private latestAcceptedMessage(id: string): Operation | undefined {
+    return this.store.listOperations({ conversationId: id, status: 'accepted', type: 'message', order: 'desc', limit: 1 })[0];
+  }
+  private messageAllowed(conversation: Conversation, current?: Operation, freshState = false): boolean {
     if (!conversation.binding || conversation.readiness !== 'ready' || !conversation.state.configurationVerified ||
-      !TERMINAL.has(conversation.state.status) || conversation.state.pendingInputs !== 0 || this.runtimes.get(conversation.id)?.dirty) return false;
+      !TERMINAL.has(conversation.state.status) || conversation.state.pendingInputs !== 0 || (!freshState && this.runtimes.get(conversation.id)?.dirty)) return false;
     for (const status of ['queued', 'dispatching', 'unknown'] as const) {
       const pending = this.store.listOperations({ conversationId: conversation.id, status, limit: 2 });
       if (pending.some(operation => operation.id !== current?.id && (status !== 'queued' || !current || operation.sequence < current.sequence))) return false;
     }
-    const previous = this.store.listOperations({ conversationId: conversation.id, status: 'accepted', type: 'message', order: 'desc', limit: 1 })[0];
+    const previous = this.latestAcceptedMessage(conversation.id);
     return !previous || (previous.runId !== null && (previous.runId === conversation.state.runId || previous.runId === conversation.state.terminalRunId));
   }
   async setArchived(id: string, archived: boolean) {
@@ -278,6 +462,9 @@ export class Workbench {
   async enqueue(input: OperationInput) {
     this.assertOpen();
     if (this.store.getOperation(input.id)) return this.store.enqueueOperation(input).operation;
+    const directory = this.conversation(input.conversationId).cwd;
+    if (!this.saving(directory) && this.executionBlocked(directory)) throw new StoreError('workspace_execution_blocked', 409);
+    if (this.saving(directory)) throw new StoreError('workspace_save_in_progress', 409);
     if (input.type === 'message' && (this.runtimes.get(input.conversationId)?.dirty || this.runtimes.get(input.conversationId)?.syncing)) await this.sync(input.conversationId);
     const conversation = this.conversation(input.conversationId); this.adapter(conversation);
     if (conversation.archived) throw new StoreError('conversation_archived', 409);
@@ -287,6 +474,8 @@ export class Workbench {
       throw new StoreError('native_run_changed', 409);
     await this.validateReferences(conversation, input);
     if (input.type === 'message' && !this.messageAllowed(this.conversation(conversation.id))) throw new StoreError('operation_needs_reconciliation', 409);
+    if (this.saving(conversation.cwd)) throw new StoreError('workspace_save_in_progress', 409);
+    if (this.executionBlocked(conversation.cwd)) throw new StoreError('workspace_execution_blocked', 409);
     const result = this.store.enqueueOperation(input);
     if (result.created) this.launch(this.dispatch(result.operation.id));
     return result.operation;
@@ -310,7 +499,7 @@ export class Workbench {
         }
         try { await this.validateReferences(conversation, operation); }
         catch { this.store.settleOperation(id, { outcome: 'rejected', reason: '引用的文件或图片已不可用，请继续编辑。' }); return; }
-        if (!conversation.binding || !this.store.claimOperation(id)) return;
+        if (!conversation.binding || this.executionBlocked(conversation.cwd) || !this.store.claimOperation(id)) return;
         claimed = true;
         let receipt: Receipt;
         try {
@@ -334,7 +523,7 @@ export class Workbench {
     return task;
   }
   private drain(id: string): void {
-    if (this.closed) return;
+    if (this.closed || this.executionBlocked(this.conversation(id).cwd)) return;
     for (const operation of this.store.listOperations({ conversationId: id, status: 'queued', limit: 100 })) {
       if (!this.processing.has(operation.id)) this.launch(this.dispatch(operation.id));
     }

@@ -7,9 +7,12 @@ import type { PrivateContext } from './app.ts';
 import type { Workbench } from './workbench.ts';
 import { StoreError, type Conversation, type Operation, type WorkbenchChange } from './workbench-store.ts';
 import { decodeImage, ResourceError } from './resources.ts';
+import { textLimit } from './workspace-documents.ts';
 import { imageSchema } from '../shared/content.ts';
 
 const uuidParams = z.object({ id: z.uuid() }).strict();
+const workspaceParams = z.object({ id: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/) }).strict();
+const documentPath = z.string().min(1).max(1024);
 const noQuery = z.object({}).strict();
 const listQuery = z.object({ beforeId: z.uuid().optional() }).strict();
 const olderQuery = z.object({ beforeItemId: identifierSchema.optional() }).strict();
@@ -201,6 +204,34 @@ export function createWorkbenchHttp(workbench: Workbench, input: Partial<z.input
       privateApp.get('/conversations/:id', async (request, reply) => {
         parse(noQuery, request.query); const { id } = parse(uuidParams, request.params);
         return json(reply, snapshotView(await workbench.open(id)));
+      });
+      privateApp.get('/workspaces/:id/files', async (request, reply) => {
+        const { id } = parse(workspaceParams, request.params);
+        const { directory } = parse(z.object({ directory: z.string().max(1024).default('') }).strict(), request.query);
+        return json(reply, { files: await workbench.listWorkspaceFiles(id, directory) });
+      });
+      privateApp.get('/workspaces/:id/file', async (request, reply) => {
+        const { id } = parse(workspaceParams, request.params);
+        const { path } = parse(z.object({ path: documentPath }).strict(), request.query);
+        return json(reply, await workbench.openWorkspaceFile(id, path));
+      });
+      privateApp.get('/workspaces/:id/edit-status', async (request, reply) => {
+        const { id } = parse(workspaceParams, request.params);
+        parse(noQuery, request.query);
+        return json(reply, workbench.workspaceEditStatus(id));
+      });
+      privateApp.post('/workspaces/:id/maintenance', async (request, reply) => {
+        const { id } = parse(workspaceParams, request.params);
+        parse(noQuery, request.query);
+        const { action } = parse(z.object({ action: z.enum(['pause', 'resume']) }).strict(), request.body);
+        return json(reply, await workbench.changeWorkspaceMaintenance(id, action));
+      });
+      privateApp.post('/workspaces/:id/file', { bodyLimit: 6 * textLimit + 8192 }, async (request, reply) => {
+        const { id } = parse(workspaceParams, request.params);
+        parse(noQuery, request.query);
+        const { path, version, text } = parse(z.object({ path: documentPath,
+          version: z.string().regex(/^[a-f0-9]{64}$/), text: z.string().max(textLimit) }).strict(), request.body);
+        return json(reply, await workbench.saveWorkspaceFile(id, path, version, text));
       });
       privateApp.get('/conversations/:id/files', async (request, reply) => {
         const { id } = parse(uuidParams, request.params);

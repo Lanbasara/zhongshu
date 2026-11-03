@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { WorkspaceReader } from './workspace-reader.tsx';
+import { useCallback, useEffect, useMemo, useLayoutEffect, useRef, useState } from 'react';
 import {
   workbenchConfigurationSchema, conversationResponseSchema, operationResponseSchema,
   snapshotSchema, changeEventSchema, resetEventSchema,
@@ -16,6 +17,8 @@ const states = { idle: '就绪', running: '运行中', waiting: '等待处理', 
 const stateLabel = (c: Conversation) => c.readiness === 'preparing' ? '正在准备' : c.readiness === 'blocked' ? '准备未完成' : states[c.state.status];
 const failures: Record<string, string> = {
   conversation_archived: '这段对话已归档，请恢复后继续。',
+  workspace_execution_blocked: '工作区正在维护，请先恢复 Agent。',
+  workspace_save_in_progress: '工作区正在保存文件，保存结束后可以继续发送。',
   conversation_not_ready: '对话尚未就绪，请等待状态核实。', operation_needs_reconciliation: '上一项操作尚未核实，请先查询结果。',
   operation_conflict: '操作编号与内容不一致；已保留输入。', configuration_unavailable: '所选配置暂时不可用，请刷新后重试。',
   active_conversation_limit: '当前观察的运行中对话较多，请稍后再试。', invalid_request: '输入未被接受，请检查内容与长度。',
@@ -54,6 +57,8 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
   const [configuration, setConfiguration] = useState<WorkbenchConfiguration>();
   const [listRevision, refreshList] = useState(0);
   const sidebarWidth = useSidebarWidth();
+  const [reader, setReader] = useState(false);
+  const [readerExpanded, setReaderExpanded] = useState(false);
   const [selected, setSelected] = useState<string | undefined>(() => /^#[0-9a-f-]{36}$/i.test(location.hash) ? location.hash.slice(1) : undefined);
   const [snapshot, setSnapshot] = useState<WorkbenchSnapshot>();
   const [items, setItems] = useState<WorkbenchItem[]>([]);
@@ -203,7 +208,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
     refreshList(value => value + 1);
     if (selectedRef.current) void loadRef.current(selectedRef.current);
   }, []);
-  const updateDraft = (next: Draft, requireDurable = false): boolean => {
+  const updateDraft = useCallback((next: Draft, requireDurable = false): boolean => {
     if (!selected) return false;
     const saved = saveDraft(selected, next);
     if (!saved) setError('浏览器无法保留草稿，请先复制输入。');
@@ -211,7 +216,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
     // IndexedDB until their metadata can be retained durably in the draft.
     if (saved || !requireDurable) { setDraft(next); draftRef.current = next; }
     return saved;
-  };
+  }, [selected]);
   const send = async () => {
     if (!selected || sendingRef.current || (!draft.text.trim() && !draft.images?.length && !draft.references?.length && !draft.pending)) return;
     const id = selected; const gen = generation.current;
@@ -231,7 +236,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
       } else if (['unknown', 'rejected'].includes(result.operation.status)) setError(result.operation.reason ?? '操作结果待核实。');
       atBottom.current = true; await load(id);
     } catch (reason) {
-      if (gen === generation.current && reason instanceof RequestError && ([400, 413].includes(reason.status) || ['conversation_archived','operation_needs_reconciliation','file_reference_unavailable','file_reference_forbidden','quote_source_changed','image_reference_changed','image_unavailable'].includes(reason.code))) {
+      if (gen === generation.current && reason instanceof RequestError && ([400, 413].includes(reason.status) || ['conversation_archived','workspace_save_in_progress','workspace_execution_blocked','operation_needs_reconciliation','file_reference_unavailable','file_reference_forbidden','quote_source_changed','image_reference_changed','image_unavailable'].includes(reason.code))) {
         setDraft(current => { const { pending: _pending, ...editable } = current; saveDraft(id, editable); return editable; });
       }
       report(reason);
@@ -271,9 +276,17 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
   const rejectedDraft = draft.pending && snapshot?.operations.find(op => op.id === draft.pending!.id)?.status === 'rejected';
   const previousMessageSettled = !latestMessage || (latestMessage.runId !== null && (latestMessage.runId === conversation?.state.runId || latestMessage.runId === conversation?.state.terminalRunId));
   const ready = !conversation?.archived && conversation?.readiness === 'ready' && conversation.state.configurationVerified && ['idle', 'interrupted', 'failed'].includes(conversation.state.status) && !conversation.state.pendingInputs && !unresolved && previousMessageSettled;
-  const live = windowed ? [] : snapshot?.history.liveItems.filter(item => !items.some(saved => saved.id === item.id && saved.status !== 'running')) ?? [];
-  const visible = items.map(item => live.find(current => current.id === item.id) ?? item).concat(live.filter(item => !items.some(saved => saved.id === item.id)));
-  return <div className="workbench" style={sidebarWidth.style}>
+  const liveItems = snapshot?.history.liveItems;
+  const visible = useMemo(() => {
+    const live = windowed ? [] : liveItems?.filter(item => !items.some(saved => saved.id === item.id && saved.status !== 'running')) ?? [];
+    return items.map(item => live.find(current => current.id === item.id) ?? item)
+      .concat(live.filter(item => !items.some(saved => saved.id === item.id)));
+  }, [items, liveItems, windowed]);
+  const quote = useCallback((reference: MessageReference) => {
+    if (draft.pending) { setError('请先核对上次发送，或继续编辑后再添加引用。'); return; }
+    updateDraft({ ...draft, references: [...(draft.references ?? []), reference].slice(0,8) });
+  }, [draft, updateDraft]);
+  return <div className={reader ? "workbench with-workspace-reader" : "workbench"} style={sidebarWidth.style}>
     <aside className={`sidebar ${navigation ? 'is-open' : ''}`} aria-label="对话导航">
       <div className="workbench-brand"><img src="/icon.svg" width="30" height="30" alt="" /><div>中书<small>ZHONGSHU</small></div><button className="icon-button mobile-only" aria-label="关闭导航" onClick={() => setNavigation(false)}>×</button></div>
       <button className="new-conversation" onClick={() => { setCreating(true); setNavigation(false); }}>＋ 新对话</button>
@@ -281,7 +294,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
         choose={choose} create={createInWorkspace} stateLabel={stateLabel} report={report}
         changed={refreshNavigation} />
       {sidebarWidth.separator}
-      <div className="sidebar-bottom"><span className="network" role="status">{connection}</span><button className="text-button" onClick={logout} disabled={busy}>退出登录</button></div>
+      <div className="sidebar-bottom"><button className="text-button" aria-expanded={reader} disabled={!configuration?.workspaces.length} onClick={() => { setReader(true); setNavigation(false); }}>工作区文件</button><span className="network" role="status">{connection}</span><button className="text-button" onClick={logout} disabled={busy}>退出登录</button></div>
     </aside>
     {navigation && <button className="nav-backdrop" aria-label="关闭导航" onClick={() => setNavigation(false)} />}
     <main className="conversation-panel">
@@ -293,7 +306,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
             {windowed && <p className="history-note">正在阅读较早的一页。<button className="text-button" onClick={() => { if (selected) { atBottom.current = true; void load(selected, true); } }}>回到最新内容</button></p>}
             {!snapshot && <p role="status" className="quiet">正在核对远端状态与历史…</p>}
             {snapshot && visible.length === 0 && <p className="quiet conversation-start">{conversation?.readiness === 'ready' ? '对话已准备好。说说你希望完成什么。' : '正在准备原生会话…'}</p>}
-            <Transcript items={visible} conversation={selected} onQuote={reference => { if (draft.pending) { setError('请先核对上次发送，或继续编辑后再添加引用。'); return; } const next = { ...draft, references: [...(draft.references ?? []), reference].slice(0,8) }; updateDraft(next); }}/>
+            <Transcript items={visible} conversation={selected} onQuote={quote}/>
           </div>
         </div>
         <div className="composer-region">
@@ -311,6 +324,8 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
       </>}
       {(error || authError) && <div className="workbench-error" role="alert"><span>{error || authError}</span><button className="text-button" onClick={() => setError('')}>关闭</button></div>}
     </main>
+    {reader && configuration && <WorkspaceReader workspaces={configuration.workspaces} initialWorkspace={conversation?.workspaceId}
+      csrf={csrf} editStatusSignal={JSON.stringify([conversation?.id, conversation?.state.status, conversation?.state.pendingInputs, unresolved])} expanded={readerExpanded} onExpand={setReaderExpanded} onClose={() => { setReader(false); setReaderExpanded(false); }}/>}
     {creating && <CreateConversation configuration={configuration} csrf={csrf} initialWorkspace={typeof creating === 'string' ? creating : undefined} onClose={() => setCreating(undefined)} onCreated={c => { setCreating(undefined); refreshList(value => value + 1); choose(c.id); }} onError={report} />}
     {pickingFile && selected && <FilePicker conversation={selected} onClose={() => setPickingFile(false)} onSelect={(reference: MessageReference) => { const next = { ...draft, text: draft.text.endsWith('@') ? draft.text.slice(0,-1) : draft.text, references: [...(draft.references ?? []), reference].slice(0,8) }; updateDraft(next); }}/ >}
   </div>;
