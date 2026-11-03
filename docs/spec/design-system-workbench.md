@@ -2,7 +2,7 @@
 status: active
 started: 2026-11-03
 exit: 完整主界面继承已认可的设计并走通真实产品对话路径，组件可隔离展示，发布隔离检查能识别反例
-evidence: none yet
+evidence: https://github.com/Lanbasara/zhongshu/pull/18
 ---
 
 # 主界面与设计系统
@@ -29,4 +29,4 @@ evidence: none yet
 
 ## Open questions
 
-无待确认的实施范围。真实 Harness 验证需使用操作者提供的隔离现场，缺失前提时如实记录；不得借用生产数据。
+无待确认的实施范围。实现及工程验收见 PR；本工作单保留至真实产品的主观体验验收。原型被接受不代表产品体验已经由用户签收。
