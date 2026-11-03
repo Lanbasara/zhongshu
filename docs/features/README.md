@@ -6,6 +6,7 @@
 
 | 用户能力 | 地图与场景 | 默认依赖 |
 | --- | --- | --- |
+| 主界面、输入交互、组件工作台与发布隔离 | [interface](interface.md)：I01–I05 | fixture、浏览器与本地构建；原生链路按关联地图 |
 | 登录、刷新、退出、密码重置后失效 | [access](access.md)：A01–A05 | 真实应用、两个独立浏览器上下文 |
 | 选配置、创建、空对话恢复、核对创建结果 | [conversations](conversations.md)：C01–C05 | fixture；C05 需真实 DSH |
 | 工作区分组、侧栏调整、标题搜索、重命名与归档 | [conversation-management](conversation-management.md)：M01–M05 | fixture、真实 Harness 与手机分支 |
@@ -68,7 +69,7 @@ node test/support/feature-fixture.ts init --root "$zh_verify_root"
 
 1. 保存 `git rev-parse HEAD`、`git status --short`、diff，以及 Node/浏览器版本；工作树有改动时保存补丁和涉及文件的哈希。构建标签只能关联 HEAD，不能证明未提交内容。
 2. READY 应给出 `mode: fixture`、本次 PID、root、origin。检查本次 `/api/health` 与 `/api/version`，再打开该 origin；不能用健康接口代替页面验收。
-3. 初始化并登录后，应能看到“＋ 新对话”。对话框应列出 Fixture A/B、Codex/DSH、Fixture 模型和两项 fixture 权限。保存实际选值；创建/核对后先等表单关闭、hash 等于本次对话 ID，再等对应标题与状态。旧对话的输入框仍存在，不能证明新对话就绪。
+3. 初始化并登录后，应能看到“新对话”。对话框应列出 Fixture A/B、Codex/DSH、Fixture 模型和两项 fixture 权限。保存实际选值；创建/核对后先等表单关闭、hash 等于本次对话 ID，再等对应标题与状态。旧对话的输入框仍存在，不能证明新对话就绪。
 4. 一般条件等待上限为 10 秒；登录与操作请求上限为 20 秒。fixture 等待的是明确 DOM/接口状态，超时保留最后状态并判失败。真实模型另记录本轮时间预算，超时不自动宣称产品失败。
 5. 进程中断前，核对应用自身 PID、实际端口监听者和本次数据目录。`spawn` 返回的 PID 可能只是 Node/Volta 启动器；不能只杀启动器就宣称应用中断。停止后需确认实际监听者退出、端口无监听且健康请求连接被拒绝，再执行停机期间的动作。重启后同样记录新监听者与版本。
 

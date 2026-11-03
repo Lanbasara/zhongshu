@@ -3,7 +3,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --ignore-scripts --no-audit --no-fund
 COPY src ./src
-COPY scripts/build.mjs ./scripts/build.mjs
+COPY scripts/build.mjs scripts/design-tokens.mjs scripts/design-boundaries.ts scripts/check-release.mjs scripts/product-assets.json ./scripts/
 COPY tsconfig.json tsconfig.server.json vite.config.ts ./
 ARG REVISION=development
 RUN REVISION="$REVISION" npm run build
@@ -15,6 +15,7 @@ LABEL org.opencontainers.image.revision=$REVISION
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund && mkdir /data && chown 10001:10001 /data && chmod 700 /data
 COPY --from=build /app/dist ./dist
+RUN --mount=from=build,source=/app/scripts/check-release.mjs,target=/tmp/check-release.mjs,ro node /tmp/check-release.mjs --image
 ENV NODE_ENV=production HOST=0.0.0.0 PORT=3000 ZHONGSHU_DATA_DIR=/data ZHONGSHU_ORIGIN=https://localhost
 USER 10001:10001
 EXPOSE 3000

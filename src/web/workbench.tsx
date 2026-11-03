@@ -1,3 +1,6 @@
+import { FolderOpen, LogOut, Plus, RefreshCw, X, ChevronRight } from 'lucide-react';
+import { BrandMark, Button, IconButton } from './ui/controls.tsx';
+import { WorkbenchFrame } from './patterns/workbench-frame.tsx';
 import { WorkspaceReader } from './workspace-reader.tsx';
 import { useCallback, useEffect, useMemo, useLayoutEffect, useRef, useState } from 'react';
 import {
@@ -308,20 +311,22 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
     if (draft.pending) { setError('请先核对上次发送，或继续编辑后再添加引用。'); return; }
     updateDraft({ ...draft, references: [...(draft.references ?? []), reference].slice(0,8) });
   }, [draft, updateDraft]);
-  return <div className={reader ? "workbench with-workspace-reader" : "workbench"} style={sidebarWidth.style}>
-    <aside className={`sidebar ${navigation ? 'is-open' : ''}`} aria-label="对话导航">
-      <div className="workbench-brand"><img src="/icon.svg" width="30" height="30" alt="" /><div>中书<small>ZHONGSHU</small></div><button className="icon-button mobile-only" aria-label="关闭导航" onClick={() => setNavigation(false)}>×</button></div>
-      <button className="new-conversation" onClick={() => { setCreating(true); setNavigation(false); }}>＋ 新对话</button>
+  const permission = configuration?.harnesses.find(h => h.id === conversation?.harnessId)?.permissions.find(p => p.id === conversation?.configuration.permissionId);
+  return <><WorkbenchFrame style={sidebarWidth.style} navigationOpen={navigation} onNavigationChange={setNavigation}
+    sidebar={<>
+      <div className="workbench-brand"><BrandMark/><span>中书</span><IconButton className="mobile-only" label="关闭导航" onClick={() => setNavigation(false)}><X size={17}/></IconButton></div>
+      <Button className="new-conversation" onClick={() => { setCreating(true); setNavigation(false); }}><Plus size={16}/>新对话</Button>
       <ConversationNavigation workspaces={configuration?.workspaces} removedWorkspaces={configuration?.removedWorkspaces}
         canAddWorkspace={!!configuration?.workspaceRoots?.length} workspaceAction={setWorkspaceAction} selected={selected} revision={listRevision} csrf={csrf}
         choose={choose} create={createInWorkspace} stateLabel={stateLabel} report={report}
         changed={refreshNavigation} />
       {sidebarWidth.separator}
-      <div className="sidebar-bottom"><button className="text-button" aria-expanded={reader} disabled={!configuration?.workspaces.length} onClick={() => { setReader(true); setNavigation(false); }}>工作区文件</button><span className="network" role="status">{connection}</span><button className="text-button" onClick={logout} disabled={busy}>退出登录</button></div>
-    </aside>
-    {navigation && <button className="nav-backdrop" aria-label="关闭导航" onClick={() => setNavigation(false)} />}
-    <main className="conversation-panel">
-      <header className="conversation-header"><button className="icon-button mobile-only" aria-label="打开对话导航" onClick={() => setNavigation(true)}>☰</button><div><h1>{conversation?.title ?? (selected ? '正在恢复对话…' : '从这里，接着做。')}</h1><p>{conversation ? `${conversation.harnessId === 'codex' ? 'Codex' : 'DSH'} · ${removedWorkspace?.label ?? configuration?.workspaces.find(w => w.id === conversation.workspaceId)?.label ?? '工作区'} · ${workspaceRemoved ? '工作区已移除' : stateLabel(conversation)}` : '一段对话，一个可以接续的工作现场'}</p></div><button className="text-button" onClick={() => { scheduleRefresh(); refreshConfiguration(); }}>重新连接</button></header>
+      <div className="sidebar-bottom"><button className="sidebar-files" aria-expanded={reader} disabled={!configuration?.workspaces.length} onClick={() => { setReader(true); setNavigation(false); }}><FolderOpen size={16}/><span>工作区文件</span><ChevronRight size={13}/></button><div className="sidebar-account"><span className="network" role="status"><span className="network-dot"/>{connection}</span><IconButton label="退出登录" onClick={logout} disabled={busy}><LogOut size={15}/></IconButton></div></div>
+    </>}
+    header={<><div className="conversation-heading"><h1>{conversation?.title ?? (selected ? '正在恢复对话…' : '从这里，接着做。')}</h1><p>{conversation ? `${conversation.harnessId === 'codex' ? 'Codex' : 'DSH'} · ${removedWorkspace?.label ?? configuration?.workspaces.find(w => w.id === conversation.workspaceId)?.label ?? '工作区'} · ${workspaceRemoved ? '工作区已移除' : stateLabel(conversation)}` : '一段对话，一个可以接续的工作现场'}</p></div><div className="header-actions"><IconButton label="打开工作区文件" disabled={!configuration?.workspaces.length} onClick={() => setReader(true)}><FolderOpen size={17}/></IconButton><IconButton label="重新连接" onClick={() => { scheduleRefresh(); refreshConfiguration(); }}><RefreshCw size={15}/></IconButton></div></>}
+    reader={reader && configuration && <WorkspaceReader workspaces={configuration.workspaces} initialWorkspace={conversation?.workspaceId}
+      csrf={csrf} editStatusSignal={JSON.stringify([conversation?.id, conversation?.state.status, conversation?.state.pendingInputs, unresolved])} expanded={readerExpanded} onExpand={setReaderExpanded} onClose={() => { setReader(false); setReaderExpanded(false); }}/>}>
+
       {!selected ? <section className="empty-workbench"><p className="eyebrow">A PLACE TO CONTINUE</p><h2>把想法，往前推进一步。</h2><p>选择一个工作区和 Agent，开始一件具体的工作。<br />离开页面后，可以回来继续。</p><button onClick={() => setCreating(true)}>开始新对话 ↗</button>{configuration?.workspaces.length === 0 && <p className="quiet">工作区与原生服务尚未由管理员连接。</p>}</section> : <>
         <div className="message-scroll" ref={scroll} onScroll={() => { const node = scroll.current!; atBottom.current = node.scrollHeight - node.scrollTop - node.clientHeight < 80; if (atBottom.current) setMoreOutput(false); }}>
           <div className="message-column">
@@ -342,19 +347,16 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
           {removedWorkspace && <button className="text-button" onClick={() => setWorkspaceAction({ kind: 'restore', workspace: removedWorkspace })}>恢复工作区</button>}
           {conversation?.archived && <p className="state-notice">这段对话已归档。可在侧栏恢复后继续。</p>}
           {!workspaceRemoved && !conversation?.archived && draft.pending && <div className="state-notice">{rejectedDraft ? '上次发送未被接受，原始输入已保留。' : '上次发送尚未确认，原始输入已保留。'}<button className="text-button" disabled={sending} onClick={() => { if (rejectedDraft && selected) { const { pending: _pending, ...next } = draft; setDraft(next); saveDraft(selected, next); } else void send(); }}>{rejectedDraft ? '继续编辑' : '核对同一发送'}</button></div>}
-          {!workspaceRemoved && !conversation?.archived && <Composer key={selected} conversation={selected} csrf={csrf} draft={draft} onChange={updateDraft} onSend={() => { if (ready || draft.pending) void send(); }} onStop={() => void stop()} onFiles={() => setPickingFile(true)} ready={ready} sending={sending} running={!!conversation && ['running','waiting'].includes(conversation.state.status) && !!conversation.state.runId} model={configuration?.harnesses.find(h => h.id === conversation?.harnessId)?.models.find(m => m.id === conversation?.configuration.modelId)?.label ?? '配置按对话固定'}/>}
-          {!workspaceRemoved && !conversation?.archived && <p className="composer-hint">Enter 换行 · ⌘ / Ctrl + Enter 发送<span>配置在本对话中保持不变</span></p>}
+          {!workspaceRemoved && !conversation?.archived && <Composer key={selected} conversation={selected} csrf={csrf} draft={draft} onChange={updateDraft} onSend={() => { if (ready || draft.pending) void send(); }} onStop={() => void stop()} onFiles={() => setPickingFile(true)} ready={ready} sending={sending} running={!!conversation && ['running','waiting'].includes(conversation.state.status) && !!conversation.state.runId} permission={conversation?.state.configurationVerified ? permission?.label ?? '配置按对话固定' : '配置待核实'} configurationNote={conversation?.state.configurationVerified ? permission?.description ?? '配置在本对话中保持不变。' : '正在核实当前对话的原生配置，核实后可继续工作。'} model={configuration?.harnesses.find(h => h.id === conversation?.harnessId)?.models.find(m => m.id === conversation?.configuration.modelId)?.label ?? '配置按对话固定'}/>}
         </div>
       </>}
       {(error || authError) && <div className="workbench-error" role="alert"><span>{error || authError}</span><button className="text-button" onClick={() => setError('')}>关闭</button></div>}
-    </main>
-    {reader && configuration && <WorkspaceReader workspaces={configuration.workspaces} initialWorkspace={conversation?.workspaceId}
-      csrf={csrf} editStatusSignal={JSON.stringify([conversation?.id, conversation?.state.status, conversation?.state.pendingInputs, unresolved])} expanded={readerExpanded} onExpand={setReaderExpanded} onClose={() => { setReader(false); setReaderExpanded(false); }}/>}
+    </WorkbenchFrame>
     {creating && <CreateConversation configuration={configuration} csrf={csrf} initialWorkspace={typeof creating === 'string' ? creating : undefined} onClose={() => setCreating(undefined)} onCreated={c => { setCreating(undefined); refreshList(value => value + 1); choose(c.id); }} onError={report} />}
     {pickingFile && selected && !workspaceRemoved && <FilePicker conversation={selected} onClose={() => setPickingFile(false)} onSelect={(reference: MessageReference) => { const next = { ...draft, text: draft.text.endsWith('@') ? draft.text.slice(0,-1) : draft.text, references: [...(draft.references ?? []), reference].slice(0,8) }; updateDraft(next); }}/ >}
     {workspaceAction && <WorkspaceManagement action={workspaceAction} roots={configuration?.workspaceRoots ?? []} csrf={csrf}
       close={() => setWorkspaceAction(undefined)} changed={() => { refreshConfiguration(); refreshNavigation(); }} report={report} />}
-  </div>;
+  </>;
 }
 
 function CreateConversation({ configuration, initialWorkspace, csrf, onClose, onCreated, onError }: { configuration?: WorkbenchConfiguration; initialWorkspace?: string; csrf: string; onClose(): void; onCreated(c: Conversation): void; onError(reason: unknown): void }) {

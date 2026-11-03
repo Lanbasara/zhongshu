@@ -7,3 +7,5 @@ dist/
 *.key
 .DS_Store
 coverage/
+
+.artifacts/

@@ -26,6 +26,8 @@ jobs:
       - run: npm run typecheck && npm test && npm run build
         env:
           REVISION: ${{ github.sha }}
+      - name: Check isolated component workbench and release contents
+        run: npm run build:storybook && npm run check:release
       - name: Build and check the actual container
         env:
           REVISION: ${{ github.sha }}

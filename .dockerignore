@@ -8,3 +8,8 @@
 !tsconfig.json
 !tsconfig.server.json
 !vite.config.ts
+
+!scripts/design-tokens.mjs
+!scripts/design-boundaries.ts
+!scripts/check-release.mjs
+!scripts/product-assets.json
