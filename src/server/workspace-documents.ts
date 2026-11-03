@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { constants } from 'node:fs';
+import { constants, type BigIntStats } from 'node:fs';
 import { lstat, open, opendir, realpath, rename, unlink } from 'node:fs/promises';
 import { basename, extname, join } from 'node:path';
 import { referenceSchema } from '../shared/content.ts';
@@ -11,11 +11,17 @@ export const textLimit = 256 * 1024;
 const htmlLimit = 1024 * 1024;
 const directoryFlags = constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW;
 
+export function directoryIdentity(info: BigIntStats): string | null {
+  return info.ino > 0n && info.birthtimeNs > 0n ? [info.dev, info.ino, info.birthtimeNs].join(':') : null;
+}
+
 // On Linux each lookup is relative to an open directory, even if an Agent renames it.
-async function withWorkspaceDirectory<T>(root: string, parts: string[], action: (directory: string) => Promise<T>): Promise<T> {
+async function withWorkspaceDirectory<T>(root: string, parts: string[], action: (directory: string) => Promise<T>, identity?: string): Promise<T> {
   async function walk(path: string, index: number): Promise<T> {
     const handle = await open(path, directoryFlags);
     try {
+      if (index === 0 && identity && directoryIdentity(await handle.stat({ bigint: true })) !== identity)
+        throw new ResourceError('workspace_directory_changed', 409);
       const anchored = process.platform === 'linux' ? '/proc/self/fd/' + handle.fd : path;
       if (process.platform !== 'linux' && await realpath(path) !== path) throw new ResourceError('file_reference_forbidden', 403);
       if (index < parts.length) return await walk(join(anchored, parts[index]!), index + 1);
@@ -78,16 +84,16 @@ async function readDocument(directory: string, name: string, kind: ReturnType<ty
   } finally { await handle.close(); }
 }
 
-export function openWorkspaceDocument(root: string, path: string) {
+export function openWorkspaceDocument(root: string, path: string, identity?: string) {
   const parts = documentParts(path);
   const kind = format(path);
   return withWorkspaceDirectory(root, parts.slice(0, -1), async directory => {
     const { mode: _mode, uid: _uid, gid: _gid, ...document } = await readDocument(directory, basename(path), kind);
     return document;
-  });
+  }, identity);
 }
 
-export function saveWorkspaceDocument(root: string, path: string, version: string, text: string, assertWritable: () => void) {
+export function saveWorkspaceDocument(root: string, path: string, version: string, text: string, assertWritable: () => void, identity?: string) {
   const parts = documentParts(path);
   const kind = format(path);
   if (kind === 'html') throw new ResourceError('file_read_only', 403);
@@ -118,10 +124,10 @@ export function saveWorkspaceDocument(root: string, path: string, version: strin
       await handle.close().catch(() => {});
       await unlink(temporary).catch(() => {});
     }
-  });
+  }, identity);
 }
 
-export function listWorkspaceDocuments(root: string, path: string) {
+export function listWorkspaceDocuments(root: string, path: string, identity?: string) {
   return withWorkspaceDirectory(root, documentParts(path, true), async directory => {
     const entries = [];
     let scanned = 0;
@@ -134,5 +140,5 @@ export function listWorkspaceDocuments(root: string, path: string) {
         supported: entry.isDirectory() || formats.has(extname(entry.name).toLowerCase()) });
     }
     return entries.sort((a, b) => Number(b.directory) - Number(a.directory) || a.name.localeCompare(b.name));
-  });
+  }, identity);
 }

@@ -91,6 +91,17 @@ export const productMigrations: Migration[] = [{ version: 2, sql: `
   ALTER TABLE workbench_conversations ADD COLUMN archived INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0, 1));
   CREATE INDEX workbench_conversations_workspace_page ON workbench_conversations(workspace_id, archived, created_at, id);
   CREATE INDEX workbench_conversations_archive_page ON workbench_conversations(archived, created_at, id);
+` }, { version: 5, sql: `
+  CREATE TABLE workbench_workspaces (
+    id TEXT PRIMARY KEY,
+    label TEXT NOT NULL,
+    directory TEXT NOT NULL,
+    identity TEXT NOT NULL,
+    root_id TEXT,
+    pinned INTEGER NOT NULL DEFAULT 0 CHECK (pinned IN (0, 1)),
+    removed INTEGER NOT NULL DEFAULT 0 CHECK (removed IN (0, 1))
+  ) STRICT;
+  CREATE INDEX workbench_workspaces_directory ON workbench_workspaces(directory);
 ` }];
 
 /** Runs inside restoreDatabase's private staging transaction, before the database is published. */

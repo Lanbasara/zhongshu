@@ -1,6 +1,7 @@
 import { memo, useEffect, useRef, useState, type CSSProperties } from 'react';
 import { conversationListSchema, conversationResponseSchema, conversationTitleSchema, type Conversation, type WorkbenchConfiguration } from '../shared/workbench.ts';
 import { RequestError, request } from './workbench-client.ts';
+import type { WorkspaceAction } from './workspace-management.tsx';
 
 const widthKey = 'zhongshu:sidebar-width';
 const minWidth = 224;
@@ -39,6 +40,9 @@ export function useSidebarWidth() {
 
 type NavigationProps = {
   workspaces?: WorkbenchConfiguration['workspaces'];
+  removedWorkspaces?: WorkbenchConfiguration['removedWorkspaces'];
+  canAddWorkspace?: boolean;
+  workspaceAction(action: WorkspaceAction): void;
   selected?: string;
   revision: number;
   csrf: string;
@@ -148,58 +152,89 @@ export const ConversationNavigation = memo(function ConversationNavigation(props
   const [search, setSearch] = useState('');
   const [term, setTerm] = useState('');
   const [archived, setArchived] = useState(false);
-  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const [collapsed, setCollapsed] = useState<Map<string, boolean>>(new Map());
+  const [workspaceSearch, setWorkspaceSearch] = useState('');
+  const [showRemoved, setShowRemoved] = useState(false);
+  const [removedGroup, setRemovedGroup] = useState<string>();
   const [managing, setManaging] = useState<Conversation>();
   const [notice, setNotice] = useState('');
+  useEffect(() => { if (!props.removedWorkspaces?.length) setShowRemoved(false); }, [props.removedWorkspaces?.length]);
   useEffect(() => {
     const timer = setTimeout(() => setTerm(search.trim()), 180);
     return () => clearTimeout(timer);
   }, [search]);
   // Keep expanded groups mounted while searching so their pagination survives a return.
   const searchActive = !!search.trim();
-  const workspaceLabel = (id: string) => props.workspaces?.find(workspace => workspace.id === id)?.label ?? '未登记工作区';
+  const workspaceLabel = (id: string) => props.workspaces?.find(workspace => workspace.id === id)?.label ??
+    props.removedWorkspaces?.find(workspace => workspace.id === id)?.label ?? '未登记工作区';
+  const workspaceTerm = workspaceSearch.trim().toLocaleLowerCase();
+  const matchingWorkspaces = props.workspaces?.filter(workspace => !workspaceTerm ||
+    [workspace.label, workspace.directoryName].some(name => name?.toLocaleLowerCase().includes(workspaceTerm)));
   const rows = { ...props, manage: setManaging };
   const resultProps = { revision: props.revision, csrf: props.csrf, report: props.report, rows };
   const scroll = useRef<HTMLElement>(null);
   const normalScroll = useRef(0);
-  const alternate = archived || searchActive;
+  const alternate = showRemoved || archived || searchActive;
   useEffect(() => { if (scroll.current) scroll.current.scrollTop = alternate ? 0 : normalScroll.current; }, [alternate]);
   const changeView = (callback: () => void) => {
     if (!alternate) normalScroll.current = scroll.current?.scrollTop ?? 0;
     callback();
   };
   return <>
+    {props.removedWorkspaces && <div className="workspace-navigation-tools">
+      <div className="navigation-tools">
+        <input type="search" aria-label="搜索工作区" placeholder="搜索工作区" maxLength={100} value={workspaceSearch}
+          onChange={event => { setWorkspaceSearch(event.target.value); setShowRemoved(false); setArchived(false); setSearch(''); }} />
+        {props.canAddWorkspace && <button className="icon-button" aria-label="添加工作区" title="添加工作区" onClick={() => props.workspaceAction({ kind: 'add' })}>＋</button>}
+      </div>
+      {!!props.removedWorkspaces.length && <button className="text-button" aria-pressed={showRemoved} onClick={() =>
+        changeView(() => { setShowRemoved(!showRemoved); setArchived(false); setSearch(''); })}>已移除的工作区</button>}
+    </div>}
     <div className="conversation-scopes" role="group" aria-label="对话范围">
-      <button aria-pressed={!archived} onClick={() => changeView(() => setArchived(false))}>未归档</button>
-      <button aria-pressed={archived} onClick={() => changeView(() => setArchived(true))}>已归档</button>
+      <button aria-pressed={!archived && !showRemoved} onClick={() => changeView(() => { setArchived(false); setShowRemoved(false); })}>未归档</button>
+      <button aria-pressed={archived} onClick={() => changeView(() => { setArchived(true); setShowRemoved(false); })}>已归档</button>
     </div>
     <div className="navigation-tools">
       <input type="search" aria-label="搜索对话标题" placeholder={archived ? "搜索已归档对话" : "搜索未归档对话"} maxLength={200} value={search}
-        onChange={event => changeView(() => setSearch(event.target.value))} />
+        onChange={event => changeView(() => { setSearch(event.target.value); setShowRemoved(false); })} />
 
     </div>
     <div className="navigation-notice" role="status">{notice}</div>
     <nav ref={scroll} aria-label="工作区与对话">
       <div hidden={alternate}>
-        {props.workspaces?.map(workspace => {
-          const closed = collapsed.has(workspace.id);
+        {matchingWorkspaces?.map((workspace, index) => {
+          const closed = collapsed.get(workspace.id) ?? index >= 16;
           return <section key={workspace.id} className="workspace-group">
             <header>
               <button className="workspace-toggle" aria-expanded={!closed} onClick={() => setCollapsed(current => {
-                const next = new Set(current);
-                if (next.has(workspace.id)) next.delete(workspace.id); else next.add(workspace.id);
+                const next = new Map(current);
+                next.set(workspace.id, !closed);
                 return next;
-              })}><span aria-hidden="true">{closed ? '›' : '⌄'}</span><strong title={workspace.label}>{workspace.label}</strong></button>
+              })}><span aria-hidden="true">{closed ? '›' : '⌄'}</span><strong title={workspace.label}>{workspace.label}</strong>
+                {workspace.pinned && <span className="quiet">置顶</span>}</button>
               <button className="icon-button" aria-label={`在 ${workspace.label} 新建对话`} onClick={() => props.create(workspace.id)}>＋</button>
+              {props.removedWorkspaces && <button className="icon-button" aria-label={`管理工作区：${workspace.label}`}
+                onClick={() => props.workspaceAction({ kind: 'manage', workspace })}>⋯</button>}
             </header>
             <div hidden={closed}><Results {...resultProps} visible={!alternate && !closed} query={{ workspaceId: workspace.id }} /></div>
           </section>;
         })}
-        {props.workspaces && <section className="workspace-group">
+        {workspaceTerm && !matchingWorkspaces?.length && <p className="navigation-empty">没有匹配的工作区</p>}
+        {props.workspaces && !workspaceTerm && <section className="workspace-group">
           <Results {...resultProps} visible={!alternate} query={{ unregistered: true }} hideEmpty label="未登记工作区" />
         </section>}
       </div>
-      {alternate && <section className="workspace-group">
+      {showRemoved && props.removedWorkspaces?.map(workspace => <section className="workspace-group" key={workspace.id}>
+        <header><button className="workspace-toggle" aria-expanded={removedGroup === workspace.id}
+          onClick={() => setRemovedGroup(removedGroup === workspace.id ? undefined : workspace.id)}>{workspace.label}</button>
+          <button className="text-button" aria-label={`恢复工作区：${workspace.label}`} onClick={() => props.workspaceAction({ kind: 'restore', workspace })}>恢复</button>
+        </header>
+        {removedGroup === workspace.id && <>
+          <Results {...resultProps} query={{ workspaceId: workspace.id }} />
+          <Results {...resultProps} query={{ workspaceId: workspace.id, archived: true }} hideEmpty label="已归档对话" />
+        </>}
+      </section>)}
+      {alternate && !showRemoved && <section className="workspace-group">
         <p className="nav-label">{archived ? '已归档对话' : '搜索结果'}</p>
         {searchActive && term !== search.trim() ? <p className="navigation-empty">正在搜索…</p> :
           <Results key={JSON.stringify([archived, term])} {...resultProps} query={{ archived, title: searchActive ? term : undefined }} workspaceLabel={workspaceLabel} />}

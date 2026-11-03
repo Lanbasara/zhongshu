@@ -1,7 +1,8 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { ServerResponse } from 'node:http';
 import { z } from 'zod';
-import { conversationManagementSchema, conversationSearchSchema, createConversationSchema, enqueueOperationSchema, identifierSchema, workbenchConfigurationSchema } from '../shared/workbench.ts';
+import { conversationManagementSchema, conversationSearchSchema, createConversationSchema, enqueueOperationSchema, identifierSchema, workbenchConfigurationSchema,
+  workspaceAddSchema, workspaceBrowseSchema, workspaceDirectoryListSchema, workspaceIdSchema, workspaceManagementSchema } from '../shared/workbench.ts';
 import type { Conversation as ConversationView, WorkbenchOperation, WorkbenchSnapshot } from '../shared/workbench.ts';
 import type { PrivateContext } from './app.ts';
 import type { Workbench } from './workbench.ts';
@@ -11,7 +12,7 @@ import { textLimit } from './workspace-documents.ts';
 import { imageSchema } from '../shared/content.ts';
 
 const uuidParams = z.object({ id: z.uuid() }).strict();
-const workspaceParams = z.object({ id: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/) }).strict();
+const workspaceParams = z.object({ id: workspaceIdSchema }).strict();
 const documentPath = z.string().min(1).max(1024);
 const noQuery = z.object({}).strict();
 const listQuery = z.object({ beforeId: z.uuid().optional() }).strict();
@@ -167,8 +168,27 @@ export function createWorkbenchHttp(workbench: Workbench, input: Partial<z.input
       });
       privateApp.get('/configuration', async (request, reply) => {
         parse(noQuery, request.query);
-        const result = workbenchConfigurationSchema.parse({ harnesses: await workbench.catalogs(), workspaces: workbench.workspaces.map(({ id, label }) => ({ id, label })) });
+        const result = workbenchConfigurationSchema.parse({ harnesses: await workbench.catalogs(), ...workbench.workspaceView() });
         return json(reply, result);
+      });
+      privateApp.post('/workspace-directories', { bodyLimit: 8192 }, async (request, reply) => {
+        parse(noQuery, request.query);
+        const { rootId, path } = parse(workspaceBrowseSchema, request.body);
+        return json(reply, workspaceDirectoryListSchema.parse(workbench.browseWorkspaceRoot(rootId, path)));
+      });
+      privateApp.post('/workspaces', { bodyLimit: 8192 }, async (request, reply) => {
+        parse(noQuery, request.query);
+        const id = workbench.addWorkspace(parse(workspaceAddSchema, request.body));
+        privateApp.log.info({ event: 'workspace_registration_changed', action: 'add' });
+        return json(reply, { id });
+      });
+      privateApp.post('/workspaces/:id/manage', { bodyLimit: 4096 }, async (request, reply) => {
+        parse(noQuery, request.query);
+        const { id } = parse(workspaceParams, request.params);
+        const input = parse(workspaceManagementSchema, request.body);
+        await workbench.manageWorkspace(id, input);
+        privateApp.log.info({ event: 'workspace_registration_changed', action: input.action });
+        return json(reply, { id });
       });
       privateApp.get('/conversations', async (request, reply) => {
         const query = parse(listQuery, request.query);
@@ -181,9 +201,10 @@ export function createWorkbenchHttp(workbench: Workbench, input: Partial<z.input
         parse(noQuery, request.query);
         const { unregistered, ...query } = parse(conversationSearchSchema, request.body);
         const limit = query.workspaceId || unregistered ? 6 : 30;
+        const workspaces = unregistered ? workbench.workspaceView() : undefined;
         const values = workbench.store.listConversations({
           ...query, limit: limit + 1,
-          ...(unregistered ? { excludeWorkspaces: workbench.workspaces.map(workspace => workspace.id) } : {}),
+          ...(workspaces ? { excludeWorkspaces: [...workspaces.workspaces, ...(workspaces.removedWorkspaces ?? [])].map(workspace => workspace.id) } : {}),
         });
         const conversations = values.slice(0, limit).map(conversationView);
         return json(reply, { conversations, olderBeforeId: values.length > limit ? conversations.at(-1)!.id : null, revision: workbench.store.version() });

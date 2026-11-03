@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import { z } from 'zod';
-import { conversationTitleSchema, identifierSchema } from '../shared/workbench.ts';
+import { conversationTitleSchema, identifierSchema, workspaceLimit } from '../shared/workbench.ts';
 import { contentFields, toolSchema, type InputContent } from '../shared/content.ts';
 import { createResourceStore } from './resources.ts';
 import type { Binding, Configuration, HarnessId, NativeItem, NativeState, Receipt } from '../harness/types.ts';
@@ -197,6 +197,11 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
     return value;
   };
   const conversationRow = (id: string) => db.prepare('SELECT * FROM workbench_conversations WHERE id = ?').get(id);
+  const removedWorkspace = db.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='workbench_workspaces'").get() ?
+    db.prepare('SELECT 1 FROM workbench_workspaces WHERE id=? AND removed=1') : undefined;
+  const assertWorkspaceActive = (id: string) => {
+    if (removedWorkspace?.get(id)) throw new StoreError('workspace_removed', 409);
+  };
   const requireConversation = (id: string): Conversation => {
     const row = conversationRow(id); if (!row) throw new StoreError('conversation_not_found', 404); return conversationFromRow(row);
   };
@@ -224,6 +229,7 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
           if (existing.creation_digest !== creationDigest) throw new StoreError('conversation_id_conflict', 409);
           return { conversation: conversationFromRow(existing), created: false };
         }
+        assertWorkspaceActive(input.workspaceId);
         const count = Number(db.prepare('SELECT COUNT(*) AS count FROM workbench_conversations').get()!.count);
         if (count >= 10_000) throw new StoreError('conversation_capacity_reached', 409);
         const initial: NativeState = { status: 'unknown', pendingInputs: 0, configurationVerified: false };
@@ -239,7 +245,7 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
       const input = parse(z.object({
         beforeId: uuid.optional(), limit: z.number().int().min(1).max(1000).default(100),
         workspaceId: identifierSchema.optional(), archived: z.boolean().optional(),
-        title: z.string().max(200).optional(), excludeWorkspaces: z.array(identifierSchema).max(16).optional(),
+        title: z.string().max(200).optional(), excludeWorkspaces: z.array(identifierSchema).max(workspaceLimit).optional(),
       }).strict(), value);
       return storage(() => {
         const before = input.beforeId ? requireConversation(input.beforeId) : null;
@@ -347,7 +353,9 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
           if (existing.digest !== contentDigest) throw new StoreError('operation_id_conflict', 409);
           return { operation: operationFromRow(existing), created: false };
         }
-        if (requireConversation(input.conversationId).archived) throw new StoreError('conversation_archived', 409);
+        const conversation = requireConversation(input.conversationId);
+        assertWorkspaceActive(conversation.workspaceId);
+        if (conversation.archived) throw new StoreError('conversation_archived', 409);
         const count = Number(db.prepare('SELECT COUNT(*) AS count FROM workbench_operations WHERE conversation_id=?').get(input.conversationId)!.count);
         if (count >= 50_000) throw new StoreError('operation_capacity_reached', 409);
         if (input.type === 'message') for (const image of input.payload.images ?? []) resources.pin(input.conversationId, image.id, input.id);

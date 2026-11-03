@@ -248,6 +248,10 @@
 .manage-dialog::backdrop { background: #16192066; }
 .manage-dialog label { display: block; }
 .manage-dialog input { width: 100%; }
+.workspace-navigation-tools { display: grid; gap: 4px; }
+.workspace-directory-heading { display: flex; align-items: center; gap: 8px; margin-block: 12px 6px; overflow-wrap: anywhere; }
+.workspace-directory-list { display: grid; max-height: 24dvh; overflow: auto; margin-bottom: 12px; border-block: 1px solid var(--line); }
+.workspace-directory-list > * { text-align: start; padding: 8px; overflow-wrap: anywhere; }
 .manage-current { color: #575c65; margin: 8px 0 18px; overflow-wrap: anywhere; }
 .management-actions { justify-content: flex-end; }
 .management-actions .primary { width: auto; margin-top: 0; }

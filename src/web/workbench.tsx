@@ -12,6 +12,7 @@ import { Transcript, FilePicker } from './conversation-content.tsx';
 import { Composer } from './composer.tsx';
 import { ConversationNavigation, useSidebarWidth } from './conversation-navigation.tsx';
 import type { MessageReference } from '../shared/content.ts';
+import { WorkspaceManagement, type WorkspaceAction } from './workspace-management.tsx';
 
 const states = { idle: '就绪', running: '运行中', waiting: '等待处理', interrupted: '已中断', failed: '执行失败', unknown: '待核实' };
 const stateLabel = (c: Conversation) => c.readiness === 'preparing' ? '正在准备' : c.readiness === 'blocked' ? '准备未完成' : states[c.state.status];
@@ -19,6 +20,11 @@ const failures: Record<string, string> = {
   conversation_archived: '这段对话已归档，请恢复后继续。',
   workspace_execution_blocked: '工作区正在维护，请先恢复 Agent。',
   workspace_save_in_progress: '工作区正在保存文件，保存结束后可以继续发送。',
+  workspace_removed: '工作区已移除。恢复后可以继续对话。',
+  workspace_remove_busy: '正在核对能否移除工作区，请稍后再试。',
+  workspace_directory_changed: '工作区目录已被替换，输入已保留。',
+  workspace_directory_unavailable: '工作区目录暂时无法访问，输入已保留。',
+  workspace_identity_unavailable: '当前文件系统无法核实工作区目录。',
   conversation_not_ready: '对话尚未就绪，请等待状态核实。', operation_needs_reconciliation: '上一项操作尚未核实，请先查询结果。',
   operation_conflict: '操作编号与内容不一致；已保留输入。', configuration_unavailable: '所选配置暂时不可用，请刷新后重试。',
   active_conversation_limit: '当前观察的运行中对话较多，请稍后再试。', invalid_request: '输入未被接受，请检查内容与长度。',
@@ -27,6 +33,11 @@ const failures: Record<string, string> = {
   image_reference_changed: '图片引用已变化，请重新添加。', message_images_too_large: '这一条消息的图片合计超过 4 MiB，请减少图片后再发送。',
 };
 const stateReasons: Record<string, string> = {
+  workspace_removed: failures.workspace_removed!,
+  workspace_directory_changed: failures.workspace_directory_changed!,
+  workspace_directory_unavailable: failures.workspace_directory_unavailable!,
+  workspace_identity_unavailable: failures.workspace_identity_unavailable!,
+  workspace_restore_pending: '正在核对原生会话，核对后可以继续对话。',
   conversation_configuration_changed: '这段对话的工作区或原生服务配置已变化，需要管理员核对后才能继续。',
   conversation_preparation_incomplete: '原生对话尚未准备完成；已有绑定已保留。',
   native_creation_result_unknown: '应用在创建过程中中断，创建结果仍待核实。',
@@ -55,6 +66,7 @@ const boundedPage = (items: WorkbenchItem[]) => {
 
 export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf: string; logout(): void; expired(): void; busy: boolean; authError: string }) {
   const [configuration, setConfiguration] = useState<WorkbenchConfiguration>();
+  const [workspaceAction, setWorkspaceAction] = useState<WorkspaceAction>();
   const [listRevision, refreshList] = useState(0);
   const sidebarWidth = useSidebarWidth();
   const [reader, setReader] = useState(false);
@@ -80,6 +92,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
   const draftRef = useRef(draft); draftRef.current = draft;
   const generation = useRef(0);
   const requestSerial = useRef(0);
+  const configurationSerial = useRef(0);
   const activeRead = useRef<{ id: string; generation: number; dirty: boolean; latest: boolean; task: Promise<void> } | undefined>(undefined);
   const viewController = useRef<AbortController | undefined>(undefined);
   const scroll = useRef<HTMLDivElement>(null);
@@ -94,6 +107,13 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
     if (reason instanceof RequestError && reason.status === 401) { expired(); return; }
     setError(reason instanceof RequestError ? failures[reason.code] ?? '暂时无法确认结果。输入和已有内容仍保留，请重新连接。' : '连接暂时中断。输入和已有内容仍保留，请重试。');
   }, [expired]);
+  const refreshConfiguration = () => {
+    const serial = ++configurationSerial.current;
+    void request('/configuration', workbenchConfigurationSchema).then(value => {
+      if (alive.current && serial === configurationSerial.current) setConfiguration(value);
+    }).catch(reason => { if (serial === configurationSerial.current) report(reason); });
+  };
+  const configurationRefresh = useRef(refreshConfiguration); configurationRefresh.current = refreshConfiguration;
   const load = async (id: string, latest = false) => {
     const gen = generation.current;
     const running = activeRead.current;
@@ -148,8 +168,8 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
   };
   useEffect(() => {
     alive.current = true;
-    void request('/configuration', workbenchConfigurationSchema).then(value => { if (alive.current) setConfiguration(value); }).catch(report);
-    return () => { alive.current = false; generation.current++; viewController.current?.abort(); if (refreshTimer.current) clearTimeout(refreshTimer.current); if (listTimer.current) clearTimeout(listTimer.current); };
+    configurationRefresh.current();
+    return () => { alive.current = false; configurationSerial.current++; generation.current++; viewController.current?.abort(); if (refreshTimer.current) clearTimeout(refreshTimer.current); if (listTimer.current) clearTimeout(listTimer.current); };
   }, []);
   useEffect(() => {
     generation.current++; requestSerial.current++; viewController.current?.abort(); viewController.current = new AbortController();
@@ -172,7 +192,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
       if (stopped) return;
       source?.close(); source = new EventSource(`/api/private/workbench/events?cursor=${cursor}`); lastMessage = Date.now();
       const own = source;
-      source.addEventListener('ready', () => { if (source !== own || stopped) return; delay = 500; lastMessage = Date.now(); setConnection('已连接'); scheduleRefresh(); });
+      source.addEventListener('ready', () => { if (source !== own || stopped) return; delay = 500; lastMessage = Date.now(); setConnection('已连接'); scheduleRefresh(); configurationRefresh.current(); });
       source.addEventListener('heartbeat', () => { if (source === own && !stopped) lastMessage = Date.now(); });
       source.addEventListener('change', event => {
         if (source !== own || stopped) return;
@@ -236,7 +256,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
       } else if (['unknown', 'rejected'].includes(result.operation.status)) setError(result.operation.reason ?? '操作结果待核实。');
       atBottom.current = true; await load(id);
     } catch (reason) {
-      if (gen === generation.current && reason instanceof RequestError && ([400, 413].includes(reason.status) || ['conversation_archived','workspace_save_in_progress','workspace_execution_blocked','operation_needs_reconciliation','file_reference_unavailable','file_reference_forbidden','quote_source_changed','image_reference_changed','image_unavailable'].includes(reason.code))) {
+      if (gen === generation.current && reason instanceof RequestError && ([400, 413].includes(reason.status) || ['conversation_archived','workspace_save_in_progress','workspace_execution_blocked','workspace_removed','workspace_remove_busy','workspace_directory_changed','workspace_directory_unavailable','workspace_identity_unavailable','operation_needs_reconciliation','file_reference_unavailable','file_reference_forbidden','quote_source_changed','image_reference_changed','image_unavailable'].includes(reason.code))) {
         setDraft(current => { const { pending: _pending, ...editable } = current; saveDraft(id, editable); return editable; });
       }
       report(reason);
@@ -275,7 +295,9 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
   const latestMessage = snapshot?.operations.find(op => op.type === 'message' && op.status === 'accepted');
   const rejectedDraft = draft.pending && snapshot?.operations.find(op => op.id === draft.pending!.id)?.status === 'rejected';
   const previousMessageSettled = !latestMessage || (latestMessage.runId !== null && (latestMessage.runId === conversation?.state.runId || latestMessage.runId === conversation?.state.terminalRunId));
-  const ready = !conversation?.archived && conversation?.readiness === 'ready' && conversation.state.configurationVerified && ['idle', 'interrupted', 'failed'].includes(conversation.state.status) && !conversation.state.pendingInputs && !unresolved && previousMessageSettled;
+  const removedWorkspace = configuration?.removedWorkspaces?.find(workspace => workspace.id === conversation?.workspaceId);
+  const workspaceRemoved = !!removedWorkspace || conversation?.error === 'workspace_removed';
+  const ready = !workspaceRemoved && !conversation?.archived && conversation?.readiness === 'ready' && conversation.state.configurationVerified && ['idle', 'interrupted', 'failed'].includes(conversation.state.status) && !conversation.state.pendingInputs && !unresolved && previousMessageSettled;
   const liveItems = snapshot?.history.liveItems;
   const visible = useMemo(() => {
     const live = windowed ? [] : liveItems?.filter(item => !items.some(saved => saved.id === item.id && saved.status !== 'running')) ?? [];
@@ -290,7 +312,8 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
     <aside className={`sidebar ${navigation ? 'is-open' : ''}`} aria-label="对话导航">
       <div className="workbench-brand"><img src="/icon.svg" width="30" height="30" alt="" /><div>中书<small>ZHONGSHU</small></div><button className="icon-button mobile-only" aria-label="关闭导航" onClick={() => setNavigation(false)}>×</button></div>
       <button className="new-conversation" onClick={() => { setCreating(true); setNavigation(false); }}>＋ 新对话</button>
-      <ConversationNavigation workspaces={configuration?.workspaces} selected={selected} revision={listRevision} csrf={csrf}
+      <ConversationNavigation workspaces={configuration?.workspaces} removedWorkspaces={configuration?.removedWorkspaces}
+        canAddWorkspace={!!configuration?.workspaceRoots?.length} workspaceAction={setWorkspaceAction} selected={selected} revision={listRevision} csrf={csrf}
         choose={choose} create={createInWorkspace} stateLabel={stateLabel} report={report}
         changed={refreshNavigation} />
       {sidebarWidth.separator}
@@ -298,7 +321,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
     </aside>
     {navigation && <button className="nav-backdrop" aria-label="关闭导航" onClick={() => setNavigation(false)} />}
     <main className="conversation-panel">
-      <header className="conversation-header"><button className="icon-button mobile-only" aria-label="打开对话导航" onClick={() => setNavigation(true)}>☰</button><div><h1>{conversation?.title ?? (selected ? '正在恢复对话…' : '从这里，接着做。')}</h1><p>{conversation ? `${conversation.harnessId === 'codex' ? 'Codex' : 'DSH'} · ${configuration?.workspaces.find(w => w.id === conversation.workspaceId)?.label ?? '工作区'} · ${stateLabel(conversation)}` : '一段对话，一个可以接续的工作现场'}</p></div><button className="text-button" onClick={() => { scheduleRefresh(); void request('/configuration', workbenchConfigurationSchema).then(setConfiguration).catch(report); }}>重新连接</button></header>
+      <header className="conversation-header"><button className="icon-button mobile-only" aria-label="打开对话导航" onClick={() => setNavigation(true)}>☰</button><div><h1>{conversation?.title ?? (selected ? '正在恢复对话…' : '从这里，接着做。')}</h1><p>{conversation ? `${conversation.harnessId === 'codex' ? 'Codex' : 'DSH'} · ${removedWorkspace?.label ?? configuration?.workspaces.find(w => w.id === conversation.workspaceId)?.label ?? '工作区'} · ${workspaceRemoved ? '工作区已移除' : stateLabel(conversation)}` : '一段对话，一个可以接续的工作现场'}</p></div><button className="text-button" onClick={() => { scheduleRefresh(); refreshConfiguration(); }}>重新连接</button></header>
       {!selected ? <section className="empty-workbench"><p className="eyebrow">A PLACE TO CONTINUE</p><h2>把想法，往前推进一步。</h2><p>选择一个工作区和 Agent，开始一件具体的工作。<br />离开页面后，可以回来继续。</p><button onClick={() => setCreating(true)}>开始新对话 ↗</button>{configuration?.workspaces.length === 0 && <p className="quiet">工作区与原生服务尚未由管理员连接。</p>}</section> : <>
         <div className="message-scroll" ref={scroll} onScroll={() => { const node = scroll.current!; atBottom.current = node.scrollHeight - node.scrollTop - node.clientHeight < 80; if (atBottom.current) setMoreOutput(false); }}>
           <div className="message-column">
@@ -315,11 +338,12 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
           {conversation?.state.status === 'interrupted' && <p className="state-notice">本轮已中断。此前启动的后台工具可能仍在运行，已经产生的改动不会撤销。</p>}
           {snapshot?.history.liveItemsLimited && <p className="state-notice">部分实时输出较长，将在完成后从历史中读取完整内容。</p>}
           {!!conversation?.state.pendingInputs && <p className="state-notice">原生服务仍保留 {conversation.state.pendingInputs} 项待处理输入。停止当前轮不会清空它们。</p>}
-          {(unresolved || conversation?.state.status === 'unknown' || !previousMessageSettled) && <div className="state-notice">{!previousMessageSettled ? '正在核对上一条消息对应轮次的执行结果。' : '正在核对执行结果。'}<button className="text-button" onClick={() => void reconcile()}>查询原生结果</button></div>}
+          {!workspaceRemoved && (unresolved || conversation?.state.status === 'unknown' || !previousMessageSettled) && <div className="state-notice">{!previousMessageSettled ? '正在核对上一条消息对应轮次的执行结果。' : '正在核对执行结果。'}<button className="text-button" onClick={() => void reconcile()}>查询原生结果</button></div>}
+          {removedWorkspace && <button className="text-button" onClick={() => setWorkspaceAction({ kind: 'restore', workspace: removedWorkspace })}>恢复工作区</button>}
           {conversation?.archived && <p className="state-notice">这段对话已归档。可在侧栏恢复后继续。</p>}
-          {!conversation?.archived && draft.pending && <div className="state-notice">{rejectedDraft ? '上次发送未被接受，原始输入已保留。' : '上次发送尚未确认，原始输入已保留。'}<button className="text-button" disabled={sending} onClick={() => { if (rejectedDraft && selected) { const { pending: _pending, ...next } = draft; setDraft(next); saveDraft(selected, next); } else void send(); }}>{rejectedDraft ? '继续编辑' : '核对同一发送'}</button></div>}
-          {!conversation?.archived && <Composer key={selected} conversation={selected} csrf={csrf} draft={draft} onChange={updateDraft} onSend={() => { if (ready || draft.pending) void send(); }} onStop={() => void stop()} onFiles={() => setPickingFile(true)} ready={ready} sending={sending} running={!!conversation && ['running','waiting'].includes(conversation.state.status) && !!conversation.state.runId} model={configuration?.harnesses.find(h => h.id === conversation?.harnessId)?.models.find(m => m.id === conversation?.configuration.modelId)?.label ?? '配置按对话固定'}/>}
-          {!conversation?.archived && <p className="composer-hint">Enter 换行 · ⌘ / Ctrl + Enter 发送<span>配置在本对话中保持不变</span></p>}
+          {!workspaceRemoved && !conversation?.archived && draft.pending && <div className="state-notice">{rejectedDraft ? '上次发送未被接受，原始输入已保留。' : '上次发送尚未确认，原始输入已保留。'}<button className="text-button" disabled={sending} onClick={() => { if (rejectedDraft && selected) { const { pending: _pending, ...next } = draft; setDraft(next); saveDraft(selected, next); } else void send(); }}>{rejectedDraft ? '继续编辑' : '核对同一发送'}</button></div>}
+          {!workspaceRemoved && !conversation?.archived && <Composer key={selected} conversation={selected} csrf={csrf} draft={draft} onChange={updateDraft} onSend={() => { if (ready || draft.pending) void send(); }} onStop={() => void stop()} onFiles={() => setPickingFile(true)} ready={ready} sending={sending} running={!!conversation && ['running','waiting'].includes(conversation.state.status) && !!conversation.state.runId} model={configuration?.harnesses.find(h => h.id === conversation?.harnessId)?.models.find(m => m.id === conversation?.configuration.modelId)?.label ?? '配置按对话固定'}/>}
+          {!workspaceRemoved && !conversation?.archived && <p className="composer-hint">Enter 换行 · ⌘ / Ctrl + Enter 发送<span>配置在本对话中保持不变</span></p>}
         </div>
       </>}
       {(error || authError) && <div className="workbench-error" role="alert"><span>{error || authError}</span><button className="text-button" onClick={() => setError('')}>关闭</button></div>}
@@ -327,7 +351,9 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
     {reader && configuration && <WorkspaceReader workspaces={configuration.workspaces} initialWorkspace={conversation?.workspaceId}
       csrf={csrf} editStatusSignal={JSON.stringify([conversation?.id, conversation?.state.status, conversation?.state.pendingInputs, unresolved])} expanded={readerExpanded} onExpand={setReaderExpanded} onClose={() => { setReader(false); setReaderExpanded(false); }}/>}
     {creating && <CreateConversation configuration={configuration} csrf={csrf} initialWorkspace={typeof creating === 'string' ? creating : undefined} onClose={() => setCreating(undefined)} onCreated={c => { setCreating(undefined); refreshList(value => value + 1); choose(c.id); }} onError={report} />}
-    {pickingFile && selected && <FilePicker conversation={selected} onClose={() => setPickingFile(false)} onSelect={(reference: MessageReference) => { const next = { ...draft, text: draft.text.endsWith('@') ? draft.text.slice(0,-1) : draft.text, references: [...(draft.references ?? []), reference].slice(0,8) }; updateDraft(next); }}/ >}
+    {pickingFile && selected && !workspaceRemoved && <FilePicker conversation={selected} onClose={() => setPickingFile(false)} onSelect={(reference: MessageReference) => { const next = { ...draft, text: draft.text.endsWith('@') ? draft.text.slice(0,-1) : draft.text, references: [...(draft.references ?? []), reference].slice(0,8) }; updateDraft(next); }}/ >}
+    {workspaceAction && <WorkspaceManagement action={workspaceAction} roots={configuration?.workspaceRoots ?? []} csrf={csrf}
+      close={() => setWorkspaceAction(undefined)} changed={() => { refreshConfiguration(); refreshNavigation(); }} report={report} />}
   </div>;
 }
 
@@ -341,7 +367,12 @@ function CreateConversation({ configuration, initialWorkspace, csrf, onClose, on
   const [title, setTitle] = useState(''); const [busy, setBusy] = useState(false); const [failed, setFailed] = useState(false);
   const submission = useRef<unknown>(undefined);
   useEffect(() => { dialog.current?.showModal(); return () => dialog.current?.close(); }, []);
-  useEffect(() => { if (!submission.current) { setModel(catalog?.models[0]?.id ?? ''); setPermission(catalog?.permissions[0]?.id ?? ''); setWorkspace(current => current || configuration?.workspaces[0]?.id || ''); } }, [harness, configuration]);
+  useEffect(() => {
+    if (submission.current) return;
+    setModel(current => catalog?.models.some(value => value.id === current) ? current : catalog?.models[0]?.id ?? '');
+    setPermission(current => catalog?.permissions.some(value => value.id === current) ? current : catalog?.permissions[0]?.id ?? '');
+    setWorkspace(current => configuration?.workspaces.some(value => value.id === current) ? current : configuration?.workspaces[0]?.id ?? '');
+  }, [catalog, configuration]);
   const create = async () => {
     if (busy) return; setBusy(true); setFailed(false);
     submission.current ??= { id: crypto.randomUUID(), harnessId: harness, workspaceId: workspace, configuration: { modelId: model, permissionId: permission }, ...(title.trim() ? { title: title.trim() } : {}) };

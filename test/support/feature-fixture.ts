@@ -20,6 +20,7 @@ import { productMigrations } from '../../src/server/migrations.ts';
 import { createWorkbenchStore } from '../../src/server/workbench-store.ts';
 import { Workbench } from '../../src/server/workbench.ts';
 import { createWorkbenchHttp } from '../../src/server/workbench-http.ts';
+import { WorkspaceRegistry } from '../../src/server/workspace-registry.ts';
 import { itemSchema, stateSchema } from '../../src/shared/workbench.ts';
 
 process.umask(0o077);
@@ -219,9 +220,13 @@ async function main() {
   }
 
   const db = openDatabase(join(root, 'data'), productMigrations);
+  const directory = join(root, 'workspace-roots');
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  mkdirSync(join(directory, 'existing'), { recursive: true, mode: 0o700 });
+  const registry = new WorkspaceRegistry(db, workspaces, [{ id: 'fixture-root', label: 'Fixture directories', directory }]);
   let transport: ReturnType<typeof createWorkbenchHttp> | undefined;
   const store = createWorkbenchStore(db, { onChange: event => transport?.changed(event) });
-  const workbench = new Workbench(store, workspaces, new Map<HarnessId, HarnessAdapter>([['codex', adapter('codex')], ['dsh', adapter('dsh')]]));
+  const workbench = new Workbench(store, workspaces, new Map<HarnessId, HarnessAdapter>([['codex', adapter('codex')], ['dsh', adapter('dsh')]]), registry);
   transport = createWorkbenchHttp(workbench);
   const origin = 'http://127.0.0.1:' + input.port;
   let app: Awaited<ReturnType<typeof buildApp>> | undefined;

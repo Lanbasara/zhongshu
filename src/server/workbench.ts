@@ -8,6 +8,9 @@ import { isAbsolute, relative } from 'node:path';
 import { listWorkspaceDocuments, openWorkspaceDocument, saveWorkspaceDocument } from './workspace-documents.ts';
 import { createHash } from 'node:crypto';
 import { StoreError, type WorkbenchStore, type CreateConversation, type OperationInput, type Conversation, type Operation } from './workbench-store.ts';
+import type { WorkspaceRegistry } from './workspace-registry.ts';
+import type { WorkbenchConfiguration, workspaceAddSchema, workspaceManagementSchema } from '../shared/workbench.ts';
+import type { z } from 'zod';
 
 const TERMINAL = new Set<NativeState['status']>(['idle', 'interrupted', 'failed']);
 const HISTORY_PAGE_SIZE = 100;
@@ -24,7 +27,8 @@ type HistoryRead = { items: NativeItem[]; cursor: string | null; establishCursor
 /** One application writer. Native execution outlives browser observers and application connections. */
 export class Workbench {
   readonly store: WorkbenchStore;
-  readonly workspaces: Workspace[];
+  private readonly initialWorkspaces: Workspace[];
+  private readonly registry?: WorkspaceRegistry;
   private readonly adapters: Map<HarnessId, HarnessAdapter>;
   private readonly runtimes = new Map<string, Runtime>();
   private readonly tasks = new Set<Promise<unknown>>();
@@ -33,14 +37,72 @@ export class Workbench {
   private readonly maintenancePhases = new Map<string, HostPhase | 'transition'>();
   private readonly savingDirectories = new Set<string>();
   private readonly preparing = new Set<string>();
+  private readonly removing = new Set<string>();
   private closed = false;
   private closing?: Promise<void>;
   private catalogCache?: Catalog[];
   private catalogAt = 0;
   private catalogLoading?: Promise<Catalog[]>;
 
-  constructor(store: WorkbenchStore, workspaces: Workspace[], adapters: Map<HarnessId, HarnessAdapter>) {
-    this.store = store; this.workspaces = workspaces; this.adapters = adapters;
+  constructor(store: WorkbenchStore, initialWorkspaces: Workspace[], adapters: Map<HarnessId, HarnessAdapter>, registry?: WorkspaceRegistry) {
+    this.store = store; this.adapters = adapters;
+    this.initialWorkspaces = initialWorkspaces; this.registry = registry;
+  }
+  get workspaces(): Workspace[] { return this.registry?.active() ?? this.initialWorkspaces; }
+  workspaceView(): Omit<WorkbenchConfiguration, 'harnesses'> {
+    return this.registry?.view() ?? { workspaces: this.workspaces.map(({ id, label }) => ({ id, label })) };
+  }
+  browseWorkspaceRoot(id: string, path: string[]) {
+    if (!this.registry) throw new StoreError('workspace_root_not_found', 404);
+    return this.registry.browse(id, path);
+  }
+  addWorkspace(input: z.infer<typeof workspaceAddSchema>) {
+    this.assertOpen();
+    if (!this.registry) throw new StoreError('workspace_root_not_found', 404);
+    return this.registry.add(input);
+  }
+  async manageWorkspace(id: string, input: z.infer<typeof workspaceManagementSchema>): Promise<void> {
+    this.assertOpen();
+    const registry = this.registry;
+    const entry = registry?.get(id);
+    if (!registry || !entry) throw new StoreError('workspace_not_found', 404);
+    if (this.removing.has(id)) throw new StoreError('workspace_remove_busy', 409);
+    if (input.action === 'restore') {
+      if (entry.removed) registry.restore(entry);
+      return;
+    }
+    if (entry.removed) {
+      if (input.action === 'remove') return;
+      throw new StoreError('workspace_removed', 409);
+    }
+    if (input.action === 'rename') { registry.rename(id, input.label); return; }
+    if (input.action === 'pin') { registry.pin(id, input.pinned); return; }
+    if (this.executionBlocked(entry.directory)) throw new StoreError('workspace_remove_busy', 409);
+    this.removing.add(id);
+    try {
+      await this.task(async () => {
+        if (!await this.confirmWorkspaceIdle(entry.directory, false, id) || this.executionBlocked(entry.directory))
+          throw new StoreError('workspace_remove_busy', 409);
+        this.assertOpen();
+        for (const conversation of this.workspaceConversations(entry.directory, id)) {
+          const runtime = this.runtimes.get(conversation.id);
+          if (runtime) this.flushLive(conversation.id, runtime);
+        }
+        registry.remove(id);
+        for (const conversation of this.workspaceConversations(entry.directory, id)) this.disposeRuntime(conversation.id);
+      });
+    } finally { this.removing.delete(id); }
+  }
+  private workspaceUnavailable(id: string): string | undefined {
+    const entry = this.registry?.get(id);
+    if (!entry) return;
+    if (entry.removed) return 'workspace_removed';
+    try { this.registry!.verify(entry); }
+    catch (error) { return error instanceof StoreError ? error.code : 'workspace_directory_unavailable'; }
+  }
+  private assertWorkspaceAvailable(id: string): void {
+    const reason = this.workspaceUnavailable(id);
+    if (reason) throw new StoreError(reason, 409);
   }
   private task<T>(action: () => Promise<T>): Promise<T> {
     const promise = action(); this.tasks.add(promise);
@@ -57,9 +119,11 @@ export class Workbench {
   private configured(conversation: Conversation): boolean {
     const workspace = this.workspaces.find(item => item.id === conversation.workspaceId);
     const adapter = this.adapters.get(conversation.harnessId);
-    return workspace?.directory === conversation.cwd && adapter?.id === conversation.harnessId;
+    return workspace?.directory === conversation.cwd && adapter?.id === conversation.harnessId &&
+      !this.workspaceUnavailable(conversation.workspaceId);
   }
   private adapter(conversation: Conversation): HarnessAdapter {
+    this.assertWorkspaceAvailable(conversation.workspaceId);
     if (!this.configured(conversation)) {
       this.store.setConversationState(conversation.id, { readiness: 'blocked', error: 'conversation_configuration_changed',
         state: { status: 'unknown', pendingInputs: conversation.state.pendingInputs, configurationVerified: false, reason: 'conversation_configuration_changed' } });
@@ -93,6 +157,7 @@ export class Workbench {
 
   private workspace(id: string): Workspace {
     this.assertOpen();
+    this.assertWorkspaceAvailable(id);
     const workspace = this.workspaces.find(item => item.id === id);
     if (!workspace) throw new StoreError('workspace_not_found', 404);
     return workspace;
@@ -150,18 +215,18 @@ export class Workbench {
       return this.workspaceEditStatus(id);
     });
   }
-  private *workspaceConversations(directory: string) {
+  private *workspaceConversations(directory: string, workspaceId?: string) {
     let beforeId: string | undefined;
     for (;;) {
-      const page: Conversation[] = this.store.listConversations({ beforeId, limit: 100 });
-      for (const conversation of page) if (this.overlaps(directory, conversation.cwd)) yield conversation;
+      const page: Conversation[] = this.store.listConversations({ beforeId, limit: 100, workspaceId });
+      for (const conversation of page) if (workspaceId || this.overlaps(directory, conversation.cwd)) yield conversation;
       if (page.length < 100) return;
       beforeId = page.at(-1)!.id;
     }
   }
   // Maintenance owns the execution gate while reading native state. History
   // delivery and observation-slot eviction do not participate in this proof.
-  private async confirmWorkspaceIdle(directory: string, publish = false): Promise<boolean> {
+  private async confirmWorkspaceIdle(directory: string, publish = false, removingId?: string): Promise<boolean> {
     const check = async (conversation: Conversation) => {
       if (!conversation.binding || !this.configured(conversation) ||
         this.preparing.has(conversation.id) || this.busyConversations.has(conversation.id)) return false;
@@ -176,7 +241,8 @@ export class Workbench {
         if (this.runtimes.get(id) !== runtime || runtime?.stateGeneration !== generation ||
           this.latestAcceptedMessage(id)?.runId !== target || this.busyConversations.has(id) ||
           !this.configured(current) || current.binding?.id !== conversation.binding.id ||
-          state.status !== 'idle' || !this.messageAllowed({ ...current, state, readiness: 'ready' }, undefined, true)) return false;
+          !(removingId ? TERMINAL.has(state.status) : state.status === 'idle') ||
+          !this.messageAllowed({ ...current, state, readiness: 'ready' }, undefined, true)) return false;
         if (publish) {
           if (runtime) runtime.stateGeneration++;
           this.store.setConversationState(id, { state, readiness: 'ready', error: null });
@@ -185,7 +251,7 @@ export class Workbench {
       } catch { return false; }
     };
     let batch: Promise<boolean>[] = [];
-    for (const conversation of this.workspaceConversations(directory)) {
+    for (const conversation of this.workspaceConversations(directory, removingId)) {
       batch.push(check(conversation));
       if (batch.length === 4) {
         if (!(await Promise.all(batch)).every(Boolean)) return false;
@@ -230,14 +296,20 @@ export class Workbench {
     }
     return { editable: idle, reason: idle ? null : 'workspace_not_idle' };
   }
-  listWorkspaceFiles(id: string, directory: string) {
-    return listWorkspaceDocuments(this.workspace(id).directory, directory);
+  async listWorkspaceFiles(id: string, directory: string) {
+    const result = await listWorkspaceDocuments(this.workspace(id).directory, directory, this.registry?.get(id)?.identity);
+    this.assertWorkspaceAvailable(id);
+    return result;
   }
-  openWorkspaceFile(id: string, path: string) {
-    return openWorkspaceDocument(this.workspace(id).directory, path);
+  async openWorkspaceFile(id: string, path: string) {
+    const result = await openWorkspaceDocument(this.workspace(id).directory, path, this.registry?.get(id)?.identity);
+    this.assertWorkspaceAvailable(id);
+    return result;
   }
   saveWorkspaceFile(id: string, path: string, version: string, text: string) {
     const { directory, maintenance } = this.workspace(id);
+    const identity = this.registry?.get(id)?.identity;
+    if (this.removing.has(id)) throw new StoreError('workspace_remove_busy', 409);
     const status = this.workspaceEditStatus(id);
     if (!status.editable) throw new StoreError(status.reason!, 409);
     this.savingDirectories.add(directory);
@@ -248,24 +320,29 @@ export class Workbench {
             this.maintenancePhases.set(id, 'unknown');
             throw new StoreError('workspace_maintenance_unavailable', 409);
           }
-          return await saveWorkspaceDocument(directory, path, version, text, () => this.assertOpen());
+          return await saveWorkspaceDocument(directory, path, version, text, () => {
+            this.assertOpen(); this.assertWorkspaceAvailable(id);
+          }, identity);
         }
         for (const conversation of this.workspaceConversations(directory)) await this.sync(conversation.id);
         const assertWritable = () => {
           this.assertOpen();
+          this.assertWorkspaceAvailable(id);
           for (const conversation of this.workspaceConversations(directory)) {
             if (!this.idleForEditing(conversation)) throw new ResourceError('workspace_not_idle', 409);
           }
         };
         assertWritable();
-        return await saveWorkspaceDocument(directory, path, version, text, assertWritable);
+        return await saveWorkspaceDocument(directory, path, version, text, assertWritable, identity);
       } finally { this.savingDirectories.delete(directory); }
     });
   }
 
   async files(id: string, directory = '') {
     const conversation = this.conversation(id); this.adapter(conversation);
-    return workspaceFiles(conversation.cwd, directory);
+    const result = await workspaceFiles(conversation.cwd, directory);
+    this.assertWorkspaceAvailable(conversation.workspaceId);
+    return result;
   }
   async workspaceImage(id: string, itemId: string, source: string) {
     const conversation = this.conversation(id);
@@ -280,6 +357,7 @@ export class Workbench {
     const path = await workspacePath(conversation.cwd, reference.path);
     // Read in the native Host, never turn Markdown into a host-user filesystem proxy.
     const data = decodeImage(await adapter.readImage(conversation.binding, path));
+    this.assertWorkspaceAvailable(conversation.workspaceId);
     const image = this.store.resources.put(id, reference.path.split('/').at(-1)!.slice(0,120), data);
     this.store.resources.pin(id, image.id, owner);
     return this.store.resources.get(id, image.id);
@@ -335,6 +413,8 @@ export class Workbench {
 
   async create(input: Omit<CreateConversation, 'cwd'>): Promise<Conversation> {
     this.assertOpen();
+    if (this.removing.has(input.workspaceId)) throw new StoreError('workspace_remove_busy', 409);
+    this.assertWorkspaceAvailable(input.workspaceId);
     const workspace = this.workspaces.find(item => item.id === input.workspaceId);
     if (!workspace || this.adapters.get(input.harnessId)?.id !== input.harnessId) throw new StoreError('configuration_unavailable', 400);
     if (!this.store.getConversation(input.id) && this.executionBlocked(workspace.directory)) throw new StoreError('workspace_execution_blocked', 409);
@@ -350,6 +430,7 @@ export class Workbench {
         const adapter = this.adapter(conversation);
         const catalog = (await this.catalogs()).find(item => item.id === conversation.harnessId);
         this.assertOpen();
+        this.assertWorkspaceAvailable(conversation.workspaceId);
         if (!catalog?.available || !catalog.models.some(item => item.id === conversation.configuration.modelId) || !catalog.permissions.some(item => item.id === conversation.configuration.permissionId))
           throw new StoreError('configuration_unavailable', 409);
         const binding = await adapter.create({ cwd: conversation.cwd, configuration: conversation.configuration, title: conversation.title }, value => {
@@ -374,6 +455,7 @@ export class Workbench {
       this.store.recoverDispatching();
       // The most recent bounded set restores eagerly. Other conversations restore when opened.
       for (const conversation of this.store.listConversations({ limit: 16, archived: false })) {
+        if (this.workspaceUnavailable(conversation.workspaceId)) continue;
         if (!this.configured(conversation)) { try { this.adapter(conversation); } catch { /* durable blocked state */ } continue; }
         if (conversation.binding && !this.executionBlocked(conversation.cwd)) this.launch(this.restoreConversation(conversation.id));
         else if (!conversation.binding && conversation.readiness === 'preparing') this.store.setConversationState(conversation.id, { readiness: 'blocked', error: 'native_creation_result_unknown' });
@@ -388,18 +470,23 @@ export class Workbench {
   }
   async open(id: string) {
     this.assertOpen(); const conversation = this.conversation(id);
-    if (conversation.binding && !this.executionBlocked(conversation.cwd)) this.launch(this.restoreConversation(id));
+    if (conversation.binding && !this.workspaceUnavailable(conversation.workspaceId) && !this.executionBlocked(conversation.cwd)) this.launch(this.restoreConversation(id));
     return this.snapshot(id);
   }
   snapshot(id: string, beforeItemId?: string) {
     this.assertOpen(); let conversation = this.conversation(id);
-    if (!this.configured(conversation)) { try { this.adapter(conversation); } catch { conversation = this.conversation(id); } }
+    const unavailable = this.workspaceUnavailable(conversation.workspaceId);
+    if (unavailable) conversation = { ...conversation, readiness: 'blocked', error: unavailable,
+      state: { ...conversation.state, configurationVerified: false } };
+    else if (!this.configured(conversation)) { try { this.adapter(conversation); } catch { conversation = this.conversation(id); } }
     const history = this.store.readHistory(id, { limit: 100, ...(beforeItemId ? { beforeItemId } : {}) });
+    if (unavailable) history.nativeOlderCursor = null;
     return { conversation, history, operations: this.store.listOperations({ conversationId: id, order: 'desc', limit: 100 }), revision: history.revision };
   }
 
   older(id: string, beforeItemId?: string) {
     this.assertOpen();
+    if (this.workspaceUnavailable(this.conversation(id).workspaceId)) return Promise.resolve(this.snapshot(id, beforeItemId));
     return this.task(async () => {
       await this.sync(id); this.assertOpen();
       const runtime = this.runtime(id);
@@ -462,7 +549,9 @@ export class Workbench {
   async enqueue(input: OperationInput) {
     this.assertOpen();
     if (this.store.getOperation(input.id)) return this.store.enqueueOperation(input).operation;
-    const directory = this.conversation(input.conversationId).cwd;
+    const { cwd: directory, workspaceId } = this.conversation(input.conversationId);
+    if (this.removing.has(workspaceId)) throw new StoreError('workspace_remove_busy', 409);
+    this.assertWorkspaceAvailable(workspaceId);
     if (!this.saving(directory) && this.executionBlocked(directory)) throw new StoreError('workspace_execution_blocked', 409);
     if (this.saving(directory)) throw new StoreError('workspace_save_in_progress', 409);
     if (input.type === 'message' && (this.runtimes.get(input.conversationId)?.dirty || this.runtimes.get(input.conversationId)?.syncing)) await this.sync(input.conversationId);
@@ -473,6 +562,8 @@ export class Workbench {
     if (input.type === 'stop' && (!['running', 'waiting'].includes(conversation.state.status) || conversation.state.runId !== input.payload.runId))
       throw new StoreError('native_run_changed', 409);
     await this.validateReferences(conversation, input);
+    if (this.removing.has(workspaceId)) throw new StoreError('workspace_remove_busy', 409);
+    this.assertWorkspaceAvailable(workspaceId);
     if (input.type === 'message' && !this.messageAllowed(this.conversation(conversation.id))) throw new StoreError('operation_needs_reconciliation', 409);
     if (this.saving(conversation.cwd)) throw new StoreError('workspace_save_in_progress', 409);
     if (this.executionBlocked(conversation.cwd)) throw new StoreError('workspace_execution_blocked', 409);
@@ -499,7 +590,8 @@ export class Workbench {
         }
         try { await this.validateReferences(conversation, operation); }
         catch { this.store.settleOperation(id, { outcome: 'rejected', reason: '引用的文件或图片已不可用，请继续编辑。' }); return; }
-        if (!conversation.binding || this.executionBlocked(conversation.cwd) || !this.store.claimOperation(id)) return;
+        if (!conversation.binding || this.workspaceUnavailable(conversation.workspaceId) ||
+          this.executionBlocked(conversation.cwd) || !this.store.claimOperation(id)) return;
         claimed = true;
         let receipt: Receipt;
         try {
