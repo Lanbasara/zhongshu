@@ -28,10 +28,15 @@ Set `ZHONGSHU_HARNESS_CONFIG` to an absolute, operator-owned `0600` file. The wo
   "workspaces": [
     { "id": "notes", "label": "Notes", "directory": "/srv/workspaces/notes" }
   ],
+  "workspaceRoots": [
+    { "id": "shared", "label": "Shared folders", "directory": "/srv/workspaces" }
+  ],
   "codex": { "socketPath": "/run/private-codex/app.sock" },
   "dsh": { "launchFile": "/run/private-zhongshu/dsh-launch" }
 }
 ```
+
+Set `workspaceRoots` to enable adding directories from the workbench. The app and intended Harnesses must see the same directory tree at the same absolute path. The app account needs permission to create directories and the intended Harness accounts must be able to enter them. Keep root ancestors stable during execution. Directory identity uses the filesystem device, inode and birth time, so choose storage that reports birth time and preserves identity across normal restarts. Root entries must be disjoint and must stay outside the app data tree. Existing `workspaces` keep their IDs and remain available while configured. The dedicated DSH editing configuration requires a single workspace and excludes `workspaceRoots`.
 
 Workspace files are readable by default. For Codex-only workspaces, set `"managedWrites": true` only after verifying that the instance coordinates every writer. DSH editing requires a dedicated instance with exactly one registered workspace, no Codex connection, `managedWrites: true`, and an absolute `dsh.maintenanceExecutable` bound to that workspace's Host. Keep the executable and its parent directories under operator control. It must be owned and executable by the application account, and cannot be a symlink or writable by other users.
 

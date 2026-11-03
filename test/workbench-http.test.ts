@@ -1,7 +1,7 @@
 import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { get as httpGet } from 'node:http';
@@ -13,6 +13,7 @@ import { productMigrations } from '../src/server/migrations.ts';
 import { createWorkbenchStore } from '../src/server/workbench-store.ts';
 import { Workbench } from '../src/server/workbench.ts';
 import { createWorkbenchHttp } from '../src/server/workbench-http.ts';
+import { WorkspaceRegistry } from '../src/server/workspace-registry.ts';
 import { changeEventSchema, snapshotSchema, workbenchConfigurationSchema } from '../src/shared/workbench.ts';
 
 const origin = 'https://workbench.example';
@@ -24,7 +25,7 @@ async function eventually(check: () => Promise<boolean> | boolean, timeout = 400
   assert.fail('bounded condition was not observed');
 }
 
-async function fixture(t: TestContext, limits: Parameters<typeof createWorkbenchHttp>[1] = {}) {
+async function fixture(t: TestContext, limits: Parameters<typeof createWorkbenchHttp>[1] = {}, withRegistry = false) {
   const directory = await mkdtemp(join(tmpdir(), 'zhongshu-workbench-http-'));
   const db = openDatabase(directory, productMigrations);
   const auth = createAuth(db, { audit: () => {} });
@@ -32,17 +33,30 @@ async function fixture(t: TestContext, limits: Parameters<typeof createWorkbench
   let transport: ReturnType<typeof createWorkbenchHttp>;
   const store = createWorkbenchStore(db, { onChange: change => transport?.changed(change) });
   const submissions: string[] = []; let receipt: Receipt = { outcome: 'unknown', reason: 'synthetic_receipt_lost' };
+  let state = nativeState;
+  let historyItems: NativeItem[] = [];
+  let nextStateRead: (() => Promise<void>) | undefined;
   const adapter: HarnessAdapter = {
     id: 'dsh',
     async catalog() { return { id: 'dsh', available: true, models: [{ id: configuration.modelId, label: 'Synthetic model' }], permissions: [{ id: configuration.permissionId, label: 'Workspace', description: 'Synthetic test only' }] }; },
     async create(input, onBound) { const binding = { id: 'private-native-binding', cwd: input.cwd, configuration: input.configuration, details: { privateNativeField: 'never-public' } }; onBound(binding); return binding; },
-    async state() { return nativeState; }, async history() { return { items: [], olderCursor: null }; },
+    async state() {
+      const pause = nextStateRead;
+      nextStateRead = undefined;
+      if (pause) await pause();
+      return state;
+    },
+    async history() { return { items: historyItems, olderCursor: null }; },
     async submit(_binding, operation) { submissions.push(operation.id); return receipt; },
     async reconcile() { return { outcome: 'accepted', runId: 'synthetic-turn' }; },
     async stop() { return { outcome: 'accepted', runId: 'synthetic-turn' }; },
     async watch() { return () => {}; }, async close() {},
   };
-  const workbench = new Workbench(store, [{ id: 'fixture', label: 'Synthetic workspace', directory: '/operator-only/synthetic-workspace' }], new Map([['dsh', adapter]]));
+  const root = join(await realpath(directory), 'folders');
+  if (withRegistry) await mkdir(root);
+  const roots = [{ id: 'shared', label: 'Test folders', directory: root }];
+  const registry = withRegistry ? new WorkspaceRegistry(db, [], roots) : undefined;
+  const workbench = new Workbench(store, [{ id: 'fixture', label: 'Synthetic workspace', directory: '/operator-only/synthetic-workspace' }], new Map([['dsh', adapter]]), registry);
   transport = createWorkbenchHttp(workbench, { heartbeatMs: 50, ...limits });
   const app = await buildApp({ db, origin, privateRoutes: transport.routes, onLogout: transport.logout });
   const base = await app.listen({ host: '127.0.0.1', port: 0 });
@@ -92,8 +106,80 @@ async function fixture(t: TestContext, limits: Parameters<typeof createWorkbench
     async function named(name: string) { while (true) { const event = await next(); if (!event || event.name === name) return event; } }
     return { response, next, named, reader, close: () => { controller.abort(); controllers.delete(controller); } };
   }
-  return { db, auth, store, workbench, transport, app, base, credentials, login, request, seed, stream, submissions, setReceipt(value: Receipt) { receipt = value; } };
+  return { db, auth, store, workbench, transport, app, base, credentials, login, request, seed, stream, submissions, root, roots,
+    setReceipt(value: Receipt) { receipt = value; }, setState(value: NativeState) { state = value; },
+    setHistory(value: NativeItem[]) { historyItems = value; },
+    pauseNextState() {
+      let entered = false;
+      let release!: () => void;
+      const released = new Promise<void>(resolve => { release = resolve; });
+      nextStateRead = () => { entered = true; return released; };
+      return { entered: () => entered, release };
+    },
+  };
 }
+
+test('workspace registration gates real HTTP and retains disk files, history and binding across removal', async t => {
+  const f = await fixture(t, {}, true);
+  const folder = join(f.root, 'existing');
+  await mkdir(folder);
+  await writeFile(join(folder, 'notes.md'), 'workspace evidence');
+  await symlink(folder, join(f.root, 'alias'));
+  const post = (path: string, body: unknown) => f.request(path, { method: 'POST', body });
+  const selection = { rootId: 'shared', path: ['existing'] };
+  assert.equal((await f.request('/workspace-directories', { method: 'POST', body: selection, authenticated: false })).status, 401);
+  assert.equal((await f.request('/workspaces', { method: 'POST', body: selection, headers: { 'x-csrf-token': '' } })).status, 403);
+  assert.deepEqual((await post('/workspace-directories', { ...selection, path: [] })).body,
+    { currentDirectory: f.root, names: ['existing'], limited: false });
+  assert.equal((await post('/workspace-directories', selection)).body.currentDirectory, folder);
+  assert.equal((await post('/workspaces', { ...selection, path: ['..'] })).status, 400);
+  assert.equal((await post('/workspaces', { ...selection, path: ['alias'] })).status, 409);
+  assert.equal((await post('/workspaces', { ...selection, path: [], name: 'new-folder' })).status, 200);
+  const registered = await post('/workspaces', selection);
+  assert.equal(registered.status, 200);
+  const workspaceId = registered.body.id as string;
+  assert.equal((await post('/workspaces', selection)).body.id, workspaceId);
+  const manage = (action: Record<string, unknown>) => post(`/workspaces/${workspaceId}/manage`, action);
+  assert.equal((await manage({ action: 'rename', label: 'Display only' })).status, 200);
+  assert.equal((await manage({ action: 'pin', pinned: true })).status, 200);
+  assert.deepEqual((await f.request('/configuration')).body.workspaces[0],
+    { id: workspaceId, label: 'Display only', directoryName: 'existing', pinned: true });
+  const id = randomUUID();
+  assert.equal((await post('/conversations', { id, harnessId: 'dsh', workspaceId, configuration })).status, 202);
+  await eventually(() => f.store.getConversation(id)?.readiness === 'ready');
+  const binding = f.store.getConversation(id)!.binding;
+  assert.equal(binding?.cwd, folder);
+  const history = [{ id: 'saved-message', kind: 'assistant', status: 'completed', text: 'Saved conversation' }] as const;
+  f.setHistory([...history]);
+  f.store.mergeHistory(id, [...history]);
+  f.setState({ ...nativeState, status: 'waiting', runId: 'waiting-run', pendingInputs: 1 });
+  assert.equal((await manage({ action: 'remove' })).body.error, 'workspace_remove_busy');
+  f.setState(nativeState);
+  const paused = f.pauseNextState();
+  const removal = manage({ action: 'remove' });
+  try {
+    await eventually(paused.entered);
+    const send = await post(`/conversations/${id}/operations`, { id: randomUUID(), type: 'message', payload: { text: 'Raced removal' } });
+    assert.equal(send.body.error, 'workspace_remove_busy');
+  } finally { paused.release(); }
+  assert.equal((await removal).status, 200);
+  assert.equal(new WorkspaceRegistry(f.db, [], f.roots).get(workspaceId)?.removed, 1);
+  assert.equal((await f.request(`/conversations/${id}`)).body.history.items[0]?.text, 'Saved conversation');
+  assert.equal((await post(`/conversations/${id}/operations`, { id: randomUUID(), type: 'message', payload: { text: 'Blocked' } })).body.error, 'workspace_removed');
+  assert.equal((await f.request(`/workspaces/${workspaceId}/file?path=notes.md`)).body.error, 'workspace_removed');
+  assert.equal(await readFile(join(folder, 'notes.md'), 'utf8'), 'workspace evidence');
+  assert.equal((await manage({ action: 'restore' })).status, 200);
+  assert.equal(f.store.getConversation(id)?.state.configurationVerified, false);
+  await f.request(`/conversations/${id}`);
+  await eventually(() => f.store.getConversation(id)?.state.configurationVerified === true);
+  assert.deepEqual(f.store.getConversation(id)?.binding, binding);
+  assert.equal((await manage({ action: 'remove' })).status, 200);
+  await rename(folder, join(f.root, 'moved'));
+  await mkdir(folder);
+  assert.equal((await manage({ action: 'restore' })).body.error, 'workspace_directory_changed');
+  assert.equal((await f.request(`/conversations/${id}`)).body.history.items[0]?.text, 'Saved conversation');
+  assert.deepEqual(f.submissions, []);
+});
 
 test('workbench real HTTP enforces authentication, input limits and the public DTO boundary', async t => {
   const f = await fixture(t);

@@ -10,6 +10,7 @@ import { loadHarnesses } from './harness-config.ts';
 import { createWorkbenchStore, type WorkbenchChange } from './workbench-store.ts';
 import { Workbench } from './workbench.ts';
 import { createWorkbenchHttp } from './workbench-http.ts';
+import { WorkspaceRegistry } from './workspace-registry.ts';
 
 const metadataSchema = z.object({ name: z.literal('zhongshu'), version: z.string().max(64), revision: z.string().regex(/^(development|[a-f0-9]{40})$/) });
 
@@ -25,7 +26,8 @@ async function main() {
   try {
     const harnesses = await loadHarnesses(process.env.ZHONGSHU_HARNESS_CONFIG, config.dataDirectory);
     const store = createWorkbenchStore(db, { onChange: (change: WorkbenchChange) => transport?.changed(change) });
-    workbench = new Workbench(store, harnesses.workspaces, harnesses.adapters);
+    const registry = new WorkspaceRegistry(db, harnesses.workspaces, harnesses.workspaceRoots);
+    workbench = new Workbench(store, harnesses.workspaces, harnesses.adapters, registry);
     transport = createWorkbenchHttp(workbench);
     app = await buildApp({ db, origin: config.origin, metadata, assetsDirectory: import.meta.url.endsWith('.ts') ? undefined : fileURLToPath(new URL('../public/', import.meta.url)), logger: true,
       privateRoutes: transport.routes, onLogout: transport.logout });

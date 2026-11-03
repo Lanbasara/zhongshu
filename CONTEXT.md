@@ -8,6 +8,9 @@
 用户选定的工作目录及其资料，是对话开展工作的上下文。
 _Avoid_：项目目录、仓库根、workspace root
 
+**工作区登记（Workspace registration）**：
+中书实例内关联工作目录与对话的记录。同一登记拥有稳定身份，显示名和是否启用可以变化。
+
 **对话（Conversation）**：
 用户与一个 Agent 持续交流的单位，可以包含多轮运行。
 _Avoid_：会话（session）、聊天（channel）

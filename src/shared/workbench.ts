@@ -27,9 +27,28 @@ export const catalogSchema = z.object({
   models: z.array(z.object({ id: identifierSchema, label: boundedText(1024) }).strict()).max(1000),
   permissions: z.array(z.object({ id: identifierSchema, label: boundedText(1024), description: boundedText(4096) }).strict()).max(100),
 }).strict();
+export const workspaceIdSchema = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/);
+export const workspaceLimit = 256;
+export const workspaceLabelSchema = boundedText(400).max(100).refine(value => !!value.trim() && !/[\u0000-\u001f\u007f]/u.test(value));
+export const folderName = boundedText(255).min(1).refine(value => !value.startsWith('.') && !/[\\/\u0000-\u001f\u007f]|%2[ef]|%5c/i.test(value) && value === value.trim());
+const folderPath = z.array(folderName).max(12);
+const directorySelection = { rootId: workspaceIdSchema, path: folderPath };
+export const workspaceBrowseSchema = z.object(directorySelection).strict();
+export const workspaceAddSchema = z.object({ ...directorySelection, name: folderName.optional() }).strict();
+export const workspaceManagementSchema = z.discriminatedUnion('action', [
+  z.object({ action: z.literal('rename'), label: workspaceLabelSchema }).strict(),
+  z.object({ action: z.literal('pin'), pinned: z.boolean() }).strict(),
+  z.object({ action: z.literal('remove') }).strict(),
+  z.object({ action: z.literal('restore') }).strict(),
+]);
+export const workspaceDirectoryListSchema = z.object({
+  currentDirectory: boundedText(4096).min(1), names: z.array(folderName).max(200), limited: z.boolean(),
+}).strict();
 export const workbenchConfigurationSchema = z.object({
   harnesses: z.array(catalogSchema).max(2),
-  workspaces: z.array(z.object({ id: identifierSchema, label: boundedText(400) }).strict()).max(16),
+  workspaces: z.array(z.object({ id: identifierSchema, label: boundedText(400), directoryName: boundedText(1024).optional(), pinned: z.boolean().optional() }).strict()).max(workspaceLimit),
+  removedWorkspaces: z.array(z.object({ id: identifierSchema, label: boundedText(400) }).strict()).max(workspaceLimit).optional(),
+  workspaceRoots: z.array(z.object({ id: workspaceIdSchema, label: workspaceLabelSchema }).strict()).max(16).optional(),
 }).strict();
 export const createConversationSchema = z.object({
   id: z.uuid(), harnessId: z.enum(['codex', 'dsh']), workspaceId: identifierSchema,
