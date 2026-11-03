@@ -2,7 +2,7 @@
 status: active
 started: 2026-11-03
 exit: 在本地与 VPS 实例均能添加已有和新建的目录并用两个 Harness 工作，移除后历史可读且文件保留，恢复后可接续原对话
-evidence: none yet
+evidence: 见 [PR #17](https://github.com/Lanbasara/zhongshu/pull/17) 的验证记录
 ---
 
 # 工作区管理
