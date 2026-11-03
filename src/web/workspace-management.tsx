@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { ChevronLeft, ChevronRight, Folder, FolderPlus, X } from 'lucide-react';
 import { z } from 'zod';
 import { folderName, workspaceDirectoryListSchema, workspaceLabelSchema, workspaceManagementSchema, type WorkbenchConfiguration } from '../shared/workbench.ts';
 import { RequestError, request } from './workbench-client.ts';
@@ -17,22 +18,120 @@ const errors: Record<string, string> = {
   workspace_path_too_deep: '目录路径过长，请选择较浅的目录。',
   workspace_limit: '工作区数量已达上限。',
 };
+type Roots = NonNullable<WorkbenchConfiguration['workspaceRoots']>;
+type FolderSelection = { rootId: string; path: string[]; name?: string };
 
-export function WorkspaceManagement({ action, roots, csrf, close, changed, report }: {
-  action: WorkspaceAction; roots: NonNullable<WorkbenchConfiguration['workspaceRoots']>; csrf: string;
-  close(): void; changed(): void; report(reason: unknown): void;
+function WorkspaceDirectoryPicker({ roots, csrf, busy, error, clearError, submit, report }: {
+  roots: Roots; csrf: string; busy: boolean; error: string;
+  clearError(): void; submit(selection: FolderSelection): Promise<void>; report(reason: unknown): void;
 }) {
-  const dialog = useRef<HTMLDialogElement>(null);
   const [rootId, setRootId] = useState(roots[0]?.id ?? '');
   const [path, setPath] = useState<string[]>([]);
   const [directory, setDirectory] = useState<z.infer<typeof workspaceDirectoryListSchema>>();
+  const [browseError, setBrowseError] = useState('');
+  const [browseRetry, retryBrowse] = useState(0);
+  const [creating, setCreating] = useState(false);
   const [folder, setFolder] = useState('');
+  const createButton = useRef<HTMLButtonElement>(null);
+  const folderInput = useRef<HTMLInputElement>(null);
+  const restoreFocus = useRef(false);
+
+  useEffect(() => {
+    if (!rootId) return;
+    const controller = new AbortController();
+    setDirectory(undefined);
+    setBrowseError('');
+    void request('/workspace-directories', workspaceDirectoryListSchema, { csrf, body: { rootId, path }, signal: controller.signal })
+      .then(value => { if (!controller.signal.aborted) setDirectory(value); })
+      .catch(reason => {
+        if (controller.signal.aborted) return;
+        if (reason instanceof RequestError && reason.status === 401) report(reason);
+        setBrowseError(reason instanceof RequestError ? errors[reason.code] ?? '暂时无法读取文件夹。' : '暂时无法读取文件夹。');
+      });
+    return () => controller.abort();
+  }, [rootId, path, csrf, report, browseRetry]);
+  useEffect(() => {
+    if (creating) folderInput.current?.focus();
+    else if (restoreFocus.current) {
+      restoreFocus.current = false;
+      createButton.current?.focus();
+    }
+  }, [creating]);
+
+  const visit = (next: string[]) => { setDirectory(undefined); setPath(next); clearError(); };
+  const rootLabel = roots.find(root => root.id === rootId)?.label ?? '工作区目录';
+  const currentFolder = path.at(-1) ?? rootLabel;
+  const parentTrail = [rootLabel, ...path.slice(0, -1)].join(' / ');
+  const validFolder = folderName.safeParse(folder).success;
+  const currentDirectory = directory?.currentDirectory;
+  const target = currentDirectory && creating && validFolder ? `${currentDirectory.replace(/\/$/, '')}/${folder}` : currentDirectory;
+  const canSubmit = !!directory && (!creating || validFolder);
+
+  return <form className="workspace-picker-form" onSubmit={event => {
+    event.preventDefault();
+    if (canSubmit && !busy) void submit({ rootId, path, ...(creating ? { name: folder } : {}) });
+  }}>
+    <div className="workspace-picker-toolbar">
+      <button type="button" className="workspace-picker-up" aria-label="上一级" disabled={!path.length || creating || busy}
+        onClick={() => visit(path.slice(0, -1))}><ChevronLeft size={19} aria-hidden="true" /></button>
+      <div className="workspace-picker-location">
+        {roots.length > 1 ? <select aria-label="选择目录位置" value={rootId} disabled={creating || busy}
+          onChange={event => { setRootId(event.target.value); visit([]); }}>
+          {roots.map(root => <option value={root.id} key={root.id}>{root.label}</option>)}
+        </select> : path.length > 0 && <span className="workspace-picker-trail" title={parentTrail}>{parentTrail}</span>}
+        {(roots.length <= 1 || path.length > 0) && <strong title={currentFolder}>{currentFolder}</strong>}
+      </div>
+      {!creating && <button type="button" className="workspace-picker-secondary" ref={createButton}
+        disabled={!directory || path.length >= 12 || busy}
+        onClick={() => { clearError(); setFolder(''); setCreating(true); }}>
+        <FolderPlus size={17} aria-hidden="true" />新建文件夹
+      </button>}
+    </div>
+    <div className="workspace-picker-content" aria-busy={!directory && !browseError}>
+      {creating && <div className="workspace-picker-new">
+        <label htmlFor="workspace-folder">文件夹名称</label>
+        <input id="workspace-folder" ref={folderInput} value={folder} maxLength={255} placeholder="输入名称" disabled={busy}
+          aria-invalid={!!folder && !validFolder}
+          aria-describedby={folder && !validFolder ? 'workspace-folder-invalid' : undefined}
+          onChange={event => { setFolder(event.target.value); clearError(); }} />
+        {folder && !validFolder && <p id="workspace-folder-invalid" className="workspace-picker-error">请输入有效的文件夹名称。</p>}
+      </div>}
+      {target && <details className="workspace-picker-path" key={`${currentDirectory}-${creating}`}>
+        <summary>{creating ? '查看创建位置' : '查看完整路径'}</summary>
+        <code>{target}</code>
+      </details>}
+      {!creating && (browseError ? <div className="workspace-picker-empty" role="status">
+        <p>{browseError}</p><button type="button" className="workspace-picker-secondary" onClick={() => retryBrowse(value => value + 1)}>重试</button>
+      </div> : !directory ? <p className="workspace-picker-empty" role="status">正在读取文件夹…</p> :
+        directory.names.length ? <ul className="workspace-picker-list" aria-label="子文件夹">
+          {directory.names.map(name => <li key={name}><button type="button" onClick={() => visit([...path, name])} disabled={path.length >= 12 || busy}>
+            <Folder size={18} aria-hidden="true" /><span>{name}</span><ChevronRight size={17} aria-hidden="true" />
+          </button></li>)}
+        </ul> : <div className="workspace-picker-empty"><Folder size={24} aria-hidden="true" /><p>这里没有子文件夹</p></div>)}
+      {!creating && directory?.limited && <p className="workspace-picker-empty">仅显示部分子文件夹。</p>}
+    </div>
+    <div className="workspace-picker-footer">
+      {error && <p className="workspace-picker-error" role="alert">{error}</p>}
+      <div className="workspace-picker-actions">
+        {creating && <button type="button" className="workspace-picker-secondary" disabled={busy}
+          onClick={() => { restoreFocus.current = true; setCreating(false); clearError(); }}>取消新建</button>}
+        <button type="submit" className="primary" disabled={!canSubmit || busy}>
+          {busy ? '正在添加…' : creating ? '新建并添加' : '添加当前目录'}
+        </button>
+      </div>
+    </div>
+  </form>;
+}
+
+export function WorkspaceManagement({ action, roots, csrf, close, changed, report }: {
+  action: WorkspaceAction; roots: Roots; csrf: string;
+  close(): void; changed(): void; report(reason: unknown): void;
+}) {
+  const dialog = useRef<HTMLDialogElement>(null);
   const [label, setLabel] = useState(action.kind === 'add' ? '' : action.workspace.label);
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  const [browseError, setBrowseError] = useState('');
-  const [browseRetry, retryBrowse] = useState(0);
   const handleError = (reason: unknown) => {
     if (reason instanceof RequestError && reason.status === 401) report(reason);
     return reason instanceof RequestError ? errors[reason.code] ?? '暂时无法完成操作，请重试。' : '暂时无法确认结果，请重试。';
@@ -43,21 +142,27 @@ export function WorkspaceManagement({ action, roots, csrf, close, changed, repor
     return () => node?.close();
   }, []);
   useEffect(() => {
-    if (action.kind !== 'add' || !rootId) return;
-    const controller = new AbortController();
-    setDirectory(undefined);
-    setBrowseError('');
-    void request('/workspace-directories', workspaceDirectoryListSchema, { csrf, body: { rootId, path }, signal: controller.signal })
-      .then(value => { if (!controller.signal.aborted) setDirectory(value); })
-      .catch(reason => {
-        if (controller.signal.aborted) return;
-        if (reason instanceof RequestError && reason.status === 401) report(reason);
-        setBrowseError(reason instanceof RequestError ? errors[reason.code] ?? '暂时无法读取目录。' : '暂时无法读取目录。');
-      });
-    return () => controller.abort();
-  }, [action.kind, rootId, path, csrf, report, browseRetry]);
-
-  const submit = async (body: z.infer<typeof workspaceManagementSchema> | { rootId: string; path: string[]; name?: string }) => {
+    const node = dialog.current;
+    const viewport = window.visualViewport;
+    if (!node || !viewport || action.kind !== 'add') return;
+    const fitVisibleViewport = () => {
+      if (viewport.scale !== 1) {
+        node.style.removeProperty('--picker-viewport');
+        node.style.removeProperty('--picker-bottom');
+        return;
+      }
+      node.style.setProperty('--picker-viewport', `${viewport.height}px`);
+      node.style.setProperty('--picker-bottom', `${Math.max(0, window.innerHeight - viewport.height - viewport.offsetTop)}px`);
+    };
+    fitVisibleViewport();
+    viewport.addEventListener('resize', fitVisibleViewport);
+    viewport.addEventListener('scroll', fitVisibleViewport);
+    return () => {
+      viewport.removeEventListener('resize', fitVisibleViewport);
+      viewport.removeEventListener('scroll', fitVisibleViewport);
+    };
+  }, [action.kind]);
+  const submit = async (body: z.infer<typeof workspaceManagementSchema> | FolderSelection) => {
     setBusy(true);
     setError('');
     try {
@@ -67,45 +172,16 @@ export function WorkspaceManagement({ action, roots, csrf, close, changed, repor
       close();
     } catch (reason) {
       setError(handleError(reason));
-      if (action.kind === 'add') retryBrowse(value => value + 1);
     } finally { setBusy(false); }
   };
-  const visit = (next: string[]) => { setDirectory(undefined); setPath(next); setFolder(''); setError(''); };
   const title = action.kind === 'add' ? '添加工作区' : action.kind === 'restore' ? '恢复工作区' : '管理工作区';
-  const validFolder = path.length < 12 && folderName.safeParse(folder).success;
-  const targetDirectory = directory && validFolder ? `${directory.currentDirectory.replace(/\/$/, '')}/${folder}` : undefined;
-  return <dialog className="create-dialog manage-dialog" aria-labelledby="workspace-dialog-title" ref={dialog}
+  return <dialog className={`create-dialog manage-dialog${action.kind === 'add' ? ' workspace-picker' : ''}`} aria-labelledby="workspace-dialog-title" ref={dialog}
     onCancel={event => { event.preventDefault(); if (!busy) close(); }}>
-    <header><h2 id="workspace-dialog-title">{title}</h2><button className="icon-button" aria-label="关闭" disabled={busy} onClick={close}>×</button></header>
+    <header><h2 id="workspace-dialog-title">{title}</h2><button className="icon-button" aria-label="关闭" disabled={busy} onClick={close}><X size={20} aria-hidden="true" /></button></header>
+    {action.kind === 'add' ? <WorkspaceDirectoryPicker roots={roots} csrf={csrf} busy={busy} error={error}
+      clearError={() => setError('')} submit={submit} report={report} /> : <>
     <fieldset disabled={busy}>
-      {action.kind === 'add' ? <>
-        <label htmlFor="workspace-root">当前实例开放的目录</label>
-        <select id="workspace-root" value={rootId} onChange={event => { setRootId(event.target.value); visit([]); }}>
-          {roots.map(root => <option value={root.id} key={root.id}>{root.label}</option>)}
-        </select>
-        <div className="workspace-directory-heading">
-          {path.length > 0 && <button className="text-button" onClick={() => visit(path.slice(0, -1))}>上一级</button>}
-          <span>当前位置</span>
-          {directory && <code aria-label="当前目录的完整路径">{directory.currentDirectory}</code>}
-        </div>
-        <div className="workspace-directory-list" aria-label="子目录">
-          {browseError ? <p role="status">{browseError} <button className="text-button" onClick={() => retryBrowse(value => value + 1)}>重试</button></p> :
-            !directory ? <p role="status">正在读取目录…</p> : <>
-              {directory.names.map(name => <button className="text-button" key={name} onClick={() => visit([...path, name])} disabled={path.length >= 12}>{name} ›</button>)}
-              {!directory.names.length && <p className="quiet">暂无可选子目录</p>}
-              {directory.limited && <p className="quiet">仅显示部分子目录。</p>}
-            </>}
-        </div>
-        <button className="primary" disabled={!directory} onClick={() => void submit({ rootId, path })}>添加当前目录</button>
-        <form onSubmit={event => { event.preventDefault(); if (targetDirectory) void submit({ rootId, path, name: folder }); }}>
-          <label htmlFor="workspace-folder">新建空文件夹</label>
-          <input id="workspace-folder" value={folder} maxLength={255} onChange={event => setFolder(event.target.value)} />
-          {directory && <p className="workspace-creation-location">
-            {targetDirectory ? '将创建在' : '将在当前目录下新建'} <code aria-label="新建文件夹的位置">{targetDirectory ?? directory.currentDirectory}</code>
-          </p>}
-          <button type="submit" className="primary" disabled={!targetDirectory}>新建并添加</button>
-        </form>
-      </> : action.kind === 'restore' ? <>
+      {action.kind === 'restore' ? <>
         <p>恢复「{action.workspace.label}」的原登记。对话核对原生会话后即可继续。</p>
         <button className="primary" onClick={() => void submit({ action: 'restore' })}>恢复工作区</button>
       </> : <>
@@ -125,6 +201,6 @@ export function WorkspaceManagement({ action, roots, csrf, close, changed, repor
         </div>}
       </>}
     </fieldset>
-    {error && <p role="alert">{error}</p>}
+    {error && <p role="alert">{error}</p>}</>}
   </dialog>;
 }
