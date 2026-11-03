@@ -9,10 +9,10 @@ export class RequestError extends Error {
 }
 const root = '/api/private/workbench';
 /** A bounded, same-origin read. An uncertain write is retried only with its original ID. */
-export async function request<T>(path: string, schema: z.ZodType<T>, options: { signal?: AbortSignal; body?: unknown; csrf?: string } = {}): Promise<T> {
+export async function request<T>(path: string, schema: z.ZodType<T>, options: { signal?: AbortSignal; body?: unknown; csrf?: string; timeoutMs?: number } = {}): Promise<T> {
   const response = await fetch(root + path, {
     method: options.body === undefined ? 'GET' : 'POST', cache: 'no-store',
-    signal: AbortSignal.any([...(options.signal ? [options.signal] : []), AbortSignal.timeout(15_000)]),
+    signal: AbortSignal.any([...(options.signal ? [options.signal] : []), AbortSignal.timeout(options.timeoutMs ?? 15_000)]),
     headers: options.body === undefined ? {} : { 'Content-Type': 'application/json', 'X-CSRF-Token': options.csrf ?? '' },
     ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
   });

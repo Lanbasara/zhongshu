@@ -48,7 +48,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
     reply.header('X-Content-Type-Options', 'nosniff');
     reply.header('Referrer-Policy', 'no-referrer');
     reply.header('X-Frame-Options', 'DENY');
-    reply.header('Content-Security-Policy', "default-src 'none'; script-src 'self'; style-src 'self'; style-src-attr 'unsafe-inline'; img-src 'self' https: blob:; connect-src 'self'; manifest-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'");
+    reply.header('Content-Security-Policy', "default-src 'none'; script-src 'self'; style-src 'self'; style-src-attr 'unsafe-inline'; img-src 'self' https: blob: data:; connect-src 'self'; manifest-src 'self'; frame-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'");
     if (secure) reply.header('Strict-Transport-Security', 'max-age=31536000');
     if (!['GET', 'HEAD', 'OPTIONS'].includes(request.method)) {
       if (request.headers.origin !== options.origin || request.headers['sec-fetch-site'] === 'cross-site') {

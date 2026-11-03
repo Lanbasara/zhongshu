@@ -156,7 +156,7 @@ async function main() {
   const workspaces = ['a', 'b'].map(id => {
     const directory = join(root, 'workspace-' + id);
     mkdirSync(directory, { recursive: true, mode: 0o700 });
-    return { id, label: 'Fixture ' + id.toUpperCase(), directory };
+    return { id, label: 'Fixture ' + id.toUpperCase(), directory, managedWrites: true };
   });
   const timers = new Set<NodeJS.Timeout>();
   function adapter(id: HarnessId): HarnessAdapter {

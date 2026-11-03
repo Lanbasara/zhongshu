@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { Streamdown, defaultRemarkPlugins } from 'streamdown';
 import { code } from '@streamdown/code';
 import { cjk } from '@streamdown/cjk';
@@ -65,7 +65,7 @@ export function ToolGroup({ items }: { items: WorkbenchItem[] }) {
 }
 
 /** Group tools without reordering text or merging actions from separate native turns. */
-export function Transcript({ items, conversation, onQuote }: { items: WorkbenchItem[]; conversation: string; onQuote(reference: MessageReference): void }) {
+export const Transcript = memo(function Transcript({ items, conversation, onQuote }: { items: WorkbenchItem[]; conversation: string; onQuote(reference: MessageReference): void }) {
   const groups: { key: string; tools?: WorkbenchItem[]; message?: WorkbenchItem }[] = [];
   for (const item of items) {
     const previous = groups.at(-1);
@@ -75,7 +75,7 @@ export function Transcript({ items, conversation, onQuote }: { items: WorkbenchI
     } else groups.push({ key: item.id, message: item });
   }
   return groups.map(group => group.tools ? <ToolGroup key={group.key} items={group.tools}/> : <Message key={group.key} item={group.message!} conversation={conversation} onQuote={onQuote}/>);
-}
+});
 
 export function FilePicker({ conversation, onSelect, onClose }: { conversation: string; onSelect(ref: MessageReference): void; onClose(): void }) {
   const dialog = useRef<HTMLDialogElement>(null);

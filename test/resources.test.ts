@@ -99,3 +99,39 @@ test('Markdown workspace images use the native reader and pin per-message snapsh
   await assert.rejects(workbench.workspaceImage(id,'bad-message','../outside.png'));assert.equal(reads,1);
   await assert.rejects(workbench.workspaceImage(id,'plot-message','another.png'));assert.equal(reads,1);
 });
+
+test('workspace documents enforce auth, CSRF, registered roots, format and path boundaries', async t => {
+  const { root, db, store } = await fixture(t);
+  const work = await realpath(await mkdtemp(join(tmpdir(), 'zhongshu-documents-')));
+  t.after(() => rm(work, { recursive: true, force: true }));
+  await writeFile(join(work, 'notes.md'), '# Original');
+  await writeFile(join(work, 'report.html'), '<h1>Report</h1>');
+  await writeFile(join(root, 'outside.txt'), 'synthetic canary');
+  await symlink(join(root, 'outside.txt'), join(work, 'escape.txt'));
+  const origin = 'https://documents.example';
+  const password = 'synthetic-test-password-123';
+  await createAuth(db).initialize(password);
+  const workbench = new Workbench(store, [{ id: 'documents', label: 'Documents', directory: work, managedWrites: true }], new Map());
+  const transport = createWorkbenchHttp(workbench);
+  const app = await buildApp({ db, origin, privateRoutes: transport.routes });
+  t.after(async () => { transport.close(); await workbench.close(); await app.close(); });
+  const login = await app.inject({ method: 'POST', url: '/api/login', headers: { origin }, payload: { password } });
+  const cookie = login.cookies.map(c => c.name + '=' + c.value).join('; ');
+  const headers = { cookie, origin, 'x-csrf-token': login.json().csrfToken };
+  const url = '/api/private/workbench/workspaces/documents/file';
+  const read = (path: string) => app.inject({ url: url + '?path=' + encodeURIComponent(path), headers });
+  assert.equal((await app.inject({ url: url + '?path=notes.md' })).statusCode, 401);
+  assert.equal((await read('../outside.txt')).statusCode, 403);
+  assert.equal((await read('escape.txt')).statusCode, 409);
+  assert.equal((await app.inject({ url: url.replace('/documents/', '/unregistered/') + '?path=notes.md', headers })).statusCode, 404);
+  const report = await read('report.html');
+  assert.equal(report.json().kind, 'html');
+  assert.match(String(report.headers['content-type']), /^application\/json/);
+  const update = (path: string, version: string, requestHeaders = headers) =>
+    app.inject({ method: 'POST', url, headers: requestHeaders, payload: { path, version, text: 'changed' } });
+  assert.equal((await update('report.html', report.json().version)).statusCode, 403);
+  const original = await read('notes.md');
+  assert.equal((await update('notes.md', original.json().version, { ...headers, 'x-csrf-token': '' })).statusCode, 403);
+  assert.equal((await update('notes.md', original.json().version)).statusCode, 200);
+  assert.equal((await read('notes.md')).json().text, 'changed');
+});

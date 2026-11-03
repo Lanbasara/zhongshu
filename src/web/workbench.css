@@ -257,3 +257,49 @@
 .workbench .manage-archive button:hover { background: #edeef0; }
 .navigation-notice { color: #3d5c50; padding-inline: 6px; font-size: 12px; }
 .navigation-notice:empty { display: none; }
+
+.workspace-reader { min-width: 0; min-height: 0; display: flex; flex-direction: column; background: #f8f8f9; border-left: 1px solid #e7e7ec; color: #303036; }
+.workspace-reader-bar, .workspace-reader-tools { display: flex; align-items: center; gap: 8px; padding: 8px 14px; border-bottom: 1px solid #e7e7ec; }
+.workspace-reader-bar { min-height: 49px; position: relative; z-index: 3; }
+.workspace-reader-tools { flex-wrap: wrap; font-size: 12px; color: #62636d; }
+.workspace-reader button { color: inherit; border: 0; background: transparent; border-radius: 7px; }
+.workspace-reader button:enabled:hover, .workspace-reader button[aria-current="true"] { background: #ebebef; }
+.workspace-reader button:disabled { opacity: .55; }
+.workspace-reader button:focus-visible, .workspace-reader select:focus-visible { outline: 2px solid #66758b; outline-offset: 2px; }
+.reader-icon { display: grid; place-items: center; flex: none; width: 34px; height: 34px; padding: 0; }
+.workspace-file-picker { flex: 1; min-width: 0; }
+.reader-file-trigger { display: flex; align-items: center; gap: 8px; min-height: 34px; max-width: 100%; padding: 0 8px; font-weight: 600; }
+.reader-file-trigger span, .reader-file-row span, .reader-file-parent span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-reader svg { flex: none; }
+.workspace-file-popover { position: absolute; top: calc(100% + 5px); left: 14px; width: min(22rem, calc(100% - 28px)); padding: 6px; background: white; border: 1px solid #e1e1e8; border-radius: 12px; box-shadow: 0 2px 6px #25253506, 0 12px 40px #25253516; }
+.reader-popover-title { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 8px 10px; color: #676875; font-size: 12px; }
+.reader-popover-title select { min-width: 0; background: transparent; border: 1px solid #e1e1e8; border-radius: 6px; color: inherit; }
+.workspace-file-popover ul { list-style: none; margin: 0; padding: 0; overflow: auto; max-height: min(42dvh, 22rem); }
+.reader-file-row, .reader-file-parent { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 38px; padding: 6px 10px; text-align: left; }
+.reader-file-row > span { flex: 1; }
+.reader-file-row small { display: block; overflow: hidden; text-overflow: ellipsis; color: #676875; font-size: 11px; }
+.reader-popover-empty { margin: 8px 10px; color: #676875; font-size: 12px; }
+.workspace-reader-tools button, .reader-action { display: inline-flex; align-items: center; gap: 6px; padding: 6px 9px; font-weight: 600; }
+.workspace-reader button.reader-primary { background: #303036; color: white; }
+.workspace-reader button.reader-primary:enabled:hover { background: #474751; }
+.reader-placeholder { margin: 12px; color: #676875; }
+.workspace-reader-content { flex: 1; min-height: 0; overflow: auto; padding: 1rem; background: white; }
+.workspace-reader-content:has(.workspace-report) { padding: 0; overflow: hidden; }
+.workspace-reader-content textarea { display: block; width: 100%; height: 100%; resize: none; font: 1rem/1.6 monospace; padding: .6rem; }
+.workspace-reader-content pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.workspace-report { display: block; width: 100%; height: 100%; border: 0; background: white; }
+.workspace-reader-feedback { margin: 0; padding: .5rem .8rem; }
+.workspace-reader.is-expanded { position: fixed; inset: 0; z-index: 20; }
+@media (min-width: 701px) {
+  .workbench.with-workspace-reader { grid-template-columns: min(var(--sidebar-width, 264px), 28vw) minmax(0, 1fr) minmax(0, 1fr); }
+}
+@media (max-width: 700px) {
+  .workspace-reader { position: fixed; inset: 0; z-index: 20; }
+  .workspace-reader .workspace-reader-expand { display: none; }
+}
+
+.reader-editor-pending { display: flex; align-items: center; gap: 8px; margin: 12px; color: #62636d; }
+
+.workspace-reader-content textarea[hidden] { display: none; }
+
+.reader-preview-pages { position: sticky; top: 0; z-index: 1; display: flex; gap: 12px; align-items: center; background: white; padding: 6px 0; font-size: 12px; }
