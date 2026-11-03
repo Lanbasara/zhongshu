@@ -6,7 +6,7 @@ import { useCallback, useEffect, useMemo, useLayoutEffect, useRef, useState } fr
 import {
   workbenchConfigurationSchema, conversationResponseSchema, operationResponseSchema,
   snapshotSchema, changeEventSchema, resetEventSchema, queueViewSchema,
-  type WorkbenchConfiguration, type Conversation, type WorkbenchSnapshot, type WorkbenchItem, type QueueCommand,
+  type WorkbenchConfiguration, type Conversation, type WorkbenchSnapshot, type WorkbenchItem, type QueueCommand, type TurnFileSummary,
 } from '../shared/workbench.ts';
 import { request, RequestError, readDraft, saveDraft, type Draft } from './workbench-client.ts';
 import { sessionSchema } from '../shared/http.ts';
@@ -55,20 +55,31 @@ const stateReasons: Record<string, string> = {
   native_run_changed: '当前运行已经变化，请先刷新状态。',
 };
 const explain = (value: string) => stateReasons[value] ?? (/^[a-z0-9_]+$/.test(value) ? '暂时无法核对原生状态；已有内容保留，任务不会自动重发。' : value);
-const mergeItems = (older: WorkbenchItem[], newer: WorkbenchItem[]): WorkbenchItem[] => {
+type PageItem = WorkbenchItem & { turnFiles?: TurnFileSummary };
+type ReaderTarget = { conversationId: string; runId: string; workspaceId: string; path: string };
+const mergeItems = (older: PageItem[], newer: PageItem[]): PageItem[] => {
   const incoming = new Map(newer.map(item => [item.id, item]));
   return [...older.filter(item => !incoming.has(item.id)), ...newer];
 };
 // Bound both the number of DOM entries and retained UTF-16 text, including long replies.
-const fitsWindow = (items: WorkbenchItem[]) => items.length <= 500 && items.reduce((bytes, item) => bytes + item.text.length * 2 + 2048, 0) <= 8 * 1024 * 1024;
-const boundedPage = (items: WorkbenchItem[]) => {
+const itemWeight = (item: PageItem) => item.text.length * 2 + 2048 +
+  (item.turnFiles?.paths.reduce((bytes, path) => bytes + path.length * 2 + 16, 0) ?? 0);
+const fitsWindow = (items: PageItem[]) => items.length <= 500 && items.reduce((bytes, item) => bytes + itemWeight(item), 0) <= 8 * 1024 * 1024;
+const boundedPage = (items: WorkbenchItem[], turnFiles: TurnFileSummary[] = []): PageItem[] => {
+  const summaries = new Map(turnFiles.map(summary => [summary.runId, summary]));
+  const page: PageItem[] = [];
   let bytes = 0; let start = items.length;
   while (start > 0 && items.length - start < 500) {
-    const next = items[start - 1]!; bytes += next.text.length * 2 + 2048;
+    const item = items[start - 1]!;
+    const summary = item.runId ? summaries.get(item.runId) : undefined;
+    const next = summary ? { ...item, turnFiles: summary } : item;
+    bytes += itemWeight(next);
     if (bytes > 8 * 1024 * 1024) break;
+    if (summary) summaries.delete(summary.runId);
+    page.push(next);
     start--;
   }
-  return items.slice(start);
+  return page.reverse();
 };
 
 export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf: string; logout(): void; expired(): void; busy: boolean; authError: string }) {
@@ -78,9 +89,12 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
   const sidebarWidth = useSidebarWidth();
   const [reader, setReader] = useState(false);
   const [readerExpanded, setReaderExpanded] = useState(false);
+  const [readerTarget, setReaderTarget] = useState<ReaderTarget>();
+  const [unavailableFiles, setUnavailableFiles] = useState<ReadonlySet<string>>(new Set());
+  const readerOrigin = useRef<{ button: HTMLButtonElement; row: HTMLLIElement | null }>(null);
   const [selected, setSelected] = useState<string | undefined>(() => /^#[0-9a-f-]{36}$/i.test(location.hash) ? location.hash.slice(1) : undefined);
   const [snapshot, setSnapshot] = useState<WorkbenchSnapshot>();
-  const [items, setItems] = useState<WorkbenchItem[]>([]);
+  const [items, setItems] = useState<PageItem[]>([]);
   const [draft, setDraft] = useState<Draft>({ text: '' });
   const [creating, setCreating] = useState<string | true>();
   const [pickingFile, setPickingFile] = useState(false);
@@ -134,7 +148,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
       if (!alive.current || gen !== generation.current || serial !== requestSerial.current || id !== selectedRef.current) return;
       if (snapshotRef.current && result.revision < snapshotRef.current.revision) return;
       const first = !snapshotRef.current || snapshotRef.current.conversation.id !== id;
-      const pageItems = boundedPage(result.history.items);
+      const pageItems = boundedPage(result.history.items, result.turnFiles);
       const pageTrimmed = pageItems.length < result.history.items.length;
       const pageBefore = pageTrimmed ? pageItems[0]?.id ?? null : result.history.olderBeforeItemId ?? pageItems[0]?.id ?? null;
       setSnapshot({ ...result, history: { ...result.history, items: pageItems } });
@@ -180,7 +194,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
   }, []);
   useEffect(() => {
     generation.current++; requestSerial.current++; viewController.current?.abort(); viewController.current = new AbortController();
-    setSnapshot(undefined); snapshotRef.current = undefined; setItems([]); setError(''); setMoreOutput(false); setWindowed(false); setBefore(null); setHasOlder(false); atBottom.current = true;
+    setSnapshot(undefined); snapshotRef.current = undefined; setItems([]); setUnavailableFiles(new Set()); setError(''); setMoreOutput(false); setWindowed(false); setBefore(null); setHasOlder(false); atBottom.current = true;
     const next = selected ? readDraft(selected) : { text: '' }; draftRef.current = next; setDraft(next);
     if (selected) void loadRef.current(selected, true);
     return () => viewController.current?.abort();
@@ -311,7 +325,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
       if (!alive.current || gen !== generation.current) return;
       if (scroll.current) anchor.current = { height: scroll.current.scrollHeight, top: scroll.current.scrollTop };
       atBottom.current = false;
-      const pageItems = boundedPage(result.history.items);
+      const pageItems = boundedPage(result.history.items, result.turnFiles);
       const trimmed = pageItems.length < result.history.items.length;
       setItems(current => { const merged = mergeItems(pageItems, current); if (!fitsWindow(merged)) { anchor.current = null; setWindowed(true); return pageItems; } return merged; });
       setBefore(trimmed ? pageItems[0]?.id ?? null : result.history.olderBeforeItemId ?? pageItems[0]?.id ?? null); setHasOlder(trimmed || result.history.hasOlder);
@@ -337,6 +351,29 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
     return items.map(item => live.find(current => current.id === item.id) ?? item)
       .concat(live.filter(item => !items.some(saved => saved.id === item.id)));
   }, [items, liveItems, windowed]);
+  const turnFiles = useMemo(() => {
+    const summaries = new Map<string, TurnFileSummary>();
+    for (const item of items) if (item.turnFiles) summaries.set(item.turnFiles.runId, item.turnFiles);
+    if (!windowed) for (const summary of snapshot?.turnFiles ?? []) summaries.set(summary.runId, summary);
+    return summaries;
+  }, [items, snapshot?.turnFiles, windowed]);
+  function openTurnFile(runId: string, path: string, button: HTMLButtonElement) {
+    if (!conversation || workspaceRemoved || conversation.id !== selected) return;
+    readerOrigin.current = { button, row: button.closest('li') };
+    setReaderTarget({ conversationId: conversation.id, runId, workspaceId: conversation.workspaceId, path });
+    setReader(true);
+  }
+  function closeReader() {
+    const origin = readerOrigin.current;
+    readerOrigin.current = null;
+    setReader(false);
+    setReaderExpanded(false);
+    setReaderTarget(undefined);
+    if (origin) requestAnimationFrame(() => {
+      if (origin.button.isConnected) origin.button.focus({ preventScroll: true });
+      else origin.row?.focus({ preventScroll: true });
+    });
+  }
   const quote = useCallback((reference: MessageReference) => {
     if (draft.pending) { setError('请先核对上次发送，或继续编辑后再添加引用。'); return; }
     updateDraft({ ...draft, references: [...(draft.references ?? []), reference].slice(0,8) });
@@ -355,7 +392,11 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
     </>}
     header={<><div className="conversation-heading"><h1>{conversation?.title ?? (selected ? '正在恢复对话…' : '从这里，接着做。')}</h1><p>{conversation ? `${conversation.harnessId === 'codex' ? 'Codex' : 'DSH'} · ${removedWorkspace?.label ?? configuration?.workspaces.find(w => w.id === conversation.workspaceId)?.label ?? '工作区'} · ${workspaceRemoved ? '工作区已移除' : stateLabel(conversation)}` : '一段对话，一个可以接续的工作现场'}</p></div><div className="header-actions"><IconButton label="打开工作区文件" disabled={!configuration?.workspaces.length} onClick={() => setReader(true)}><FolderOpen size={17}/></IconButton><IconButton label="重新连接" onClick={() => { scheduleRefresh(); refreshConfiguration(); }}><RefreshCw size={15}/></IconButton></div></>}
     reader={reader && configuration && <WorkspaceReader workspaces={configuration.workspaces} initialWorkspace={conversation?.workspaceId}
-      csrf={csrf} editStatusSignal={JSON.stringify([conversation?.id, conversation?.state.status, conversation?.state.pendingInputs, unresolved])} expanded={readerExpanded} onExpand={setReaderExpanded} onClose={() => { setReader(false); setReaderExpanded(false); }}/>}>
+      target={readerTarget} onTargetUnavailable={target => {
+        if (target === readerTarget && readerTarget.conversationId === selectedRef.current)
+          setUnavailableFiles(previous => new Set(previous).add(JSON.stringify([readerTarget.runId, target.path])));
+      }}
+      csrf={csrf} editStatusSignal={JSON.stringify([conversation?.id, conversation?.state.status, conversation?.state.pendingInputs, unresolved])} expanded={readerExpanded} onExpand={setReaderExpanded} onClose={closeReader}/>}>
 
       {!selected ? <section className="empty-workbench"><p className="eyebrow">A PLACE TO CONTINUE</p><h2>把想法，往前推进一步。</h2><p>选择一个工作区和 Agent，开始一件具体的工作。<br />离开页面后，可以回来继续。</p><button onClick={() => setCreating(true)}>开始新对话 ↗</button>{configuration?.workspaces.length === 0 && <p className="quiet">工作区与原生服务尚未由管理员连接。</p>}</section> : <>
         <div className="message-scroll" ref={scroll} onScroll={() => { const node = scroll.current!; atBottom.current = node.scrollHeight - node.scrollTop - node.clientHeight < 80; if (atBottom.current) setMoreOutput(false); }}>
@@ -364,7 +405,9 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
             {windowed && <p className="history-note">正在阅读较早的一页。<button className="text-button" onClick={() => { if (selected) { atBottom.current = true; void load(selected, true); } }}>回到最新内容</button></p>}
             {!snapshot && <p role="status" className="quiet">正在核对远端状态与历史…</p>}
             {snapshot && visible.length === 0 && <p className="quiet conversation-start">{conversation?.readiness === 'ready' ? '对话已准备好。说说你希望完成什么。' : '正在准备原生会话…'}</p>}
-            <Transcript items={visible} conversation={selected} onQuote={quote}/>
+            <Transcript items={visible} conversation={selected} onQuote={quote} turnFiles={turnFiles}
+              activeRun={running ? conversation?.state.runId : undefined} activeFile={readerTarget?.conversationId === selected ? readerTarget : undefined}
+              workspaceUnavailable={workspaceRemoved} unavailableFiles={unavailableFiles} onOpenFile={openTurnFile}/>
           </div>
         </div>
         <div className="composer-region">

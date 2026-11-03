@@ -121,6 +121,13 @@ export const productMigrations: Migration[] = [{ version: 2, sql: `
   ) STRICT;
   CREATE INDEX workbench_queue_entries_active ON workbench_queue_entries(conversation_id, sequence) WHERE content_json IS NOT NULL;
   CREATE UNIQUE INDEX workbench_queue_entries_operation ON workbench_queue_entries(operation_id) WHERE operation_id IS NOT NULL;
+` }, { version: 7, sql: `
+  CREATE TABLE workbench_turn_files (
+    conversation_id TEXT NOT NULL REFERENCES workbench_conversations(id) ON DELETE CASCADE,
+    run_id TEXT NOT NULL,
+    path TEXT NOT NULL,
+    PRIMARY KEY (conversation_id, run_id, path)
+  ) STRICT, WITHOUT ROWID;
 ` }];
 
 /** Runs inside restoreDatabase's private staging transaction, before the database is published. */

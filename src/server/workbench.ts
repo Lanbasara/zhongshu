@@ -500,7 +500,12 @@ export class Workbench {
     else if (!this.configured(conversation)) { try { this.adapter(conversation); } catch { conversation = this.conversation(id); } }
     const history = this.store.readHistory(id, { limit: 100, ...(beforeItemId ? { beforeItemId } : {}) });
     if (unavailable) history.nativeOlderCursor = null;
-    return { conversation, history, operations: this.store.listOperations({ conversationId: id, order: 'desc', limit: 100 }), queue: this.queue(id), revision: history.revision };
+    const runIds = new Set<string>();
+    for (const item of [...history.items, ...history.liveItems].reverse()) {
+      if (item.runId) runIds.add(item.runId);
+    }
+    return { conversation, history, turnFiles: this.store.readTurnFiles(id, [...runIds]),
+      operations: this.store.listOperations({ conversationId: id, order: 'desc', limit: 100 }), queue: this.queue(id), revision: history.revision };
   }
 
   older(id: string, beforeItemId?: string) {
@@ -924,6 +929,7 @@ export class Workbench {
             if (!live) return item;
             const sameBody = item.kind === live.kind && item.text === live.text && item.runId === live.runId && item.operationId === live.operationId;
             if (sameBody && (item.status === live.status || item.status === 'completed')) { runtime.live.delete(item.id); return item; }
+            if (item.fileEdits && live.runId === item.runId && live.status === 'completed') return { ...live, fileEdits: item.fileEdits };
             return live;
           });
           this.store.mergeHistory(id, items);

@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { NativeItem } from '../types.ts';
+import { editPath } from '../edit-paths.ts';
 
 export const nativeId = z.string().min(1).max(512);
 export const nativeText = z.string().max(2 * 1024 * 1024);
@@ -17,13 +18,14 @@ export const nativeItem = z.object({
   content: z.unknown().optional(), summary: z.array(nativeText).max(200).optional(), name: z.string().max(200).optional(),
   tool: z.string().max(200).optional(), success: z.boolean().nullable().optional(),
   result: z.string().max(8 * 1024 * 1024).optional(), savedPath: z.string().max(4096).optional(),
-  changes: z.array(z.object({ path: z.string().max(4096), diff: nativeText.optional() })).max(200).optional(),
+  changes: z.array(z.object({ path: z.string().max(4096), diff: nativeText.optional(),
+    kind: z.object({ type: z.string(), move_path: z.string().max(4096).nullish() }).optional() })).max(200).optional(),
 });
 export const itemEntry = z.object({ turnId: nativeId, item: nativeItem, completedAtMs: z.number().nullable().optional() });
 export const itemsPage = z.object({ data: z.array(itemEntry).max(200), nextCursor: cursor.nullable() });
 
 /** Keep stable native identities; unsupported native items remain explicit notices, never fake text. */
-export function mapItem(input: z.infer<typeof nativeItem>, runId: string, running = false): NativeItem {
+export function mapItem(input: z.infer<typeof nativeItem>, runId: string, cwd: string, running = false): NativeItem {
   const base = { id: input.id, runId };
   const status = input.status === 'inProgress' || running ? 'running'
     : input.success === false || (input.status && input.status !== 'completed') ? 'failed' : 'completed';
@@ -34,7 +36,21 @@ export function mapItem(input: z.infer<typeof nativeItem>, runId: string, runnin
     }
     case 'agentMessage': return { ...base, kind: 'assistant', text: input.text ?? '', status: running ? 'running' : 'completed' };
     case 'commandExecution': return { ...base, kind: 'tool', text: [input.command ?? '执行命令', input.aggregatedOutput].filter(Boolean).join('\n'), tool: { name: '运行命令', input: input.command?.slice(0,32000), output: input.aggregatedOutput?.slice(0,128000) }, status };
-    case 'fileChange': return { ...base, kind: 'tool', text: '修改工作区文件', tool: { name: '修改文件', output: input.changes?.map(c => c.path + '\n' + (c.diff ?? '')).join('\n').slice(0,128000) }, status };
+    case 'fileChange': {
+      const changes = input.changes ?? [];
+      const paths = new Set<string>();
+      if (status === 'completed' && input.status === 'completed') {
+        for (const change of changes) {
+          const path = editPath(cwd, change.path);
+          const destination = change.kind?.type === 'update' ? editPath(cwd, change.kind.move_path) : undefined;
+          if (path) paths.add(path);
+          if (destination) paths.add(destination);
+        }
+      }
+      return { ...base, kind: 'tool', text: '修改工作区文件', tool: { name: '修改文件',
+        output: changes.map(c => c.path + '\n' + (c.diff ?? '')).join('\n').slice(0,128000) }, status,
+        ...(paths.size ? { fileEdits: [...paths] } : {}) };
+    }
     case 'mcpToolCall': case 'dynamicToolCall': return { ...base, kind: 'tool', text: input.tool ?? input.name ?? '调用工具', tool: { name: input.tool ?? input.name ?? '调用工具' }, status };
     case 'imageGeneration': return { ...base, kind: 'assistant', text: status === 'failed' ? '图片生成未完成。' : status === 'completed' && !input.result && !input.savedPath ? '原生图片资源暂不可读取。' : '', status, ...((input.result || input.savedPath) ? { imageSources: [{ ...(input.result ? { data: input.result } : { path: input.savedPath }) }] } : {}) };
     case 'reasoning': return { ...base, kind: 'notice', text: input.summary?.join('\n') ?? '思考', status: running ? 'running' : 'completed' };

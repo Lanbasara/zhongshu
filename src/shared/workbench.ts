@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { contentFields, toolSchema } from './content.ts';
+import { contentFields, recordedFilePath, toolSchema } from './content.ts';
 
 const utf8 = new TextEncoder();
 const boundedText = (bytes: number) => z.string().max(bytes).refine(value => utf8.encode(value).byteLength <= bytes);
@@ -108,10 +108,13 @@ export const conversationListSchema = z.object({
 }).strict();
 export const conversationResponseSchema = z.object({ conversation: conversationSchema }).strict();
 export const operationResponseSchema = z.object({ operation: operationSchema }).strict();
+export const turnFileLimit = 500;
+const turnFilesSchema = z.object({ runId: identifierSchema, paths: z.array(recordedFilePath).max(turnFileLimit), limited: z.boolean() }).strict();
+export type TurnFileSummary = z.infer<typeof turnFilesSchema>;
 export const snapshotSchema = z.object({
   conversation: conversationSchema,
   history: z.object({ items: z.array(itemSchema).max(100), liveItems: z.array(itemSchema).max(100), liveItemsLimited: z.boolean(), olderBeforeItemId: identifierSchema.nullable(), hasOlder: z.boolean(), loaded: z.boolean() }).strict(),
-  operations: z.array(operationSchema).max(100), queue: queueViewSchema.optional(), revision: revisionSchema,
+  operations: z.array(operationSchema).max(100), queue: queueViewSchema.optional(), turnFiles: z.array(turnFilesSchema).max(200).optional(), revision: revisionSchema,
 }).strict();
 export const changeEventSchema = z.object({ type: z.literal('change'), revision: revisionSchema, conversationId: z.uuid(), item: itemSchema.optional() }).strict();
 export const resetEventSchema = z.object({ type: z.literal('reset'), revision: revisionSchema }).strict();

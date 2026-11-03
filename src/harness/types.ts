@@ -27,6 +27,8 @@ export type NativeItem = {
   images?: ImageAttachment[];
   references?: InputContent['references'];
   tool?: { name: string; exitCode?: number; input?: string; output?: string };
+  /** Confirmed edit targets, relative to this binding's workspace. */
+  fileEdits?: string[];
   /** Transient native image sources: materialized before persistence or HTTP. */
   imageSources?: { data?: string; path?: string; mediaType?: string }[];
 };

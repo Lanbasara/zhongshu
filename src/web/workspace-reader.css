@@ -1,4 +1,9 @@
 .workspace-reader { min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--zs-canvas); border-left: 1px solid var(--zs-surface-hover); color: var(--zs-text); }
+.workspace-reader.turn-file-reader { margin:0; padding:0; width:auto; height:auto; max-width:none; max-height:none; overflow:hidden; }
+.workspace-reader.turn-file-reader:not(.is-expanded) { border:0; border-left:1px solid var(--zs-surface-hover); }
+@media (min-width:1101px) { .workspace-reader.turn-file-reader:not(.is-expanded) { position:relative; inset:auto; } }
+.workspace-reader.turn-file-reader:not([open]) { display:none; }
+.workspace-reader.turn-file-reader::backdrop { background:var(--zs-scrim); }
 .workspace-reader-bar, .workspace-reader-tools { display: flex; align-items: center; gap: 8px; padding: 8px 14px; border-bottom: 1px solid var(--zs-surface-hover); }
 .workspace-reader-bar { min-height: var(--zs-header-height); position: relative; z-index: 3; }
 .workspace-reader-tools { flex-wrap: wrap; font-size:var(--zs-type-control); color: var(--zs-text-secondary); }
@@ -34,6 +39,12 @@
 @media (max-width: 759px) {
   .workspace-reader { position: fixed; inset: 0; z-index: var(--zs-layer-overlay); }
   .workspace-reader .workspace-reader-expand { display: none; }
+  .with-workspace-reader .workspace-reader.turn-file-reader {
+    inset:auto 0 0; width:100%; max-height:75dvh; padding-bottom:env(safe-area-inset-bottom);
+    border:1px solid var(--zs-border); border-radius:var(--zs-radius-surface) var(--zs-radius-surface) 0 0;
+    box-shadow:var(--zs-shadow-overlay);
+  }
+  .turn-file-reader .reader-icon { width:var(--zs-control-touch); height:var(--zs-control-touch); }
 }
 
 .reader-editor-pending { display: flex; align-items: center; gap: 8px; margin: 12px; color: var(--zs-text-secondary); }

@@ -142,7 +142,7 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
       const first = records.length ? Math.min(...records.map(record => record.event.seq)) : undefined;
       if (hasMore && (first === undefined || first === 0)) throw new HarnessError('DSH_HISTORY_NO_PROGRESS');
       if (records.some(record => record.event.seq > through) || new Set(records.map(record => record.event.seq)).size !== records.length) throw new HarnessError('DSH_HISTORY_INVALID');
-      return { items: historyItems(binding.id, records.map(record => record.event), activeTurn, outline), olderCursor: hasMore ? Buffer.from(JSON.stringify({ session: binding.id, through, before: first })).toString('base64url') : null };
+      return { items: historyItems(binding.id, records.map(record => record.event), activeTurn, outline, binding.cwd), olderCursor: hasMore ? Buffer.from(JSON.stringify({ session: binding.id, through, before: first })).toString('base64url') : null };
     } catch (error) { throw nativeError(error); }
   }
 
@@ -230,7 +230,7 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
                 emit({ type: 'state', state: remember(binding, stateFrom(binding, current)) }); emit({ type: 'invalidate' });
                 outline = current.projections.values.turnOutline ?? [];
                 const boundary = boundaryFrom(current);
-                for (const item of historyItems(binding.id, current.records.map(record => record.event), boundary?.openTurnStartSeq !== null ? boundary?.lastTurn : undefined, outline)) emit({ type: 'item', item });
+                for (const item of historyItems(binding.id, current.records.map(record => record.event), boundary?.openTurnStartSeq !== null ? boundary?.lastTurn : undefined, outline, binding.cwd)) emit({ type: 'item', item });
                 if (!boundary) refresh();
                 const item = live.restore(current); if (item) emit({ type: 'item', item });
               } else if (frame.type === 'event') {

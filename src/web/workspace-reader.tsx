@@ -1,5 +1,5 @@
 import { ArrowLeft, ChevronDown, ChevronRight, FileCode2, FileText, Folder, LoaderCircle, Maximize2, Minimize2, Pencil, Save } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Streamdown, parseMarkdownIntoBlocks } from 'streamdown';
 import { z } from 'zod';
 import { referenceSchema } from '../shared/content.ts';
@@ -7,11 +7,12 @@ import { RequestError, request } from './workbench-client.ts';
 import { WorkspaceReport } from './workspace-report.tsx';
 
 const listing = z.object({ files: z.array(z.object({ name: z.string(), path: z.string(), directory: z.boolean(), supported: z.boolean() })) });
-const fileSchema = z.object({ kind: z.enum(['markdown', 'text', 'html']), text: z.string(), version: z.string() });
+const fileSchema = z.object({ kind: z.enum(['markdown', 'text', 'html', 'source']), text: z.string(), version: z.string() });
 const statusSchema = z.object({ editable: z.boolean(), reason: z.string().nullable(), canPause: z.boolean().optional(), maintenance: z.enum(['online', 'paused', 'unknown', 'transition']).optional() });
 type File = z.infer<typeof fileSchema>;
 type Entry = z.infer<typeof listing>['files'][number];
 type OpenFile = { path: string; file: File; position: number };
+type FileTarget = { workspaceId: string; path: string };
 
 const errors = new Map([
   ['workspace_not_idle', '工作区正在运行或尚未确认空闲。修改已保留。'],
@@ -85,22 +86,25 @@ function reportTarget(path: string, href: string): string {
   return target;
 }
 
-export function WorkspaceReader({ workspaces, initialWorkspace, csrf, editStatusSignal, expanded, onExpand, onClose }: {
+export function WorkspaceReader({ workspaces, initialWorkspace, target, onTargetUnavailable, csrf, editStatusSignal, expanded, onExpand, onClose }: {
   workspaces: { id: string; label: string }[];
   initialWorkspace?: string;
+  target?: FileTarget;
+  onTargetUnavailable?(target: FileTarget): void;
   csrf: string;
   editStatusSignal: string;
   expanded: boolean;
   onExpand(value: boolean): void;
   onClose(): void;
 }) {
-  const [workspace, setWorkspace] = useState(() => workspaces.find(w => w.id === initialWorkspace)?.id ?? workspaces[0]?.id ?? '');
+  const [workspace, setWorkspace] = useState(() => target?.workspaceId ?? workspaces.find(w => w.id === initialWorkspace)?.id ?? workspaces[0]?.id ?? '');
   const [browsing, setBrowsing] = useState(false);
   const picker = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
   const [directory, setDirectory] = useState('');
   const [files, setFiles] = useState<Entry[]>([]);
   const [opened, setOpened] = useState<OpenFile>();
+  const [attemptedPath, setAttemptedPath] = useState<string>();
   const [back, setBack] = useState<OpenFile[]>([]);
   const [preparingEditor, setPreparingEditor] = useState(false);
   const [editing, setEditing] = useState(false);
@@ -113,10 +117,28 @@ export function WorkspaceReader({ workspaces, initialWorkspace, csrf, editStatus
   const [busy, setBusy] = useState(false);
   const refreshStatus = useRef<(() => void) | null>(null);
   const pending = useRef<AbortController>(null);
+  const dialog = useRef<HTMLDialogElement>(null);
+  const closeButton = useRef<HTMLButtonElement>(null);
   const largeMarkdown = useMemo(() => opened?.file.kind === 'markdown' &&
     new TextEncoder().encode(opened.file.text).length > 64 * 1024, [opened?.file.kind, opened?.file.text]);
   const dirty = editing && opened?.file.text !== draft;
   const base = '/workspaces/' + encodeURIComponent(workspace);
+  const fromTurn = target !== undefined;
+
+  useLayoutEffect(() => {
+    const panel = dialog.current;
+    if (!fromTurn || !panel) return;
+    const narrow = matchMedia('(max-width:759px)');
+    function position() {
+      if (!panel) return;
+      if (panel.open) panel.close();
+      if (narrow.matches) panel.showModal();
+      else panel.show();
+    }
+    position();
+    narrow.addEventListener('change', position);
+    return () => { narrow.removeEventListener('change', position); panel.close(); };
+  }, [fromTurn]);
 
   useEffect(() => {
     if (!workspace) return;
@@ -223,26 +245,58 @@ export function WorkspaceReader({ workspaces, initialWorkspace, csrf, editStatus
     setNotice('');
   }
 
-  async function open(path: string, origin?: OpenFile, preserveBack = false) {
-    if (pending.current || !mayLeave()) return;
+  async function open(path: string, origin?: OpenFile, preserveBack = false, requested?: FileTarget) {
+    if (requested) {
+      const maintenancePending = status?.maintenance === 'paused' || status?.maintenance === 'unknown';
+      if (editing || preparingEditor || (requested.workspaceId !== workspace && maintenancePending)) {
+        setError('请先结束当前文件的编辑，再打开本轮文件。');
+        return;
+      }
+      if (busy && !pending.current) return;
+      pending.current?.abort();
+      setAttemptedPath(path);
+      setOpened(undefined);
+      setBrowsing(false);
+      setBack([]);
+    } else {
+      if (pending.current || !mayLeave()) return;
+      setAttemptedPath(undefined);
+    }
     const abort = new AbortController();
     pending.current = abort;
     setBusy(true);
     setError('');
     try {
-      const file = await request(base + '/file?path=' + encodeURIComponent(path), fileSchema, { signal: abort.signal });
+      const source = requested ? '/workspaces/' + encodeURIComponent(requested.workspaceId) : base;
+      const file = await request(source + '/file?path=' + encodeURIComponent(path), fileSchema, { signal: abort.signal });
       if (abort.signal.aborted) return;
       resetEditor();
+      if (requested && requested.workspaceId !== workspace) {
+        setWorkspace(requested.workspaceId);
+        setStatus(undefined);
+        setDirectory('');
+      }
       setOpened({ path, file, position: 0 });
       setBrowsing(false);
       if (origin) setBack(previous => [...previous.slice(-31), origin]);
       else if (!preserveBack) setBack([]);
-    } catch (reason) { if (!abort.signal.aborted) setError(message(reason)); }
+    } catch (reason) {
+      if (abort.signal.aborted) return;
+      setError(message(reason));
+      if (requested && reason instanceof RequestError && ['file_reference_unavailable', 'file_reference_forbidden', 'file_type_unsupported'].includes(reason.code))
+        onTargetUnavailable?.(requested);
+    }
     finally {
       if (pending.current === abort) pending.current = null;
       if (!abort.signal.aborted) setBusy(false);
     }
   }
+
+  const openTarget = useEffectEvent((file: FileTarget) => {
+    closeButton.current?.focus({ preventScroll: true });
+    void open(file.path, undefined, false, file);
+  });
+  useEffect(() => { if (target) openTarget(target); }, [target]);
 
   async function save() {
     if (!opened || !status?.editable || busy || !dirty) return;
@@ -278,7 +332,7 @@ export function WorkspaceReader({ workspaces, initialWorkspace, csrf, editStatus
   }
 
   async function beginEdit() {
-    if (!opened || busy) return;
+    if (!opened || busy || opened.file.kind === 'html' || opened.file.kind === 'source') return;
     if (!status?.editable && !status?.canPause) return;
     setPreparingEditor(true);
     onExpand(true);
@@ -302,6 +356,11 @@ export function WorkspaceReader({ workspaces, initialWorkspace, csrf, editStatus
   }
 
   async function leaveEditor(close: boolean) {
+    if (close && fromTurn && pending.current && !editing && status?.maintenance !== 'paused' && status?.maintenance !== 'unknown') {
+      pending.current.abort();
+      onClose();
+      return;
+    }
     if (!mayLeave()) return;
     if ((status?.maintenance === 'paused' || status?.maintenance === 'unknown') && !await maintenance('resume')) return;
     resetEditor();
@@ -320,20 +379,33 @@ export function WorkspaceReader({ workspaces, initialWorkspace, csrf, editStatus
     } catch { setError('这个链接未指向工作区内可读的文件。'); }
   }
 
-  return <section className={expanded ? 'workspace-reader is-expanded' : 'workspace-reader'} aria-label="工作区文件阅读器">
+  const Panel = fromTurn ? 'dialog' : 'section';
+  const fileLabel = opened?.path ?? attemptedPath;
+  return <Panel ref={fromTurn ? dialog : undefined}
+    className={`workspace-reader${expanded ? ' is-expanded' : ''}${fromTurn ? ' turn-file-reader' : ''}`} aria-label="工作区文件阅读器"
+    onCancel={fromTurn ? event => {
+      event.preventDefault();
+      if (!browsing) void leaveEditor(true);
+    } : undefined}
+    onKeyDown={fromTurn ? event => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        if (!browsing) void leaveEditor(true);
+      }
+    } : undefined}>
     <header className="workspace-reader-bar">
-      <button className="reader-icon" aria-label="返回对话" title="返回对话" onClick={() => void leaveEditor(true)}><ArrowLeft size={17}/></button>
+      <button ref={closeButton} className="reader-icon" aria-label="返回对话" title="返回对话" onClick={() => void leaveEditor(true)}><ArrowLeft size={17}/></button>
       <div className="workspace-file-picker" ref={picker}>
         <button className="reader-file-trigger" ref={trigger} aria-expanded={browsing} aria-controls="workspace-file-list"
-          title={opened?.path} onClick={() => setBrowsing(!browsing)}>
-          {opened ? <FileText size={16}/> : <Folder size={16}/>}
-          <span>{opened?.path.split('/').at(-1) ?? '工作区文件'}</span><ChevronDown size={14}/>
+          title={fileLabel} onClick={() => setBrowsing(!browsing)}>
+          {fileLabel ? <FileText size={16}/> : <Folder size={16}/>}
+          <span>{fileLabel?.split('/').at(-1) ?? '工作区文件'}</span><ChevronDown size={14}/>
         </button>
         {browsing && <div className="workspace-file-popover" id="workspace-file-list">
           <div className="reader-popover-title">
             {workspaces.length > 1 ? <select aria-label="工作区" value={workspace} disabled={busy} onChange={event => {
               if (!mayLeave()) return;
-              resetEditor(); setOpened(undefined); setBack([]); setStatus(undefined);
+              resetEditor(); setOpened(undefined); setAttemptedPath(undefined); setBack([]); setStatus(undefined);
               setDirectory(''); setWorkspace(event.target.value);
             }}>{workspaces.map(w => <option key={w.id} value={w.id}>{w.label}</option>)}</select>
               : <span>{workspaces[0]?.label}</span>}
@@ -366,7 +438,8 @@ export function WorkspaceReader({ workspaces, initialWorkspace, csrf, editStatus
       setOpened(back.at(-1));
       setBack(back.slice(0, -1));
     }}><ArrowLeft size={14}/>返回报告</button></div>}
-    {opened && opened.file.kind !== 'html' && <div className="workspace-reader-tools">
+    {opened?.file.kind === 'source' && <div className="workspace-reader-tools">源码 · 只读</div>}
+    {opened && opened.file.kind !== 'html' && opened.file.kind !== 'source' && <div className="workspace-reader-tools">
       {editing ? <>
         {opened.file.kind === 'markdown' && <button onClick={() => setPreview(!preview)}>{preview ? '原文' : '预览'}</button>}
         <button className="reader-action reader-primary" disabled={!dirty || !status?.editable || busy} onClick={() => void save()}><Save size={14}/>保存</button>
@@ -389,7 +462,8 @@ export function WorkspaceReader({ workspaces, initialWorkspace, csrf, editStatus
           {preview && <MarkdownPreview text={draft} paginate={largeMarkdown}/>}
         </>
         : opened?.file.kind === 'markdown' && (!largeMarkdown || readingPreview) ? <MarkdownPreview text={opened.file.text} paginate={largeMarkdown}/>
-        : opened ? <pre>{opened.file.text}</pre> : <p className="reader-placeholder">从顶部「工作区文件」选择要打开的文件。</p>}
+        : opened ? <pre>{opened.file.text}</pre> : attemptedPath ? (busy && <p className="reader-placeholder" role="status">正在打开文件…</p>)
+        : <p className="reader-placeholder">从顶部「工作区文件」选择要打开的文件。</p>}
     </div>
-  </section>;
+  </Panel>;
 }

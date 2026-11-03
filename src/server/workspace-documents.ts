@@ -2,11 +2,14 @@ import { createHash, randomUUID } from 'node:crypto';
 import { constants, type BigIntStats } from 'node:fs';
 import { lstat, open, opendir, realpath, rename, unlink } from 'node:fs/promises';
 import { basename, extname, join } from 'node:path';
-import { referenceSchema } from '../shared/content.ts';
+import { workspaceDocumentPath } from '../shared/content.ts';
 import { ResourceError } from './resources.ts';
 
-const formats = new Map<string, 'markdown' | 'text' | 'html'>([['.md', 'markdown'], ['.markdown', 'markdown'], ['.txt', 'text'],
+const formats = new Map<string, 'markdown' | 'text' | 'html' | 'source'>([['.md', 'markdown'], ['.markdown', 'markdown'], ['.txt', 'text'],
   ['.json', 'text'], ['.yaml', 'text'], ['.yml', 'text'], ['.toml', 'text'], ['.ini', 'text'], ['.html', 'html'], ['.htm', 'html']] as const);
+for (const extension of ['.ts', '.tsx', '.js', '.jsx', '.mts', '.cts', '.mjs', '.cjs', '.css', '.scss', '.py', '.sh', '.go', '.rs', '.java', '.c', '.h', '.cpp', '.hpp', '.sql']) {
+  formats.set(extension, 'source');
+}
 export const textLimit = 256 * 1024;
 const htmlLimit = 1024 * 1024;
 const directoryFlags = constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW;
@@ -43,7 +46,7 @@ async function withWorkspaceDirectory<T>(root: string, parts: string[], action: 
 
 function documentParts(path: string, directory = false): string[] {
   if (!path && directory) return [];
-  if (!referenceSchema.safeParse({ type: 'file', path }).success || path.split('/').some(part => part.startsWith('.')))
+  if (!workspaceDocumentPath.safeParse(path).success)
     throw new ResourceError('file_reference_forbidden', 403);
   return path.split('/');
 }
@@ -96,7 +99,7 @@ export function openWorkspaceDocument(root: string, path: string, identity?: str
 export function saveWorkspaceDocument(root: string, path: string, version: string, text: string, assertWritable: () => void, identity?: string) {
   const parts = documentParts(path);
   const kind = format(path);
-  if (kind === 'html') throw new ResourceError('file_read_only', 403);
+  if (kind === 'html' || kind === 'source') throw new ResourceError('file_read_only', 403);
   if (Buffer.byteLength(text) > textLimit) throw new ResourceError('file_too_large', 413);
   if (text.includes('\0') || /\p{Surrogate}/u.test(text)) throw new ResourceError('file_encoding_unsupported', 415);
   return withWorkspaceDirectory(root, parts.slice(0, -1), async directory => {
@@ -135,7 +138,7 @@ export function listWorkspaceDocuments(root: string, path: string, identity?: st
       if (++scanned > 2000 || entries.length >= 200) break;
       if (entry.name.startsWith('.') || (!entry.isDirectory() && !entry.isFile())) continue;
       const relative = path ? path + '/' + entry.name : entry.name;
-      if (!referenceSchema.safeParse({ type: 'file', path: relative }).success) continue;
+      if (!workspaceDocumentPath.safeParse(relative).success) continue;
       entries.push({ name: entry.name, path: relative, directory: entry.isDirectory(),
         supported: entry.isDirectory() || formats.has(extname(entry.name).toLowerCase()) });
     }

@@ -58,14 +58,14 @@ function snapshotView(value: ReturnType<Workbench['snapshot']>): WorkbenchSnapsh
   // Keep a contiguous latest suffix, preserving whole messages and a usable older-page anchor.
   // A single maximum-size native message (including JSON escaping) fits this budget.
   const items = newestWithin(history.items, 7 * 1024 * 1024);
-  const { queue } = value;
-  const liveItems = newestWithin(history.liveItems, MAX_RESPONSE_BYTES - size({ conversation, operations, items, queue }) - 4096);
+  const { queue, turnFiles } = value;
+  const liveItems = newestWithin(history.liveItems, MAX_RESPONSE_BYTES - size({ conversation, operations, items, queue, turnFiles }) - 4096);
   const trimmed = items.length < history.items.length;
   const hasOlder = trimmed || Boolean(history.olderBeforeItemId || history.nativeOlderCursor);
   return { conversation, history: {
     items, liveItems, liveItemsLimited: history.liveItemsLimited || liveItems.length < history.liveItems.length, loaded: history.historyLoaded,
     olderBeforeItemId: hasOlder ? (trimmed ? items[0]?.id : history.olderBeforeItemId) ?? items[0]?.id ?? null : null, hasOlder,
-  }, operations, queue, revision: value.revision };
+  }, operations, queue, ...(turnFiles.length ? { turnFiles } : {}), revision: value.revision };
 }
 function json(reply: FastifyReply, value: unknown): FastifyReply {
   const body = JSON.stringify(value);

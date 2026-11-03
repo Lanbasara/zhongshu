@@ -231,7 +231,7 @@ class CodexAdapter implements HarnessAdapter {
         if (next && seen.has(next)) throw new HarnessError('codex_history_no_progress');
         if (next) seen.add(next);
       } while (next && entries.length < size && bytes < 8 * 1024 * 1024);
-      return { items: entries.reverse().map(entry => mapItem(entry.item, entry.turnId, entry.completedAtMs === null && entry.item.type !== 'userMessage')), olderCursor: next ?? null };
+      return { items: entries.reverse().map(entry => mapItem(entry.item, entry.turnId, binding.cwd, entry.completedAtMs === null && entry.item.type !== 'userMessage')), olderCursor: next ?? null };
     } finally { await this.release(binding.id); }
   }
 
@@ -384,7 +384,7 @@ class CodexAdapter implements HarnessAdapter {
     if (!watch) return;
     if (method === 'item/started' || method === 'item/completed') {
       const item = parse(nativeItem, params.item); const runId = parse(nativeId, params.turnId);
-      const normalized = mapItem(item, runId, method === 'item/started'); const key = JSON.stringify([threadId, item.id]);
+      const normalized = mapItem(item, runId, watch.binding.cwd, method === 'item/started'); const key = JSON.stringify([threadId, item.id]);
       this.removeLive(key);
       if (method === 'item/started' && item.type === 'agentMessage' && Buffer.byteLength(normalized.text) <= 256 * 1024 && this.live.size < 128 && this.liveBytes + Buffer.byteLength(normalized.text) <= 2 * 1024 * 1024) {
         this.live.set(key, { threadId, item: normalized, overflow: false }); this.liveBytes += Buffer.byteLength(normalized.text);

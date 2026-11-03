@@ -54,6 +54,24 @@ class Peer implements HarnessAdapter {
   async close() { this.closed = true; this.listener = undefined; await this.closeRead?.(); }
 }
 
+test('turn files survive replay and remain visible when the original edit scrolls off the history page', t => {
+  const f = fixture(t);
+  const edit: NativeItem = { ...nativeItem('edit'), kind: 'tool', runId: 'first', fileEdits: ['a.tsx', 'b/a.tsx'] };
+  f.store.saveLiveItem(f.id, edit);
+  f.store.mergeHistory(f.id, [
+    edit, { ...edit, id: 'failed', status: 'failed', fileEdits: ['failed.ts'] },
+    ...Array.from({ length: 105 }, (_, index) => ({ ...nativeItem('step-' + index), runId: 'first' })),
+    { ...edit, id: 'next-edit', runId: 'second', fileEdits: ['a.tsx'] },
+  ]);
+  f.store.mergeHistory(f.id, [{ ...edit, fileEdits: undefined }]);
+  const snapshot = f.service.snapshot(f.id);
+  assert.equal(snapshot.history.items.some(item => item.id === edit.id), false);
+  assert.deepEqual(snapshot.turnFiles, [
+    { runId: 'second', paths: ['a.tsx'], limited: false },
+    { runId: 'first', paths: ['a.tsx', 'b/a.tsx'], limited: false },
+  ]);
+});
+
 test('one immutable queue claim wins edit, manual send and automatic dispatch; lost receipt resolves from original history', async t => {
   const f = fixture(t);
   const active = { ...terminal('original-run'), status: 'running' as const };

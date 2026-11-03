@@ -30,6 +30,8 @@
 
 **I04：组件工作台。** `npm run build:storybook` 后产物只在 `.artifacts/storybook`。启动 Storybook，操作基础按钮/菜单/浮层；输入模式分别查看默认、执行中、待核实、上传失败、长模型名称，测试可编辑与禁用的差异；完整工作台 story 折叠导航、打开阅读器、输入文字。再次以 390px 查看。设计参考 iframe 明示历史模拟；它不调用产品服务，组件故事的演示操作不提交真实任务。检查浏览器错误；截图不能代替组件动作。开发服务端口冲突时用 `npm run storybook -- --port <空闲端口>`，不要停止他人的进程。
 
+在「产品模式 / 本轮文件」中，单文件直接打开模拟阅读器；多文件先露出三项，展开后打开靠后的文件，再关闭阅读器并收起。文件不可用仍显示路径和状态。窄屏 story 点击文件后在底部打开阅读器，用 Escape 关闭并检查焦点回到原文件。
+
 **I05：发布隔离与反例。** 运行四项仓库检查，再 `npm run build:storybook && npm run check:release`。以 `node --test test/design-boundaries.test.ts` 检查静态/动态/type import、公共资源改名/混入与构建后文件修改的反例；还要在一次性源码副本进行以下真实构建检查，不能污染正在验证的应用：
 
 1. 给产品入口追加一个指向 `design/` 的 import（即使未使用），构建应以 Build boundary 拒绝；恢复后能构建。

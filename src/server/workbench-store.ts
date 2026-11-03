@@ -1,9 +1,9 @@
 import { createHash } from 'node:crypto';
-import type { DatabaseSync } from 'node:sqlite';
+import type { DatabaseSync, StatementSync } from 'node:sqlite';
 import { z } from 'zod';
-import { conversationTitleSchema, identifierSchema, messagePayload, queueCommandSchema, queueDeliverySchema, queueLimit, queuePauseSchema, stateSchema, workspaceLimit } from '../shared/workbench.ts';
-import type { QueueCommand, QueueDelivery, QueuePause, QueueView } from '../shared/workbench.ts';
-import { contentFields, toolSchema, type InputContent } from '../shared/content.ts';
+import { conversationTitleSchema, identifierSchema, messagePayload, queueCommandSchema, queueDeliverySchema, queueLimit, queuePauseSchema, stateSchema, turnFileLimit, workspaceLimit } from '../shared/workbench.ts';
+import type { QueueCommand, QueueDelivery, QueuePause, QueueView, TurnFileSummary } from '../shared/workbench.ts';
+import { contentFields, recordedFilePath, toolSchema, type InputContent } from '../shared/content.ts';
 import { createResourceStore } from './resources.ts';
 import type { Binding, Configuration, HarnessId, NativeItem, NativeState, Receipt } from '../harness/types.ts';
 
@@ -68,6 +68,7 @@ export interface WorkbenchStore {
   hasHistoryItem(conversationId: string, itemId: string): boolean;
   operationRunId(conversationId: string, operationId: string): string | null;
   readHistory(conversationId: string, options?: { beforeItemId?: string; limit?: number }): HistorySnapshot;
+  readTurnFiles(conversationId: string, runIds: readonly string[]): TurnFileSummary[];
 }
 
 export class StoreError extends Error {
@@ -91,6 +92,7 @@ const itemSchema = z.object({
   status: z.enum(['running', 'completed', 'failed']), runId: identifier.optional(), operationId: identifier.optional(),
   ...contentFields, tool: toolSchema.optional(),
 }).strict();
+const nativeItemSchema = itemSchema.extend({ fileEdits: z.array(recordedFilePath).max(400).optional() });
 const bindingSchema = z.object({
   id: identifier, cwd: boundedText(4096).min(1), configuration: configurationSchema, details: z.record(z.string(), z.unknown()),
 }).strict();
@@ -224,6 +226,22 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
       OR workbench_items.status IS NOT excluded.status OR workbench_items.run_id IS NOT excluded.run_id
       OR workbench_items.operation_id IS NOT excluded.operation_id OR workbench_items.metadata_json IS NOT excluded.metadata_json`);
   const deleteLive = db.prepare('DELETE FROM workbench_live_items WHERE conversation_id = ? AND id = ?');
+  let insertTurnFile: StatementSync | undefined;
+  let countTurnFiles: StatementSync | undefined;
+  let selectTurnFiles: StatementSync | undefined;
+  function recordTurnFiles(conversationId: string, item: NativeItem): boolean {
+    if (item.kind !== 'tool' || item.status !== 'completed' || !item.runId || !item.fileEdits?.length) return false;
+    insertTurnFile ??= db.prepare('INSERT OR IGNORE INTO workbench_turn_files(conversation_id,run_id,path) VALUES(?,?,?)');
+    countTurnFiles ??= db.prepare('SELECT COUNT(*) AS count FROM workbench_turn_files WHERE conversation_id=? AND run_id=?');
+    // Keep one extra distinct target to signal truncation, without growing the per-turn index further.
+    let count = Number(countTurnFiles.get(conversationId, item.runId)!.count);
+    const before = count;
+    for (const path of item.fileEdits) {
+      if (count > turnFileLimit) break;
+      count += Number(insertTurnFile.run(conversationId, item.runId, path).changes);
+    }
+    return count !== before;
+  }
   const resources = createResourceStore(db);
   const queueRow = (id: string) => db.prepare('SELECT * FROM workbench_queues WHERE conversation_id=?').get(id);
   const hasQueue = (id: string) => !!db.prepare('SELECT 1 FROM workbench_queue_entries WHERE conversation_id=? AND content_json IS NOT NULL LIMIT 1').get(id);
@@ -595,7 +613,7 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
     },
     mergeHistory(conversationId, value, beforeItemId) {
       parse(uuid, conversationId); if (beforeItemId !== undefined) parse(identifier, beforeItemId);
-      const items = parse(z.array(itemSchema).max(1000), value);
+      const items = parse(z.array(nativeItemSchema).max(1000), value);
       // Duplicate native IDs carry the final body in the page, retaining their first order.
       const incoming = new Map(items.map(item => [item.id, item]));
       return mutate(changed => {
@@ -660,14 +678,16 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
         for (const item of incoming.values()) {
           const written = upsertItem.run(conversationId, item.id, positions.get(item.id)!, item.kind, item.text, item.status, item.runId ?? null, item.operationId ?? null, metadata(item));
           const removed = deleteLive.run(conversationId, item.id);
-          if (Number(written.changes) + Number(removed.changes) > 0) changed(conversationId);
+          const recorded = recordTurnFiles(conversationId, item);
+          if (recorded || Number(written.changes) + Number(removed.changes) > 0) changed(conversationId);
         }
       });
     },
     saveLiveItem(conversationId, value) {
-      parse(uuid, conversationId); const item = parse(itemSchema, value);
+      parse(uuid, conversationId); const item = parse(nativeItemSchema, value);
       return mutate(changed => {
         requireConversation(conversationId);
+        if (recordTurnFiles(conversationId, item)) changed(conversationId);
         const canonical = db.prepare('SELECT position FROM workbench_items WHERE conversation_id=? AND id=?').get(conversationId, item.id);
         if (canonical) {
           const written = upsertItem.run(conversationId, item.id, Number(canonical.position), item.kind, item.text, item.status, item.runId ?? null, item.operationId ?? null, metadata(item));
@@ -709,6 +729,23 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
           UNION ALL SELECT id,kind,text,status,run_id,operation_id,metadata_json FROM workbench_items WHERE conversation_id=? AND id=? LIMIT 1`)
           .get(conversationId, itemId, conversationId, itemId);
         return row ? itemFromRow(row) : null;
+      });
+    },
+    readTurnFiles(conversationId, runIds) {
+      if (!runIds.length) return [];
+      return storage(() => {
+        selectTurnFiles ??= db.prepare('SELECT path FROM workbench_turn_files WHERE conversation_id=? AND run_id=? ORDER BY path LIMIT ?');
+        const summaries: TurnFileSummary[] = [];
+        let remaining = 2 * 1024 * 1024;
+        for (const runId of runIds) {
+          const rows = selectTurnFiles.all(conversationId, runId, turnFileLimit + 1);
+          if (!rows.length) continue;
+          const summary = { runId, paths: rows.slice(0, turnFileLimit).map(row => String(row.path)), limited: rows.length > turnFileLimit };
+          remaining -= Buffer.byteLength(JSON.stringify(summary)) + 1;
+          if (remaining < 0) break;
+          summaries.push(summary);
+        }
+        return summaries;
       });
     },
     readHistory(conversationId, value = {}) {
