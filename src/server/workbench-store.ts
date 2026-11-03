@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import { z } from 'zod';
+import { conversationTitleSchema, identifierSchema } from '../shared/workbench.ts';
 import { contentFields, toolSchema, type InputContent } from '../shared/content.ts';
 import { createResourceStore } from './resources.ts';
 import type { Binding, Configuration, HarnessId, NativeItem, NativeState, Receipt } from '../harness/types.ts';
@@ -9,7 +10,7 @@ export type Readiness = 'preparing' | 'ready' | 'blocked';
 export type Conversation = {
   id: string; harnessId: HarnessId; workspaceId: string; cwd: string; title: string;
   configuration: Configuration; binding: Binding | null; readiness: Readiness;
-  state: NativeState; error: string | null; createdAt: number;
+  archived: boolean; state: NativeState; error: string | null; createdAt: number;
   historyLoaded: boolean; nativeOlderCursor: string | null; nativeOlderBeforeItemId: string | null;
 };
 export type CreateConversation = Pick<Conversation, 'id' | 'harnessId' | 'workspaceId' | 'cwd' | 'configuration'> & { title?: string };
@@ -30,11 +31,17 @@ export type HistorySnapshot = {
   historyLoaded: boolean; nativeOlderCursor: string | null; nativeOlderBeforeItemId: string | null;
 };
 export type ListOperations = { conversationId?: string; status?: OperationStatus; type?: 'message' | 'stop'; order?: 'asc' | 'desc'; afterId?: string; limit?: number };
+type ConversationList = {
+  beforeId?: string; limit?: number; workspaceId?: string; archived?: boolean;
+  title?: string; excludeWorkspaces?: string[];
+};
 export interface WorkbenchStore {
   resources: ReturnType<typeof createResourceStore>;
   createConversation(input: CreateConversation): { conversation: Conversation; created: boolean };
   getConversation(id: string): Conversation | null;
-  listConversations(options?: { beforeId?: string; limit?: number }): Conversation[];
+  listConversations(options?: ConversationList): Conversation[];
+  renameConversation(id: string, title: string): Conversation;
+  setArchived(id: string, archived: boolean, canArchive: (conversation: Conversation) => boolean): Conversation;
   saveBinding(id: string, binding: Binding): Conversation;
   setConversationState(id: string, change: { readiness?: Readiness; state?: NativeState; error?: string | null }): Conversation;
   setHistoryCursor(id: string, cursor: { loaded: boolean; olderCursor: string | null; beforeItemId: string | null }): Conversation;
@@ -150,7 +157,7 @@ function itemFromRow(row: Row): NativeItem {
 function conversationFromRow(row: Row): Conversation {
   return {
     id: String(row.id), harnessId: parse(z.enum(['codex', 'dsh']), row.harness_id, 'corrupt_workbench_data'),
-    workspaceId: String(row.workspace_id), cwd: String(row.cwd), title: String(row.title),
+    workspaceId: String(row.workspace_id), cwd: String(row.cwd), title: String(row.title), archived: row.archived === 1,
     configuration: parseJson(configurationSchema, row.configuration_json), binding: row.binding_json === null ? null : parseJson(bindingSchema, row.binding_json),
     readiness: parse(z.enum(['preparing', 'ready', 'blocked']), row.readiness, 'corrupt_workbench_data'),
     state: parseJson(nativeStateSchema, row.state_json), error: row.error === null ? null : String(row.error), createdAt: Number(row.created_at),
@@ -229,13 +236,63 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
     },
     getConversation(id) { parse(uuid, id); return storage(() => { const row = conversationRow(id); return row ? conversationFromRow(row) : null; }); },
     listConversations(value = {}) {
-      const input = parse(z.object({ beforeId: uuid.optional(), limit: z.number().int().min(1).max(1000).default(100) }).strict(), value);
+      const input = parse(z.object({
+        beforeId: uuid.optional(), limit: z.number().int().min(1).max(1000).default(100),
+        workspaceId: identifierSchema.optional(), archived: z.boolean().optional(),
+        title: z.string().max(200).optional(), excludeWorkspaces: z.array(identifierSchema).max(16).optional(),
+      }).strict(), value);
       return storage(() => {
         const before = input.beforeId ? requireConversation(input.beforeId) : null;
-        const rows = before
-          ? db.prepare('SELECT * FROM workbench_conversations WHERE (created_at,id) < (?,?) ORDER BY created_at DESC,id DESC LIMIT ?').all(before.createdAt, before.id, input.limit)
-          : db.prepare('SELECT * FROM workbench_conversations ORDER BY created_at DESC,id DESC LIMIT ?').all(input.limit);
+        const cursor = [before?.createdAt ?? 9223372036854775807n, before?.id ?? ''] as const;
+        const title = input.title ?? '';
+        const exclusions = JSON.stringify(input.excludeWorkspaces ?? []);
+        const rows = input.workspaceId !== undefined && input.archived !== undefined
+          ? db.prepare(`
+              SELECT * FROM workbench_conversations
+              WHERE workspace_id = ? AND archived = ? AND (created_at,id) < (?,?)
+                AND workspace_id NOT IN (SELECT value FROM json_each(?))
+                AND instr(lower(title), lower(?)) > 0
+              ORDER BY created_at DESC,id DESC LIMIT ?
+            `).all(input.workspaceId, Number(input.archived), ...cursor, exclusions, title, input.limit)
+          : input.archived !== undefined && input.workspaceId === undefined
+            ? db.prepare(`
+                SELECT * FROM workbench_conversations
+                WHERE archived = ? AND (created_at,id) < (?,?)
+                  AND workspace_id NOT IN (SELECT value FROM json_each(?))
+                  AND instr(lower(title), lower(?)) > 0
+                ORDER BY created_at DESC,id DESC LIMIT ?
+              `).all(Number(input.archived), ...cursor, exclusions, title, input.limit)
+            : db.prepare(`
+                SELECT * FROM workbench_conversations
+                WHERE (created_at,id) < (?,?) AND (? IS NULL OR workspace_id = ?)
+                  AND workspace_id NOT IN (SELECT value FROM json_each(?))
+                  AND instr(lower(title), lower(?)) > 0
+                ORDER BY created_at DESC,id DESC LIMIT ?
+              `).all(...cursor, input.workspaceId ?? null, input.workspaceId ?? null, exclusions, title, input.limit);
         return rows.map(conversationFromRow);
+      });
+    },
+    renameConversation(id, value) {
+      parse(uuid, id);
+      const title = parse(conversationTitleSchema, value).trim();
+      return mutate(changed => {
+        const current = requireConversation(id);
+        if (current.title === title) return current;
+        db.prepare('UPDATE workbench_conversations SET title=? WHERE id=?').run(title, id);
+        changed(id);
+        return requireConversation(id);
+      });
+    },
+    setArchived(id, archived, canArchive) {
+      parse(uuid, id);
+      parse(z.boolean(), archived);
+      return mutate(changed => {
+        const current = requireConversation(id);
+        if (current.archived === archived) return current;
+        if (archived && !canArchive(current)) throw new StoreError('conversation_archive_busy', 409);
+        db.prepare('UPDATE workbench_conversations SET archived=? WHERE id=?').run(Number(archived), id);
+        changed(id);
+        return requireConversation(id);
       });
     },
     saveBinding(id, value) {
@@ -290,7 +347,7 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
           if (existing.digest !== contentDigest) throw new StoreError('operation_id_conflict', 409);
           return { operation: operationFromRow(existing), created: false };
         }
-        requireConversation(input.conversationId);
+        if (requireConversation(input.conversationId).archived) throw new StoreError('conversation_archived', 409);
         const count = Number(db.prepare('SELECT COUNT(*) AS count FROM workbench_operations WHERE conversation_id=?').get(input.conversationId)!.count);
         if (count >= 50_000) throw new StoreError('operation_capacity_reached', 409);
         if (input.type === 'message') for (const image of input.payload.images ?? []) resources.pin(input.conversationId, image.id, input.id);

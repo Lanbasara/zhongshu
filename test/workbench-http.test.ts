@@ -225,3 +225,39 @@ test('a real non-reading TCP client is evicted under backpressure without an unb
   const replacement = await f.stream(); assert.equal(replacement.response.status, 200, 'slow client connection slot must be released');
   await replacement.named('ready'); replacement.close(); paused.destroy();
 });
+
+test('management filters before paging, preserves binding and guards archived submissions', async t => {
+  const f = await fixture(t);
+  const id = f.seed();
+  const post = (path: string, body: unknown) => f.request(path, { method: 'POST', body });
+  const manage = (body: unknown) => post(`/conversations/${id}/manage`, body);
+  const search = (body: unknown) => post('/conversation-search', body);
+  const title = '旧对话 100%_内容';
+  const binding = f.store.getConversation(id)?.binding;
+  assert.equal((await f.request('/conversation-search', { method: 'POST', authenticated: false, body: {} })).status, 401);
+  assert.equal((await f.request(`/conversations/${id}/manage`, { method: 'POST', body: { action: 'archive', archived: true }, headers: { 'x-csrf-token': '' } })).status, 403);
+  assert.equal((await manage({ action: 'rename', title: '   ' })).status, 400);
+  assert.equal((await manage({ action: 'rename', title })).body.conversation.title, title);
+  for (let index = 0; index < 8; index++) f.seed();
+  const first = await search({ workspaceId: 'fixture' });
+  assert.equal(first.body.conversations.length, 6);
+  assert.ok(first.body.olderBeforeId);
+  const second = await search({ workspaceId: 'fixture', beforeId: first.body.olderBeforeId });
+  assert.equal(second.body.conversations.length, 3);
+  assert.equal(new Set([...first.body.conversations, ...second.body.conversations].map(entry => entry.id)).size, 9);
+  assert.deepEqual((await search({ title: '%_' })).body.conversations.map((entry: { id: string }) => entry.id), [id]);
+  assert.deepEqual((await search({ workspaceId: 'other', title })).body.conversations, []);
+
+  const operation = { id: randomUUID(), type: 'message', payload: { text: 'Concurrent synthetic submission' } };
+  const [archive, send] = await Promise.all([manage({ action: 'archive', archived: true }), post(`/conversations/${id}/operations`, operation)]);
+  assert.ok((archive.status === 200 && send.status === 409) || (archive.status === 409 && send.status === 202));
+  const archivable = archive.status === 200 ? id : f.seed();
+  const setArchive = (archived: boolean) => post(`/conversations/${archivable}/manage`, { action: 'archive', archived });
+  assert.equal((await setArchive(true)).body.conversation.archived, true);
+  assert.equal((await post(`/conversations/${archivable}/operations`, { ...operation, id: randomUUID() })).body.error, 'conversation_archived');
+  assert.equal((await search({ archived: true })).body.conversations[0].id, archivable);
+  assert.equal((await f.request(`/conversations/${archivable}`)).body.conversation.archived, true);
+  assert.equal((await setArchive(false)).body.conversation.archived, false);
+  assert.deepEqual(f.store.getConversation(id)?.binding, binding);
+  assert.deepEqual((await search({ archived: true })).body.conversations, []);
+});

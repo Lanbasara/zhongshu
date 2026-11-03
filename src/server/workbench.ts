@@ -192,7 +192,7 @@ export class Workbench {
     return this.task(async () => {
       this.store.recoverDispatching();
       // The most recent bounded set restores eagerly. Other conversations restore when opened.
-      for (const conversation of this.store.listConversations({ limit: 16 })) {
+      for (const conversation of this.store.listConversations({ limit: 16, archived: false })) {
         if (!this.configured(conversation)) { try { this.adapter(conversation); } catch { /* durable blocked state */ } continue; }
         if (conversation.binding) this.launch(this.restoreConversation(conversation.id));
         else if (conversation.readiness === 'preparing') this.store.setConversationState(conversation.id, { readiness: 'blocked', error: 'native_creation_result_unknown' });
@@ -262,11 +262,25 @@ export class Workbench {
     const previous = this.store.listOperations({ conversationId: conversation.id, status: 'accepted', type: 'message', order: 'desc', limit: 1 })[0];
     return !previous || (previous.runId !== null && (previous.runId === conversation.state.runId || previous.runId === conversation.state.terminalRunId));
   }
+  async setArchived(id: string, archived: boolean) {
+    this.assertOpen();
+    const current = this.conversation(id);
+    if (archived && !current.archived && current.binding) {
+      await this.observe(id);
+      await this.sync(id);
+      this.assertOpen();
+    }
+    return this.store.setArchived(id, archived, conversation =>
+      conversation.binding ? this.messageAllowed(conversation) :
+        conversation.readiness === 'blocked' && conversation.state.pendingInputs === 0 &&
+        !['running', 'waiting'].includes(conversation.state.status));
+  }
   async enqueue(input: OperationInput) {
     this.assertOpen();
     if (this.store.getOperation(input.id)) return this.store.enqueueOperation(input).operation;
     if (input.type === 'message' && (this.runtimes.get(input.conversationId)?.dirty || this.runtimes.get(input.conversationId)?.syncing)) await this.sync(input.conversationId);
     const conversation = this.conversation(input.conversationId); this.adapter(conversation);
+    if (conversation.archived) throw new StoreError('conversation_archived', 409);
     if (!conversation.binding) throw new StoreError('conversation_not_ready', 409);
     if (input.type === 'message' && !this.messageAllowed(conversation)) throw new StoreError('operation_needs_reconciliation', 409);
     if (input.type === 'stop' && (!['running', 'waiting'].includes(conversation.state.status) || conversation.state.runId !== input.payload.runId))

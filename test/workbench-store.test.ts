@@ -351,3 +351,31 @@ test('large history and live reads have byte bounds before HTTP serialization an
   assert(live.liveItems.reduce((bytes, entry) => bytes + Buffer.byteLength(entry.text) + 2048, 0) <= 4 * 1024 * 1024);
   assert(live.liveItems.every(entry => entry.text === body));
 });
+
+test('v3 conversation history upgrades to active and management metadata survives reopen', t => {
+  const f = fixture(t);
+  const input = { ...conversation(), title: '旧库原始标题' };
+  const native = binding(input);
+  const legacy = openDatabase(f.directory, productMigrations.filter(migration => migration.version < 4));
+  try {
+    const store = createWorkbenchStore(legacy);
+    store.createConversation(input);
+    store.saveBinding(input.id, native);
+    store.mergeHistory(input.id, [item('legacy-entry', '旧库原文')]);
+  } finally { legacy.close(); }
+
+  let db = f.open();
+  let store = createWorkbenchStore(db);
+  assert.deepEqual(store.listConversations({ archived: false }).map(entry => entry.id), [input.id]);
+  assert.equal(store.getConversation(input.id)?.archived, false);
+  store.renameConversation(input.id, '升级后的标题');
+  store.setArchived(input.id, true, () => true);
+  f.close(db);
+
+  db = f.open();
+  store = createWorkbenchStore(db);
+  assert.deepEqual(store.listConversations({ archived: false }), []);
+  assert.equal(store.listConversations({ archived: true })[0]?.title, '升级后的标题');
+  assert.deepEqual(store.getConversation(input.id)?.binding, native);
+  assert.equal(store.readHistory(input.id).items[0]?.text, '旧库原文');
+});

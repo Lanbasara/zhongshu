@@ -8,6 +8,7 @@
 | --- | --- | --- |
 | 登录、刷新、退出、密码重置后失效 | [access](access.md)：A01–A05 | 真实应用、两个独立浏览器上下文 |
 | 选配置、创建、空对话恢复、核对创建结果 | [conversations](conversations.md)：C01–C05 | fixture；C05 需真实 DSH |
+| 工作区分组、侧栏调整、标题搜索、重命名与归档 | [conversation-management](conversation-management.md)：M01–M05 | fixture、真实 Harness 与手机分支 |
 | 发送、接续、停止、未知回执核对 | [execution](execution.md)：E01–E05 | fixture；E05 需真实 Harness |
 | 刷新/关页/应用中断后恢复、草稿、长历史 | [continuity](continuity.md)：R01–R06 | fixture；原生恢复需另跑真实分支 |
 | 完整图文对话、工具阅读、输入与引用、恢复接续 | [conversation-usability](conversation-usability.md)：U01–U10 | 两个真实 Harness、合成图片及工作区文件 |

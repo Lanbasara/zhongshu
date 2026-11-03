@@ -87,6 +87,10 @@ export const productMigrations: Migration[] = [{ version: 2, sql: `
     owner_id TEXT NOT NULL,
     PRIMARY KEY(resource_id,owner_id)
   ) STRICT;
+` }, { version: 4, sql: `
+  ALTER TABLE workbench_conversations ADD COLUMN archived INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0, 1));
+  CREATE INDEX workbench_conversations_workspace_page ON workbench_conversations(workspace_id, archived, created_at, id);
+  CREATE INDEX workbench_conversations_archive_page ON workbench_conversations(archived, created_at, id);
 ` }];
 
 /** Runs inside restoreDatabase's private staging transaction, before the database is published. */
