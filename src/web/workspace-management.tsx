@@ -103,7 +103,7 @@ export function WorkspaceManagement({ action, roots, csrf, close, changed, repor
           {directory && <p className="workspace-creation-location">
             {targetDirectory ? '将创建在' : '将在当前目录下新建'} <code aria-label="新建文件夹的位置">{targetDirectory ?? directory.currentDirectory}</code>
           </p>}
-          <div className="management-actions"><button className="text-button" disabled={!targetDirectory}>新建并添加</button></div>
+          <button type="submit" className="primary" disabled={!targetDirectory}>新建并添加</button>
         </form>
       </> : action.kind === 'restore' ? <>
         <p>恢复「{action.workspace.label}」的原登记。对话核对原生会话后即可继续。</p>
