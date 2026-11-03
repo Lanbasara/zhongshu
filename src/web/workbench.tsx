@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import {
-  workbenchConfigurationSchema, conversationListSchema, conversationResponseSchema, operationResponseSchema,
+  workbenchConfigurationSchema, conversationResponseSchema, operationResponseSchema,
   snapshotSchema, changeEventSchema, resetEventSchema,
   type WorkbenchConfiguration, type Conversation, type WorkbenchSnapshot, type WorkbenchItem,
 } from '../shared/workbench.ts';
@@ -9,11 +9,13 @@ import { sessionSchema } from '../shared/http.ts';
 import './workbench.css';
 import { Transcript, FilePicker } from './conversation-content.tsx';
 import { Composer } from './composer.tsx';
+import { ConversationNavigation, useSidebarWidth } from './conversation-navigation.tsx';
 import type { MessageReference } from '../shared/content.ts';
 
 const states = { idle: '就绪', running: '运行中', waiting: '等待处理', interrupted: '已中断', failed: '执行失败', unknown: '待核实' };
 const stateLabel = (c: Conversation) => c.readiness === 'preparing' ? '正在准备' : c.readiness === 'blocked' ? '准备未完成' : states[c.state.status];
 const failures: Record<string, string> = {
+  conversation_archived: '这段对话已归档，请恢复后继续。',
   conversation_not_ready: '对话尚未就绪，请等待状态核实。', operation_needs_reconciliation: '上一项操作尚未核实，请先查询结果。',
   operation_conflict: '操作编号与内容不一致；已保留输入。', configuration_unavailable: '所选配置暂时不可用，请刷新后重试。',
   active_conversation_limit: '当前观察的运行中对话较多，请稍后再试。', invalid_request: '输入未被接受，请检查内容与长度。',
@@ -50,13 +52,13 @@ const boundedPage = (items: WorkbenchItem[]) => {
 
 export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf: string; logout(): void; expired(): void; busy: boolean; authError: string }) {
   const [configuration, setConfiguration] = useState<WorkbenchConfiguration>();
-  const [conversations, setConversations] = useState<Conversation[]>([]);
-  const [listBefore, setListBefore] = useState<string | null>(null);
+  const [listRevision, refreshList] = useState(0);
+  const sidebarWidth = useSidebarWidth();
   const [selected, setSelected] = useState<string | undefined>(() => /^#[0-9a-f-]{36}$/i.test(location.hash) ? location.hash.slice(1) : undefined);
   const [snapshot, setSnapshot] = useState<WorkbenchSnapshot>();
   const [items, setItems] = useState<WorkbenchItem[]>([]);
   const [draft, setDraft] = useState<Draft>({ text: '' });
-  const [creating, setCreating] = useState(false);
+  const [creating, setCreating] = useState<string | true>();
   const [pickingFile, setPickingFile] = useState(false);
   const [navigation, setNavigation] = useState(false);
   const [error, setError] = useState('');
@@ -73,8 +75,6 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
   const draftRef = useRef(draft); draftRef.current = draft;
   const generation = useRef(0);
   const requestSerial = useRef(0);
-  const listSerial = useRef(0);
-  const listExpanded = useRef(false);
   const activeRead = useRef<{ id: string; generation: number; dirty: boolean; latest: boolean; task: Promise<void> } | undefined>(undefined);
   const viewController = useRef<AbortController | undefined>(undefined);
   const scroll = useRef<HTMLDivElement>(null);
@@ -89,16 +89,6 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
     if (reason instanceof RequestError && reason.status === 401) { expired(); return; }
     setError(reason instanceof RequestError ? failures[reason.code] ?? '暂时无法确认结果。输入和已有内容仍保留，请重新连接。' : '连接暂时中断。输入和已有内容仍保留，请重试。');
   }, [expired]);
-  const loadList = async (older?: string) => {
-    const serial = ++listSerial.current;
-    try {
-      const result = await request('/conversations' + (older ? `?beforeId=${encodeURIComponent(older)}` : ''), conversationListSchema);
-      if (!alive.current || serial !== listSerial.current) return;
-      if (older) listExpanded.current = true;
-      setConversations(previous => older ? [...previous, ...result.conversations.filter(c => !previous.some(p => p.id === c.id))].slice(-200) : listExpanded.current ? [...result.conversations, ...previous.filter(c => !result.conversations.some(p => p.id === c.id))].slice(0, 200) : result.conversations);
-      if (older || !listExpanded.current) setListBefore(result.olderBeforeId);
-    } catch (reason) { report(reason); }
-  };
   const load = async (id: string, latest = false) => {
     const gen = generation.current;
     const running = activeRead.current;
@@ -146,16 +136,14 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
     return job.task;
   };
   const loadRef = useRef(load); loadRef.current = load;
-  const listRef = useRef(loadList); listRef.current = loadList;
-  const scheduleRefresh = (id?: string) => {
-    if (!listTimer.current) listTimer.current = setTimeout(() => { listTimer.current = undefined; void listRef.current(); }, 700);
+  const scheduleRefresh = (id?: string, refreshNavigation = true) => {
+    if (refreshNavigation && !listTimer.current) listTimer.current = setTimeout(() => { listTimer.current = undefined; refreshList(value => value + 1); }, 700);
     if (id && id !== selectedRef.current) return;
     if (!refreshTimer.current) refreshTimer.current = setTimeout(() => { refreshTimer.current = undefined; if (selectedRef.current) void loadRef.current(selectedRef.current); }, 180);
   };
   useEffect(() => {
     alive.current = true;
     void request('/configuration', workbenchConfigurationSchema).then(value => { if (alive.current) setConfiguration(value); }).catch(report);
-    void loadList();
     return () => { alive.current = false; generation.current++; viewController.current?.abort(); if (refreshTimer.current) clearTimeout(refreshTimer.current); if (listTimer.current) clearTimeout(listTimer.current); };
   }, []);
   useEffect(() => {
@@ -192,7 +180,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
             setSnapshot(current => current ? { ...current, history: { ...current.history, liveItems: [...current.history.liveItems.filter(old => old.id !== item.id), item].slice(-100) } } : current);
           }
           // History snapshots reconcile live and durable identities; this also catches missed terminal events.
-          scheduleRefresh(change.conversationId);
+          scheduleRefresh(change.conversationId, !change.item);
         } catch { cursor = 0; reconnect(); }
       });
       source.addEventListener('reset', event => { if (source !== own || stopped) return; try { cursor = resetEventSchema.parse(JSON.parse((event as MessageEvent).data)).revision; scheduleRefresh(); } catch { cursor = 0; reconnect(); } });
@@ -209,7 +197,12 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
     else if (atBottom.current) { node.scrollTop = node.scrollHeight; setMoreOutput(false); }
     else setMoreOutput(true);
   }, [items, snapshot?.history.liveItems]);
-  const choose = (id: string) => { history.replaceState(null, '', `#${id}`); setSelected(id); setNavigation(false); };
+  const choose = useCallback((id: string) => { history.replaceState(null, '', `#${id}`); setSelected(id); setNavigation(false); }, []);
+  const createInWorkspace = useCallback((id: string) => { setCreating(id); setNavigation(false); }, []);
+  const refreshNavigation = useCallback(() => {
+    refreshList(value => value + 1);
+    if (selectedRef.current) void loadRef.current(selectedRef.current);
+  }, []);
   const updateDraft = (next: Draft, requireDurable = false): boolean => {
     if (!selected) return false;
     const saved = saveDraft(selected, next);
@@ -238,7 +231,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
       } else if (['unknown', 'rejected'].includes(result.operation.status)) setError(result.operation.reason ?? '操作结果待核实。');
       atBottom.current = true; await load(id);
     } catch (reason) {
-      if (gen === generation.current && reason instanceof RequestError && ([400, 413].includes(reason.status) || ['operation_needs_reconciliation','file_reference_unavailable','file_reference_forbidden','quote_source_changed','image_reference_changed','image_unavailable'].includes(reason.code))) {
+      if (gen === generation.current && reason instanceof RequestError && ([400, 413].includes(reason.status) || ['conversation_archived','operation_needs_reconciliation','file_reference_unavailable','file_reference_forbidden','quote_source_changed','image_reference_changed','image_unavailable'].includes(reason.code))) {
         setDraft(current => { const { pending: _pending, ...editable } = current; saveDraft(id, editable); return editable; });
       }
       report(reason);
@@ -277,16 +270,17 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
   const latestMessage = snapshot?.operations.find(op => op.type === 'message' && op.status === 'accepted');
   const rejectedDraft = draft.pending && snapshot?.operations.find(op => op.id === draft.pending!.id)?.status === 'rejected';
   const previousMessageSettled = !latestMessage || (latestMessage.runId !== null && (latestMessage.runId === conversation?.state.runId || latestMessage.runId === conversation?.state.terminalRunId));
-  const ready = conversation?.readiness === 'ready' && conversation.state.configurationVerified && ['idle', 'interrupted', 'failed'].includes(conversation.state.status) && !conversation.state.pendingInputs && !unresolved && previousMessageSettled;
+  const ready = !conversation?.archived && conversation?.readiness === 'ready' && conversation.state.configurationVerified && ['idle', 'interrupted', 'failed'].includes(conversation.state.status) && !conversation.state.pendingInputs && !unresolved && previousMessageSettled;
   const live = windowed ? [] : snapshot?.history.liveItems.filter(item => !items.some(saved => saved.id === item.id && saved.status !== 'running')) ?? [];
   const visible = items.map(item => live.find(current => current.id === item.id) ?? item).concat(live.filter(item => !items.some(saved => saved.id === item.id)));
-  return <div className="workbench">
+  return <div className="workbench" style={sidebarWidth.style}>
     <aside className={`sidebar ${navigation ? 'is-open' : ''}`} aria-label="对话导航">
       <div className="workbench-brand"><img src="/icon.svg" width="30" height="30" alt="" /><div>中书<small>ZHONGSHU</small></div><button className="icon-button mobile-only" aria-label="关闭导航" onClick={() => setNavigation(false)}>×</button></div>
       <button className="new-conversation" onClick={() => { setCreating(true); setNavigation(false); }}>＋ 新对话</button>
-      <p className="nav-label">你的对话</p>
-      <nav>{conversations.map(c => <button key={c.id} className={`conversation-link ${c.id === selected ? 'selected' : ''}`} aria-current={c.id === selected ? 'page' : undefined} onClick={() => choose(c.id)}><strong>{c.title}</strong><span>{c.harnessId === 'codex' ? 'Codex' : 'DSH'} <i>{stateLabel(c)}</i></span></button>)}</nav>
-      {listBefore && <button className="text-button" onClick={() => void loadList(listBefore)}>更早的对话</button>}
+      <ConversationNavigation workspaces={configuration?.workspaces} selected={selected} revision={listRevision} csrf={csrf}
+        choose={choose} create={createInWorkspace} stateLabel={stateLabel} report={report}
+        changed={refreshNavigation} />
+      {sidebarWidth.separator}
       <div className="sidebar-bottom"><span className="network" role="status">{connection}</span><button className="text-button" onClick={logout} disabled={busy}>退出登录</button></div>
     </aside>
     {navigation && <button className="nav-backdrop" aria-label="关闭导航" onClick={() => setNavigation(false)} />}
@@ -309,23 +303,24 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
           {snapshot?.history.liveItemsLimited && <p className="state-notice">部分实时输出较长，将在完成后从历史中读取完整内容。</p>}
           {!!conversation?.state.pendingInputs && <p className="state-notice">原生服务仍保留 {conversation.state.pendingInputs} 项待处理输入。停止当前轮不会清空它们。</p>}
           {(unresolved || conversation?.state.status === 'unknown' || !previousMessageSettled) && <div className="state-notice">{!previousMessageSettled ? '正在核对上一条消息对应轮次的执行结果。' : '正在核对执行结果。'}<button className="text-button" onClick={() => void reconcile()}>查询原生结果</button></div>}
-          {draft.pending && <div className="state-notice">{rejectedDraft ? '上次发送未被接受，原始输入已保留。' : '上次发送尚未确认，原始输入已保留。'}<button className="text-button" disabled={sending} onClick={() => { if (rejectedDraft && selected) { const { pending: _pending, ...next } = draft; setDraft(next); saveDraft(selected, next); } else void send(); }}>{rejectedDraft ? '继续编辑' : '核对同一发送'}</button></div>}
-          <Composer key={selected} conversation={selected} csrf={csrf} draft={draft} onChange={updateDraft} onSend={() => { if (ready || draft.pending) void send(); }} onStop={() => void stop()} onFiles={() => setPickingFile(true)} ready={ready} sending={sending} running={!!conversation && ['running','waiting'].includes(conversation.state.status) && !!conversation.state.runId} model={configuration?.harnesses.find(h => h.id === conversation?.harnessId)?.models.find(m => m.id === conversation?.configuration.modelId)?.label ?? '配置按对话固定'}/>
-          <p className="composer-hint">Enter 换行 · ⌘ / Ctrl + Enter 发送<span>配置在本对话中保持不变</span></p>
+          {conversation?.archived && <p className="state-notice">这段对话已归档。可在侧栏恢复后继续。</p>}
+          {!conversation?.archived && draft.pending && <div className="state-notice">{rejectedDraft ? '上次发送未被接受，原始输入已保留。' : '上次发送尚未确认，原始输入已保留。'}<button className="text-button" disabled={sending} onClick={() => { if (rejectedDraft && selected) { const { pending: _pending, ...next } = draft; setDraft(next); saveDraft(selected, next); } else void send(); }}>{rejectedDraft ? '继续编辑' : '核对同一发送'}</button></div>}
+          {!conversation?.archived && <Composer key={selected} conversation={selected} csrf={csrf} draft={draft} onChange={updateDraft} onSend={() => { if (ready || draft.pending) void send(); }} onStop={() => void stop()} onFiles={() => setPickingFile(true)} ready={ready} sending={sending} running={!!conversation && ['running','waiting'].includes(conversation.state.status) && !!conversation.state.runId} model={configuration?.harnesses.find(h => h.id === conversation?.harnessId)?.models.find(m => m.id === conversation?.configuration.modelId)?.label ?? '配置按对话固定'}/>}
+          {!conversation?.archived && <p className="composer-hint">Enter 换行 · ⌘ / Ctrl + Enter 发送<span>配置在本对话中保持不变</span></p>}
         </div>
       </>}
       {(error || authError) && <div className="workbench-error" role="alert"><span>{error || authError}</span><button className="text-button" onClick={() => setError('')}>关闭</button></div>}
     </main>
-    {creating && <CreateConversation configuration={configuration} csrf={csrf} onClose={() => setCreating(false)} onCreated={c => { setCreating(false); setConversations(current => [c, ...current.filter(old => old.id !== c.id)]); choose(c.id); }} onError={report} />}
+    {creating && <CreateConversation configuration={configuration} csrf={csrf} initialWorkspace={typeof creating === 'string' ? creating : undefined} onClose={() => setCreating(undefined)} onCreated={c => { setCreating(undefined); refreshList(value => value + 1); choose(c.id); }} onError={report} />}
     {pickingFile && selected && <FilePicker conversation={selected} onClose={() => setPickingFile(false)} onSelect={(reference: MessageReference) => { const next = { ...draft, text: draft.text.endsWith('@') ? draft.text.slice(0,-1) : draft.text, references: [...(draft.references ?? []), reference].slice(0,8) }; updateDraft(next); }}/ >}
   </div>;
 }
 
-function CreateConversation({ configuration, csrf, onClose, onCreated, onError }: { configuration?: WorkbenchConfiguration; csrf: string; onClose(): void; onCreated(c: Conversation): void; onError(reason: unknown): void }) {
+function CreateConversation({ configuration, initialWorkspace, csrf, onClose, onCreated, onError }: { configuration?: WorkbenchConfiguration; initialWorkspace?: string; csrf: string; onClose(): void; onCreated(c: Conversation): void; onError(reason: unknown): void }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const [harness, setHarness] = useState<'codex' | 'dsh'>(configuration?.harnesses.find(h => h.available)?.id ?? 'codex');
   const catalog = configuration?.harnesses.find(h => h.id === harness);
-  const [workspace, setWorkspace] = useState(configuration?.workspaces[0]?.id ?? '');
+  const [workspace, setWorkspace] = useState(initialWorkspace ?? configuration?.workspaces[0]?.id ?? '');
   const [model, setModel] = useState(catalog?.models[0]?.id ?? '');
   const [permission, setPermission] = useState(catalog?.permissions[0]?.id ?? '');
   const [title, setTitle] = useState(''); const [busy, setBusy] = useState(false); const [failed, setFailed] = useState(false);

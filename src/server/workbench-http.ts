@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { ServerResponse } from 'node:http';
 import { z } from 'zod';
-import { createConversationSchema, enqueueOperationSchema, identifierSchema, workbenchConfigurationSchema } from '../shared/workbench.ts';
+import { conversationManagementSchema, conversationSearchSchema, createConversationSchema, enqueueOperationSchema, identifierSchema, workbenchConfigurationSchema } from '../shared/workbench.ts';
 import type { Conversation as ConversationView, WorkbenchOperation, WorkbenchSnapshot } from '../shared/workbench.ts';
 import type { PrivateContext } from './app.ts';
 import type { Workbench } from './workbench.ts';
@@ -31,7 +31,7 @@ function parse<T>(schema: z.ZodType<T>, value: unknown): T {
   return parsed.data;
 }
 function conversationView(value: Conversation): ConversationView {
-  return { id: value.id, title: value.title, harnessId: value.harnessId, workspaceId: value.workspaceId,
+  return { id: value.id, title: value.title, harnessId: value.harnessId, workspaceId: value.workspaceId, archived: value.archived,
     configuration: value.configuration, readiness: value.readiness, state: value.state, error: value.error, createdAt: value.createdAt };
 }
 function operationView(value: Operation): WorkbenchOperation {
@@ -172,6 +172,26 @@ export function createWorkbenchHttp(workbench: Workbench, input: Partial<z.input
         const values = workbench.store.listConversations({ ...query, limit: 101 });
         const conversations = values.slice(0, 100).map(conversationView);
         return json(reply, { conversations, olderBeforeId: values.length > 100 ? conversations.at(-1)!.id : null, revision: workbench.store.version() });
+      });
+      // Titles stay in the body, outside request URL logs.
+      privateApp.post('/conversation-search', { bodyLimit: 4096 }, async (request, reply) => {
+        parse(noQuery, request.query);
+        const { unregistered, ...query } = parse(conversationSearchSchema, request.body);
+        const limit = query.workspaceId || unregistered ? 6 : 30;
+        const values = workbench.store.listConversations({
+          ...query, limit: limit + 1,
+          ...(unregistered ? { excludeWorkspaces: workbench.workspaces.map(workspace => workspace.id) } : {}),
+        });
+        const conversations = values.slice(0, limit).map(conversationView);
+        return json(reply, { conversations, olderBeforeId: values.length > limit ? conversations.at(-1)!.id : null, revision: workbench.store.version() });
+      });
+      privateApp.post('/conversations/:id/manage', { bodyLimit: 4096 }, async (request, reply) => {
+        parse(noQuery, request.query);
+        const { id } = parse(uuidParams, request.params);
+        const body = parse(conversationManagementSchema, request.body);
+        const conversation = body.action === 'rename' ? workbench.store.renameConversation(id, body.title) :
+          await workbench.setArchived(id, body.archived);
+        return json(reply, { conversation: conversationView(conversation) });
       });
       privateApp.post('/conversations', async (request, reply) => {
         parse(noQuery, request.query);

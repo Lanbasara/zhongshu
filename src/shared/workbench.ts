@@ -20,7 +20,7 @@ export const itemSchema = z.object({
 export const conversationSchema = z.object({
   id: z.uuid(), title: boundedText(200), harnessId: z.enum(['codex', 'dsh']), workspaceId: identifierSchema,
   configuration: configurationSchema, readiness: z.enum(['preparing', 'ready', 'blocked']),
-  state: stateSchema, error: boundedText(4096).nullable(), createdAt: revisionSchema,
+  archived: z.boolean().default(false), state: stateSchema, error: boundedText(4096).nullable(), createdAt: revisionSchema,
 }).strict();
 export const catalogSchema = z.object({
   id: z.enum(['codex', 'dsh']), available: z.boolean(), reason: boundedText(4096).optional(),
@@ -35,6 +35,16 @@ export const createConversationSchema = z.object({
   id: z.uuid(), harnessId: z.enum(['codex', 'dsh']), workspaceId: identifierSchema,
   configuration: configurationSchema, title: boundedText(200).min(1).optional(),
 }).strict();
+export const conversationTitleSchema = boundedText(200).refine(title => !!title.trim() && !title.includes('\0'));
+export const conversationManagementSchema = z.discriminatedUnion('action', [
+  z.object({ action: z.literal('rename'), title: conversationTitleSchema }).strict(),
+  z.object({ action: z.literal('archive'), archived: z.boolean() }).strict(),
+]);
+export const conversationSearchSchema = z.object({
+  workspaceId: identifierSchema.optional(), unregistered: z.literal(true).optional(),
+  title: boundedText(800).max(200).optional(), archived: z.boolean().default(false),
+  beforeId: z.uuid().optional(),
+}).strict().refine(query => !(query.workspaceId && query.unregistered));
 const messagePayload = z.object({ text: boundedText(48 * 1024).max(16_000), ...contentFields }).strict().refine(v => v.text.trim() || v.images?.length || v.references?.length);
 const stopPayload = z.object({ runId: identifierSchema }).strict();
 export const enqueueOperationSchema = z.discriminatedUnion('type', [
