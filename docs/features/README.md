@@ -10,6 +10,7 @@
 | 选配置、创建、空对话恢复、核对创建结果 | [conversations](conversations.md)：C01–C05 | fixture；C05 需真实 DSH |
 | 发送、接续、停止、未知回执核对 | [execution](execution.md)：E01–E05 | fixture；E05 需真实 Harness |
 | 刷新/关页/应用中断后恢复、草稿、长历史 | [continuity](continuity.md)：R01–R06 | fixture；原生恢复需另跑真实分支 |
+| 完整图文对话、工具阅读、输入与引用、恢复接续 | [conversation-usability](conversation-usability.md)：U01–U10 | 两个真实 Harness、合成图片及工作区文件 |
 
 场景编号用于引用和记录证据，不表示优先级或已通过。每页的 `Implementation and regression` 给出当前代码与定向回归入口。
 
@@ -139,6 +140,6 @@ node dist/server/main.js
 
 ## 覆盖边界与维护
 
-只列当前可操作能力。运行中追加、回答提问/审批、附件、成果阅读器/编辑器不在本地图覆盖范围；实现情况与下一切片见 spec。Android 真机、真实 Host 崩溃、VPS/Tunnel、慢网和性能需各自建立现场，桌面 fixture 成功不替代这些证据。
+只列当前可操作能力。运行中追加、回答提问/审批、通用文档附件、成果阅读器/编辑器不在本地图覆盖范围；实现情况与下一切片见 spec。Android 真机、真实 Host 崩溃、VPS/Tunnel、慢网和性能需各自建立现场，桌面 fixture 成功不替代这些证据。
 
 入口、行为、前提或判据随代码变化时更新受影响页。结构与相对引用由 `npm run check:docs` 检查；它不能证明语义或驱动可用。对 SSE 游标、背压和资源上限的协议回归见 [workbench-http.test.ts](../../test/workbench-http.test.ts)，页面恢复由 R01–R06 验证，两者分开记录。

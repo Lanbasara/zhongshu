@@ -1,4 +1,5 @@
 /** Product-facing semantics. Native protocol types stay inside each adapter. */
+import type { ImageAttachment, InputContent } from '../shared/content.ts';
 export type HarnessId = 'codex' | 'dsh';
 export type Configuration = { modelId: string; permissionId: string };
 export type Catalog = {
@@ -22,6 +23,11 @@ export type NativeItem = {
   status: 'running' | 'completed' | 'failed';
   runId?: string;
   operationId?: string;
+  images?: ImageAttachment[];
+  references?: InputContent['references'];
+  tool?: { name: string; exitCode?: number; input?: string; output?: string };
+  /** Transient native image sources: materialized before persistence or HTTP. */
+  imageSources?: { data?: string; path?: string; mediaType?: string }[];
 };
 export type NativeState = {
   status: 'idle' | 'running' | 'waiting' | 'interrupted' | 'failed' | 'unknown';
@@ -58,7 +64,8 @@ export interface HarnessAdapter {
   state(binding: Binding, targetRunId?: string): Promise<NativeState>;
   history(binding: Binding, olderCursor?: string, limit?: number): Promise<HistoryPage>;
   /** operationId is retained in the native message for reconciliation. Never auto-resend. */
-  submit(binding: Binding, operation: { id: string; text: string }): Promise<Receipt>;
+  submit(binding: Binding, operation: InputContent & { id: string; imageData?: { mediaType: string; data: string }[] }): Promise<Receipt>;
+  readImage?(binding: Binding, path: string): Promise<string>;
   reconcile(binding: Binding, operationId: string): Promise<Receipt>;
   stop(binding: Binding, runId: string): Promise<Receipt>;
   /** Changes are hints/live items; history and state are re-read on reconnect. */

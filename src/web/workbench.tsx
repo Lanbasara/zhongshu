@@ -7,6 +7,9 @@ import {
 import { request, RequestError, readDraft, saveDraft, type Draft } from './workbench-client.ts';
 import { sessionSchema } from '../shared/http.ts';
 import './workbench.css';
+import { Transcript, FilePicker } from './conversation-content.tsx';
+import { Composer } from './composer.tsx';
+import type { MessageReference } from '../shared/content.ts';
 
 const states = { idle: '就绪', running: '运行中', waiting: '等待处理', interrupted: '已中断', failed: '执行失败', unknown: '待核实' };
 const stateLabel = (c: Conversation) => c.readiness === 'preparing' ? '正在准备' : c.readiness === 'blocked' ? '准备未完成' : states[c.state.status];
@@ -14,6 +17,9 @@ const failures: Record<string, string> = {
   conversation_not_ready: '对话尚未就绪，请等待状态核实。', operation_needs_reconciliation: '上一项操作尚未核实，请先查询结果。',
   operation_conflict: '操作编号与内容不一致；已保留输入。', configuration_unavailable: '所选配置暂时不可用，请刷新后重试。',
   active_conversation_limit: '当前观察的运行中对话较多，请稍后再试。', invalid_request: '输入未被接受，请检查内容与长度。',
+  file_reference_unavailable: '引用文件已删除或无法读取，请重新选择；输入已保留。', file_reference_forbidden: '该文件不在可引用的工作区范围内。',
+  quote_source_changed: '引用的原消息无法读取，请重新选择。', image_unavailable: '图片暂时无法读取，请重新添加；文字和引用已保留。',
+  image_reference_changed: '图片引用已变化，请重新添加。', message_images_too_large: '这一条消息的图片合计超过 4 MiB，请减少图片后再发送。',
 };
 const stateReasons: Record<string, string> = {
   conversation_configuration_changed: '这段对话的工作区或原生服务配置已变化，需要管理员核对后才能继续。',
@@ -51,6 +57,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
   const [items, setItems] = useState<WorkbenchItem[]>([]);
   const [draft, setDraft] = useState<Draft>({ text: '' });
   const [creating, setCreating] = useState(false);
+  const [pickingFile, setPickingFile] = useState(false);
   const [navigation, setNavigation] = useState(false);
   const [error, setError] = useState('');
   const [sending, setSending] = useState(false);
@@ -124,7 +131,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
       if (pending) {
         const operation = result.operations.find(op => op.id === pending.id);
         if (operation?.status === 'accepted') {
-          setDraft(current => { const next = { text: current.text === pending.text ? '' : current.text }; saveDraft(id, next); return next; });
+          setDraft(current => { const { pending: _pending, ...editable } = current; const same = editable.text === pending.text && JSON.stringify(editable.images ?? []) === JSON.stringify(pending.images ?? []) && JSON.stringify(editable.references ?? []) === JSON.stringify(pending.references ?? []); const next = same ? { text: '' } : editable; saveDraft(id, next); return next; });
           setError('');
         } else if (operation?.status === 'rejected') setError(operation.reason ?? '本次发送未被接受，输入已保留。');
       }
@@ -203,16 +210,21 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
     else setMoreOutput(true);
   }, [items, snapshot?.history.liveItems]);
   const choose = (id: string) => { history.replaceState(null, '', `#${id}`); setSelected(id); setNavigation(false); };
-  const updateDraft = (text: string) => {
-    if (!selected) return;
-    const next = { ...draft, text }; setDraft(next); draftRef.current = next;
-    if (!saveDraft(selected, next)) setError('浏览器暂时无法保存草稿；关闭页面前请先复制输入。');
+  const updateDraft = (next: Draft, requireDurable = false): boolean => {
+    if (!selected) return false;
+    const saved = saveDraft(selected, next);
+    if (!saved) setError('浏览器无法保留草稿，请先复制输入。');
+    // Storage denial must not erase newly typed text. Uploaded files stay in
+    // IndexedDB until their metadata can be retained durably in the draft.
+    if (saved || !requireDurable) { setDraft(next); draftRef.current = next; }
+    return saved;
   };
   const send = async () => {
-    if (!selected || sendingRef.current || (!draft.text.trim() && !draft.pending)) return;
+    if (!selected || sendingRef.current || (!draft.text.trim() && !draft.images?.length && !draft.references?.length && !draft.pending)) return;
     const id = selected; const gen = generation.current;
-    const operation = draft.pending ?? { id: crypto.randomUUID(), text: draft.text };
-    const body = { id: operation.id, type: 'message', payload: { text: operation.text } };
+    const operation = draft.pending ?? { id: crypto.randomUUID(), text: draft.text, ...(draft.images?.length ? { images: draft.images } : {}), ...(draft.references?.length ? { references: draft.references } : {}) };
+    const { id: _operationId, ...payload } = operation;
+    const body = { id: operation.id, type: 'message', payload };
     if (new TextEncoder().encode(JSON.stringify(body)).length > 60 * 1024) { setError('输入编码后较长，请减少内容再发送；本次尚未发送。'); return; }
     const next = { ...draft, pending: operation };
     if (!saveDraft(id, next)) { setError('浏览器无法保留本次发送编号，本次尚未发送。请保留输入后重新打开页面。'); return; }
@@ -222,12 +234,12 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
       const result = await request(`/conversations/${id}/operations`, operationResponseSchema, { csrf, body });
       if (!alive.current || gen !== generation.current) return;
       if (result.operation.status === 'accepted') {
-        setDraft(current => { const clean = { text: current.text === operation.text ? '' : current.text }; saveDraft(id, clean); return clean; });
+        setDraft(current => { const { pending: _pending, ...editable } = current; const same = editable.text === operation.text && JSON.stringify(editable.images ?? []) === JSON.stringify(operation.images ?? []) && JSON.stringify(editable.references ?? []) === JSON.stringify(operation.references ?? []); const clean = same ? { text: '' } : editable; saveDraft(id, clean); return clean; });
       } else if (['unknown', 'rejected'].includes(result.operation.status)) setError(result.operation.reason ?? '操作结果待核实。');
       atBottom.current = true; await load(id);
     } catch (reason) {
-      if (gen === generation.current && reason instanceof RequestError && [400, 413].includes(reason.status)) {
-        setDraft(current => { const editable = { text: current.text }; saveDraft(id, editable); return editable; });
+      if (gen === generation.current && reason instanceof RequestError && ([400, 413].includes(reason.status) || ['operation_needs_reconciliation','file_reference_unavailable','file_reference_forbidden','quote_source_changed','image_reference_changed','image_unavailable'].includes(reason.code))) {
+        setDraft(current => { const { pending: _pending, ...editable } = current; saveDraft(id, editable); return editable; });
       }
       report(reason);
     }
@@ -287,7 +299,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
             {windowed && <p className="history-note">正在阅读较早的一页。<button className="text-button" onClick={() => { if (selected) { atBottom.current = true; void load(selected, true); } }}>回到最新内容</button></p>}
             {!snapshot && <p role="status" className="quiet">正在核对远端状态与历史…</p>}
             {snapshot && visible.length === 0 && <p className="quiet conversation-start">{conversation?.readiness === 'ready' ? '对话已准备好。说说你希望完成什么。' : '正在准备原生会话…'}</p>}
-            {visible.map(item => <Message key={item.id} item={item} />)}
+            <Transcript items={visible} conversation={selected} onQuote={reference => { if (draft.pending) { setError('请先核对上次发送，或继续编辑后再添加引用。'); return; } const next = { ...draft, references: [...(draft.references ?? []), reference].slice(0,8) }; updateDraft(next); }}/>
           </div>
         </div>
         <div className="composer-region">
@@ -297,22 +309,16 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
           {snapshot?.history.liveItemsLimited && <p className="state-notice">部分实时输出较长，将在完成后从历史中读取完整内容。</p>}
           {!!conversation?.state.pendingInputs && <p className="state-notice">原生服务仍保留 {conversation.state.pendingInputs} 项待处理输入。停止当前轮不会清空它们。</p>}
           {(unresolved || conversation?.state.status === 'unknown' || !previousMessageSettled) && <div className="state-notice">{!previousMessageSettled ? '正在核对上一条消息对应轮次的执行结果。' : '正在核对执行结果。'}<button className="text-button" onClick={() => void reconcile()}>查询原生结果</button></div>}
-          {draft.pending && <div className="state-notice">{rejectedDraft ? '上次发送未被接受，原始输入已保留。' : '上次发送尚未确认，原始输入已保留。'}<button className="text-button" disabled={sending} onClick={() => { if (rejectedDraft && selected) { const next = { text: draft.text }; setDraft(next); saveDraft(selected, next); } else void send(); }}>{rejectedDraft ? '继续编辑' : '核对同一发送'}</button></div>}
-          <form className="composer" onSubmit={e => { e.preventDefault(); if (ready || draft.pending) void send(); }}>
-            <label className="sr-only" htmlFor="message">给 Agent 的消息</label><textarea id="message" name="message" value={draft.text} maxLength={16_000} placeholder="继续思考，或开始一件工作…" onChange={e => updateDraft(e.target.value)} onKeyDown={e => { if ((e.ctrlKey || e.metaKey) && e.key === 'Enter' && !e.nativeEvent.isComposing && (ready || draft.pending)) { e.preventDefault(); void send(); } }} rows={3} />
-            <div className="composer-actions"><span title={conversation?.configuration.modelId}>{configuration?.harnesses.find(h => h.id === conversation?.harnessId)?.models.find(m => m.id === conversation?.configuration.modelId)?.label ?? '配置按对话固定'}</span>{conversation && ['running', 'waiting'].includes(conversation.state.status) && conversation.state.runId ? <button type="button" className="stop-button" disabled={sending} onClick={() => void stop()}>停止当前轮</button> : <button type="submit" aria-label="发送消息" disabled={sending || (!ready && !draft.pending) || (!draft.text.trim() && !draft.pending)}>{sending ? '确认中…' : '发送 ↑'}</button>}</div>
-          </form><p className="composer-hint">Enter 换行 · ⌘ / Ctrl + Enter 发送<span>配置在本对话中保持不变</span></p>
+          {draft.pending && <div className="state-notice">{rejectedDraft ? '上次发送未被接受，原始输入已保留。' : '上次发送尚未确认，原始输入已保留。'}<button className="text-button" disabled={sending} onClick={() => { if (rejectedDraft && selected) { const { pending: _pending, ...next } = draft; setDraft(next); saveDraft(selected, next); } else void send(); }}>{rejectedDraft ? '继续编辑' : '核对同一发送'}</button></div>}
+          <Composer key={selected} conversation={selected} csrf={csrf} draft={draft} onChange={updateDraft} onSend={() => { if (ready || draft.pending) void send(); }} onStop={() => void stop()} onFiles={() => setPickingFile(true)} ready={ready} sending={sending} running={!!conversation && ['running','waiting'].includes(conversation.state.status) && !!conversation.state.runId} model={configuration?.harnesses.find(h => h.id === conversation?.harnessId)?.models.find(m => m.id === conversation?.configuration.modelId)?.label ?? '配置按对话固定'}/>
+          <p className="composer-hint">Enter 换行 · ⌘ / Ctrl + Enter 发送<span>配置在本对话中保持不变</span></p>
         </div>
       </>}
       {(error || authError) && <div className="workbench-error" role="alert"><span>{error || authError}</span><button className="text-button" onClick={() => setError('')}>关闭</button></div>}
     </main>
     {creating && <CreateConversation configuration={configuration} csrf={csrf} onClose={() => setCreating(false)} onCreated={c => { setCreating(false); setConversations(current => [c, ...current.filter(old => old.id !== c.id)]); choose(c.id); }} onError={report} />}
+    {pickingFile && selected && <FilePicker conversation={selected} onClose={() => setPickingFile(false)} onSelect={(reference: MessageReference) => { const next = { ...draft, text: draft.text.endsWith('@') ? draft.text.slice(0,-1) : draft.text, references: [...(draft.references ?? []), reference].slice(0,8) }; updateDraft(next); }}/ >}
   </div>;
-}
-
-function Message({ item }: { item: WorkbenchItem }) {
-  if (item.kind === 'tool') return <details className="tool-message"><summary><span aria-hidden="true">{item.status === 'running' ? '◌' : item.status === 'failed' ? '!' : '✓'}</span> 工具活动 <small>{item.status === 'running' ? '进行中' : item.status === 'failed' ? '未完成' : '已完成'}</small></summary><pre>{item.text}</pre></details>;
-  return <article className={`message message-${item.kind}`}><div className="message-author">{item.kind === 'user' ? '你' : item.kind === 'assistant' ? '中书' : '状态'}</div><div className="message-text">{item.text || (item.status === 'running' ? '正在生成…' : '')}</div>{item.status === 'failed' && <small className="quiet">此项未完成</small>}</article>;
 }
 
 function CreateConversation({ configuration, csrf, onClose, onCreated, onError }: { configuration?: WorkbenchConfiguration; csrf: string; onClose(): void; onCreated(c: Conversation): void; onError(reason: unknown): void }) {

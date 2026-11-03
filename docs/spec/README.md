@@ -7,17 +7,19 @@ spec 是与用户讨论后确认的临时约定：它回答“接下来建什么
 | 切片 | 用户行为 | 状态 | 退出条件 | 证据 | 更新 |
 | --- | --- | --- | --- | --- | --- |
 | 首条 Agent 曳光弹 | 选 Codex 或 DSH，完成真实工作，关页后接续；必要时停止 | done | 本机两 Harness 完成真实工作、关页或应用中断后接续；目标设备与部署链路分别有证据 | PR #5、#6、#9；[发布检查](https://github.com/Lanbasara/zhongshu/actions/runs/41433423972)；目标设备与部署链路已由用户验收 | 2026-11-02 |
+| [对话基本可用性](conversation-usability.md) | 读正文与工具过程、收发图片，用顺手的输入框引用消息与工作区原文件 | active | 两端真实用户路径与恢复验收，用户试用确认 | [PR #13](https://github.com/Lanbasara/zhongshu/pull/13) | 2026-11-02 |
 | 会改变架构的接入实验 | 回答追加、文件保存、HTML 阅读等会改变实现的问题 | next | 每个问题有结论，决定进入 ADR | none yet | 2026-10-31 |
 | 多工作区 | 在多个自选工作区开展工作 | next | 页面可选择已登记目录并完成一轮真实工作 | none yet | 2026-10-31 |
 | 运行中追加与审批 | 执行中追加、回答问题或审批 | next | 两个 Harness 的原生语义分别接通并有真实证据 | none yet | 2026-10-31 |
 | 文件阅读与编辑 | 打开成果、跳转底稿、编辑 Markdown/TXT 并保存 | next | 阅读、编辑、冲突检测与保存路径验收 | none yet | 2026-10-31 |
-| 附件 | 上传图片或常见文档交给 Agent，并能回看 | next | 上传生命周期、真实原生输入、失败与清理验收 | none yet | 2026-10-31 |
+| 通用文档附件 | 在图片之外上传常见文档交给 Agent，并能回看；图片归对话基本可用性 | next | 文档生命周期、真实原生输入、失败与清理验收 | none yet | 2026-11-02 |
 | 搜索与语音 | 搜索对话、语音转文字、安装后恢复工作 | next | 分成独立小切片，各自有真实证据 | none yet | 2026-10-31 |
 
 Ledger 状态只允许 `next / active / blocked / done`；spec front matter 使用 `draft / active / blocked / done`。`done` 行在一轮发布后删除；耐久知识已经折入 feature map / ADR。
 
 ## 文件
 
+- [conversation-usability.md](conversation-usability.md) — 已授权实施；用户试用验收仍待完成
 - [integration-probes.md](integration-probes.md) — next
 
 ## spec 模板

@@ -1,10 +1,15 @@
 import type { Catalog, HarnessAdapter, HarnessId, HistoryPage, NativeItem, NativeState, Receipt } from '../harness/types.ts';
 import type { Workspace } from './harness-config.ts';
+import { decodeImage, workspacePath, workspaceFiles } from './resources.ts';
+import { nativeText } from '../shared/content.ts';
+import { referenceSchema } from '../shared/content.ts';
+import { createHash } from 'node:crypto';
 import { StoreError, type WorkbenchStore, type CreateConversation, type OperationInput, type Conversation, type Operation } from './workbench-store.ts';
 
 const TERMINAL = new Set<NativeState['status']>(['idle', 'interrupted', 'failed']);
 const HISTORY_PAGE_SIZE = 100;
-const HISTORY_MAX_PAGES = 10;
+const HISTORY_MAX_PAGES = 250;
+const HISTORY_MAX_ITEMS = 1000;
 const HISTORY_MAX_BYTES = 16 * 1024 * 1024;
 type Runtime = {
   stop?: () => void; watching?: Promise<void>; syncing?: Promise<void>; older?: Promise<void>;
@@ -79,6 +84,76 @@ export class Workbench {
       void this.catalogLoading.then(() => { this.catalogLoading = undefined; }, () => { this.catalogLoading = undefined; });
     }
     return this.catalogLoading;
+  }
+
+  async files(id: string, directory = '') {
+    const conversation = this.conversation(id); this.adapter(conversation);
+    return workspaceFiles(conversation.cwd, directory);
+  }
+  async workspaceImage(id: string, itemId: string, source: string) {
+    const conversation = this.conversation(id);
+    const item = this.store.getItem(id, itemId);
+    if (!item || !item.text.includes(source)) throw new StoreError('image_unavailable', 404);
+    const owner = 'markdown:' + createHash('sha256').update(itemId + '\0' + source).digest('hex');
+    const cached = this.store.resources.owned(id, owner); if (cached) return cached;
+    const reference = referenceSchema.parse({ type: 'file', path: decodeURIComponent(source).replace(/^\.\//, '') });
+    if (reference.type !== 'file') throw new StoreError('invalid_request', 400);
+    const adapter = this.adapter(conversation);
+    if (!conversation.binding || !adapter.readImage) throw new StoreError('image_unavailable', 404);
+    const path = await workspacePath(conversation.cwd, reference.path);
+    // Read in the native Host, never turn Markdown into a host-user filesystem proxy.
+    const data = decodeImage(await adapter.readImage(conversation.binding, path));
+    const image = this.store.resources.put(id, reference.path.split('/').at(-1)!.slice(0,120), data);
+    this.store.resources.pin(id, image.id, owner);
+    return this.store.resources.get(id, image.id);
+  }
+  async validateReferences(conversation: Conversation, input: OperationInput): Promise<void> {
+    if (input.type !== 'message') return;
+    for (const ref of input.payload.references ?? []) {
+      if (ref.type === 'file') await workspacePath(conversation.cwd, ref.path);
+      else {
+        const item = this.store.getItem(conversation.id, ref.itemId);
+        if (!item) throw new StoreError('quote_source_changed', 409);
+      }
+    }
+    let totalImageBytes = 0;
+    for (const image of input.payload.images ?? []) {
+      const saved = this.store.resources.get(conversation.id, image.id);
+      totalImageBytes += saved.data.length;
+      if (saved.name !== image.name || saved.mediaType !== image.mediaType) throw new StoreError('image_reference_changed', 409);
+    }
+    if (totalImageBytes > 4 * 1024 * 1024) throw new StoreError('message_images_too_large', 413);
+  }
+  private async materialize(conversation: Conversation, items: NativeItem[]): Promise<NativeItem[]> {
+    const adapter = this.adapter(conversation);
+    const output: NativeItem[] = [];
+    for (const raw of items) {
+      const { imageSources, ...item } = raw;
+      if (imageSources?.length && conversation.binding && item.status === 'completed') {
+        const images = [];
+        for (const [index, source] of imageSources.slice(0,4).entries()) {
+          try {
+            const old = this.store.getItem(conversation.id, item.id)?.images?.[index];
+            if (old) { this.store.resources.get(conversation.id, old.id); images.push(old); continue; }
+            const encoded = source.data ?? (source.path && adapter.readImage ? await adapter.readImage(conversation.binding, source.path) : undefined);
+            if (!encoded) throw new Error('image_unavailable');
+            const image = this.store.resources.put(conversation.id, 'Agent 图片 ' + (index + 1), decodeImage(encoded.replace(/^data:image\/[a-z]+;base64,/, '')));
+            this.store.resources.pin(conversation.id, image.id, item.id); images.push(image);
+          } catch { item.text = (item.text || '图片') + '\n图片暂时无法读取，请重新查询原生结果。'; }
+        }
+        if (images.length) item.images = images;
+      }
+      if (item.operationId && item.kind === 'user') {
+        const operation = this.store.getOperation(item.operationId);
+        if (operation?.type === 'message' && operation.conversationId === conversation.id) {
+          item.text = operation.payload.text;
+          item.images = operation.payload.images;
+          item.references = operation.payload.references;
+        }
+      }
+      output.push(item);
+    }
+    return output;
   }
 
   async create(input: Omit<CreateConversation, 'cwd'>): Promise<Conversation> {
@@ -162,7 +237,7 @@ export class Workbench {
               throw new StoreError('native_history_page_limit', 502);
             if (page.olderCursor && seen.has(page.olderCursor)) throw new StoreError('history_no_progress', 502);
             if (page.items.length || !page.olderCursor) {
-              this.store.mergeHistory(id, page.items, local.nativeOlderBeforeItemId);
+              this.store.mergeHistory(id, await this.materialize(conversation, page.items), local.nativeOlderBeforeItemId);
               this.store.setHistoryCursor(id, { loaded: true, olderCursor: page.olderCursor, beforeItemId: page.olderCursor ? (page.items[0]?.id ?? local.nativeOlderBeforeItemId) : null });
               return;
             }
@@ -190,11 +265,14 @@ export class Workbench {
   async enqueue(input: OperationInput) {
     this.assertOpen();
     if (this.store.getOperation(input.id)) return this.store.enqueueOperation(input).operation;
+    if (input.type === 'message' && (this.runtimes.get(input.conversationId)?.dirty || this.runtimes.get(input.conversationId)?.syncing)) await this.sync(input.conversationId);
     const conversation = this.conversation(input.conversationId); this.adapter(conversation);
     if (!conversation.binding) throw new StoreError('conversation_not_ready', 409);
     if (input.type === 'message' && !this.messageAllowed(conversation)) throw new StoreError('operation_needs_reconciliation', 409);
     if (input.type === 'stop' && (!['running', 'waiting'].includes(conversation.state.status) || conversation.state.runId !== input.payload.runId))
       throw new StoreError('native_run_changed', 409);
+    await this.validateReferences(conversation, input);
+    if (input.type === 'message' && !this.messageAllowed(this.conversation(conversation.id))) throw new StoreError('operation_needs_reconciliation', 409);
     const result = this.store.enqueueOperation(input);
     if (result.created) this.launch(this.dispatch(result.operation.id));
     return result.operation;
@@ -216,12 +294,14 @@ export class Workbench {
         if (operation.type === 'stop' && (!['running', 'waiting'].includes(conversation.state.status) || conversation.state.runId !== operation.payload.runId)) {
           this.store.settleOperation(id, { outcome: 'rejected', reason: 'native_run_changed' }); return;
         }
+        try { await this.validateReferences(conversation, operation); }
+        catch { this.store.settleOperation(id, { outcome: 'rejected', reason: '引用的文件或图片已不可用，请继续编辑。' }); return; }
         if (!conversation.binding || !this.store.claimOperation(id)) return;
         claimed = true;
         let receipt: Receipt;
         try {
           receipt = operation.type === 'message'
-            ? await adapter.submit(conversation.binding, { id: operation.id, text: operation.payload.text })
+            ? await adapter.submit(conversation.binding, { ...operation.payload, id: operation.id, text: nativeText(operation.payload), imageData: operation.payload.images?.map(image => { const r = this.store.resources.get(conversation.id, image.id); return { mediaType: r.mediaType, data: r.data.toString('base64') }; }) })
             : await adapter.stop(conversation.binding, operation.payload.runId);
         } catch { receipt = { outcome: 'unknown', reason: 'native_receipt_unknown' }; }
         this.store.settleOperation(id, receipt); claimed = false;
@@ -314,6 +394,17 @@ export class Workbench {
         runtime.generation++;
         try {
           if (change.type === 'item') {
+            if (change.item.imageSources?.length) { this.scheduleSync(id); return; }
+            if (change.item.kind === 'user' && change.item.operationId) {
+              const operation = this.store.getOperation(change.item.operationId);
+              if (operation?.type === 'message' && operation.conversationId === id) {
+                change.item.text = operation.payload.text;
+                change.item.images = operation.payload.images;
+                change.item.references = operation.payload.references;
+              }
+            }
+            const prior = runtime.live.get(change.item.id);
+            if (change.item.tool && prior?.tool) { change.item.tool = { ...prior.tool, ...change.item.tool, name: prior.tool.name }; if (!change.item.text) change.item.text = prior.text; if (change.item.tool.exitCode !== undefined && change.item.tool.exitCode !== 0) change.item.status = 'failed'; }
             if (runtime.live.size >= 64 && !runtime.live.has(change.item.id)) throw new StoreError('live_item_limit', 429);
             runtime.live.set(change.item.id, change.item);
             if (!runtime.flush) { runtime.flush = setTimeout(() => this.flushLive(id, runtime), 40); runtime.flush.unref(); }
@@ -349,9 +440,9 @@ export class Workbench {
       const page: HistoryPage = await adapter.history(conversation.binding!, cursor, HISTORY_PAGE_SIZE);
       this.assertOpen();
       if (!Array.isArray(page.items) || page.items.length > HISTORY_PAGE_SIZE) throw new StoreError('native_history_page_limit', 502);
-      bytes += page.items.reduce((total, item) => total + Buffer.byteLength(item.text), 0); count += page.items.length;
-      if (bytes > HISTORY_MAX_BYTES || count > HISTORY_MAX_PAGES * HISTORY_PAGE_SIZE) throw new StoreError('history_gap_limit', 502);
-      pages.push(page.items); lastCursor = page.olderCursor;
+      bytes += page.items.reduce((total, item) => total + Buffer.byteLength(JSON.stringify(item)), 0); count += page.items.length;
+      if (bytes > HISTORY_MAX_BYTES || count > HISTORY_MAX_ITEMS) throw new StoreError('history_gap_limit', 502);
+      pages.push(await this.materialize(conversation, page.items)); lastCursor = page.olderCursor;
       const intersects = page.items.some(item => this.store.hasHistoryItem(conversation.id, item.id));
       if (intersects || (establishCursor && (count > 0 || !page.olderCursor))) return { items: pages.reverse().flat(), cursor: lastCursor, establishCursor };
       if (!page.olderCursor) {

@@ -1,6 +1,6 @@
 # 执行与停止：feature map
 
-当前能力：发送文本、观察正文/工具活动、终态核实后在同对话继续，以及停止当前轮。发送与恢复决策见 [ADR 0004](../adr/0004-recoverable-communication.md)，原生语义见 [ADR 0001](../adr/0001-native-harness-boundary.md)。
+图文与引用的完整行为、控件和验证归 [对话基本可用性](conversation-usability.md)。本页当前能力：发送消息、观察正文/工具过程、终态核实后在同对话继续，以及停止当前轮。发送与恢复决策见 [ADR 0004](../adr/0004-recoverable-communication.md)，原生语义见 [ADR 0001](../adr/0001-native-harness-boundary.md)。
 
 ## Sub-features
 

@@ -6,6 +6,8 @@ import type { Conversation as ConversationView, WorkbenchOperation, WorkbenchSna
 import type { PrivateContext } from './app.ts';
 import type { Workbench } from './workbench.ts';
 import { StoreError, type Conversation, type Operation, type WorkbenchChange } from './workbench-store.ts';
+import { decodeImage, ResourceError } from './resources.ts';
+import { imageSchema } from '../shared/content.ts';
 
 const uuidParams = z.object({ id: z.uuid() }).strict();
 const noQuery = z.object({}).strict();
@@ -154,6 +156,7 @@ export function createWorkbenchHttp(workbench: Workbench, input: Partial<z.input
       privateApp.addHook('preClose', async () => close());
       privateApp.setErrorHandler((error, _request, reply) => {
         if (error instanceof StoreError && /^[a-z][a-z0-9_]{0,99}$/.test(error.code)) return reply.code(error.statusCode).send({ error: error.code });
+        if (error instanceof ResourceError) return reply.code(error.statusCode).send({ error: error.message });
         const code = typeof error === 'object' && error !== null && 'statusCode' in error ? error.statusCode : undefined;
         const status = typeof code === 'number' && code >= 400 && code < 500 ? code : 500;
         if (status === 500) privateApp.log.error({ event: 'workbench_request_failed' });
@@ -178,6 +181,33 @@ export function createWorkbenchHttp(workbench: Workbench, input: Partial<z.input
       privateApp.get('/conversations/:id', async (request, reply) => {
         parse(noQuery, request.query); const { id } = parse(uuidParams, request.params);
         return json(reply, snapshotView(await workbench.open(id)));
+      });
+      privateApp.get('/conversations/:id/files', async (request, reply) => {
+        const { id } = parse(uuidParams, request.params);
+        const { directory } = parse(z.object({ directory: z.string().max(1024).default('') }).strict(), request.query);
+        return json(reply, { files: await workbench.files(id, directory) });
+      });
+      privateApp.get('/conversations/:id/workspace-image', async (request, reply) => {
+        const { id } = parse(uuidParams, request.params);
+        const { item, source } = parse(z.object({ item: identifierSchema, source: z.string().min(1).max(2048) }).strict(), request.query);
+        const image = await workbench.workspaceImage(id, item, source);
+        return reply.type(image.mediaType).header('Content-Disposition', 'inline').send(image.data);
+      });
+      privateApp.post('/conversations/:id/resources', { bodyLimit: 3 * 1024 * 1024 }, async (request, reply) => {
+        const { id } = parse(uuidParams, request.params);
+        if (!workbench.store.getConversation(id)) throw new StoreError('conversation_not_found', 404);
+        const body = parse(z.object({ name: z.string().min(1).max(120), data: z.string().max(3 * 1024 * 1024) }).strict(), request.body);
+        return json(reply, imageSchema.parse(workbench.store.resources.put(id, body.name, decodeImage(body.data, 2 * 1024 * 1024))));
+      });
+      const resourceParams = z.object({ id: z.uuid(), resource: z.uuid() }).strict();
+      privateApp.get('/conversations/:id/resources/:resource', async (request, reply) => {
+        const { id, resource } = parse(resourceParams, request.params); parse(noQuery, request.query);
+        const image = workbench.store.resources.get(id, resource);
+        return reply.type(image.mediaType).header('Content-Disposition', 'inline').send(image.data);
+      });
+      privateApp.delete('/conversations/:id/resources/:resource', async (request, reply) => {
+        const { id, resource } = parse(resourceParams, request.params); parse(noQuery, request.query);
+        workbench.store.resources.remove(id, resource); return reply.code(204).send();
       });
       privateApp.get('/conversations/:id/older', async (request, reply) => {
         const { id } = parse(uuidParams, request.params); const { beforeItemId } = parse(olderQuery, request.query);

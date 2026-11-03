@@ -1,5 +1,7 @@
 import { z } from 'zod';
 import { errorSchema } from '../shared/http.ts';
+import { contentFields } from '../shared/content.ts';
+import { clearUploads } from './upload-drafts.ts';
 
 export class RequestError extends Error {
   readonly code: string; readonly status: number;
@@ -26,7 +28,7 @@ export async function request<T>(path: string, schema: z.ZodType<T>, options: { 
 }
 
 const prefix = 'zhongshu:draft:v1:';
-const draftSchema = z.object({ text: z.string().max(16_000), pending: z.object({ id: z.uuid(), text: z.string().max(16_000) }).optional() });
+const draftSchema = z.object({ text: z.string().max(16_000), ...contentFields, pending: z.object({ id: z.uuid(), text: z.string().max(16_000), ...contentFields }).optional() });
 export type Draft = z.infer<typeof draftSchema>;
 export function readDraft(id: string): Draft {
   try { return draftSchema.parse(JSON.parse(sessionStorage.getItem(prefix + id) ?? '{}')); } catch { return { text: '' }; }
@@ -35,5 +37,6 @@ export function saveDraft(id: string, draft: Draft): boolean {
   try { if (!draft.text && !draft.pending) sessionStorage.removeItem(prefix + id); else sessionStorage.setItem(prefix + id, JSON.stringify(draft)); return true; } catch { return false; }
 }
 export function clearDrafts(): void {
+  void clearUploads().catch(() => {});
   try { for (const key of Object.keys(sessionStorage)) if (key.startsWith(prefix)) sessionStorage.removeItem(key); } catch { /* Storage may be disabled; in-memory drafts disappear with the authenticated view. */ }
 }

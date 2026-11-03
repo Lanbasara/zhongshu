@@ -130,10 +130,18 @@ export function itemFrom(session: string, event: Event, live = false, inferredTu
     const text = textContent(object(data.message).content); if (!text) return;
     return { ...base, id: assistantId(session, turn, data.step), kind: 'assistant', text, status: data.interrupted === true ? 'failed' : 'completed' };
   }
-  if (event.type === 'tool/call' && live && typeof data.callId === 'string') return { ...base, id: `dsh:${session}:tool:${data.callId}`, kind: 'tool', text: typeof data.name === 'string' ? data.name.slice(0, 120) : '工具执行', status: 'running' };
+  if (event.type === 'tool/call' && typeof data.callId === 'string') return { ...base, id: `dsh:${session}:tool:${data.callId}`, kind: 'tool', text: typeof data.name === 'string' ? data.name.slice(0, 120) : '工具执行', tool: { name: typeof data.name === 'string' ? data.name.slice(0,200) : '工具执行', input: (typeof (data.input ?? data.arguments) === 'string' ? String(data.input ?? data.arguments) : JSON.stringify(data.input ?? data.arguments ?? {})).slice(0,32000) }, status: 'running' };
+  // rc.4 marks a successfully invoked bash tool isError=false even when its
+  // command exits nonzero. Use the producer's job outcome, never parse stdout.
+  if (event.type === 'job/settled' && data.kind === 'bash' && data.producerReported === true) {
+    const callId = object(data.toolCall).callId;
+    const match = typeof data.detail === 'string' ? /^exit code: (-?\d{1,10})$/.exec(data.detail) : null;
+    const exitCode = match ? Number(match[1]) : undefined;
+    if (typeof callId === 'string' && exitCode !== undefined && Number.isSafeInteger(exitCode) && exitCode >= -2147483648 && exitCode <= 2147483647) return { ...base, id: `dsh:${session}:tool:${callId}`, kind: 'tool', text: '', tool: { name: '工具执行', exitCode }, status: exitCode === 0 ? 'completed' : 'failed' };
+  }
   if (event.type === 'tool/result') {
     const message = object(data.message); if (typeof message.toolCallId !== 'string') return;
-    return { ...base, id: `dsh:${session}:tool:${message.toolCallId}`, kind: 'tool', text: message.isError ? '工具执行失败或结果未知' : '工具已完成', status: message.isError ? 'failed' : 'completed' };
+    return { ...base, id: `dsh:${session}:tool:${message.toolCallId}`, kind: 'tool', text: textContent(message.content) || (message.isError ? '工具执行失败或结果未知' : '工具已完成'), tool: { name: '工具执行', output: textContent(message.content).slice(0,128000) }, status: message.isError ? 'failed' : 'completed' };
   }
   if (event.type === 'approval/asked') return { ...base, kind: 'notice', text: 'DSH 请求审批；此版本不自动批准，请在原生界面处理。' };
   if (event.type === 'approval/decided' && data.outcome === 'unavailable') return { ...base, kind: 'notice', text: 'DSH 没有可用的审批处理入口；本次请求未获授权。', status: 'failed' };
@@ -141,6 +149,6 @@ export function itemFrom(session: string, event: Event, live = false, inferredTu
 }
 export function historyItems(session: string, events: Event[], activeTurn?: number, outline: TurnOutline = []): NativeItem[] {
   const items = new Map<string, NativeItem>();
-  for (const event of [...events].sort((a, b) => a.seq - b.seq)) { const turn = turnAt(outline, event.seq); const item = itemFrom(session, event, activeTurn !== undefined && (event.data.turn ?? turn) === activeTurn, turn); if (item) items.set(item.id, item); }
+  for (const event of [...events].sort((a, b) => a.seq - b.seq)) { const turn = turnAt(outline, event.seq); const item = itemFrom(session, event, activeTurn !== undefined && (event.data.turn ?? turn) === activeTurn, turn); if (item) { const old = items.get(item.id); if (old?.tool && item.tool) { item.tool = { ...old.tool, ...item.tool, name: old.tool.name }; if (!item.text) item.text = old.text; if (item.tool.exitCode !== undefined && item.tool.exitCode !== 0) item.status = 'failed'; } items.set(item.id, item); } }
   return [...items.values()];
 }

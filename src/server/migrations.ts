@@ -69,6 +69,24 @@ export const productMigrations: Migration[] = [{ version: 2, sql: `
   ) STRICT;
   CREATE INDEX workbench_live_items_operation ON workbench_live_items(conversation_id, operation_id, kind, run_id);
   CREATE INDEX workbench_live_items_updated ON workbench_live_items(conversation_id, updated_at, id);
+` }, { version: 3, sql: `
+  ALTER TABLE workbench_items ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}';
+  ALTER TABLE workbench_live_items ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}';
+  CREATE TABLE workbench_resources (
+    id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL REFERENCES workbench_conversations(id),
+    name TEXT NOT NULL,
+    media_type TEXT NOT NULL,
+    data BLOB NOT NULL,
+    digest TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    UNIQUE(conversation_id,digest)
+  ) STRICT;
+  CREATE TABLE workbench_resource_refs (
+    resource_id TEXT NOT NULL REFERENCES workbench_resources(id),
+    owner_id TEXT NOT NULL,
+    PRIMARY KEY(resource_id,owner_id)
+  ) STRICT;
 ` }];
 
 /** Runs inside restoreDatabase's private staging transaction, before the database is published. */

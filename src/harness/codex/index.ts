@@ -3,13 +3,14 @@ import { z } from 'zod';
 import { HarnessError } from '../types.ts';
 import type { Binding, Catalog, Configuration, HarnessAdapter, HistoryPage, NativeChange, NativeItem, NativeState, Receipt } from '../types.ts';
 import { CodexRpc, RpcError } from './rpc.ts';
+import type { InputContent } from '../../shared/content.ts';
 import { configuredThread, cursor, itemsPage, mapItem, nativeId, nativeItem, record, threadStatus, turn } from './protocol.ts';
 
 const configuration = z.object({ modelId: nativeId, permissionId: nativeId });
 const workspace = z.string().min(1).max(4096).refine(path => isAbsolute(path) && normalize(path) === path && !path.includes('\0'));
 const titleSchema = z.string().min(1).max(200).refine(value => Buffer.byteLength(value) <= 200);
 const bindingSchema = z.object({ id: nativeId, cwd: workspace, configuration, details: z.object({ version: z.literal(1), approvalPolicy: z.literal('never'), title: titleSchema.optional() }) });
-const operationSchema = z.object({ id: nativeId, text: z.string().min(1).max(100_000) });
+const operationSchema = z.object({ id: nativeId, text: z.string().max(100_000), imageData: z.array(z.object({ mediaType: z.enum(['image/png', 'image/jpeg', 'image/webp']), data: z.string().max(3 * 1024 * 1024) })).max(4).optional() }).refine(v => v.text.trim() || v.imageData?.length);
 const unknownState = (reason: string): NativeState => ({ status: 'unknown', pendingInputs: 0, configurationVerified: false, reason });
 function parse<T>(schema: z.ZodType<T>, data: unknown): T {
   const result = schema.safeParse(data);
@@ -209,12 +210,28 @@ class CodexAdapter implements HarnessAdapter {
     this.retain(binding.id);
     try {
       await this.load(binding);
-      const page = parse(itemsPage, await this.rpc.request('thread/items/list', { threadId: binding.id, limit: size, sortDirection: 'desc', ...(after ? { cursor: after } : {}) }));
-      return { items: page.data.slice().reverse().map(entry => mapItem(entry.item, entry.turnId, entry.completedAtMs === null && entry.item.type !== 'userMessage')), olderCursor: page.nextCursor };
+      // Native pages include image bytes. Keep transport reads small while combining
+      // ordinary text entries into the existing public history page.
+      const entries: z.infer<typeof itemsPage>['data'] = [];
+      let next = after; let bytes = 0;
+      const seen = new Set<string>();
+      do {
+        const page = parse(itemsPage, await this.rpc.request('thread/items/list', { threadId: binding.id, limit: Math.min(size - entries.length, 2), sortDirection: 'desc', ...(next ? { cursor: next } : {}) }));
+        entries.push(...page.data);
+        bytes += page.data.reduce((n, entry) => n + Buffer.byteLength(JSON.stringify(entry.item)), 0);
+        next = page.nextCursor ?? undefined;
+        if (next && seen.has(next)) throw new HarnessError('codex_history_no_progress');
+        if (next) seen.add(next);
+      } while (next && entries.length < size && bytes < 8 * 1024 * 1024);
+      return { items: entries.reverse().map(entry => mapItem(entry.item, entry.turnId, entry.completedAtMs === null && entry.item.type !== 'userMessage')), olderCursor: next ?? null };
     } finally { await this.release(binding.id); }
   }
 
-  async submit(input: Binding, rawOperation: { id: string; text: string }): Promise<Receipt> {
+  async readImage(_binding: Binding, path: string): Promise<string> {
+    const response = z.object({ dataBase64: z.string().max(8 * 1024 * 1024) }).parse(await this.rpc.request('fs/readFile', { path }));
+    return response.dataBase64;
+  }
+  async submit(input: Binding, rawOperation: InputContent & { id: string; imageData?: { mediaType: string; data: string }[] }): Promise<Receipt> {
     const binding = parse(bindingSchema, input); const operation = parse(operationSchema, rawOperation);
     this.retain(binding.id);
     try {
@@ -222,7 +239,7 @@ class CodexAdapter implements HarnessAdapter {
       if (!current.configurationVerified) return { outcome: 'rejected', reason: current.reason ?? 'codex_configuration_unverified' };
       if (!['idle', 'interrupted', 'failed'].includes(current.status) || current.pendingInputs > 0) return { outcome: 'rejected', reason: 'codex_conversation_busy' };
       // Every send pins the saved selection as well as checking the live native configuration.
-      const result = parse(z.object({ turn }), await this.rpc.request('turn/start', { threadId: binding.id, clientUserMessageId: operation.id, model: binding.configuration.modelId, permissions: binding.configuration.permissionId, approvalPolicy: 'never', input: [{ type: 'text', text: operation.text, text_elements: [] }] }));
+      const result = parse(z.object({ turn }), await this.rpc.request('turn/start', { threadId: binding.id, clientUserMessageId: operation.id, model: binding.configuration.modelId, permissions: binding.configuration.permissionId, approvalPolicy: 'never', input: [...(operation.text ? [{ type: 'text', text: operation.text, text_elements: [] }] : []), ...(operation.imageData ?? []).map(image => ({ type: 'image', url: `data:${image.mediaType};base64,${image.data}` }))] }));
       return { outcome: 'accepted', runId: result.turn.id };
     } catch (error) {
       if (error instanceof RpcError && error.nativeCode === -32602) return { outcome: 'rejected', reason: 'codex_native_rejected' };
