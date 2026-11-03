@@ -1,6 +1,6 @@
 # 界面与组件工作台：feature map
 
-本页维护界面交互、设计基础的消费入口和开发资源的发布隔离。职责及扩展规则归 [architecture](../architecture.md#界面与设计系统)，已确认的本轮范围归 [spec](../spec/design-system-workbench.md)。业务行为仍按各能力地图验证；Storybook 不证明原生执行。
+本页维护界面交互、设计基础的消费入口和开发资源的发布隔离。职责及扩展规则归 [architecture](../architecture.md#界面与设计系统)。业务行为仍按各能力地图验证；Storybook 不证明原生执行。
 
 ## Sub-features
 
