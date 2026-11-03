@@ -1,6 +1,6 @@
 import { useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
-import { ArrowUp, FileText, ImagePlus, LoaderCircle, Plus, ShieldCheck, Square } from 'lucide-react';
+import { ArrowUp, FileText, ImagePlus, ListPlus, LoaderCircle, Plus, ShieldCheck, Square } from 'lucide-react';
 import { Information, Menu, MenuItem } from '../ui/controls.tsx';
 import { transitions } from '../ui/motion.ts';
 import './composer.css';
@@ -10,12 +10,12 @@ export type ComposerViewProps = {
   onImages(files: File[]): void; onFiles(): void;
   editDisabled: boolean; imagesDisabled: boolean; filesDisabled: boolean; sendDisabled: boolean;
   sending: boolean; running: boolean; queueing?: boolean; model: string; permission: string; configurationNote: string;
-  materials?: ReactNode; hasMaterials: boolean; error?: string;
+  queue?: ReactNode; materials?: ReactNode; hasMaterials: boolean; error?: string;
 };
 
 /** Presentation only: the caller owns submission, upload and persistence decisions. */
 export function ComposerView(props: ComposerViewProps) {
-  const { value, onChange, onSend, onStop, onImages, onFiles, editDisabled, imagesDisabled, filesDisabled, sendDisabled, sending, running, queueing, model, permission, configurationNote, materials, hasMaterials, error } = props;
+  const { value, onChange, onSend, onStop, onImages, onFiles, editDisabled, imagesDisabled, filesDisabled, sendDisabled, sending, running, queueing, model, permission, configurationNote, queue, materials, hasMaterials, error } = props;
   const canSubmit = !sendDisabled && (!running || queueing);
   const sendLabel = queueing ? '加入队列' : '发送消息';
   const field = useRef<HTMLTextAreaElement>(null);
@@ -42,6 +42,8 @@ export function ComposerView(props: ComposerViewProps) {
     return () => observer.disconnect();
   }, []);
   return <div className="writing-region">
+    <div className="writing-dock">
+    {queue}
     <form className="writing-surface" data-dragging={dragging && !imagesDisabled} onSubmit={event => { event.preventDefault(); if (canSubmit) onSend(); }}
       onDragEnter={event => { if (!imagesDisabled && event.dataTransfer.types.includes('Files')) { event.preventDefault(); depth.current++; setDragging(true); } }}
       onDragOver={event => { if (event.dataTransfer.types.includes('Files')) event.preventDefault(); }}
@@ -70,11 +72,12 @@ export function ComposerView(props: ComposerViewProps) {
         </motion.button>}
         {(!running || queueing) && <motion.button className="writing-send" type="submit" aria-label={sendLabel} title={sendLabel} disabled={sendDisabled}
           whileTap={reduce ? undefined : { scale: .94 }} transition={transitions.state}>
-          {sending ? <LoaderCircle size={18} className="spin"/> : <ArrowUp size={19}/>}
+          {sending ? <LoaderCircle size={18} className="spin"/> : queueing ? <ListPlus size={19}/> : <ArrowUp size={19}/>}
         </motion.button>}
       </div>
       {dragging && !imagesDisabled && <div className="writing-drop"><ImagePlus size={24}/><span>松开，添加图片</span></div>}
     </form>
+    </div>
     <div className="writing-footnote"><span title={configurationNote}><ShieldCheck size={12}/>{permission}</span><span id={hintId}><kbd>⌘ / Ctrl</kbd><kbd>↵</kbd>{queueing ? '排队' : '发送'}</span></div>
   </div>;
 }

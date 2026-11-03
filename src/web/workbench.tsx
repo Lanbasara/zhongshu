@@ -383,11 +383,15 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
               if (item) scroll.current?.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(item.id)}"]`)?.focus();
             }}>查看消息</button>}
           </div>}
-          {!workspaceRemoved && !conversation?.archived && queue && <InputQueue key={`queue:${selected}`} queue={queue} busy={sending}
-            target={running && usable && !unresolved ? conversation.state.runId : undefined} canResume={!!usable && !unresolved}
-            onCommand={changeQueue}/>}
           {!workspaceRemoved && !conversation?.archived && draft.pending && <div className="state-notice">{rejectedDraft ? '上次发送未被接受，原始输入已保留。' : '上次发送尚未确认，原始输入已保留。'}<button className="text-button" disabled={sending} onClick={() => { if (rejectedDraft && selected) { const { pending: _pending, ...next } = draft; setDraft(next); saveDraft(selected, next); } else void send(); }}>{rejectedDraft ? '继续编辑' : '核对同一发送'}</button></div>}
-          {!workspaceRemoved && !conversation?.archived && <Composer key={selected} conversation={selected} csrf={csrf} draft={draft} onChange={updateDraft} onSend={() => { if (ready || draft.pending) void send(); }} onStop={() => void stop()} onFiles={() => setPickingFile(true)} ready={ready} sending={sending} running={running} queueing={queueing} permission={conversation?.state.configurationVerified ? permission?.label ?? '配置按对话固定' : '配置待核实'} configurationNote={conversation?.state.configurationVerified ? permission?.description ?? '配置在本对话中保持不变。' : '正在核实当前对话的原生配置，核实后可继续工作。'} model={configuration?.harnesses.find(h => h.id === conversation?.harnessId)?.models.find(m => m.id === conversation?.configuration.modelId)?.label ?? '配置按对话固定'}/>}
+          {!workspaceRemoved && !conversation?.archived && <Composer key={selected} conversation={selected} csrf={csrf} draft={draft} onChange={updateDraft}
+            onSend={() => { if (ready || draft.pending) void send(); }} onStop={() => void stop()} onFiles={() => setPickingFile(true)}
+            ready={ready} sending={sending} running={running} queueing={queueing}
+            queue={queue && <InputQueue queue={queue} busy={sending}
+              target={running && usable && !unresolved ? conversation.state.runId : undefined} canResume={!!usable && !unresolved} onCommand={changeQueue}/>}
+            permission={conversation?.state.configurationVerified ? permission?.label ?? '配置按对话固定' : '配置待核实'}
+            configurationNote={conversation?.state.configurationVerified ? permission?.description ?? '配置在本对话中保持不变。' : '正在核实当前对话的原生配置，核实后可继续工作。'}
+            model={configuration?.harnesses.find(h => h.id === conversation?.harnessId)?.models.find(m => m.id === conversation?.configuration.modelId)?.label ?? '配置按对话固定'}/>}
         </div>
       </>}
       {(error || authError) && <div className="workbench-error" role="alert"><span>{error || authError}</span><button className="text-button" onClick={() => setError('')}>关闭</button></div>}
