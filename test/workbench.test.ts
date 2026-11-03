@@ -10,6 +10,7 @@ import { openDatabase } from '../src/server/database.ts';
 import { productMigrations } from '../src/server/migrations.ts';
 import { createWorkbenchStore, type OperationInput } from '../src/server/workbench-store.ts';
 import { Workbench } from '../src/server/workbench.ts';
+import type { QueueDelivery } from '../src/shared/workbench.ts';
 
 function deferred<T>() { let resolve!: (value: T) => void; let reject!: (reason: unknown) => void; const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; }
 const terminal = (runId?: string): NativeState => ({ status: 'idle', pendingInputs: 0, configurationVerified: true, ...(runId ? { runId } : {}) });
@@ -20,6 +21,8 @@ async function until(predicate: () => boolean) { const until = Date.now() + 2000
 /** Deterministic native-contract peer. These fault tests do not claim real Harness or browser acceptance. */
 class Peer implements HarnessAdapter {
   readonly id = 'codex' as const;
+  readonly earlyInput = 'current' as const;
+  queuedRead?: (input: { id: string; text: string }, delivery: QueueDelivery) => Promise<Receipt>;
   current = terminal(); records: NativeItem[] = []; listener?: (change: NativeChange) => void;
   stateCalls = 0; stateTargets: (string | undefined)[] = []; historyCalls: (string | undefined)[] = []; submitCalls: string[] = []; stopCalls: string[] = []; reconcileCalls: string[] = [];
   createCalls = 0; closed = false; unwatchCount = 0;
@@ -40,12 +43,138 @@ class Peer implements HarnessAdapter {
     return { items: this.records.slice(start, end), olderCursor: start ? String(start) : null };
   }
   async submit(_binding: Binding, input: { id: string; text: string }): Promise<Receipt> { this.submitCalls.push(input.id); return this.submitRead ? this.submitRead(input.id) : { outcome: 'accepted', runId: 'run-' + input.id }; }
+  async submitQueued(_binding: Binding, input: { id: string; text: string }, delivery: QueueDelivery): Promise<Receipt> {
+    assert.ok(this.queuedRead);
+    return this.queuedRead(input, delivery);
+  }
   async reconcile(_binding: Binding, id: string): Promise<Receipt> { this.reconcileCalls.push(id); return { outcome: 'unknown', reason: 'not_found' }; }
   async stop(_binding: Binding, runId: string): Promise<Receipt> { this.stopCalls.push(runId); return { outcome: 'accepted', runId }; }
   async watch(_binding: Binding, listener: (change: NativeChange) => void) { this.listener = listener; return () => { this.listener = undefined; this.unwatchCount++; }; }
   emit(change: NativeChange) { this.listener?.(change); }
   async close() { this.closed = true; this.listener = undefined; await this.closeRead?.(); }
 }
+
+test('turn files survive replay and remain visible when the original edit scrolls off the history page', t => {
+  const f = fixture(t);
+  const edit: NativeItem = { ...nativeItem('edit'), kind: 'tool', runId: 'first', fileEdits: ['a.tsx', 'b/a.tsx'] };
+  f.store.saveLiveItem(f.id, edit);
+  f.store.mergeHistory(f.id, [
+    edit, { ...edit, id: 'failed', status: 'failed', fileEdits: ['failed.ts'] },
+    ...Array.from({ length: 105 }, (_, index) => ({ ...nativeItem('step-' + index), runId: 'first' })),
+    { ...edit, id: 'next-edit', runId: 'second', fileEdits: ['a.tsx'] },
+  ]);
+  f.store.mergeHistory(f.id, [{ ...edit, fileEdits: undefined }]);
+  const snapshot = f.service.snapshot(f.id);
+  assert.equal(snapshot.history.items.some(item => item.id === edit.id), false);
+  assert.deepEqual(snapshot.turnFiles, [
+    { runId: 'second', paths: ['a.tsx'], limited: false },
+    { runId: 'first', paths: ['a.tsx', 'b/a.tsx'], limited: false },
+  ]);
+});
+
+test('one immutable queue claim wins edit, manual send and automatic dispatch; lost receipt resolves from original history', async t => {
+  const f = fixture(t);
+  const active = { ...terminal('original-run'), status: 'running' as const };
+  f.peer.current = active;
+  f.store.setConversationState(f.id, { state: active });
+  const first = randomUUID(); const early = randomUUID();
+  await f.service.changeQueue(f.id, { action: 'add', entryId: first, content: { text: 'first' } });
+  await f.service.changeQueue(f.id, { action: 'add', entryId: early, content: { text: 'early' } });
+  await f.service.changeQueue(f.id, { action: 'edit', entryId: early, version: 0, content: { text: 'edited' } });
+  const receipt = deferred<Receipt>();
+  const calls: { id: string; text: string; mode: string }[] = [];
+  f.peer.queuedRead = async (input, delivery) => {
+    calls.push({ ...input, mode: delivery.mode });
+    if (input.text === 'edited') return receipt.promise;
+    f.peer.current = { ...terminal('next-run'), status: 'running' };
+    return { outcome: 'accepted', runId: 'next-run' };
+  };
+  const operationId = randomUUID();
+  const send = { action: 'send' as const, entryId: early, version: 1, operationId, mode: 'current' as const, target: 'original-run' };
+  await f.service.changeQueue(f.id, send);
+  await f.service.changeQueue(f.id, send);
+  await assert.rejects(f.service.changeQueue(f.id, { ...send, target: 'another-run' }), { code: 'operation_id_conflict' });
+  await assert.rejects(f.service.changeQueue(f.id, { action: 'remove', entryId: early, version: 1 }), { code: 'queue_entry_changed' });
+  f.peer.current = terminal('original-run');
+  await f.service.reconcile(f.id);
+  assert.equal(calls.length, 1);
+  receipt.resolve({ outcome: 'unknown', reason: 'synthetic_lost_ack' });
+  await until(() => f.store.getOperation(operationId)?.status === 'unknown');
+  await f.service.reconcile(f.id);
+  assert.equal(calls.length, 1);
+  f.peer.records.push({ id: 'native-user-early', kind: 'user', text: 'edited', status: 'completed', runId: 'original-run', operationId });
+  await f.service.reconcile(f.id);
+  await until(() => calls.length === 2);
+  assert.deepEqual(calls.map(({ text, mode }) => ({ text, mode })), [{ text: 'edited', mode: 'current' }, { text: 'first', mode: 'next' }]);
+  assert.equal(f.store.getOperation(operationId)?.runId, 'original-run');
+  await f.service.changeQueue(f.id, { action: 'add', entryId: early, content: { text: 'early' } });
+  assert.equal(f.store.readQueue(f.id).entries.some(item => item.entryId === early), false);
+});
+
+test('queue pauses on the exact interrupted predecessor even after a later native turn completed', async t => {
+  const f = fixture(t);
+  const active = { ...terminal('original-run'), status: 'running' as const };
+  f.peer.current = active;
+  f.store.setConversationState(f.id, { state: active });
+  await f.service.changeQueue(f.id, { action: 'add', entryId: randomUUID(), content: { text: 'after original' } });
+  let calls = 0;
+  f.peer.queuedRead = async () => { calls++; return { outcome: 'accepted', runId: 'resumed-run' }; };
+  f.peer.current = { ...terminal('later-run'), terminalRunId: 'original-run', terminalStatus: 'interrupted' };
+  await f.service.reconcile(f.id);
+  await until(() => f.store.readQueue(f.id).pause === 'stopped');
+  assert.equal(calls, 0);
+  await f.service.changeQueue(f.id, { action: 'resume', version: f.store.readQueue(f.id).version });
+  await until(() => calls === 1 && f.store.readQueue(f.id).entries.length === 0);
+});
+
+test('a late manual send cannot reclaim the same row after automatic dispatch claims it', async t => {
+  const f = fixture(t);
+  const active = { ...terminal('previous-run'), status: 'running' as const };
+  f.peer.current = active;
+  f.store.setConversationState(f.id, { state: active });
+  const entryId = randomUUID();
+  await f.service.changeQueue(f.id, { action: 'add', entryId, content: { text: 'race for this row' } });
+  let calls = 0;
+  const ack = deferred<Receipt>();
+  f.peer.queuedRead = async (_input, delivery) => { calls++; assert.equal(delivery.mode, 'next'); return ack.promise; };
+  f.peer.current = terminal('previous-run');
+  await f.service.reconcile(f.id);
+  try {
+    await until(() => calls === 1);
+    await assert.rejects(f.service.changeQueue(f.id, { action: 'send', entryId, version: 0, operationId: randomUUID(), mode: 'current', target: 'previous-run' }),
+      { code: 'operation_needs_reconciliation' });
+  } finally { ack.resolve({ outcome: 'accepted', runId: 'queued-run' }); }
+  await until(() => f.store.readQueue(f.id).entries.length === 0);
+  assert.equal(calls, 1);
+});
+
+test('startup recovers claimed queue input by identity and observes older queued conversations', async t => {
+  const f = fixture(t);
+  f.store.setConversationState(f.id, { state: { ...terminal('old-run'), status: 'running' } });
+  const admitted = randomUUID(); const next = randomUUID(); const operationId = randomUUID();
+  f.store.changeQueue(f.id, { action: 'add', entryId: admitted, content: { text: 'admitted before exit' } });
+  f.store.changeQueue(f.id, { action: 'add', entryId: next, content: { text: 'still waiting' } });
+  f.store.claimQueue(f.id, admitted, 0, operationId, { mode: 'current', target: 'old-run' });
+  await delay(2);
+  for (let index = 0; index < 16; index++) {
+    f.store.createConversation({ id: randomUUID(), harnessId: 'codex', workspaceId: 'fixture', cwd: f.workspaces[0]!.directory,
+      configuration: { modelId: 'model', permissionId: 'workspace' } });
+  }
+  assert.equal(f.store.listConversations({ limit: 16 }).some(item => item.id === f.id), false);
+  await f.service.close();
+  const peer = new Peer();
+  peer.current = terminal('old-run');
+  peer.records.push({ id: 'old-user', kind: 'user', text: 'admitted before exit', status: 'completed', runId: 'old-run', operationId });
+  const calls: string[] = [];
+  peer.queuedRead = async input => { calls.push(input.text); return { outcome: 'accepted', runId: 'new-run' }; };
+  const restarted = new Workbench(f.store, f.workspaces, new Map([['codex', peer]]));
+  try {
+    await restarted.start();
+    await until(() => calls.length === 1);
+    assert.deepEqual(calls, ['still waiting']);
+    assert.equal(f.store.getOperation(operationId)?.runId, 'old-run');
+  } finally { await restarted.close(); }
+});
 function fixture(t: TestContext) {
   const directory = mkdtempSync(join(tmpdir(), 'zhongshu-service-')); const db = openDatabase(directory, productMigrations);
   const store = createWorkbenchStore(db); const peer = new Peer(); const workspaces = [{ id: 'fixture', label: 'fixture', directory: '/synthetic/workspace' }];

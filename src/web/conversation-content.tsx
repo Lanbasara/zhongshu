@@ -1,12 +1,13 @@
-import { memo, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, memo, useEffect, useMemo, useRef, useState } from 'react';
 import { Streamdown, defaultRemarkPlugins } from 'streamdown';
 import { code } from '@streamdown/code';
 import { cjk } from '@streamdown/cjk';
 import { Check, ChevronDown, Copy, FileText, Quote, Terminal, X, ImageIcon } from 'lucide-react';
-import type { WorkbenchItem } from '../shared/workbench.ts';
+import type { TurnFileSummary, WorkbenchItem } from '../shared/workbench.ts';
 import type { MessageReference, ImageAttachment } from '../shared/content.ts';
 import { referenceSchema } from '../shared/content.ts';
 import { workspaceImages } from './markdown.ts';
+import { TurnFiles } from './patterns/turn-files.tsx';
 
 export const imageUrl = (conversation: string, image: ImageAttachment) => `/api/private/workbench/conversations/${encodeURIComponent(conversation)}/resources/${image.id}`;
 
@@ -65,16 +66,33 @@ export function ToolGroup({ items }: { items: WorkbenchItem[] }) {
 }
 
 /** Group tools without reordering text or merging actions from separate native turns. */
-export const Transcript = memo(function Transcript({ items, conversation, onQuote }: { items: WorkbenchItem[]; conversation: string; onQuote(reference: MessageReference): void }) {
+export const Transcript = memo(function Transcript({ items, conversation, onQuote, turnFiles, activeRun, activeFile, unavailableFiles, workspaceUnavailable, onOpenFile }: {
+  items: WorkbenchItem[]; conversation: string; onQuote(reference: MessageReference): void;
+  turnFiles?: ReadonlyMap<string, TurnFileSummary>; activeRun?: string; activeFile?: { runId: string; path: string };
+  unavailableFiles?: ReadonlySet<string>; workspaceUnavailable?: boolean;
+  onOpenFile?(runId: string, path: string, trigger: HTMLButtonElement): void;
+}) {
   const groups: { key: string; tools?: WorkbenchItem[]; message?: WorkbenchItem }[] = [];
+  const lastItem = new Map<string, string>();
   for (const item of items) {
+    if (item.runId) lastItem.set(item.runId, item.id);
     const previous = groups.at(-1);
     if (item.kind === 'tool') {
       if (previous?.tools && previous.tools.at(-1)?.runId === item.runId) previous.tools.push(item);
       else groups.push({ key: item.id, tools: [item] });
     } else groups.push({ key: item.id, message: item });
   }
-  return groups.map(group => group.tools ? <ToolGroup key={group.key} items={group.tools}/> : <Message key={group.key} item={group.message!} conversation={conversation} onQuote={onQuote}/>);
+  return groups.map(group => {
+    const last = group.tools?.at(-1) ?? group.message!;
+    const run = last.runId;
+    const summary = run && run !== activeRun && lastItem.get(run) === last.id ? turnFiles?.get(run) : undefined;
+    return <Fragment key={group.key}>
+      {group.tools ? <ToolGroup items={group.tools}/> : <Message item={group.message!} conversation={conversation} onQuote={onQuote}/>}
+      {summary && onOpenFile && <TurnFiles key={summary.runId} activePath={activeFile?.runId === summary.runId ? activeFile.path : undefined}
+        limited={summary.limited} onOpen={(path, trigger) => onOpenFile(summary.runId, path, trigger)}
+        files={summary.paths.map(path => ({ path, unavailable: workspaceUnavailable || unavailableFiles?.has(JSON.stringify([summary.runId, path])) }))}/>}
+    </Fragment>;
+  });
 });
 
 export function FilePicker({ conversation, onSelect, onClose }: { conversation: string; onSelect(ref: MessageReference): void; onClose(): void }) {

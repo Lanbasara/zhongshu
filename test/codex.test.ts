@@ -64,6 +64,26 @@ async function peer(t: TestContext, override?: (request: Request, socket: WebSoc
 }
 async function until(predicate: () => boolean) { for (let tries = 0; tries < 100; tries++) { if (predicate()) return; await delay(20); } assert.fail('Expected protocol observation did not arrive'); }
 
+test('Codex uses a guarded native steer and reconciles a pending next-turn item by client identity', async t => {
+  const p = await peer(t, (request, socket) => {
+    if (request.method === 'thread/read') return { thread: { id: saved.id, status: { type: 'active' } } };
+    if (request.method === 'thread/turns/list') return { data: [{ id: 'run-1', status: 'inProgress' }], nextCursor: null };
+    if (request.method === 'turn/steer') {
+      assert.equal(request.params.expectedTurnId, 'run-1');
+      socket.send(JSON.stringify({ id: request.id, error: { code: -32600, message: 'no active turn to steer' } }));
+      return NO_RESPONSE;
+    }
+    if (request.method === 'thread/queue/add') return { queuedSubmission: { id: 'queued-1', clientUserMessageId: 'queued-op' } };
+    if (request.method === 'thread/queue/list') return { data: [{ id: 'queued-1', clientUserMessageId: 'queued-op' }], nextCursor: null };
+    return undefined;
+  });
+  assert.deepEqual(await p.adapter.submitQueued!(saved, { id: 'steered-op', text: 'guarded' }, { mode: 'current', target: 'run-1' }),
+    { outcome: 'rejected', reason: 'native_run_changed' });
+  assert.deepEqual(await p.adapter.submitQueued!(saved, { id: 'queued-op', text: 'next round' }, { mode: 'next' }), { outcome: 'accepted' });
+  assert.deepEqual(await p.adapter.reconcile(saved, 'queued-op'), { outcome: 'accepted' });
+  assert.equal(p.calls.some(call => call.method === 'turn/start'), false);
+});
+
 test('Codex persists the native identity before configuration verification can fail', async t => {
   const p = await peer(t, request => request.method === 'thread/start' ? { ...nativeConfiguration(), model: 'unexpected-model' } : undefined);
   let bound: Binding | undefined;
@@ -240,7 +260,7 @@ test('Codex proves the exact older target through native turn pages and does not
       ? { data: [{ id: 'user-run', status: 'interrupted' }], nextCursor: null }
       : { data: [{ id: 'notification-run', status: 'completed' }], nextCursor: 'older-turns' };
   });
-  assert.deepEqual(await p.adapter.state(saved, 'user-run'), { status: 'idle', runId: 'notification-run', terminalRunId: 'user-run', pendingInputs: 0, configurationVerified: true });
+  assert.deepEqual(await p.adapter.state(saved, 'user-run'), { status: 'idle', runId: 'notification-run', terminalRunId: 'user-run', terminalStatus: 'interrupted', pendingInputs: 0, configurationVerified: true });
   assert.equal(p.calls.filter(call => call.method === 'thread/turns/list' && call.params.limit === 100).length, 2);
   assert.equal((await p.adapter.state(saved, 'newly-accepted-run')).terminalRunId, undefined);
   assert.equal((await p.adapter.state(saved)).terminalRunId, undefined);

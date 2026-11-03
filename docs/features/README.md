@@ -10,9 +10,9 @@
 | 登录、刷新、退出、密码重置后失效 | [access](access.md)：A01–A05 | 真实应用、两个独立浏览器上下文 |
 | 选配置、创建、空对话恢复、核对创建结果 | [conversations](conversations.md)：C01–C05 | fixture；C05 需真实 DSH |
 | 工作区分组、侧栏调整、标题搜索、重命名与归档 | [conversation-management](conversation-management.md)：M01–M05 | fixture、真实 Harness 与手机分支 |
-| 发送、接续、停止、未知回执核对 | [execution](execution.md)：E01–E05 | fixture；E05 需真实 Harness |
+| 发送、接续、停止、排队与提前发送 | [execution](execution.md)：E01–E07 | fixture；原生轮次与接收语义需真实 Harness |
 | 刷新/关页/应用中断后恢复、草稿、长历史 | [continuity](continuity.md)：R01–R06 | fixture；原生恢复需另跑真实分支 |
-| 完整图文对话、工具阅读、输入与引用、恢复接续 | [conversation-usability](conversation-usability.md)：U01–U10 | 两个真实 Harness、合成图片及工作区文件 |
+| 完整图文对话、工具阅读、输入与引用、本轮文件、恢复接续 | [conversation-usability](conversation-usability.md)：U01–U11 | 两个真实 Harness、合成图片及工作区文件 |
 | 工作区文件、只读 HTML 与条件保存 | [workspace-files](workspace-files.md) | 浏览器、合成报告与纯文本、两个真实 Harness |
 | 添加目录、管理、移除与恢复工作区登记 | [workspace-management](workspace-management.md) | fixture、两个真实 Harness、本地与 VPS 测试实例 |
 
@@ -144,6 +144,6 @@ node dist/server/main.js
 
 ## 覆盖边界与维护
 
-只列当前可操作能力。运行中追加、回答提问/审批、通用文档附件不在本地图覆盖范围；实现情况与下一切片见 spec。Android 真机、真实 Host 崩溃、VPS/Tunnel、慢网和性能需各自建立现场，桌面 fixture 成功不替代这些证据。
+只列当前可操作能力。回答提问/审批、通用文档附件的范围见 spec。Android 真机、真实 Host 崩溃、VPS/Tunnel、慢网和性能需各自建立现场，桌面 fixture 成功不替代这些证据。
 
 入口、行为、前提或判据随代码变化时更新受影响页。结构与相对引用由 `npm run check:docs` 检查；它不能证明语义或驱动可用。对 SSE 游标、背压和资源上限的协议回归见 [workbench-http.test.ts](../../test/workbench-http.test.ts)，页面恢复由 R01–R06 验证，两者分开记录。

@@ -1,0 +1,61 @@
+.turn-files {
+  max-width:36rem;
+  margin-block:var(--zs-space-3) var(--zs-space-6);
+  padding:var(--zs-space-2);
+  border:1px solid var(--zs-line);
+  border-radius:var(--zs-radius-surface);
+  background:var(--zs-canvas);
+}
+.turn-files-header {
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:var(--zs-space-2);
+  padding:var(--zs-space-1) var(--zs-space-2) var(--zs-space-2);
+}
+.turn-files-header h2 {
+  display:flex;
+  align-items:center;
+  gap:var(--zs-space-2);
+  font-size:var(--zs-type-interface);
+  font-weight:600;
+}
+.turn-files-header svg,.turn-files-row > svg { color:var(--zs-text-secondary); }
+.turn-files-count {
+  padding:2px var(--zs-space-2);
+  border-radius:var(--zs-radius-item);
+  background:var(--zs-surface-subtle);
+  color:var(--zs-text-secondary);
+  font-size:var(--zs-type-caption);
+  white-space:nowrap;
+}
+.turn-files-list { list-style:none; padding:0; margin:0; }
+.turn-files-row {
+  display:grid;
+  grid-template-columns:28px minmax(0,1fr) auto;
+  align-items:center;
+  gap:var(--zs-space-2);
+  width:100%;
+  min-height:var(--zs-control-touch);
+  padding:var(--zs-space-1) var(--zs-space-2);
+  border-radius:var(--zs-radius-item);
+  text-align:left;
+}
+button.turn-files-row:hover { background:var(--zs-surface-hover); }
+button.turn-files-row[aria-current="true"] { background:var(--zs-surface-selected); }
+.turn-files-icon {
+  display:grid;
+  place-items:center;
+  width:28px;
+  height:28px;
+  border-radius:var(--zs-radius-control);
+  background:var(--zs-surface-subtle);
+  color:var(--zs-text-secondary);
+}
+.turn-files-label { min-width:0; overflow-wrap:anywhere; }
+.turn-files-label strong { display:block; font-size:var(--zs-type-interface); font-weight:600; }
+.turn-files-label small { display:block; color:var(--zs-text-secondary); font:var(--zs-type-caption)/1.45 var(--zs-font-code); }
+.turn-files-unavailable { color:var(--zs-text-secondary); font-size:var(--zs-type-caption); white-space:nowrap; }
+.turn-files-toggle { margin-top:var(--zs-space-1); padding-inline:var(--zs-space-2); }
+.turn-files-toggle[aria-expanded="true"] svg { transform:rotate(180deg); }
+@media (max-width:759px) { .turn-files-toggle { min-height:var(--zs-control-touch); } }

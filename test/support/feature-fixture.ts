@@ -13,7 +13,8 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { DatabaseSync } from 'node:sqlite';
 import { z } from 'zod';
-import type { Binding, HarnessAdapter, HarnessId, NativeItem, NativeState } from '../../src/harness/types.ts';
+import type { Binding, HarnessAdapter, HarnessId, HarnessInput, NativeItem, NativeState, Receipt } from '../../src/harness/types.ts';
+import type { QueueDelivery } from '../../src/shared/workbench.ts';
 import { buildApp } from '../../src/server/app.ts';
 import { openDatabase } from '../../src/server/database.ts';
 import { productMigrations } from '../../src/server/migrations.ts';
@@ -162,8 +163,30 @@ async function main() {
   const timers = new Set<NodeJS.Timeout>();
   function adapter(id: HarnessId): HarnessAdapter {
     const checked = (binding: Binding) => { const value = load(binding.id); if (value.offline) throw new Error('fixture_disconnected'); return value; };
+    async function submit(binding: Binding, operation: HarnessInput, delivery?: QueueDelivery): Promise<Receipt> {
+      checked(binding);
+      let receipt: Receipt = { outcome: 'unknown', reason: 'fixture_receipt_lost' };
+      change(binding.id, value => {
+        if (value.submissions.some(item => item.id === operation.id) || value.rejectedOperationIds.includes(operation.id)) throw new Error('duplicate_fixture_dispatch');
+        value.submitCalls++;
+        const active = value.state.status === 'running' ? value.state.runId : undefined;
+        const missed = delivery?.mode === 'current' && active !== delivery.target;
+        const rejected = value.rejectNext; value.rejectNext = false;
+        if (rejected || missed) {
+          value.rejectedOperationIds.push(operation.id);
+          receipt = { outcome: 'rejected', reason: missed ? 'native_run_changed' : 'Fixture 拒绝了本次输入，未接收执行。' };
+          return;
+        }
+        const runId = delivery && delivery.mode !== 'next' && active ? active : 'fixture-run:' + operation.id;
+        value.submissions.push({ id: operation.id, text: operation.text, runId });
+        const unknown = value.unknownReceipt; value.unknownReceipt = false; value.hidden = unknown;
+        value.state = { status: 'running', runId, pendingInputs: 0, configurationVerified: true };
+        if (!unknown) { prove(value); receipt = delivery ? { outcome: 'accepted' } : { outcome: 'accepted', runId }; }
+      });
+      return receipt;
+    }
     return {
-      id,
+      id, earlyInput: id === 'codex' ? 'current' : 'soon', submit, submitQueued: submit,
       async catalog() { return { id, available: true, models: [{ id: 'fixture-model', label: 'Fixture · 非真实模型' }], permissions: [{ id: 'fixture-write', label: 'Fixture write', description: 'Synthetic boundary; no actual agent execution.' }, { id: 'fixture-read', label: 'Fixture read', description: 'Synthetic configuration selection only.' }] }; },
       async create(input, onBound) {
         const fail = native.prepare('SELECT fail_create FROM settings WHERE id = 1').get()!.fail_create === 1;
@@ -177,25 +200,12 @@ async function main() {
       },
       async state(binding, target) {
         const value = checked(binding);
-        return { ...value.state, ...(target && value.items.some(item => item.runId === target && item.kind === 'assistant' && item.status === 'completed') ? { terminalRunId: target } : {}) };
+        return { ...value.state, ...(target && value.items.some(item => item.runId === target && item.kind === 'assistant' && item.status === 'completed') ? { terminalRunId: target, terminalStatus: 'completed' as const } : {}) };
       },
       async history(binding, cursor, limit = 100) {
         const value = checked(binding); const end = cursor === undefined ? value.items.length : z.coerce.number().int().min(0).max(value.items.length).parse(cursor);
         const start = Math.max(0, end - limit);
         return { items: value.items.slice(start, end), olderCursor: start ? String(start) : null };
-      },
-      async submit(binding, operation) {
-        checked(binding); let unknown = false; let rejected = false; const runId = 'fixture-run:' + operation.id;
-        change(binding.id, value => {
-          if (value.submissions.some(item => item.id === operation.id) || value.rejectedOperationIds.includes(operation.id)) throw new Error('duplicate_fixture_dispatch');
-          value.submitCalls++;
-          rejected = value.rejectNext; value.rejectNext = false;
-          if (rejected) { value.rejectedOperationIds.push(operation.id); return; }
-          value.submissions.push({ ...operation, runId }); unknown = value.unknownReceipt; value.unknownReceipt = false; value.hidden = unknown;
-          value.state = { status: 'running', runId, pendingInputs: 0, configurationVerified: true };
-          if (!unknown) prove(value);
-        });
-        return rejected ? { outcome: 'rejected', reason: 'Fixture 拒绝了本次输入，未接收执行。' } : unknown ? { outcome: 'unknown', reason: 'fixture_receipt_lost' } : { outcome: 'accepted', runId };
       },
       async reconcile(binding, operationId) {
         const value = checked(binding); const message = value.submissions.find(item => item.id === operationId);

@@ -1,11 +1,11 @@
 import { isAbsolute, normalize } from 'node:path';
 import { z } from 'zod';
-import type { InputContent } from '../../shared/content.ts';
+import type { QueueDelivery } from '../../shared/workbench.ts';
 import { HarnessError } from '../types.ts';
-import type { Binding, Catalog, Configuration, HarnessAdapter, HistoryPage, NativeChange, NativeState, Receipt } from '../types.ts';
+import type { Binding, Catalog, Configuration, HarnessAdapter, HarnessInput, HistoryPage, NativeChange, NativeState, Receipt } from '../types.ts';
 import { Connection, NativeRejection } from './connection.ts';
 import { LiveAssistant } from './live.ts';
-import { boundaryFrom, decodeModel, eventSchema, historyItems, identifier, itemFrom, modelId, modelSchema, object, pageSchema, snapshotSchema, stateFrom, targetTurnRange, terminalRunFrom, turnAt } from './native.ts';
+import { boundaryFrom, decodeModel, eventSchema, historyItems, identifier, itemFrom, modelId, modelSchema, object, pageSchema, snapshotSchema, stateFrom, targetTurnRange, terminalStatusFrom, turnAt } from './native.ts';
 import type { Snapshot, TurnOutline } from './native.ts';
 
 const modelCatalog = z.object({ groups: z.array(z.object({ id: identifier, name: z.string().max(240), models: z.array(z.object({ id: identifier, name: z.string().max(240), reasoning: z.object({ efforts: z.array(z.object({ id: identifier, name: z.string().max(240) })).max(32) }).optional() })).max(300) })).max(100) });
@@ -57,12 +57,12 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
         current.records.unshift(...page.records); current.hasMore = page.hasMore;
       }
       let proofRecords = current.records;
-      let terminalRunId = terminalRunFrom(binding.id, current, targetRunId);
+      let terminalStatus = terminalStatusFrom(binding.id, current, targetRunId);
       const range = targetTurnRange(binding.id, current, targetRunId);
       // Automatic notification turns may follow the user's accepted turn. Query
       // that exact interval without importing old approvals into current state.
       let before = range?.before;
-      while (!terminalRunId && range && before !== undefined && before > range.start && pages < 10) {
+      while (!terminalStatus && range && before !== undefined && before > range.start && pages < 10) {
         pages++;
         const page = pageSchema.parse(await connection.call('session/page', request(binding, { throughSeq: current.cursor, beforeSeq: before, maxMessages: 100 })));
         if (!page.records.length) break;
@@ -70,8 +70,8 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
         if (page.records.some(record => record.event.seq >= cut) || new Set(page.records.map(record => record.event.seq)).size !== page.records.length) throw new HarnessError('DSH_HISTORY_NO_PROGRESS');
         bytes += Buffer.byteLength(JSON.stringify(page.records));
         if (bytes > 8 * 1024 * 1024) throw new HarnessError('DSH_STATE_HISTORY_LIMIT');
-        terminalRunId = terminalRunFrom(binding.id, current, targetRunId, page.records);
-        if (terminalRunId) proofRecords = page.records;
+        terminalStatus = terminalStatusFrom(binding.id, current, targetRunId, page.records);
+        if (terminalStatus) proofRecords = page.records;
         before = Math.min(...page.records.map(record => record.event.seq));
         if (!page.hasMore) break;
       }
@@ -81,10 +81,10 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
         const latest = await snapshot(binding, 5);
         if (latest.cursor < current.cursor) throw new HarnessError('DSH_HISTORY_CHANGED');
         current = latest.cursor === current.cursor ? { ...latest, records: current.records, hasMore: current.hasMore } : latest;
-        terminalRunId = terminalRunFrom(binding.id, current, targetRunId, proofRecords);
+        terminalStatus = terminalStatusFrom(binding.id, current, targetRunId, proofRecords);
       }
       const result = stateFrom(binding, current);
-      return remember(binding, { ...result, ...(terminalRunId ? { terminalRunId } : {}) });
+      return remember(binding, { ...result, ...(terminalStatus ? { terminalRunId: targetRunId, terminalStatus } : {}) });
     }
     catch (error) { if (error instanceof HarnessError && error.code === 'DSH_BINDING_INVALID') throw error; return disconnectedState(binding); }
   }
@@ -142,7 +142,7 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
       const first = records.length ? Math.min(...records.map(record => record.event.seq)) : undefined;
       if (hasMore && (first === undefined || first === 0)) throw new HarnessError('DSH_HISTORY_NO_PROGRESS');
       if (records.some(record => record.event.seq > through) || new Set(records.map(record => record.event.seq)).size !== records.length) throw new HarnessError('DSH_HISTORY_INVALID');
-      return { items: historyItems(binding.id, records.map(record => record.event), activeTurn, outline), olderCursor: hasMore ? Buffer.from(JSON.stringify({ session: binding.id, through, before: first })).toString('base64url') : null };
+      return { items: historyItems(binding.id, records.map(record => record.event), activeTurn, outline, binding.cwd), olderCursor: hasMore ? Buffer.from(JSON.stringify({ session: binding.id, through, before: first })).toString('base64url') : null };
     } catch (error) { throw nativeError(error); }
   }
 
@@ -152,13 +152,16 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
     if (value.absolutePath !== path) throw new HarnessError('DSH_IMAGE_PATH_CHANGED');
     return value.data;
   }
-  async function submit(binding: Binding, operation: InputContent & { id: string; imageData?: { mediaType: string; data: string }[] }): Promise<Receipt> {
+  async function submit(binding: Binding, operation: HarnessInput, delivery?: QueueDelivery): Promise<Receipt> {
     try { checkBinding(binding); identifier.parse(operation.id); z.string().max(100000).parse(operation.text); if (!operation.text.trim() && !operation.imageData?.length) throw new Error('empty_input'); }
     catch { return { outcome: 'rejected', reason: '消息或会话参数无效。' }; }
     const current = await state(binding);
-    if (!current.configurationVerified || current.pendingInputs > 0 || !['idle', 'interrupted', 'failed'].includes(current.status)) return { outcome: 'rejected', reason: current.reason ?? '原生对话尚未就绪。' };
+    if (delivery?.mode === 'current') return { outcome: 'rejected', reason: 'queue_mode_unavailable' };
+    if (!current.configurationVerified || current.status === 'unknown') return { outcome: 'rejected', reason: current.reason ?? '原生对话尚未就绪。' };
+    if (!delivery && (current.pendingInputs > 0 || !['idle', 'interrupted', 'failed'].includes(current.status)))
+      return { outcome: 'rejected', reason: current.reason ?? '原生对话尚未就绪。' };
     try {
-      z.object({ accepted: z.literal(true) }).parse(await connection.call('session/prompt', { request: { sessionId: binding.id, requestId: operation.id, mode: 'queue', content: [...(operation.text ? [{ type: 'text', text: operation.text }] : []), ...(operation.imageData ?? []).map(image => ({ type: 'image', mediaType: image.mediaType, data: image.data }))] } }));
+      z.object({ accepted: z.literal(true) }).parse(await connection.call('session/prompt', { request: { sessionId: binding.id, requestId: operation.id, mode: delivery?.mode === 'soon' ? 'steer' : 'queue', content: [...(operation.text ? [{ type: 'text', text: operation.text }] : []), ...(operation.imageData ?? []).map(image => ({ type: 'image', mediaType: image.mediaType, data: image.data }))] } }));
       return { outcome: 'accepted' };
     } catch (error) { return error instanceof NativeRejection ? { outcome: 'rejected', reason: 'DSH 拒绝了这条输入。' } : { outcome: 'unknown', reason: '无法确认 DSH 是否接收；保留原操作身份核对，未自动重发。' }; }
   }
@@ -227,7 +230,7 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
                 emit({ type: 'state', state: remember(binding, stateFrom(binding, current)) }); emit({ type: 'invalidate' });
                 outline = current.projections.values.turnOutline ?? [];
                 const boundary = boundaryFrom(current);
-                for (const item of historyItems(binding.id, current.records.map(record => record.event), boundary?.openTurnStartSeq !== null ? boundary?.lastTurn : undefined, outline)) emit({ type: 'item', item });
+                for (const item of historyItems(binding.id, current.records.map(record => record.event), boundary?.openTurnStartSeq !== null ? boundary?.lastTurn : undefined, outline, binding.cwd)) emit({ type: 'item', item });
                 if (!boundary) refresh();
                 const item = live.restore(current); if (item) emit({ type: 'item', item });
               } else if (frame.type === 'event') {
@@ -258,5 +261,5 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
     subscriptions.add(dispose); await start(); return dispose;
   }
 
-  return { id: 'dsh', catalog, create, state, history, submit, readImage, reconcile, stop, watch, async close() { closed = true; for (const dispose of [...subscriptions]) dispose(); lastStates.clear(); await connection.close(); } };
+  return { id: 'dsh', earlyInput: 'soon', catalog, create, state, history, submit, submitQueued: submit, readImage, reconcile, stop, watch, async close() { closed = true; for (const dispose of [...subscriptions]) dispose(); lastStates.clear(); await connection.close(); } };
 }

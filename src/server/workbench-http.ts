@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { ServerResponse } from 'node:http';
 import { z } from 'zod';
-import { conversationManagementSchema, conversationSearchSchema, createConversationSchema, enqueueOperationSchema, identifierSchema, workbenchConfigurationSchema,
+import { conversationManagementSchema, conversationSearchSchema, createConversationSchema, enqueueOperationSchema, identifierSchema, queueCommandSchema, workbenchConfigurationSchema,
   workspaceAddSchema, workspaceBrowseSchema, workspaceDirectoryListSchema, workspaceIdSchema, workspaceManagementSchema } from '../shared/workbench.ts';
 import type { Conversation as ConversationView, WorkbenchOperation, WorkbenchSnapshot } from '../shared/workbench.ts';
 import type { PrivateContext } from './app.ts';
@@ -41,7 +41,7 @@ function conversationView(value: Conversation): ConversationView {
 function operationView(value: Operation): WorkbenchOperation {
   const common = { id: value.id, conversationId: value.conversationId, status: value.status, runId: value.runId,
     reason: value.reason, createdAt: value.createdAt, updatedAt: value.updatedAt };
-  return { ...common, type: value.type };
+  return { ...common, type: value.type, ...(value.type === 'message' && value.queuedInput ? { delivery: value.queuedInput.delivery } : {}) };
 }
 function size(value: unknown): number { return Buffer.byteLength(JSON.stringify(value)); }
 function newestWithin<T>(values: T[], budget: number, newestFirst = false): T[] {
@@ -58,13 +58,14 @@ function snapshotView(value: ReturnType<Workbench['snapshot']>): WorkbenchSnapsh
   // Keep a contiguous latest suffix, preserving whole messages and a usable older-page anchor.
   // A single maximum-size native message (including JSON escaping) fits this budget.
   const items = newestWithin(history.items, 7 * 1024 * 1024);
-  const liveItems = newestWithin(history.liveItems, MAX_RESPONSE_BYTES - size({ conversation, operations, items }) - 4096);
+  const { queue, turnFiles } = value;
+  const liveItems = newestWithin(history.liveItems, MAX_RESPONSE_BYTES - size({ conversation, operations, items, queue, turnFiles }) - 4096);
   const trimmed = items.length < history.items.length;
   const hasOlder = trimmed || Boolean(history.olderBeforeItemId || history.nativeOlderCursor);
   return { conversation, history: {
     items, liveItems, liveItemsLimited: history.liveItemsLimited || liveItems.length < history.liveItems.length, loaded: history.historyLoaded,
     olderBeforeItemId: hasOlder ? (trimmed ? items[0]?.id : history.olderBeforeItemId) ?? items[0]?.id ?? null : null, hasOlder,
-  }, operations, revision: value.revision };
+  }, operations, queue, ...(turnFiles.length ? { turnFiles } : {}), revision: value.revision };
 }
 function json(reply: FastifyReply, value: unknown): FastifyReply {
   const body = JSON.stringify(value);
@@ -289,6 +290,11 @@ export function createWorkbenchHttp(workbench: Workbench, input: Partial<z.input
         parse(noQuery, request.query); const { id } = parse(uuidParams, request.params);
         const operation = await workbench.enqueue({ ...parse(enqueueOperationSchema, request.body), conversationId: id });
         return json(reply.code(202), { operation: operationView(operation) });
+      });
+      privateApp.post('/conversations/:id/queue', async (request, reply) => {
+        parse(noQuery, request.query);
+        const { id } = parse(uuidParams, request.params);
+        return json(reply, await workbench.changeQueue(id, parse(queueCommandSchema, request.body)));
       });
       privateApp.get('/operations/:id', async (request, reply) => {
         parse(noQuery, request.query); const { id } = parse(uuidParams, request.params);

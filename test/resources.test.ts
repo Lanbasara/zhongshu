@@ -106,6 +106,7 @@ test('workspace documents enforce auth, CSRF, registered roots, format and path 
   t.after(() => rm(work, { recursive: true, force: true }));
   await writeFile(join(work, 'notes.md'), '# Original');
   await writeFile(join(work, 'report.html'), '<h1>Report</h1>');
+  await writeFile(join(work, 'sample.tsx'), 'export const sample = <strong>Source</strong>;');
   await writeFile(join(root, 'outside.txt'), 'synthetic canary');
   await symlink(join(root, 'outside.txt'), join(work, 'escape.txt'));
   const origin = 'https://documents.example';
@@ -130,6 +131,10 @@ test('workspace documents enforce auth, CSRF, registered roots, format and path 
   const update = (path: string, version: string, requestHeaders = headers) =>
     app.inject({ method: 'POST', url, headers: requestHeaders, payload: { path, version, text: 'changed' } });
   assert.equal((await update('report.html', report.json().version)).statusCode, 403);
+  const source = (await read('sample.tsx')).json();
+  assert.equal(source.kind, 'source');
+  assert.equal(source.text, 'export const sample = <strong>Source</strong>;');
+  assert.equal((await update('sample.tsx', source.version)).json().error, 'file_read_only');
   const original = await read('notes.md');
   assert.equal((await update('notes.md', original.json().version, { ...headers, 'x-csrf-token': '' })).statusCode, 403);
   assert.equal((await update('notes.md', original.json().version)).statusCode, 200);

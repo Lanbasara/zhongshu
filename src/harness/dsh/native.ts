@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { HarnessError } from '../types.ts';
 import type { Binding, NativeItem, NativeState } from '../types.ts';
+import { editPath } from '../edit-paths.ts';
 
 export const identifier = z.string().min(1).max(240);
 export const modelSchema = z.object({ provider: identifier, model: identifier, reasoningEffort: identifier.optional() });
@@ -55,11 +56,19 @@ export function targetTurnRange(session: string, snapshot: Snapshot, targetRunId
 }
 /** A later turn alone is insufficient: require the target's own durable closer. */
 export function terminalRunFrom(session: string, snapshot: Snapshot, targetRunId?: string, records = snapshot.records): string | undefined {
+  return terminalStatusFrom(session, snapshot, targetRunId, records) ? targetRunId : undefined;
+}
+export function terminalStatusFrom(session: string, snapshot: Snapshot, targetRunId?: string, records = snapshot.records): NativeState['terminalStatus'] {
   const range = targetTurnRange(session, snapshot, targetRunId);
   if (!range) return;
-  return records.some(({ event }) => event.type === 'turn/end' && event.data.turn === range.turn
+  const record = records.find(({ event }) => event.type === 'turn/end' && event.data.turn === range.turn
     && event.seq > range.start && event.seq < range.before && event.seq <= snapshot.cursor
-    && terminalReasons.has(String(object(event.data.reason).kind))) ? targetRunId : undefined;
+    && terminalReasons.has(String(object(event.data.reason).kind)));
+  if (!record) return;
+  const kind = object(record.event.data.reason).kind;
+  if (kind === 'completed') return 'completed';
+  if (kind === 'aborted' || kind === 'interrupted') return 'interrupted';
+  return 'failed';
 }
 export function turnAt(outline: TurnOutline, seq: number): number | undefined {
   let low = 0; let high = outline.length - 1; let turn: number | undefined;
@@ -147,8 +156,25 @@ export function itemFrom(session: string, event: Event, live = false, inferredTu
   if (event.type === 'approval/decided' && data.outcome === 'unavailable') return { ...base, kind: 'notice', text: 'DSH 没有可用的审批处理入口；本次请求未获授权。', status: 'failed' };
   if (event.type === 'turn/end' && object(data.reason).kind !== 'completed') return { ...base, kind: 'notice', text: object(data.reason).kind === 'interrupted' ? 'DSH 进程在本轮完成前退出，工具结果需核对。' : '原生本轮已停止或未正常完成。', status: 'failed' };
 }
-export function historyItems(session: string, events: Event[], activeTurn?: number, outline: TurnOutline = []): NativeItem[] {
+export function historyItems(session: string, events: Event[], activeTurn?: number, outline: TurnOutline = [], cwd?: string): NativeItem[] {
   const items = new Map<string, NativeItem>();
-  for (const event of [...events].sort((a, b) => a.seq - b.seq)) { const turn = turnAt(outline, event.seq); const item = itemFrom(session, event, activeTurn !== undefined && (event.data.turn ?? turn) === activeTurn, turn); if (item) { const old = items.get(item.id); if (old?.tool && item.tool) { item.tool = { ...old.tool, ...item.tool, name: old.tool.name }; if (!item.text) item.text = old.text; if (item.tool.exitCode !== undefined && item.tool.exitCode !== 0) item.status = 'failed'; } items.set(item.id, item); } }
+  for (const event of [...events].sort((a, b) => a.seq - b.seq)) {
+    const turn = turnAt(outline, event.seq);
+    const item = itemFrom(session, event, activeTurn !== undefined && (event.data.turn ?? turn) === activeTurn, turn);
+    if (!item) continue;
+    const old = items.get(item.id);
+    if (old?.tool && item.tool) {
+      item.tool = { ...old.tool, ...item.tool, name: old.tool.name };
+      if (!item.text) item.text = old.text;
+      if (item.tool.exitCode !== undefined && item.tool.exitCode !== 0) item.status = 'failed';
+      if (cwd && item.runId && item.runId === old.runId && event.type === 'tool/result' && item.status === 'completed'
+        && object(event.data.message).isError === false && (item.tool.name === 'write' || item.tool.name === 'edit')) {
+        const meta = object(event.data.meta);
+        const path = editPath(cwd, meta.path);
+        if (path && (meta.operation === 'create' || (Array.isArray(meta.diffs) && meta.diffs.length > 0))) item.fileEdits = [path];
+      }
+    }
+    items.set(item.id, item);
+  }
   return [...items.values()];
 }

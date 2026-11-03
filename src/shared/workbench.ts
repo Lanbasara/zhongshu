@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { contentFields, toolSchema } from './content.ts';
+import { contentFields, recordedFilePath, toolSchema } from './content.ts';
 
 const utf8 = new TextEncoder();
 const boundedText = (bytes: number) => z.string().max(bytes).refine(value => utf8.encode(value).byteLength <= bytes);
@@ -8,7 +8,8 @@ export const revisionSchema = z.number().int().min(0).max(Number.MAX_SAFE_INTEGE
 export const configurationSchema = z.object({ modelId: identifierSchema, permissionId: identifierSchema }).strict();
 export const stateSchema = z.object({
   status: z.enum(['idle', 'running', 'waiting', 'interrupted', 'failed', 'unknown']),
-  runId: identifierSchema.optional(), terminalRunId: identifierSchema.optional(), pendingInputs: z.number().int().min(0).max(1_000_000),
+  runId: identifierSchema.optional(), terminalRunId: identifierSchema.optional(),
+  terminalStatus: z.enum(['completed', 'interrupted', 'failed']).optional(), pendingInputs: z.number().int().min(0).max(1_000_000),
   configurationVerified: z.boolean(), reason: boundedText(4096).optional(),
 }).strict();
 export const itemSchema = z.object({
@@ -64,7 +65,34 @@ export const conversationSearchSchema = z.object({
   title: boundedText(800).max(200).optional(), archived: z.boolean().default(false),
   beforeId: z.uuid().optional(),
 }).strict().refine(query => !(query.workspaceId && query.unregistered));
-const messagePayload = z.object({ text: boundedText(48 * 1024).max(16_000), ...contentFields }).strict().refine(v => v.text.trim() || v.images?.length || v.references?.length);
+export const messagePayload = z.object({ text: boundedText(48 * 1024).max(16_000), ...contentFields }).strict().refine(v => v.text.trim() || v.images?.length || v.references?.length);
+export const earlyModeSchema = z.enum(['current', 'soon']);
+export const queueDeliverySchema = z.discriminatedUnion('mode', [
+  z.object({ mode: z.literal('next') }).strict(),
+  z.object({ mode: z.literal('current'), target: identifierSchema }).strict(),
+  z.object({ mode: z.literal('soon'), target: identifierSchema }).strict(),
+]);
+export const queueLimit = 20;
+const queueIdentity = { entryId: z.uuid(), version: revisionSchema };
+export const queueCommandSchema = z.discriminatedUnion('action', [
+  z.object({ action: z.literal('add'), entryId: z.uuid(), content: messagePayload }).strict(),
+  z.object({ action: z.literal('edit'), ...queueIdentity, content: messagePayload }).strict(),
+  z.object({ action: z.literal('remove'), ...queueIdentity }).strict(),
+  z.object({ action: z.literal('send'), ...queueIdentity, operationId: z.uuid(), mode: earlyModeSchema, target: identifierSchema }).strict(),
+  z.object({ action: z.literal('resume'), version: revisionSchema }).strict(),
+]);
+export const queueEntrySchema = z.object({ ...queueIdentity, content: messagePayload,
+  status: z.enum(['waiting', 'dispatching', 'accepted', 'unknown', 'held']),
+}).strict();
+export const queuePauseSchema = z.enum(['stopped', 'failed', 'rejected', 'missed', 'restored']);
+export const queueViewSchema = z.object({
+  entries: z.array(queueEntrySchema).max(queueLimit), mode: earlyModeSchema.nullable(),
+  pause: queuePauseSchema.nullable(), version: revisionSchema,
+}).strict();
+export type QueueCommand = z.infer<typeof queueCommandSchema>;
+export type QueueDelivery = z.infer<typeof queueDeliverySchema>;
+export type QueueView = z.infer<typeof queueViewSchema>;
+export type QueuePause = z.infer<typeof queuePauseSchema>;
 const stopPayload = z.object({ runId: identifierSchema }).strict();
 export const enqueueOperationSchema = z.discriminatedUnion('type', [
   z.object({ id: z.uuid(), type: z.literal('message'), payload: messagePayload }).strict(),
@@ -74,16 +102,19 @@ const operationFields = {
   id: z.uuid(), conversationId: z.uuid(), status: z.enum(['queued', 'dispatching', 'accepted', 'unknown', 'rejected']),
   runId: identifierSchema.nullable(), reason: boundedText(4096).nullable(), createdAt: revisionSchema, updatedAt: revisionSchema,
 };
-export const operationSchema = z.object({ ...operationFields, type: z.enum(['message', 'stop']) }).strict();
+export const operationSchema = z.object({ ...operationFields, type: z.enum(['message', 'stop']), delivery: queueDeliverySchema.optional() }).strict();
 export const conversationListSchema = z.object({
   conversations: z.array(conversationSchema).max(100), olderBeforeId: z.uuid().nullable(), revision: revisionSchema,
 }).strict();
 export const conversationResponseSchema = z.object({ conversation: conversationSchema }).strict();
 export const operationResponseSchema = z.object({ operation: operationSchema }).strict();
+export const turnFileLimit = 500;
+const turnFilesSchema = z.object({ runId: identifierSchema, paths: z.array(recordedFilePath).max(turnFileLimit), limited: z.boolean() }).strict();
+export type TurnFileSummary = z.infer<typeof turnFilesSchema>;
 export const snapshotSchema = z.object({
   conversation: conversationSchema,
   history: z.object({ items: z.array(itemSchema).max(100), liveItems: z.array(itemSchema).max(100), liveItemsLimited: z.boolean(), olderBeforeItemId: identifierSchema.nullable(), hasOlder: z.boolean(), loaded: z.boolean() }).strict(),
-  operations: z.array(operationSchema).max(100), revision: revisionSchema,
+  operations: z.array(operationSchema).max(100), queue: queueViewSchema.optional(), turnFiles: z.array(turnFilesSchema).max(200).optional(), revision: revisionSchema,
 }).strict();
 export const changeEventSchema = z.object({ type: z.literal('change'), revision: revisionSchema, conversationId: z.uuid(), item: itemSchema.optional() }).strict();
 export const resetEventSchema = z.object({ type: z.literal('reset'), revision: revisionSchema }).strict();

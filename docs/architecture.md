@@ -4,7 +4,7 @@
 
 ## 当前系统
 
-当前实现单管理员私人工作台，通过 Codex 与 DSH 两个 adapter 创建对话、提交图文消息与引用、读取历史与状态、停止当前轮。应用保留操作记录和展示历史，原生进程独立执行。公开的版本与健康接口不包含私有状态。
+当前实现单管理员私人工作台，通过 Codex 与 DSH 两个 adapter 创建对话、提交图文消息与引用、读取历史与状态、停止当前轮。Workbench 还持有运行中加入的消息队列，派发前将条目内容和发送方式冻结到操作记录。原生进程独立执行并提供接收与归属轮次的证据。公开的版本与健康接口不包含私有状态。
 
 ```text
 React 浏览器 ──同源 HTTP / SSE──→ Fastify 应用
@@ -38,7 +38,7 @@ React 浏览器 ──同源 HTTP / SSE──→ Fastify 应用
 
 Codex adapter 在已建立连接丢失时报告内部 `unavailable` 事件，由 Workbench 立即持久化“待核实”并撤销配置/终态证明，保留绑定、历史、操作及最后已知运行信息。离线连接尝试失败不重复发失联事件；旧连接事件和旧代次读取不能覆盖后来的状态。重新连接后按原绑定核实配置和原生状态，不自动重发未知操作。公开 HTTP/SSE 仍使用既有状态契约。
 
-Web manifest 提供独立窗口入口；离线缓存、运行中追加、审批/提问界面尚未实现。原生等待不会被静默批准。界面以 Streamdown 渲染 Markdown/GFM/代码，用按轮折叠的工具组展示原生命令、输出和状态；原始 HTML 不执行，链接协议受限。
+Web manifest 提供独立窗口入口。界面以 Streamdown 渲染 Markdown/GFM/代码，用按轮折叠的工具组展示原生命令、输出和状态。运行中输入的路径见[执行功能地图](features/execution.md)。原始 HTML 不执行，链接协议受限。审批与提问仍由原生界面处理。
 
 ## 界面与设计系统
 
@@ -54,7 +54,9 @@ Web manifest 提供独立窗口入口；离线缓存、运行中追加、审批/
 | 功能 | [workbench](../src/web/workbench.tsx)、[composer](../src/web/composer.tsx)、[transcript](../src/web/conversation-content.tsx)、工作区阅读/管理 | 拥有 API、真实业务状态、授权能力、草稿、上传与操作生命周期；向展示层传值，不把业务状态机搬进公共组件 |
 | 开发工作台 | [.storybook](../.storybook/main.ts)、[stories](../design/stories/) | 复用产品组件展示状态。示例与模拟只存在开发入口，不成为产品默认值 |
 
-界面字体用于控制与正文，宋体/衬线只用于阅读标题，等宽用于代码。颜色按 surface/text/action/status 等语义使用；工作区身份不改变主题，绿色只作为明确成功状态的一部分。输入与正文共用阅读宽度，导航和阅读器各自滚动；窄屏导航为有焦点约束的抽屉。响应、状态、表面切换分别使用 140/180/260ms 与同一缓动，系统减少动效时去除位移/持续旋转。新增功能先加入相应 Storybook 状态，再接功能数据；组件展示不能代替真实路径验收。
+界面字体用于控制与正文，宋体/衬线只用于阅读标题，等宽用于代码。颜色按 surface/text/action/status 等语义使用；工作区身份不改变主题，绿色只作为明确成功状态的一部分。输入与正文共用阅读宽度，导航和阅读器各自滚动；窄屏导航为有焦点约束的抽屉。响应、状态、表面切换分别使用 140/180/260ms 与同一缓动，系统减少动效时去除位移/持续旋转。
+
+界面原型与组件示例的维护约定见 [ADR 0008](adr/0008-storybook-ui-prototypes.md)。启动命令见 [README](../README.md#ui-development)。
 
 发布边界在 [design-boundaries](../scripts/design-boundaries.ts) 与 [check-release](../scripts/check-release.mjs)：源码 AST 拒绝产品到开发目录的依赖、展示层到功能的依赖与直接网络调用；Vite 检查实际模块图、输出名称和静态资源清单；最终 dist 记录文件及 SHA-256，容器校验清单且不得安装 Storybook。源码检查是防误用护栏，不是恶意源码沙箱。公共静态资源变化由 [product-assets](../scripts/product-assets.json) 显式登记，检查会识别改名混入的原型。构建与 Docker 的输入只含产品和必要构建工具，不含 reference/stories/Storybook 输出；验证反例见 [interface](features/interface.md)。
 
@@ -75,6 +77,8 @@ Codex 以原生 image input、DSH 以原生 image content 接图片，无需新�
 ## 工作区文件
 
 阅读器以登记的工作区和相对路径定位原文件。私有工作台 API 提供目录、文件正文、可编辑状态和带版本的保存。正文不进入 SQLite。只读 HTML 在禁止脚本和网络资源的 iframe 内显示，由工作台解析同工作区底稿链接并恢复阅读位置。
+
+Harness Adapter 提供可归因的编辑目标。工作台在写入历史或实时条目时记录对话、原生轮和工作区相对路径，转发当前历史页所涉及的清单。清单与文件内容分开读取，打开时仍走原工作区阅读器。
 
 可写工作区由操作者声明写入边界。保存期间工作台阻止相交目录的新建与原生派发，并检查相关对话的原生状态和待处理请求。文件版本由内容和文件身份共同决定，只有旧版本匹配才替换。应用协调范围之外的写入者属于实例前提，详见[文件功能地图](features/workspace-files.md)。
 

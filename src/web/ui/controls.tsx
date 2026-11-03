@@ -5,8 +5,8 @@ import { ChevronDown } from 'lucide-react';
 export function Button({ variant = 'secondary', className = '', ...props }: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: 'primary' | 'secondary' | 'quiet' }) {
   return <button type="button" {...props} className={`zs-button zs-button-${variant} ${className}`}/>;
 }
-export function IconButton({ label, children, className = '', ...props }: ComponentPropsWithRef<'button'> & { label: string; children: ReactNode }) {
-  return <Tooltip.Root><Tooltip.Trigger asChild><button type="button" {...props} aria-label={label} className={`zs-icon ${className}`}>{children}</button></Tooltip.Trigger><Tooltip.Portal><Tooltip.Content className="zs-tooltip" sideOffset={7}>{label}</Tooltip.Content></Tooltip.Portal></Tooltip.Root>;
+export function IconButton({ label, tooltip = label, children, className = '', ...props }: ComponentPropsWithRef<'button'> & { label: string; tooltip?: string; children: ReactNode }) {
+  return <Tooltip.Root><Tooltip.Trigger asChild><button type="button" {...props} aria-label={label} className={`zs-icon ${className}`}>{children}</button></Tooltip.Trigger><Tooltip.Portal><Tooltip.Content className="zs-tooltip" sideOffset={7}>{tooltip}</Tooltip.Content></Tooltip.Portal></Tooltip.Root>;
 }
 export function Menu({ label, trigger, children, disabled }: { label: string; trigger: ReactNode; children: ReactNode; disabled?: boolean }) {
   return <DropdownMenu.Root><DropdownMenu.Trigger asChild><button type="button" className="zs-icon" aria-label={label} disabled={disabled}>{trigger}</button></DropdownMenu.Trigger><DropdownMenu.Portal><DropdownMenu.Content className="zs-menu" align="start" sideOffset={8} collisionPadding={12}>{children}</DropdownMenu.Content></DropdownMenu.Portal></DropdownMenu.Root>;

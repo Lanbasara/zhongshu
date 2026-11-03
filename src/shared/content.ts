@@ -1,9 +1,12 @@
 import { z } from 'zod';
 
 export const imageSchema = z.object({ id: z.uuid(), name: z.string().min(1).max(120), mediaType: z.enum(['image/png', 'image/jpeg', 'image/webp']) }).strict();
+const referencePath = z.string().min(1).max(1024).refine(p => !p.startsWith('/') && !p.includes('\\') && !p.split('/').some(part => !part || part === '.' || part === '..') && !/[\u0000-\u001f]/.test(p));
+export const workspaceDocumentPath = referencePath.refine(path => !path.split('/').some(part => part.startsWith('.')));
+export const recordedFilePath = workspaceDocumentPath.refine(path => !/%(?:25|2[ef]|5c)|[\u007f]/i.test(path));
 export const referenceSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('quote'), itemId: z.string().min(1).max(1024), text: z.string().min(1).max(8000) }).strict(),
-  z.object({ type: z.literal('file'), path: z.string().min(1).max(1024).refine(p => !p.startsWith('/') && !p.includes('\\') && !p.split('/').some(part => !part || part === '.' || part === '..') && !/[\u0000-\u001f]/.test(p)) }).strict(),
+  z.object({ type: z.literal('file'), path: referencePath }).strict(),
 ]);
 export const contentFields = { images: z.array(imageSchema).max(4).optional(), references: z.array(referenceSchema).max(8).optional() };
 export const toolSchema = z.object({ name: z.string().max(200), exitCode: z.number().int().min(-2147483648).max(2147483647).optional(), input: z.string().max(32000).optional(), output: z.string().max(128000).optional() }).strict();
