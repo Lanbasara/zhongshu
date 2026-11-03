@@ -72,18 +72,21 @@ export function WorkspaceManagement({ action, roots, csrf, close, changed, repor
   };
   const visit = (next: string[]) => { setDirectory(undefined); setPath(next); setFolder(''); setError(''); };
   const title = action.kind === 'add' ? '添加工作区' : action.kind === 'restore' ? '恢复工作区' : '管理工作区';
+  const validFolder = path.length < 12 && folderName.safeParse(folder).success;
+  const targetDirectory = directory && validFolder ? `${directory.currentDirectory.replace(/\/$/, '')}/${folder}` : undefined;
   return <dialog className="create-dialog manage-dialog" aria-labelledby="workspace-dialog-title" ref={dialog}
     onCancel={event => { event.preventDefault(); if (!busy) close(); }}>
     <header><h2 id="workspace-dialog-title">{title}</h2><button className="icon-button" aria-label="关闭" disabled={busy} onClick={close}>×</button></header>
     <fieldset disabled={busy}>
       {action.kind === 'add' ? <>
-        <label htmlFor="workspace-root">当前实例的目录</label>
+        <label htmlFor="workspace-root">当前实例开放的目录</label>
         <select id="workspace-root" value={rootId} onChange={event => { setRootId(event.target.value); visit([]); }}>
           {roots.map(root => <option value={root.id} key={root.id}>{root.label}</option>)}
         </select>
         <div className="workspace-directory-heading">
           {path.length > 0 && <button className="text-button" onClick={() => visit(path.slice(0, -1))}>上一级</button>}
-          <span>{path.length ? path.join(' / ') : '根目录'}</span>
+          <span>当前位置</span>
+          {directory && <code aria-label="当前目录的完整路径">{directory.currentDirectory}</code>}
         </div>
         <div className="workspace-directory-list" aria-label="子目录">
           {browseError ? <p role="status">{browseError} <button className="text-button" onClick={() => retryBrowse(value => value + 1)}>重试</button></p> :
@@ -94,10 +97,13 @@ export function WorkspaceManagement({ action, roots, csrf, close, changed, repor
             </>}
         </div>
         <button className="primary" disabled={!directory} onClick={() => void submit({ rootId, path })}>添加当前目录</button>
-        <form onSubmit={event => { event.preventDefault(); if (directory && folderName.safeParse(folder).success) void submit({ rootId, path, name: folder }); }}>
+        <form onSubmit={event => { event.preventDefault(); if (targetDirectory) void submit({ rootId, path, name: folder }); }}>
           <label htmlFor="workspace-folder">新建空文件夹</label>
           <input id="workspace-folder" value={folder} maxLength={255} onChange={event => setFolder(event.target.value)} />
-          <div className="management-actions"><button className="text-button" disabled={!directory || path.length >= 12 || !folderName.safeParse(folder).success}>新建并添加</button></div>
+          {directory && <p className="workspace-creation-location">
+            {targetDirectory ? '将创建在' : '将在当前目录下新建'} <code aria-label="新建文件夹的位置">{targetDirectory ?? directory.currentDirectory}</code>
+          </p>}
+          <div className="management-actions"><button className="text-button" disabled={!targetDirectory}>新建并添加</button></div>
         </form>
       </> : action.kind === 'restore' ? <>
         <p>恢复「{action.workspace.label}」的原登记。对话核对原生会话后即可继续。</p>

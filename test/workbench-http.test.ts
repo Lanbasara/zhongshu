@@ -129,7 +129,9 @@ test('workspace registration gates real HTTP and retains disk files, history and
   const selection = { rootId: 'shared', path: ['existing'] };
   assert.equal((await f.request('/workspace-directories', { method: 'POST', body: selection, authenticated: false })).status, 401);
   assert.equal((await f.request('/workspaces', { method: 'POST', body: selection, headers: { 'x-csrf-token': '' } })).status, 403);
-  assert.deepEqual((await post('/workspace-directories', { ...selection, path: [] })).body.names, ['existing']);
+  assert.deepEqual((await post('/workspace-directories', { ...selection, path: [] })).body,
+    { currentDirectory: f.root, names: ['existing'], limited: false });
+  assert.equal((await post('/workspace-directories', selection)).body.currentDirectory, folder);
   assert.equal((await post('/workspaces', { ...selection, path: ['..'] })).status, 400);
   assert.equal((await post('/workspaces', { ...selection, path: ['alias'] })).status, 409);
   assert.equal((await post('/workspaces', { ...selection, path: [], name: 'new-folder' })).status, 200);

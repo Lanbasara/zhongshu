@@ -41,7 +41,9 @@ export const workspaceManagementSchema = z.discriminatedUnion('action', [
   z.object({ action: z.literal('remove') }).strict(),
   z.object({ action: z.literal('restore') }).strict(),
 ]);
-export const workspaceDirectoryListSchema = z.object({ names: z.array(folderName).max(200), limited: z.boolean() }).strict();
+export const workspaceDirectoryListSchema = z.object({
+  currentDirectory: boundedText(4096).min(1), names: z.array(folderName).max(200), limited: z.boolean(),
+}).strict();
 export const workbenchConfigurationSchema = z.object({
   harnesses: z.array(catalogSchema).max(2),
   workspaces: z.array(z.object({ id: identifierSchema, label: boundedText(400), directoryName: boundedText(1024).optional(), pinned: z.boolean().optional() }).strict()).max(workspaceLimit),

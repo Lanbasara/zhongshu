@@ -111,7 +111,7 @@ export class WorkspaceRegistry {
   }
 
   browse(rootId: string, path: string[]) {
-    return inDirectory(this.root(rootId).directory, path, directory => {
+    return inDirectory(this.root(rootId).directory, path, (directory, _, currentDirectory) => {
       const names: string[] = [];
       let scanned = 0;
       let limited = false;
@@ -122,7 +122,7 @@ export class WorkspaceRegistry {
           if (entry.isDirectory() && folderName.safeParse(entry.name).success) names.push(entry.name);
         }
       } finally { entries.closeSync(); }
-      return { names: names.sort((a, b) => a.localeCompare(b)), limited };
+      return { currentDirectory, names: names.sort((a, b) => a.localeCompare(b)), limited };
     });
   }
 
