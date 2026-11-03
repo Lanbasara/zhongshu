@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { sessionSchema, versionSchema, errorSchema, type SessionView } from '../shared/http.ts';
 import './style.css';
+import { UIProvider } from './ui/provider.tsx';
 import { WorkbenchView } from './workbench.tsx';
 import { clearDrafts } from './workbench-client.ts';
 
@@ -88,4 +89,4 @@ function App() {
   </main>;
 }
 
-createRoot(document.getElementById('root')!).render(<App />);
+createRoot(document.getElementById('root')!).render(<UIProvider><App /></UIProvider>);

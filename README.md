@@ -48,6 +48,19 @@ Current compatibility is Codex CLI `0.166.0-alpha.5.1` and DSH `0.2.1-rc.4`. Re-
 
 For a production build, run `npm run build`, set `ZHONGSHU_ORIGIN` to the public HTTPS origin, then `npm start`.
 
+## UI development
+
+```sh
+npm run tokens            # regenerate CSS after editing the authored tokens
+npm run storybook         # http://127.0.0.1:6006, no product login or native host
+npm run build:storybook   # .artifacts/storybook, development artifact only
+npm run check:release     # verify the most recent product build inventory
+```
+
+The [UI architecture](docs/architecture.md#界面与设计系统) describes the token, control, pattern and feature boundaries. The [interface map](docs/features/interface.md) covers interaction, component states and release-boundary verification. Storybook renders the product's actual components; its accepted reference prototype is a separate historical reference under `design/reference/`, not a product entry.
+
+Product builds reject development imports and unreviewed public assets. Storybook outputs never go into `dist`. The Docker build copies an explicit input list, installs production dependencies in the runtime stage and verifies the final artifact inventory. These checks also run in CI. Deliberate changes to public assets require updating `scripts/product-assets.json` and reviewing the changed file, not just accepting a new hash.
+
 ## Container
 
 ```sh
