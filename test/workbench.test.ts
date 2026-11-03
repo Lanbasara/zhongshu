@@ -109,6 +109,27 @@ test('queue pauses on the exact interrupted predecessor even after a later nativ
   await until(() => calls === 1 && f.store.readQueue(f.id).entries.length === 0);
 });
 
+test('a late manual send cannot reclaim the same row after automatic dispatch claims it', async t => {
+  const f = fixture(t);
+  const active = { ...terminal('previous-run'), status: 'running' as const };
+  f.peer.current = active;
+  f.store.setConversationState(f.id, { state: active });
+  const entryId = randomUUID();
+  await f.service.changeQueue(f.id, { action: 'add', entryId, content: { text: 'race for this row' } });
+  let calls = 0;
+  const ack = deferred<Receipt>();
+  f.peer.queuedRead = async (_input, delivery) => { calls++; assert.equal(delivery.mode, 'next'); return ack.promise; };
+  f.peer.current = terminal('previous-run');
+  await f.service.reconcile(f.id);
+  try {
+    await until(() => calls === 1);
+    await assert.rejects(f.service.changeQueue(f.id, { action: 'send', entryId, version: 0, operationId: randomUUID(), mode: 'current', target: 'previous-run' }),
+      { code: 'operation_needs_reconciliation' });
+  } finally { ack.resolve({ outcome: 'accepted', runId: 'queued-run' }); }
+  await until(() => f.store.readQueue(f.id).entries.length === 0);
+  assert.equal(calls, 1);
+});
+
 test('startup recovers claimed queue input by identity and observes older queued conversations', async t => {
   const f = fixture(t);
   f.store.setConversationState(f.id, { state: { ...terminal('old-run'), status: 'running' } });
