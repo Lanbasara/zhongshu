@@ -79,6 +79,8 @@
 
 ### U13 对话用量
 
+原生读回先核对绑定身份。在本次隔离应用中从浏览器地址取得产品对话 ID，以只读方式在本次 `zhongshu.sqlite` 按 ID 查询 `workbench_conversations` 的 `json_extract(binding_json, '$.id')`。只保留原生 ID 及本次合成用量证据。
+
 1. 在 U12 的两端真实对话各完成两次模型请求。对照浮层累计值、已用量与窗口容量。Codex 从隔离原生连接记录 `thread/tokenUsage/updated` 的 `total.totalTokens`、`last.totalTokens` 和 `modelContextWindow`。DSH 查 `session/projections`，累计值为 `tokenUsage` 四项之和，上下文优先用 `contextPressure.projectedTokens`，回退用 `pressureTokens`。只读本次原生绑定。记录数值和百分比，区分近似显示与精确累计值。
 2. 完整刷新、切到另一对话再切回，确认数据归属。用足够长的合成对话触发原生压缩，或从隔离 Host 请求压缩。DSH 可将约 26 KiB ASCII 合成材料分两条发送，每条少于 16,000 字符，再在该会话执行原生 `/compact`。核对原生事件和独立读数。占用变小时圆环与详情随之变化，累计值不因压缩降低。只有原生缺少容量或 fixture 分支可检验容量缺失。
 
