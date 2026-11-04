@@ -30,7 +30,6 @@
 .reader-placeholder { margin: 12px; color: var(--zs-text-secondary); }
 .workspace-reader-content { flex: 1; min-height: 0; overflow: auto; padding: 1rem; background: var(--zs-surface); }
 .workspace-reader-content:has(.workspace-report) { padding: 0; overflow: hidden; }
-.workspace-reader-content textarea { display: block; width: 100%; height: 100%; resize: none; font: 1rem/1.6 monospace; padding: .6rem; }
 .workspace-reader-content pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 .workspace-report { display: block; width: 100%; height: 100%; border: 0; background: var(--zs-surface); }
 .workspace-reader-feedback { margin: 0; padding: .5rem .8rem; }
@@ -49,14 +48,11 @@
 
 .reader-editor-pending { display: flex; align-items: center; gap: 8px; margin: 12px; color: var(--zs-text-secondary); }
 
-.workspace-reader-content textarea[hidden] { display: none; }
-
 .reader-preview-pages { position: sticky; top: 0; z-index: 1; display: flex; gap: 12px; align-items: center; background: var(--zs-surface); padding: 6px 0; font-size:var(--zs-type-control); }
 
 .workspace-reader { animation:zs-surface-in var(--zs-duration-surface) var(--zs-ease); }
 .workspace-reader-content { font-size:var(--zs-type-body); line-height:var(--zs-line-body); padding:24px; }
 .workspace-reader-content h1,.workspace-reader-content h2 { font-family:var(--zs-font-reading); margin:1em 0 .6em; font-size:var(--zs-type-title); }
 .workspace-reader-content p { margin:.8em 0; }
-.workspace-reader-content textarea { font-family:var(--zs-font-code); }
 .workspace-reader-feedback { font-size:var(--zs-type-control); color:var(--zs-text-secondary); line-height:1.7; }
 @media(prefers-reduced-motion:reduce) { .workspace-reader { animation:none; } }

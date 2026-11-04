@@ -20,6 +20,9 @@
     "build:storybook": "STORYBOOK_DISABLE_TELEMETRY=1 storybook build --output-dir .artifacts/storybook"
   },
   "dependencies": {
+    "@codemirror/commands": "6.11.1",
+    "@codemirror/state": "6.7.6",
+    "@codemirror/view": "6.43.15",
     "@fastify/cookie": "11.1.5",
     "@fastify/static": "10.1.8",
     "@streamdown/cjk": "1.0.4",

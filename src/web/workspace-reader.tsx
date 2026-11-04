@@ -1,6 +1,6 @@
 import { ArrowLeft, ChevronDown, ChevronRight, FileCode2, FileText, Folder, LoaderCircle, Maximize2, Minimize2, Pencil, Save } from 'lucide-react';
-import { useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { Streamdown, parseMarkdownIntoBlocks } from 'streamdown';
+import { lazy, Suspense, useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { Streamdown } from 'streamdown';
 import { z } from 'zod';
 import { referenceSchema } from '../shared/content.ts';
 import { RequestError, request } from './workbench-client.ts';
@@ -8,6 +8,9 @@ import { WorkspaceReport } from './workspace-report.tsx';
 import { directoryFilesSchema, directoryProgress, useDirectoryPage } from './directory-client.ts';
 import { DirectoryControls } from './directory-controls.tsx';
 import { WorkspaceSelect } from './workspace-selection.tsx';
+import { workspacePreviewPages } from './workspace-preview.ts';
+
+const WorkspaceTextEditor = lazy(() => import('./workspace-text-editor.tsx'));
 
 const fileSchema = z.object({ kind: z.enum(['markdown', 'text', 'html', 'source']), text: z.string(), version: z.string() });
 const statusSchema = z.object({ editable: z.boolean(), reason: z.string().nullable(), canPause: z.boolean().optional(), maintenance: z.enum(['online', 'paused', 'unknown', 'transition']).optional(),
@@ -55,23 +58,7 @@ function previewUrl(url: string, key: string) {
 
 function MarkdownPreview({ text, paginate }: { text: string; paginate: boolean }) {
   const [page, setPage] = useState(0);
-  const pages = useMemo(() => {
-    if (!paginate) return [text];
-    const sections: string[] = [];
-    let pending: string[] = [];
-    let length = 0;
-    for (const block of parseMarkdownIntoBlocks(text)) {
-      if (pending.length && (pending.length >= 48 || length + block.length > 16 * 1024)) {
-        sections.push(pending.join(''));
-        pending = [];
-        length = 0;
-      }
-      pending.push(block);
-      length += block.length;
-    }
-    if (pending.length) sections.push(pending.join(''));
-    return sections.length ? sections : [''];
-  }, [text, paginate]);
+  const pages = useMemo(() => workspacePreviewPages(text, paginate), [text, paginate]);
   const index = Math.min(page, pages.length - 1);
   return <div className="message-text">
     {pages.length > 1 && <nav className="reader-preview-pages" aria-label="Markdown 预览分页">
@@ -79,7 +66,8 @@ function MarkdownPreview({ text, paginate }: { text: string; paginate: boolean }
       <span aria-live="polite">{index + 1} / {pages.length}</span>
       <button disabled={index === pages.length - 1} onClick={() => setPage(index + 1)}>下一页</button>
     </nav>}
-    <Streamdown mode="static" skipHtml urlTransform={previewUrl}>{pages[index]}</Streamdown>
+    {pages[index]!.raw ? <><p className="reader-placeholder">此段内容较长，按原文分页显示。</p><pre>{pages[index]!.text}</pre></>
+      : <Streamdown mode="static" skipHtml urlTransform={previewUrl}>{pages[index]!.text}</Streamdown>}
   </div>;
 }
 
@@ -140,6 +128,7 @@ export function WorkspaceReader({ workspaces, workspaceCursor, initialWorkspace,
   const closeButton = useRef<HTMLButtonElement>(null);
   const largeMarkdown = useMemo(() => opened?.file.kind === 'markdown' &&
     new TextEncoder().encode(opened.file.text).length > 64 * 1024, [opened?.file.kind, opened?.file.text]);
+  const largeDraft = useMemo(() => new TextEncoder().encode(draft).length > 64 * 1024, [draft]);
   const dirty = editing && opened?.file.text !== draft;
   const base = '/workspaces/' + encodeURIComponent(workspace);
   const fromTurn = target !== undefined;
@@ -486,8 +475,10 @@ export function WorkspaceReader({ workspaces, workspaceCursor, initialWorkspace,
         : opened?.file.kind === 'html' ? <WorkspaceReport key={opened.path + ':' + opened.file.version + ':' + back.length}
         title={opened.path} text={opened.file.text} position={opened.position} navigate={navigate}/>
         : editing ? <>
-          <textarea hidden={preview} aria-label="文件原文" readOnly={!status?.editable || busy} value={draft} onChange={event => setDraft(event.target.value)}/>
-          {preview && <MarkdownPreview text={draft} paginate={largeMarkdown}/>}
+          <Suspense fallback={<p hidden={preview} className="reader-editor-pending" role="status">正在准备编辑器…</p>}>
+            <WorkspaceTextEditor hidden={preview} readOnly={!status?.editable || busy} value={draft} onChange={setDraft}/>
+          </Suspense>
+          {preview && <MarkdownPreview text={draft} paginate={largeDraft}/>}
         </>
         : opened?.file.kind === 'markdown' && (!largeMarkdown || readingPreview) ? <MarkdownPreview text={opened.file.text} paginate={largeMarkdown}/>
         : opened ? <pre>{opened.file.text}</pre> : attemptedPath ? (busy && <p className="reader-placeholder" role="status">正在打开文件…</p>)
