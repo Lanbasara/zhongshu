@@ -144,6 +144,8 @@ IMAGE=zhongshu:local docker compose --project-name zhongshu-local down
 
 `scripts/check-container.mjs` runs against a fresh temporary Compose project and verifies real login, production cookie attributes, session survival after container replacement, online backup, restore to a new directory, and old-session revocation. It is not for a real instance.
 
+`MEMORY_LIMIT` and `CPU_LIMIT` configure the application container. The Compose defaults are a small initial configuration, not the measured large-history profile. For scale acceptance, use the budgets in [performance-profile.ts](test/support/performance-profile.ts); budget the independent native Hosts separately and verify the target machine. An unhealthy gateway can require an explicit process restart; the current worker failure and operation-recovery behavior is described in the [architecture](docs/architecture.md#边界).
+
 ## Checks
 
 ```sh
