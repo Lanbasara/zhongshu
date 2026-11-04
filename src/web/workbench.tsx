@@ -1,4 +1,4 @@
-import { FolderOpen, LogOut, Plus, RefreshCw, X, ChevronRight } from 'lucide-react';
+import { FolderOpen, LogOut, Plus, RefreshCw, X, ChevronRight, Puzzle } from 'lucide-react';
 import { BrandMark, Button, IconButton } from './ui/controls.tsx';
 import { WorkbenchFrame } from './patterns/workbench-frame.tsx';
 import { WorkspaceReader } from './workspace-reader.tsx';
@@ -17,6 +17,7 @@ import { ConversationNavigation, useSidebarWidth } from './conversation-navigati
 import type { MessageReference } from '../shared/content.ts';
 import { WorkspaceManagement, type WorkspaceAction } from './workspace-management.tsx';
 import { InputQueue } from './input-queue.tsx';
+import { PluginManagement } from './plugin-management.tsx';
 
 const states = { idle: '就绪', running: '运行中', waiting: '等待处理', interrupted: '已中断', failed: '执行失败', unknown: '待核实' };
 const stateLabel = (c: Conversation) => c.readiness === 'preparing' ? '正在准备' : c.readiness === 'blocked' ? '准备未完成' : states[c.state.status];
@@ -85,6 +86,7 @@ const boundedPage = (items: WorkbenchItem[], turnFiles: TurnFileSummary[] = []):
 export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf: string; logout(): void; expired(): void; busy: boolean; authError: string }) {
   const [configuration, setConfiguration] = useState<WorkbenchConfiguration>();
   const [workspaceAction, setWorkspaceAction] = useState<WorkspaceAction>();
+  const [managingPlugins, setManagingPlugins] = useState(false);
   const [listRevision, refreshList] = useState(0);
   const sidebarWidth = useSidebarWidth();
   const [reader, setReader] = useState(false);
@@ -243,7 +245,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
     else if (atBottom.current) { node.scrollTop = node.scrollHeight; setMoreOutput(false); }
     else setMoreOutput(true);
   }, [items, snapshot?.history.liveItems]);
-  const choose = useCallback((id: string) => { history.replaceState(null, '', `#${id}`); setSelected(id); setNavigation(false); }, []);
+  const choose = useCallback((id: string) => { history.replaceState(null, '', `#${id}`); setSelected(id); setManagingPlugins(false); setNavigation(false); }, []);
   const createInWorkspace = useCallback((id: string) => { setCreating(id); setNavigation(false); }, []);
   const refreshNavigation = useCallback(() => {
     refreshList(value => value + 1);
@@ -388,17 +390,21 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
         choose={choose} create={createInWorkspace} stateLabel={stateLabel} report={report}
         changed={refreshNavigation} />
       {sidebarWidth.separator}
-      <div className="sidebar-bottom"><button className="sidebar-files" aria-expanded={reader} disabled={!configuration?.workspaces.length} onClick={() => { setReader(true); setNavigation(false); }}><FolderOpen size={16}/><span>工作区文件</span><ChevronRight size={13}/></button><div className="sidebar-account"><span className="network" role="status"><span className="network-dot"/>{connection}</span><IconButton label="退出登录" onClick={logout} disabled={busy}><LogOut size={15}/></IconButton></div></div>
+      <div className="sidebar-bottom">
+        <button className="sidebar-files" aria-current={managingPlugins ? 'page' : undefined} onClick={() => { setManagingPlugins(true); setReader(false); setNavigation(false); }}><Puzzle size={16}/><span>插件管理</span><ChevronRight size={13}/></button>
+        <button className="sidebar-files" aria-expanded={reader} disabled={!configuration?.workspaces.length} onClick={() => { setReader(true); setNavigation(false); }}><FolderOpen size={16}/><span>工作区文件</span><ChevronRight size={13}/></button>
+        <div className="sidebar-account"><span className="network" role="status"><span className="network-dot"/>{connection}</span><IconButton label="退出登录" onClick={logout} disabled={busy}><LogOut size={15}/></IconButton></div>
+      </div>
     </>}
-    header={<><div className="conversation-heading"><h1>{conversation?.title ?? (selected ? '正在恢复对话…' : '从这里，接着做。')}</h1><p>{conversation ? `${conversation.harnessId === 'codex' ? 'Codex' : 'DSH'} · ${removedWorkspace?.label ?? configuration?.workspaces.find(w => w.id === conversation.workspaceId)?.label ?? '工作区'} · ${workspaceRemoved ? '工作区已移除' : stateLabel(conversation)}` : '一段对话，一个可以接续的工作现场'}</p></div><div className="header-actions"><IconButton label="打开工作区文件" disabled={!configuration?.workspaces.length} onClick={() => setReader(true)}><FolderOpen size={17}/></IconButton><IconButton label="重新连接" onClick={() => { scheduleRefresh(); refreshConfiguration(); }}><RefreshCw size={15}/></IconButton></div></>}
-    reader={reader && configuration && <WorkspaceReader workspaces={configuration.workspaces} initialWorkspace={conversation?.workspaceId}
+    header={managingPlugins ? <><div className="conversation-heading"><p>工作台 / 插件</p></div><Button variant="quiet" onClick={() => setManagingPlugins(false)}>返回工作台</Button></> : <><div className="conversation-heading"><h1>{conversation?.title ?? (selected ? '正在恢复对话…' : '从这里，接着做。')}</h1><p>{conversation ? `${conversation.harnessId === 'codex' ? 'Codex' : 'DSH'} · ${removedWorkspace?.label ?? configuration?.workspaces.find(w => w.id === conversation.workspaceId)?.label ?? '工作区'} · ${workspaceRemoved ? '工作区已移除' : stateLabel(conversation)}` : '一段对话，一个可以接续的工作现场'}</p></div><div className="header-actions"><IconButton label="打开工作区文件" disabled={!configuration?.workspaces.length} onClick={() => setReader(true)}><FolderOpen size={17}/></IconButton><IconButton label="重新连接" onClick={() => { scheduleRefresh(); refreshConfiguration(); }}><RefreshCw size={15}/></IconButton></div></>}
+    reader={!managingPlugins && reader && configuration && <WorkspaceReader workspaces={configuration.workspaces} initialWorkspace={conversation?.workspaceId}
       target={readerTarget} onTargetUnavailable={target => {
         if (target === readerTarget && readerTarget.conversationId === selectedRef.current)
           setUnavailableFiles(previous => new Set(previous).add(JSON.stringify([readerTarget.runId, target.path])));
       }}
       csrf={csrf} editStatusSignal={JSON.stringify([conversation?.id, conversation?.state.status, conversation?.state.pendingInputs, unresolved])} expanded={readerExpanded} onExpand={setReaderExpanded} onClose={closeReader}/>}>
 
-      {!selected ? <section className="empty-workbench"><p className="eyebrow">A PLACE TO CONTINUE</p><h2>把想法，往前推进一步。</h2><p>选择一个工作区和 Agent，开始一件具体的工作。<br />离开页面后，可以回来继续。</p><button onClick={() => setCreating(true)}>开始新对话 ↗</button>{configuration?.workspaces.length === 0 && <p className="quiet">工作区与原生服务尚未由管理员连接。</p>}</section> : <>
+      {managingPlugins ? <PluginManagement csrf={csrf} report={report}/> : !selected ? <section className="empty-workbench"><p className="eyebrow">A PLACE TO CONTINUE</p><h2>把想法，往前推进一步。</h2><p>选择一个工作区和 Agent，开始一件具体的工作。<br />离开页面后，可以回来继续。</p><button onClick={() => setCreating(true)}>开始新对话 ↗</button>{configuration?.workspaces.length === 0 && <p className="quiet">工作区与原生服务尚未由管理员连接。</p>}</section> : <>
         <div className="message-scroll" ref={scroll} onScroll={() => { const node = scroll.current!; atBottom.current = node.scrollHeight - node.scrollTop - node.clientHeight < 80; if (atBottom.current) setMoreOutput(false); }}>
           <div className="message-column">
             {hasOlder && <button className="load-history" disabled={loadingOlder} onClick={() => void older()}>{loadingOlder ? '正在读取…' : '查看更早的内容'}</button>}

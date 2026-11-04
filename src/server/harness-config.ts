@@ -6,21 +6,24 @@ import { maintenanceController, type MaintenanceController } from './workspace-m
 import { createDshAdapter } from '../harness/dsh/index.ts';
 import type { HarnessAdapter, HarnessId } from '../harness/types.ts';
 import { workspaceIdSchema, workspaceLabelSchema } from '../shared/workbench.ts';
+import { codexPluginClient } from './codex-plugin-client.ts';
+import type { PluginBackend } from './plugin-backend.ts';
+import { dshPlugins, dshPluginSources } from './dsh-plugins.ts';
 
 const absolutePath = z.string().min(1).max(4096).refine(isAbsolute);
 const configuration = z.object({
   workspaces: z.array(z.object({ id: workspaceIdSchema, label: z.string().min(1).max(100), directory: absolutePath, managedWrites: z.boolean().optional() }).strict()).max(16).default([]),
   workspaceRoots: z.array(z.object({ id: workspaceIdSchema, label: workspaceLabelSchema, directory: absolutePath }).strict()).max(16).default([]),
-  codex: z.object({ socketPath: absolutePath }).strict().optional(),
-  dsh: z.object({ launchFile: absolutePath, maintenanceExecutable: absolutePath.optional() }).strict().optional(),
+  codex: z.object({ socketPath: absolutePath, pluginManagerSocketPath: absolutePath.optional() }).strict().optional(),
+  dsh: z.object({ launchFile: absolutePath, maintenanceExecutable: absolutePath.optional(), pluginSources: dshPluginSources.optional() }).strict().optional(),
 }).strict();
 export type Workspace = { id: string; label: string; directory: string; managedWrites?: boolean; maintenance?: MaintenanceController };
 export type WorkspaceRoot = Pick<Workspace, 'id' | 'label' | 'directory'>;
 export const contains = (parent: string, child: string) => { const path = relative(parent, child); return path !== '..' && !path.startsWith('../') && !isAbsolute(path); };
 
 /** Operator-owned configuration is never accepted from a browser request. */
-export async function loadHarnesses(file: string | undefined, dataDirectory: string): Promise<{ workspaces: Workspace[]; workspaceRoots: WorkspaceRoot[]; adapters: Map<HarnessId, HarnessAdapter> }> {
-  if (!file) return { workspaces: [], workspaceRoots: [], adapters: new Map() };
+export async function loadHarnesses(file: string | undefined, dataDirectory: string): Promise<{ workspaces: Workspace[]; workspaceRoots: WorkspaceRoot[]; adapters: Map<HarnessId, HarnessAdapter>; plugins: Partial<Record<HarnessId, PluginBackend>> }> {
+  if (!file) return { workspaces: [], workspaceRoots: [], adapters: new Map(), plugins: {} };
   if (!isAbsolute(file)) throw new Error('harness_config_requires_absolute_path');
   const info = await lstat(file);
   if (!info.isFile() || info.isSymbolicLink() || info.size > 32 * 1024 || (info.mode & 0o022) || (process.getuid && info.uid !== process.getuid())) throw new Error('unsafe_harness_config');
@@ -53,7 +56,14 @@ export async function loadHarnesses(file: string | undefined, dataDirectory: str
     workspaces.push({ ...input, directory, ...(config.dsh?.maintenanceExecutable ? { maintenance: maintenanceController(config.dsh.maintenanceExecutable) } : {}) });
   }
   const adapters = new Map<HarnessId, HarnessAdapter>();
-  if (config.codex) adapters.set('codex', createCodexAdapter(config.codex));
-  if (config.dsh) adapters.set('dsh', createDshAdapter(config.dsh));
-  return { workspaces, workspaceRoots, adapters };
+  const plugins: Partial<Record<HarnessId, PluginBackend>> = {};
+  if (config.codex) {
+    adapters.set('codex', createCodexAdapter({ socketPath: config.codex.socketPath }));
+    if (config.codex.pluginManagerSocketPath) plugins.codex = codexPluginClient(config.codex.pluginManagerSocketPath, config.codex.socketPath);
+  }
+  if (config.dsh) {
+    adapters.set('dsh', createDshAdapter(config.dsh));
+    if (config.dsh.pluginSources) plugins.dsh = dshPlugins(config.dsh.launchFile, config.dsh.pluginSources);
+  }
+  return { workspaces, workspaceRoots, adapters, plugins };
 }

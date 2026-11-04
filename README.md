@@ -46,6 +46,8 @@ Codex uses a Unix socket; the operator owns its directory and permissions. DSH's
 
 Current compatibility is Codex CLI `0.166.0-alpha.5.1` and DSH `0.2.1-rc.4`. Re-run the real integration path after upgrading either host; a passing schema check is not a compatibility proof.
 
+To enable instance plugin management, see the [native connection setup](docs/features/plugin-management.md#准备原生连接).
+
 For a production build, run `npm run build`, set `ZHONGSHU_ORIGIN` to the public HTTPS origin, then `npm start`.
 
 ## UI development

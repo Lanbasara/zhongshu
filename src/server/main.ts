@@ -11,6 +11,7 @@ import { createWorkbenchStore, type WorkbenchChange } from './workbench-store.ts
 import { Workbench } from './workbench.ts';
 import { createWorkbenchHttp } from './workbench-http.ts';
 import { WorkspaceRegistry } from './workspace-registry.ts';
+import { createPluginManagement } from './plugins.ts';
 
 const metadataSchema = z.object({ name: z.literal('zhongshu'), version: z.string().max(64), revision: z.string().regex(/^(development|[a-f0-9]{40})$/) });
 
@@ -22,28 +23,33 @@ async function main() {
   const db = openDatabase(config.dataDirectory, productMigrations);
   let workbench: Workbench | undefined;
   let transport: ReturnType<typeof createWorkbenchHttp> | undefined;
+  let plugins: ReturnType<typeof createPluginManagement> | undefined;
   let app: Awaited<ReturnType<typeof buildApp>> | undefined;
   try {
     const harnesses = await loadHarnesses(process.env.ZHONGSHU_HARNESS_CONFIG, config.dataDirectory);
+    plugins = createPluginManagement(db, harnesses.plugins);
     const store = createWorkbenchStore(db, { onChange: (change: WorkbenchChange) => transport?.changed(change) });
     const registry = new WorkspaceRegistry(db, harnesses.workspaces, harnesses.workspaceRoots);
     workbench = new Workbench(store, harnesses.workspaces, harnesses.adapters, registry);
     transport = createWorkbenchHttp(workbench);
     app = await buildApp({ db, origin: config.origin, metadata, assetsDirectory: import.meta.url.endsWith('.ts') ? undefined : fileURLToPath(new URL('../public/', import.meta.url)), logger: true,
-      privateRoutes: transport.routes, onLogout: transport.logout });
+      privateRoutes: async (scope, context) => {
+        await transport!.routes(scope, context);
+        await scope.register(plugins!.routes, { prefix: '/workbench' });
+      }, onLogout: transport.logout });
     let closing = false;
     const stop = async () => {
       if (closing) return;
       closing = true;
       const timeout = setTimeout(() => process.exit(1), 10_000).unref();
-      try { transport!.close(); await workbench!.close(); await app!.close(); db.close(); clearTimeout(timeout); }
+      try { transport!.close(); await plugins!.close(); await workbench!.close(); await app!.close(); db.close(); clearTimeout(timeout); }
       catch { process.exitCode = 1; }
     };
     process.once('SIGINT', () => { void stop(); });
     process.once('SIGTERM', () => { void stop(); });
     await workbench.start();
     await app.listen({ port: config.port, host: config.host });
-  } catch (error) { transport?.close(); await workbench?.close(); await app?.close(); db.close(); throw error; }
+  } catch (error) { transport?.close(); await plugins?.close(); await workbench?.close(); await app?.close(); db.close(); throw error; }
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
