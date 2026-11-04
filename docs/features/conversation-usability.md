@@ -74,6 +74,8 @@
 
 错误提示回收也使用上述独占 fixture：保存生成路径后，只移除本次 `workspace-a/turn-files-<原生ID>` 下的合成文件，保留替身编辑证据。在同一页面逐页打开超过提示数量预算的不同路径，每次等待实际文件读取失败、关闭阅读器，再继续；核对最近项显示“当前不可用”，早期被淘汰项重新出现打开按钮，再次点击仍得到真实读取失败。切换另一对话再返回，旧提示清空，原清单和正文仍在。可只读观察 Transcript 的 `unavailableFiles` 属性及键文本大小，按[界面缓存上限](../architecture.md#界面与设计系统)核对平台值；不得注入 React 状态或伪造响应正文来构造通过。长路径还须触发文本预算；跨许多历史轮的变体须实际翻过窗口回收边界，不能只测试切换对话后的清空。
 
+这两个变体分别在新建空对话中运行 `seed-turn-files --root "$zh_verify_root" --title '长路径提示' --count 50 --pathPadding 700`、`seed-turn-files --root "$zh_verify_root" --title '跨轮提示' --count 650 --separateRuns`（命令前缀仍为 `node test/support/feature-fixture.ts`）。前者在同一合成目录下增加合法长路径分段，后者生成每个文件独立的一轮；默认选项保持原单轮分页场景。路径和原文通过本次工作区独立枚举后再移除。长路径逐次计算 JSON `[runId,path]` 的 UTF-16 文本字节以检验先于数量的回收；跨轮通过“查看更早的内容”越过历史窗口，并核对回到最新与旧项重试。两条命令只写 fixture 原生库和合成文件，不直接填产品存档。
+
 ### U12 技能引用
 
 1. 按 [Native 入口](README.md#native真实接入分支)启动隔离 Host 和应用。在工作区 A 放 `zhi-proof` 与 `zhi-secondary` 两个技能，各有 `SKILL.md`、名称和简述。Codex 用 `.agents/skills/`，DSH 用 `.dsh/skills/`。给 `zhi-proof` 的正文放独有合成标记，DSH front matter 设 `disable-model-invocation: true`。工作区 B 保持空白。分别建两段对话并核对就绪。

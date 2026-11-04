@@ -8,7 +8,7 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { constants, existsSync, lstatSync, mkdirSync, openSync, closeSync, readFileSync, readdirSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs';
-import { isAbsolute, join } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { appendFile, stat } from 'node:fs/promises';
@@ -40,6 +40,8 @@ const cliSchema = z.object({
   title: z.string().min(1).max(200).optional(),
   count: z.coerce.number().int().min(1).max(700).default(650),
   chars: z.coerce.number().int().min(32).max(80_000).default(80),
+  pathPadding: z.coerce.number().int().min(0).max(800).default(0),
+  separateRuns: z.boolean().default(false),
 });
 const recordSchema = z.object({
   id: z.uuid(), title: z.string().max(200), harnessId: z.enum(['codex', 'dsh']),
@@ -60,9 +62,9 @@ function privateFile(path: string): void {
 }
 
 async function main() {
-  const args = parseArgs({ options: { root: { type: 'string' }, port: { type: 'string' }, host: { type: 'string' }, build: { type: 'string' }, physical: { type: 'boolean' }, sampleMs: { type: 'string' }, title: { type: 'string' }, count: { type: 'string' }, chars: { type: 'string' }, help: { type: 'boolean' } }, allowPositionals: true, strict: true });
+  const args = parseArgs({ options: { root: { type: 'string' }, port: { type: 'string' }, host: { type: 'string' }, build: { type: 'string' }, physical: { type: 'boolean' }, sampleMs: { type: 'string' }, title: { type: 'string' }, count: { type: 'string' }, chars: { type: 'string' }, pathPadding: { type: 'string' }, separateRuns: { type: 'boolean' }, help: { type: 'boolean' } }, allowPositionals: true, strict: true });
   if (args.values.help) {
-    console.log(`node test/support/feature-fixture.ts <${cliSchema.shape.command.options.join('|')}> --root ABSOLUTE_DIRECTORY [--port 4391] [--title TITLE] [--count 650 --chars 80]`);
+    console.log(`node test/support/feature-fixture.ts <${cliSchema.shape.command.options.join('|')}> --root ABSOLUTE_DIRECTORY [--port 4391] [--title TITLE] [--count 650 --chars 80] [--pathPadding 700 --separateRuns]`);
     return;
   }
   if (args.positionals.length !== 1) throw new Error('one_command_required');
@@ -154,16 +156,20 @@ async function main() {
             if (value.items.length || value.submissions.length) throw new Error('seed_requires_empty_conversation');
             if (![join(root, 'workspace-a'), join(root, 'workspace-b')].includes(value.cwd)) throw new Error('fixture_workspace_required');
             const base = 'turn-files-' + value.id;
-            const paths = Array.from({ length: input.count }, (_, number) => `${base}/${String(number).padStart(4, '0')}/sample.txt`);
+            // Generated padding uses bounded path segments, never caller-supplied paths.
+            const padding = Array.from({ length: Math.ceil(input.pathPadding / 180) }, (_, index) => 'p'.repeat(Math.min(180, input.pathPadding - index * 180)));
+            const paths = Array.from({ length: input.count }, (_, number) => [base, ...padding, String(number).padStart(4, '0'), 'sample.txt'].join('/'));
             for (const [number, path] of paths.entries()) {
-              mkdirSync(join(value.cwd, base, String(number).padStart(4, '0')), { recursive: true, mode: 0o700 });
+              mkdirSync(dirname(join(value.cwd, path)), { recursive: true, mode: 0o700 });
               writeFileSync(join(value.cwd, path), `SYNTHETIC TURN FILE ${number}\n`, { flag: 'wx', mode: 0o600 });
             }
-            const runId = 'fixture-files:' + value.id;
-            value.items = Array.from({ length: Math.ceil(paths.length / 100) }, (_, page) => ({
-              id: 'fixture-file-edits-' + page, kind: 'tool' as const, status: 'completed' as const, runId,
-              text: 'Synthetic edit evidence; no native execution.', tool: { name: 'fixture-write' }, fileEdits: paths.slice(page * 100, (page + 1) * 100),
+            const run = (index: number) => 'fixture-files:' + value.id + (input.separateRuns ? ':' + String(index).padStart(4, '0') : '');
+            const pageSize = input.separateRuns ? 1 : 100;
+            value.items = Array.from({ length: Math.ceil(paths.length / pageSize) }, (_, page) => ({
+              id: 'fixture-file-edits-' + page, kind: 'tool' as const, status: 'completed' as const, runId: run(page),
+              text: 'Synthetic edit evidence; no native execution.', tool: { name: 'fixture-write' }, fileEdits: paths.slice(page * pageSize, (page + 1) * pageSize),
             }));
+            const runId = run(value.items.length - 1);
             value.items.push({ id: 'fixture-file-finish', kind: 'assistant', status: 'completed', runId, text: 'Fixture files ready.' });
             value.state = { ...idle(), runId };
           }

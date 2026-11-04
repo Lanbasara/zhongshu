@@ -4,10 +4,33 @@ import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { gzipSync, gunzipSync, brotliCompressSync, brotliDecompressSync } from 'node:zlib';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { connect } from 'node:net';
+import { once } from 'node:events';
 import { openDatabase } from '../src/server/database.ts';
 import { createAuth } from '../src/server/auth.ts';
 import { buildApp } from '../src/server/app.ts';
 import { validOrigin, loadConfig } from '../src/server/config.ts';
+
+test('HTTP shutdown releases a connection whose request body never finishes', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'zhongshu-http-close-'));
+  const db = openDatabase(directory);
+  const origin = 'https://workbench.example';
+  const app = await buildApp({ db, origin });
+  await app.listen({ host: '127.0.0.1', port: 0 });
+  const address = app.server.address(); assert.ok(address && typeof address !== 'string');
+  const socket = connect({ host: '127.0.0.1', port: address.port });
+  socket.on('error', () => {});
+  t.after(async () => { socket.destroy(); await app.close(); db.close(); await rm(directory, { recursive: true }); });
+  await once(socket, 'connect', { signal: AbortSignal.timeout(2000) });
+  const received = once(app.server, 'request', { signal: AbortSignal.timeout(2000) });
+  socket.write(`POST /api/login HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: ${origin}\r\nContent-Type: application/json\r\nContent-Length: 1024\r\n\r\n{`);
+  await received;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('http_close_waited_for_incomplete_body')), 1000); });
+  try { await Promise.race([app.close(), deadline]); }
+  finally { clearTimeout(timer); }
+  assert.equal(app.server.listening, false);
+});
 
 test('sealed static encodings preserve bytes and only hashed assets receive immutable caching', async t => {
   const root = await mkdtemp(join(tmpdir(), 'zhongshu-assets-'));

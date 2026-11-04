@@ -35,6 +35,9 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
     bodyLimit: 64 * 1024,
     requestTimeout: 15_000,
     connectionTimeout: 20_000,
+    // Shutdown must also release clients that never finish a request body.
+    // Native work is drained separately; closing HTTP is not a stop operation.
+    forceCloseConnections: true,
     trustProxy: false,
     logController: new LogController({ disableRequestLogging: true }),
     logger: options.logger ? { level: 'info', redact: ['req.headers.cookie', 'req.headers.authorization', 'body'] } : false,

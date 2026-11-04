@@ -66,6 +66,8 @@ Web manifest 提供独立窗口入口。有限且已完成的 Markdown 预览按
 
 状态、历史和传输游标入口在 [Workbench](../src/server/workbench.ts)、[存储](../src/server/workbench-store.ts)、[HTTP](../src/server/workbench-http.ts) 与 [浏览器工作台](../src/web/workbench.tsx)。正文身份、暂存、分块、所有权和校验归 [body-store](../src/server/body-store.ts)；历史位置重建归 [history-order](../src/server/history-order.ts)。旧源游标失效会保留存档并重新锚定，同时标记连续性未确认；源缺口不会因一次新扫描成功而消失。运行中的实时前缀标记 `previewOnly`，不冒充可下载的完整正文；物理记录的可比较修订和终态负责完成它。
 
+应用停止先关闭执行协调与已跟踪工作，再关闭 HTTP、存储与目录所有者。HTTP 关闭释放全部连接，未完成请求正文或慢读客户端不能阻止后续存储关闭；断开浏览器传输不等于向 Harness 发送停止任务。未送达回执仍按持久操作身份核对，不能重发换取确定结果。正常停止与未完成正文反例见 [R02](features/continuity.md#driving-it-with-harness)。
+
 修订流的游标绑定原生源代次与一轮固定上界，每页最多扫描 16 条追加索引记录，再按 ID 点读最新条目；空批次也推进水位。修订顺序不改变历史位置，尚未进入历史的 ID 必须等待历史路径补齐。已完成正文发生变化时，旧版本先保留为不可变正文；稳定重读和流式前缀不累积重复版本。只有历史回填与修订水位都确认，公开状态才可表示同步完整。登记已移除时，后台仍可核对原登记、目录身份和绑定后使用明确只读的物理读取能力；不能由存档获得执行许可或任意原文件读取权限。
 
 有界接入的 Codex reader 读取校验过身份和版本的持久 rollout，DSH reader 读取原生日志并建立稳定条目/工具锚点；巨型标量流式提取，缓存配额和正文租约由各 reader 管理。DSH 专用 Host plugin 缩减状态和 watch 投影。原生 state/watch/reconcile 仍可能加载或激活会话，必须走受控执行许可；物理 history/readItems/body 路径不恢复执行。原生模型运行时的内存成本独立于中书的分页预算，不能据此宣称原生 Agent loop 为常量空间。固定版本和复验归 [execution](features/execution.md) 与 [continuity](features/continuity.md)。

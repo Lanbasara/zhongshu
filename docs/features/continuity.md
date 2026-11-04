@@ -39,6 +39,8 @@ node test/support/feature-fixture.ts disconnect --root "$zh_verify_root" --title
 node test/support/feature-fixture.ts reconnect --root "$zh_verify_root" --title '断连恢复'
 ```
 
+R02 另跑正常停止时的未完成请求反例：在本次独占 fixture 发出一条消息，独立确认已受理且 `submitCalls=1`。使用自己的回环 TCP 连接向 `/api/login` 发送合法 Origin、`Content-Type: application/json`、`Content-Length: 1024` 和 `Expect: 100-continue`；等服务端 `100 Continue` 后只写一个 `{`，保持连接，不补齐正文。向已核对的应用 PID 发送 SIGTERM，客户端不主动断开；服务端应释放连接，进程在自身 10 秒总退出预算内正常退出并移除 fixture 锁。随后独立 CLI complete、以同一 root 重启，从页面核对同一操作/原生绑定和完成正文，`submitCalls` 仍为 1。不得通过提前关闭测试连接让关闭通过；超时须保留进程/锁/退出码证据，再仅清理自己的连接。此分支证明中书 HTTP 与持久操作恢复，真实 Harness 仍按 R02 的原生分支另验。
+
 seed 仅允许没有消息和既有历史的 fixture 对话，不写产品历史表。每条已知正文是 `HISTORY NNNN ` 右补 `x` 到指定字符数，预期直接由输入条件确定。R04 的 `.message-text` 是预览；不能用其长度当原文长度。R07 通过完整阅读器或下载逐字核对原文，这属于结果观察，不通过内部写入制造成功。
 
 ### R07：完整正文与复杂内容
