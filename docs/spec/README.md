@@ -6,6 +6,7 @@ spec 是与用户讨论后确认的临时约定：它回答“接下来建什么
 
 | 切片 | 用户行为 | 状态 | 退出条件 | 证据 | 更新 |
 | --- | --- | --- | --- | --- | --- |
+| [多年使用与极限规模](long-term-performance.md) | 长对话完整阅读、后台全量存档、大量工作区与文件持续可用 | next | 五个子规格在同一候选版本通过规模、故障与真实路径联合验收；全部在上线前完成 | none yet | 2026-11-04 |
 | 主界面与设计系统 | 用统一设计完成真实对话，隔离展示公共组件 | done | 本轮实现及已声明验证范围经用户认可；未覆盖项见 PR | [PR #18](https://github.com/Lanbasara/zhongshu/pull/18) | 2026-11-03 |
 | 首条 Agent 曳光弹 | 选 Codex 或 DSH，完成真实工作，关页后接续；必要时停止 | done | 本机两 Harness 完成真实工作、关页或应用中断后接续；目标设备与部署链路分别有证据 | PR #5、#6、#9；[发布检查](https://github.com/Lanbasara/zhongshu/actions/runs/41433423972)；目标设备与部署链路已由用户验收 | 2026-11-02 |
 | [对话基本可用性](conversation-usability.md) | 读正文与工具过程、收发图片，用顺手的输入框引用消息与工作区原文件 | active | 两端真实用户路径与恢复验收，用户试用确认 | [PR #13](https://github.com/Lanbasara/zhongshu/pull/13) | 2026-11-02 |
@@ -25,6 +26,12 @@ Ledger 状态只允许 `next / active / blocked / done`；spec front matter 使�
 
 ## 文件
 
+- [long-term-performance.md](long-term-performance.md) — 本轮总范围、依赖、联合退出条件及待冻结预算；已授权文档正式化，尚未启动产品实现
+- [managed-workspace-editing.md](managed-workspace-editing.md) — 受控执行入口与大规模工作区编辑
+- [history-archival.md](history-archival.md) — 全量后台阅读存档与逐页恢复
+- [bounded-conversation-reading.md](bounded-conversation-reading.md) — 有界预览、窗口与完整正文读取
+- [storage-longevity.md](storage-longevity.md) — 累计容量、存储调度、迁移与恢复
+- [workspace-directory-index.md](workspace-directory-index.md) — 大目录完整分页与工作区导航
 - [conversation-usability.md](conversation-usability.md) — 已授权实施；用户试用验收仍待完成
 - [workspace-conversation-management.md](workspace-conversation-management.md) — 已授权实施，待完成验收
 - [workspace-management.md](workspace-management.md) — 已授权实施，按工作单验收

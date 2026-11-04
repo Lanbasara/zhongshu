@@ -27,6 +27,8 @@ evidence: https://github.com/Lanbasara/zhongshu/pull/13
 
 不包含 HTML/交互报告、通用编辑/文档附件、跨对话引用、语音、运行中追加或审批。模型/权限按对话固定。遵循[身份边界](../adr/0006-auth-session-data.md)与[操作恢复约定](../adr/0004-recoverable-communication.md)。
 
+后续已确认的[有界阅读规格](bounded-conversation-reading.md)扩展正文展示：普通内容保留本页体验，巨型内容采用有限预览和完整原文阅读入口，不要求聊天内整条富文本渲染；该入口不是新增 HTML 报告或通用附件能力。后台全量保存及覆盖声明唯一归[存档规格](history-archival.md)，本页的既有图片、输入与引用承诺继续有效。
+
 ## Implementation decisions
 
 以下为 2026-11-02 已确认的实施安排；按完整 feature 统一集成与验收。技术未知见[前置探测](integration-probes.md)，完成判据见下节，不另建计划或进度文件。

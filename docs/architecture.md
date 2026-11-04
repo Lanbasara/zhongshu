@@ -2,6 +2,12 @@
 
 本文只描述当前实现，随代码演进。长期取舍见 [ADR](adr/)，用户路径见 [feature maps](features/README.md)，共同验证方法见 [features/README](features/README.md)。按用户行为寻找修改与验证路径从 feature map 进入；本图维护模块职责与依赖。文档系统本身见 [ADR 0005](adr/0005-documentation-system.md)。
 
+## 已确认演进的入口
+
+多年使用方案已经进入正式决策，当前代码尚未完成该重构。目标模块图和数据归属唯一维护在 [ADR 0012](adr/0012-bounded-data-paths.md#目标架构与数据所有权)；永久阅读存档、覆盖与容量承诺见 [ADR 0010](adr/0010-durable-reading-archive.md)，统一执行入口和编辑窗口见 [ADR 0011](adr/0011-managed-workspace-execution.md)。五类问题的交付与验收由[上线前联合规格](spec/long-term-performance.md)统筹，全部属于上线前范围。
+
+下文保留实际模块、调用链及尚存耦合。每个实现切片完成后更新对应现状和 feature map，不因 ADR 已接受就把目标写成已实现，也不提前改写操作者当前连接方式。
+
 ## 当前系统
 
 当前实现单管理员私人工作台，通过 Codex 与 DSH 两个 adapter 创建对话、提交图文消息与引用、读取历史与状态、停止当前轮。Workbench 还持有运行中加入的消息队列，派发前将条目内容和发送方式冻结到操作记录。原生进程独立执行并提供接收与归属轮次的证据。公开的版本与健康接口不包含私有状态。
@@ -40,6 +46,22 @@ Codex adapter 在已建立连接丢失时报告内部 `unavailable` 事件，由
 
 Web manifest 提供独立窗口入口。界面以 Streamdown 渲染 Markdown/GFM/代码，用按轮折叠的工具组展示原生命令、输出和状态。运行中输入的路径见[执行功能地图](features/execution.md)。原始 HTML 不执行，链接协议受限。审批与提问仍由原生界面处理。
 
+## 当前数据路径与演进边界
+
+| 当前路径 | 实际职责与耦合 | 已确认目标的维护位置 |
+| --- | --- | --- |
+| 用户提交 → 操作落库 → adapter 派发 | Workbench 持有派发、排队、观察与恢复；观察连接的寿命不等于原生运行寿命 | [执行登记与门禁](adr/0011-managed-workspace-execution.md#持久未决登记与代次) |
+| 原生变更 → Workbench 同步 → 存储 → SSE 提示重取 | 同步同时读取原生状态和历史；历史读取失败可使整次同步走待核实，正文与执行证明尚未完全分离 | [三种事实独立](adr/0010-durable-reading-archive.md#三种事实独立) |
+| 历史读取 → 累积页面 → 合并正文 | 当前追赶在单次任务内累积页；旧页主要由翻阅触发，尚无独立的全量后台存档任务及逐页持久进度 | [可恢复同步](adr/0010-durable-reading-archive.md#可恢复同步) |
+| 存储 → 对话 HTTP 页 → 浏览器正文窗口 | 已有条数分页和浏览器正文预算；接口仍携带条目正文，缺少摘要与分块全文的独立读取路径 | [查询、正文和渲染](adr/0012-bounded-data-paths.md#查询正文和渲染) |
+| 历史合并 → SQLite | 同步驱动在应用进程执行；一般新增也读取该对话全部已有 ID/位置，累计容量常量仍存在 | [存储与调度](adr/0012-bounded-data-paths.md#存储与调度) |
+| 文件编辑资格 → 相关对话核对 → 条件保存 | 普通路径依赖观察 runtime 和同步；DSH 维护路径独立查原生状态，但仍遍历关联历史对话 | [编辑窗口协议](adr/0011-managed-workspace-execution.md#编辑窗口协议) |
+| 文件选择 → 目录遍历 → 截断后排序 | 当前无完整目录代次和继续游标；工作区与各文件选择入口也有各自容量限制 | [目录清单](adr/0012-bounded-data-paths.md#目录清单) |
+
+当前状态、历史和传输游标的具体入口在 [Workbench](../src/server/workbench.ts)、[存储](../src/server/workbench-store.ts)、[HTTP](../src/server/workbench-http.ts) 与 [浏览器工作台](../src/web/workbench.tsx)。这些已有模块是改造入口，不是未来模块名已经落地的声明。
+
+Codex adapter 的状态核对包含加载原生线程、当前轮/队列及指定运行证明；历史读取也经过线程加载。DSH adapter 通过 follow 快照核实状态，快照中使用完整轮次 outline，读旧页时还会获取快照。两者的当前实现均不能仅凭外层分页就宣称内部工作量有界。目标接入契约见 [ADR 0012 的原生边界](adr/0012-bounded-data-paths.md#原生接入也是预算边界)，现有原生行为及验证仍归 [execution](features/execution.md) 与 [continuity](features/continuity.md)。
+
 ## 界面与设计系统
 
 当前界面以安静、清晰、有质感为方向：导航紧凑，正文舒展，动作利落。设计参考保存在 [reference](../design/reference/index.html)，它记录已接受的原型，不参与产品运行。产品通过自己的布局与真实状态实现设计意图，引用、上传、执行与恢复沿用原有能力。
@@ -72,6 +94,8 @@ Codex 以原生 image input、DSH 以原生 image content 接图片，无需新�
 
 输入草稿的文本/已上传资源/引用沿用 sessionStorage；失败或中断的上传文件单独在 IndexedDB 暂存，重新加载后需明确重试。发送前必须先持久化操作编号及原提交内容；上传未完成或暂存失败不会悄悄只发文本。退出清理浏览器草稿与暂存。两端文件读取与生成能力的具体差异留在 adapter，验证入口统一归 [对话基本可用性](features/conversation-usability.md)。
 
+上述资源大小与额度仍是当前实现限制。统一容量准入、正文分块与全文阅读器尚未替代它们；已确认的范围与退出条件分别在[容量规格](spec/storage-longevity.md)和[有界阅读规格](spec/bounded-conversation-reading.md)，不能把输入上传限制直接解释为永久阅读存档上限。
+
 技能目录从当前对话绑定的 Harness 读取。私有接口给浏览器显示信息和不透明 ID，草稿与操作保存已选技能的 ID 及文本位置。派发时 adapter 按原生清单核对并转换为本端输入。用量由 adapter 从原生事件或当前投影读取，Workbench 保存每段对话最近一次已确认的用量快照，通过原有变更流提示页面重取。复验见[技能引用](features/conversation-usability.md#u12-技能引用)与[对话用量](features/conversation-usability.md#u13-对话用量)。
 
 仅当已实现的变更影响本图应描述的模块职责、依赖、共享接口或数据归属时，更新受影响的条目。用户能力的入口、行为、实现定位和验收方法归对应的 [功能地图](features/README.md)。尚未实现的设计留在对应 spec 或 ADR 中。
@@ -86,9 +110,13 @@ Harness Adapter 提供可归因的编辑目标。工作台在写入历史或实�
 
 DSH 原地保存要求专用 Host 和操作者提供的维护控制器。工作台协调暂停、写入和恢复，控制器负责证明进程树已退出并保留暂停状态。恢复后工作台重新核对原生状态与绑定，再开放派发。
 
+当前并未实现两个 Harness 共用的持久运行组登记与编辑窗口协议。该边界的扩展由 [ADR 0011](adr/0011-managed-workspace-execution.md) 决定，[受管编辑规格](spec/managed-workspace-editing.md)覆盖规模、交错与恢复；当前部署不能仅通过打开一个配置开关就取得目标能力。
+
 ## 工作区登记
 
 操作者配置可登记的目录根和原生连接。工作区登记、显示名、置顶与移除状态由 SQLite 持久化。旧配置中的登记首次导入时沿用 ID，后续启动保留已保存的状态。工作台在文件访问和原生派发前核对登记和目录身份。移除期间检查关联对话的原生状态，停用登记与操作受理互斥。恢复沿用原登记，旧对话重新验证原生绑定后接续。操作入口和复验见[工作区管理](features/workspace-management.md)。
+
+大量工作区的分页导航及稳定目录索引是[目录与导航规格](spec/workspace-directory-index.md)的目标；当前登记和真实文件身份仍是授权依据，未来可重建清单不改变这一归属。
 
 ## 实例级插件管理
 
