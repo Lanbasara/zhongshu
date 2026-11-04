@@ -217,7 +217,11 @@ export const ConversationNavigation = memo(function ConversationNavigation(props
             <header>
               <button className="workspace-toggle" aria-expanded={!closed} onClick={() => setCollapsed(current => {
                 const next = new Map(current);
+                // Preferences are transient: paging across years of workspaces
+                // must not retain every group ever toggled in this browser view.
+                next.delete(workspace.id);
                 next.set(workspace.id, !closed);
+                if (next.size > 256) next.delete(next.keys().next().value!);
                 return next;
               })}><span aria-hidden="true">{closed ? '›' : '⌄'}</span><strong title={workspace.label}>{workspace.label}</strong>
                 {workspace.pinned && <span className="quiet">置顶</span>}</button>
