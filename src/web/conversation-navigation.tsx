@@ -89,10 +89,13 @@ function Results({ query, revision, csrf, report, rows, hideEmpty, workspaceLabe
     const controller = new AbortController();
     let loading = false;
     let refreshRequested = false; let paused = false; pauseSearch.current = () => { paused = true; };
-    const fetchPage = async () => {
-      loading = true; setLoadingPage(true); setScanned(0);
+    const fetchPage = async (foreground = false) => {
+      loading = true;
+      // Passive revalidation keeps the known page and its controls usable.
+      // Only an explicit page/query change owns the loading indicator/lock.
+      if (foreground) { setLoadingPage(true); setScanned(0); }
       try {
-        await progressiveSearch({ cursor: beforeId, signal: controller.signal, continuous: !!query.title, paused: () => paused,
+        await progressiveSearch({ cursor: beforeId, signal: controller.signal, continuous: foreground && !!query.title, paused: () => paused,
           fetch: async current => {
             const result = await request('/conversation-search', conversationListSchema, {
               csrf, signal: controller.signal, body: { ...JSON.parse(queryKey), beforeId: current },
@@ -107,7 +110,7 @@ function Results({ query, revision, csrf, report, rows, hideEmpty, workspaceLabe
         if (reason instanceof RequestError && reason.status === 401) latestReport.current(reason);
       } finally {
         loading = false;
-        if (!controller.signal.aborted) setLoadingPage(false);
+        if (foreground && !controller.signal.aborted) setLoadingPage(false);
         if (refreshRequested && !controller.signal.aborted) {
           refreshRequested = false;
           void fetchPage();
@@ -119,7 +122,7 @@ function Results({ query, revision, csrf, report, rows, hideEmpty, workspaceLabe
       if (loading) { if (!query.title) refreshRequested = true; }
       else void fetchPage();
     };
-    void fetchPage();
+    void fetchPage(true);
     return () => controller.abort();
   }, [beforeId, queryKey, csrf, retry, visible]);
 
