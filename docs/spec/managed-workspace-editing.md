@@ -30,4 +30,6 @@ evidence: none yet
 
 ## 实施条件
 
+实施顺序：[P1 真实单组编辑路径](https://github.com/Lanbasara/zhongshu/issues/25)先穿过控制器、存储、页面与原生恢复；存储契约稳定后由 [P7](https://github.com/Lanbasara/zhongshu/issues/31)推广到多组、相交目录和旧实例初始化。详细依赖与集成归联合计划。
+
 两个 Harness 的控制器和统一入口必须实际证明上述能力；不可用不能以缓存 idle 替代。首次旧库核对与正常保存分别测量，数值预算和全部退出条件归联合规格。

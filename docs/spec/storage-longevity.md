@@ -30,4 +30,6 @@ evidence: none yet
 
 ## 实施条件
 
+实施依赖：[P2](https://github.com/Lanbasara/zhongshu/issues/26)完成事务级异步存储与单写者迁移；P3 接入正文增长所需的基础容量门禁；[P4](https://github.com/Lanbasara/zhongshu/issues/28)完成容量治理及累计限制替代；[P8](https://github.com/Lanbasara/zhongshu/issues/32)统一演练全库切换、备份恢复和长期负载，验证后再删除旧路径。
+
 可配置准入、缓存及批次预算替代累计寿命上限；输入限制不直接充当阅读存档限制。配额默认值、部署空间与性能阈值在联合规格的预算冻结中确定，有限磁盘不承诺无限输出。

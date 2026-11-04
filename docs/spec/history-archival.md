@@ -30,4 +30,6 @@ evidence: none yet
 
 ## 实施条件
 
+实施顺序：[P3](https://github.com/Lanbasara/zhongshu/issues/27)先贯通单段真实长对话的分块、续传和完整读回，再由 [P4](https://github.com/Lanbasara/zhongshu/issues/28)扩展到所有绑定及公平调度。详细契约与依赖归联合计划。
+
 旧库已加载标志不能直接迁移为完整覆盖。原生 API、分块持久化与故障现场必须真实可驱动；数值预算、备份恢复及联合运行归联合规格和[容量规格](storage-longevity.md)。

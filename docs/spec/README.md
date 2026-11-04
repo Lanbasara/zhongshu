@@ -26,7 +26,7 @@ Ledger 状态只允许 `next / active / blocked / done`；spec front matter 使�
 
 ## 文件
 
-- [long-term-performance.md](long-term-performance.md) — 本轮总范围、依赖、联合退出条件及待冻结预算；已授权文档正式化，尚未启动产品实现
+- [long-term-performance.md](long-term-performance.md) — 本轮总范围、联合退出条件及待冻结预算；[实施计划 #23](https://github.com/Lanbasara/zhongshu/issues/23)维护切片与依赖，产品实现尚未启动
 - [managed-workspace-editing.md](managed-workspace-editing.md) — 受控执行入口与大规模工作区编辑
 - [history-archival.md](history-archival.md) — 全量后台阅读存档与逐页恢复
 - [bounded-conversation-reading.md](bounded-conversation-reading.md) — 有界预览、窗口与完整正文读取
