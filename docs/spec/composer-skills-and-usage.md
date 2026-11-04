@@ -2,7 +2,7 @@
 status: active
 started: 2026-11-04
 exit: 在 Codex 与 DSH 的真实对话中均可筛选、选中并实际调用可用技能，输入区显示可核对的累计 Token 与上下文占用，缺数据时按原型呈现
-evidence: 见[已认可的 Storybook 原型](../features/interface.md#driving-it-with-harness)（交互与布局）
+evidence: 见 [PR #21](https://github.com/Lanbasara/zhongshu/pull/21) 的产品验收记录
 ---
 
 # 输入区技能引用与对话用量
@@ -29,5 +29,3 @@ evidence: 见[已认可的 Storybook 原型](../features/interface.md#driving-it
 - 桌面从 `/zhi` 开始，切换高亮、Tab 插入并继续写。窄屏用点按走同一路径。覆盖 Escape、无匹配和手打完整名称，检查焦点、草稿与发送行为。
 - 在 Codex 与 DSH 各用一项合成技能走产品发送路径，查原生接收及技能加载证据。切到技能不可用的对话，确认列表不串；验证已选技能失效时能修正草稿。对可用的排队和恢复分支，核对派发内容与原操作身份。
 - 在两端完成真实模型请求，独立读回原生用量并与界面核对。覆盖刷新、切换对话、窗口容量缺失和上下文下降，确认累计值与占用各自正确。按[独立执行验收](../features/README.md#独立执行验收)保存证据并更新产品功能地图。
-
-待实测的接入点是两端对技能调用的原生证据，以及恢复对话后用量与窗口容量的读回。Storybook 证据覆盖交互与布局。

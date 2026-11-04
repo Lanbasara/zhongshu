@@ -298,8 +298,16 @@ test('SSE capacity is released after client disconnect and app shutdown closes a
   const excess = await f.request('/events'); assert.equal(excess.status, 429); assert.equal(excess.body.error, 'event_connection_limit'); first.close();
   await new Promise(resolve => setTimeout(resolve, 50));
   const replacement = await f.stream(); assert.equal(replacement.response.status, 200); await replacement.named('ready');
-  const ended = replacement.next().then(value => value === null, () => true);
-  await f.app.close(); assert.equal(await ended, true);
+  const ended = (async () => {
+    try { while (await replacement.next()) { /* Drain heartbeat frames already in flight. */ } }
+    catch { /* Closing the socket may reject the pending read. */ }
+  })();
+  let deadline: NodeJS.Timeout | undefined;
+  const timedOut = new Promise<never>((_, reject) => {
+    deadline = setTimeout(() => reject(new Error('active SSE stream did not close during shutdown')), 3000).unref();
+  });
+  try { await Promise.all([f.app.close(), Promise.race([ended, timedOut])]); }
+  finally { clearTimeout(deadline); }
 });
 
 test('idle streams recheck revoked credentials, while oversized events fall back to complete HTTP bodies', async t => {
