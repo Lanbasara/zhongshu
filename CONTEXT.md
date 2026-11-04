@@ -19,6 +19,9 @@ _Avoid_：会话（session）、聊天（channel）
 提供 Agent 执行、工具、上下文及原生子 Agent 能力的运行系统。当前接入 Codex App Server 与 DSH Web Host。
 _Avoid_：Agent 后端、原生服务（作为业务概念时）
 
+**插件的全局范围（Instance-wide plugin scope）**：
+一个中书实例内，所选 Harness 的原生插件安装与启用范围。界面称「实例共享」。
+
 **轮（Turn）**：
 Harness 接受一次用户输入后的一段原生执行。
 _Avoid_：运行（当只指单次输入时）

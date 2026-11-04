@@ -15,6 +15,7 @@
 | 完整图文对话、工具阅读、输入与引用、本轮文件、恢复接续 | [conversation-usability](conversation-usability.md)：U01–U11 | 两个真实 Harness、合成图片及工作区文件 |
 | 工作区文件、只读 HTML 与条件保存 | [workspace-files](workspace-files.md) | 浏览器、合成报告与纯文本、两个真实 Harness |
 | 添加目录、管理、移除与恢复工作区登记 | [workspace-management](workspace-management.md) | fixture、两个真实 Harness、本地与 VPS 测试实例 |
+| 实例级插件发现、安装、启停与卸载 | [plugin-management](plugin-management.md)：P01–P04 | 浏览器、隔离的 Codex 与 DSH 原生环境 |
 
 场景编号用于引用和记录证据，不表示优先级或已通过。每页的 `Implementation and regression` 给出当前代码与定向回归入口。
 

@@ -118,12 +118,12 @@ export class Connection {
     for (const listener of listeners) listener.failed(new HarnessError('DSH_DISCONNECTED'));
   }
 
-  async call(endpoint: string, args: Record<string, unknown> = {}): Promise<unknown> {
+  async call(endpoint: string, args: Record<string, unknown> = {}, timeout = 15_000): Promise<unknown> {
     await this.ready();
     if (!/^[A-Za-z][A-Za-z0-9]*\/[A-Za-z][A-Za-z0-9]*$/.test(endpoint)) throw new HarnessError('DSH_ENDPOINT_INVALID');
     if (this.requests.size >= 32) throw new HarnessError('DSH_REQUEST_LIMIT');
     const controller = new AbortController(); this.requests.add(controller);
-    const timer = setTimeout(() => controller.abort(), 15000);
+    const timer = setTimeout(() => controller.abort(), timeout);
     try {
       const rpcId = randomUUID(); const body = JSON.stringify({ type: 'client-request', rpcId, method: endpoint, payload: { args } });
       if (Buffer.byteLength(body) > 12 * 1024 * 1024) throw new HarnessError('DSH_REQUEST_TOO_LARGE');

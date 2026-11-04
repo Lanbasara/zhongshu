@@ -128,6 +128,18 @@ export const productMigrations: Migration[] = [{ version: 2, sql: `
     path TEXT NOT NULL,
     PRIMARY KEY (conversation_id, run_id, path)
   ) STRICT, WITHOUT ROWID;
+` }, { version: 8, sql: `
+  CREATE TABLE plugin_operations (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    id TEXT NOT NULL UNIQUE,
+    harness TEXT NOT NULL CHECK (harness IN ('codex', 'dsh')),
+    plugin_id TEXT NOT NULL,
+    action TEXT NOT NULL CHECK (action IN ('install', 'enable', 'disable', 'remove')),
+    status TEXT NOT NULL CHECK (status IN ('applying', 'unknown', 'applied', 'restart-required', 'failed'))
+  ) STRICT;
+  CREATE INDEX plugin_operations_target ON plugin_operations(harness, plugin_id, sequence);
+  CREATE UNIQUE INDEX plugin_operations_in_flight ON plugin_operations(harness)
+    WHERE status IN ('applying', 'unknown', 'restart-required');
 ` }];
 
 /** Runs inside restoreDatabase's private staging transaction, before the database is published. */

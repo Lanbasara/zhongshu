@@ -36,6 +36,7 @@ export class CodexRpc {
   private pending = new Map<number, { resolve(value: unknown): void; reject(error: Error): void; timer: NodeJS.Timeout }>();
   private heartbeat: NodeJS.Timeout | undefined;
   private awaitingPong = false;
+  private home: string | undefined;
 
   constructor(socketPath: string, hooks: Hooks) {
     const parsed = z.string().min(1).max(4096).refine(path => isAbsolute(path) && normalize(path) === path && !path.includes('\0')).safeParse(socketPath);
@@ -45,6 +46,7 @@ export class CodexRpc {
   }
 
   get connected(): boolean { return this.socket?.readyState === WebSocket.OPEN; }
+  get codexHome(): string | undefined { return this.home; }
 
   async connect(): Promise<void> {
     if (this.permanentlyClosed) throw new RpcError('codex_adapter_closed');
@@ -69,6 +71,7 @@ export class CodexRpc {
       ended = true;
       if (this.socket !== ws) return;
       this.socket = undefined;
+      this.home = undefined;
       if (this.heartbeat) clearInterval(this.heartbeat);
       this.heartbeat = undefined;
       for (const request of this.pending.values()) { clearTimeout(request.timer); request.reject(new RpcError('codex_disconnected')); }
@@ -108,8 +111,10 @@ export class CodexRpc {
         ws.once('error', () => reject(new RpcError('codex_unavailable')));
         ws.once('close', () => reject(new RpcError('codex_disconnected')));
       });
-      await this.send('initialize', { clientInfo: { name: 'zhongshu', version: '0.1.0' }, capabilities: { experimentalApi: true } });
+      const initialization = z.object({ codexHome: z.string().max(4096) }).safeParse(
+        await this.send('initialize', { clientInfo: { name: 'zhongshu', version: '0.1.0' }, capabilities: { experimentalApi: true } }));
       if (ws.readyState !== WebSocket.OPEN) throw new RpcError('codex_disconnected');
+      this.home = initialization.data?.codexHome;
       ws.send(JSON.stringify({ method: 'initialized', params: {} }));
       established = true;
       this.awaitingPong = false;
@@ -123,6 +128,11 @@ export class CodexRpc {
 
   async request(method: string, params: unknown): Promise<unknown> {
     await this.connect();
+    return this.requestConnected(method, params);
+  }
+
+  /** Used when the caller must fence a request to an already verified connection. */
+  requestConnected(method: string, params: unknown): Promise<unknown> {
     return this.send(method, params);
   }
 
