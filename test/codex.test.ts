@@ -79,6 +79,9 @@ test('Codex resolves explicit skill occurrences from the current cwd and observe
   assert.equal(skill.label, 'Proof');
   assert.equal('path' in skill, false);
   const operation = { id: 'explicit', text: '⬡ Proof now', skills: [{ id: skill.id, label: skill.label, start: 0, end: 7 }] };
+  assert.deepEqual(await p.adapter.submitQueued!(saved, operation, { mode: 'current', target: 'run-1' }),
+    { outcome: 'rejected', reason: 'queue_skill_requires_next_turn' });
+  assert.equal(p.calls.some(call => call.method === 'turn/steer'), false);
   assert.equal((await p.adapter.submit(saved, operation)).outcome, 'accepted');
   const inputs = () => p.calls.filter(call => call.method === 'turn/start').map(call => call.params.input);
   assert.deepEqual(inputs()[0], [{ type: 'text', text: ' $zhi-proof  now', text_elements: [] }, { type: 'skill', name: 'zhi-proof', path }]);

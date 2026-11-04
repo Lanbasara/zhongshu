@@ -74,7 +74,7 @@
 
 1. 按 [Native 入口](README.md#native真实接入分支)启动隔离 Host 和应用。在工作区 A 放 `zhi-proof` 与 `zhi-secondary` 两个技能，各有 `SKILL.md`、名称和简述。Codex 用 `.agents/skills/`，DSH 用 `.dsh/skills/`。给 `zhi-proof` 的正文放独有合成标记，DSH front matter 设 `disable-model-invocation: true`。工作区 B 保持空白。分别建两段对话并核对就绪。
 2. 在 A 输入 `/` 再输入 `zhi`，用方向键切到 `zhi-proof`，按 Tab 并接着输入任务。完整刷新，确认强调的引用、余下文字与选择身份仍在。另测 Escape、无匹配时 Tab、输入路径或 URL、手打完整 `/zhi-proof` 后直接发送。原生收到的手打文本保留原样。390px 视口点按候选，继续输入。
-3. 发送选中的 `zhi-proof`，查原生同一轮用户输入和指令内容。Codex 查 `rawResponseItem/completed` 或隔离 rollout 的 `response_item`，核对 skill 正文标记。DSH 用 `session/follow` 或 `session/page` 查 `user/message`，要求 `source.kind=skill-invocation`、名称及正文标记同时匹配。模型复述不是调用证明。按 [E06/E07](execution.md#e06--e07-排队与提前发送)跑排队派发和回执核对，检查原操作只出现一次。
+3. 发送选中的 `zhi-proof`，查原生同一轮用户输入和指令内容。Codex 查 `rawResponseItem/completed` 或隔离 rollout 的 `response_item`，核对 skill 正文标记。DSH 用 `session/follow` 或 `session/page` 查 `user/message`，要求 `source.kind=skill-invocation`、名称及正文标记同时匹配。模型复述不是调用证明。按 [E06/E07](execution.md#e06--e07-排队与提前发送)跑排队派发和回执核对，检查原操作只出现一次。Codex 的原生本轮追加不会加载技能正文，带显式技能的条目应显示「技能将在下一轮调用」并留在队列。直接请求本轮追加应拒绝，释放当前轮后核对下一轮的技能正文。普通文本仍可追加到本轮。DSH 的「尽快发送」可带技能。
 4. 切到 B 再查 `/zhi`，确认 A 的技能不出现。选中技能后在实验现场使它从原生目录消失并核对原生清单，再发送旧引用。应拒绝调用并保留草稿或排队条目。点「继续编辑」或队列行的「编辑」，核对保留内容可修改后重发。若该 Host 对旧会话冻结技能范围，使用能改变清单的原生禁用方式或下方 fixture。未登录端请求 `/api/private/workbench/conversations/<id>/skills` 应被拒绝，已登录结果只含显示信息与不透明 ID。
 
 ### U13 对话用量

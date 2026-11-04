@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { DatabaseSync, StatementSync } from 'node:sqlite';
 import { z } from 'zod';
-import { conversationTitleSchema, identifierSchema, messagePayload, queueCommandSchema, queueDeliverySchema, queueLimit, queuePauseSchema, stateSchema, turnFileLimit, usageSchema, workspaceLimit } from '../shared/workbench.ts';
+import { conversationTitleSchema, identifierSchema, messagePayload, queueCommandSchema, queueDeliverySchema, queueLimit, queuePauseSchema, skillRequiresNextTurn, stateSchema, turnFileLimit, usageSchema, workspaceLimit } from '../shared/workbench.ts';
 import type { ConversationUsage, QueueCommand, QueueDelivery, QueuePause, QueueView, TurnFileSummary } from '../shared/workbench.ts';
 import { contentFields, inputFields, recordedFilePath, toolSchema, validSkillSpans, type InputContent } from '../shared/content.ts';
 import { createResourceStore } from './resources.ts';
@@ -600,6 +600,7 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
         const count = db.prepare('SELECT COUNT(*) AS n FROM workbench_operations WHERE conversation_id=?').get(id)!;
         if (Number(count.n) >= 50_000) throw new StoreError('operation_capacity_reached', 409);
         const content = parseJson(messagePayload, entry.content_json);
+        if (skillRequiresNextTurn(delivery.mode, content)) throw new StoreError('queue_skill_requires_next_turn', 409);
         const queuedInput = { entryId, version, delivery };
         for (const image of content.images ?? []) resources.pin(id, image.id, operationId);
         const at = now();

@@ -40,6 +40,7 @@ const failures: Record<string, string> = {
   quote_source_changed: '引用的原消息无法读取，请重新选择。', image_unavailable: '图片暂时无法读取，请重新添加；文字和引用已保留。',
   image_reference_changed: '图片引用已变化，请重新添加。', message_images_too_large: '这一条消息的图片合计超过 4 MiB，请减少图片后再发送。',
   skill_reference_unavailable: '无法核对所选技能。输入已保留，请重新选择技能或移除该引用。',
+  queue_skill_requires_next_turn: '带技能的消息将在下一轮派发，已保留在队列中。',
 };
 const stateReasons: Record<string, string> = {
   workspace_removed: failures.workspace_removed!,

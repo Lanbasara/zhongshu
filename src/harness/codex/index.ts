@@ -4,7 +4,7 @@ import { HarnessError } from '../types.ts';
 import type { Binding, Catalog, Configuration, HarnessAdapter, HarnessInput, HistoryPage, NativeChange, NativeItem, NativeState, Receipt } from '../types.ts';
 import { CodexRpc, RpcError } from './rpc.ts';
 import { inputFields } from '../../shared/content.ts';
-import { revisionSchema } from '../../shared/workbench.ts';
+import { revisionSchema, skillRequiresNextTurn } from '../../shared/workbench.ts';
 import type { QueueDelivery } from '../../shared/workbench.ts';
 import { configuredThread, cursor, itemsPage, mapItem, nativeId, nativeItem, record, threadStatus, turn } from './protocol.ts';
 import { nativeSkill, resolveSkillInput, skillOptions, type NativeSkill } from '../skills.ts';
@@ -293,6 +293,7 @@ class CodexAdapter implements HarnessAdapter {
     if (delivery.mode === 'soon') return { outcome: 'rejected', reason: 'queue_mode_unavailable' };
     const binding = parse(bindingSchema, rawBinding);
     const operation = parse(operationSchema, rawOperation);
+    if (skillRequiresNextTurn(delivery.mode, operation)) return { outcome: 'rejected', reason: 'queue_skill_requires_next_turn' };
     this.retain(binding.id);
     try {
       const current = await this.state(binding);

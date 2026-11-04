@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { contentFields, inputFields, recordedFilePath, toolSchema, validSkillSpans } from './content.ts';
+import { contentFields, inputFields, recordedFilePath, toolSchema, validSkillSpans, type InputContent } from './content.ts';
 
 const utf8 = new TextEncoder();
 const boundedText = (bytes: number) => z.string().max(bytes).refine(value => utf8.encode(value).byteLength <= bytes);
@@ -98,6 +98,10 @@ export const queueViewSchema = z.object({
 }).strict();
 export type QueueCommand = z.infer<typeof queueCommandSchema>;
 export type QueueDelivery = z.infer<typeof queueDeliverySchema>;
+/** Codex current-turn input accepts text but omits native skill instruction loading. */
+export function skillRequiresNextTurn(mode: QueueDelivery['mode'] | null, content: Pick<InputContent, 'skills'>): boolean {
+  return mode === 'current' && !!content.skills?.length;
+}
 export type QueueView = z.infer<typeof queueViewSchema>;
 export type QueuePause = z.infer<typeof queuePauseSchema>;
 const stopPayload = z.object({ runId: identifierSchema }).strict();

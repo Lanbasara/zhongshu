@@ -143,6 +143,15 @@ test('skills and usage stay behind conversation authorization and skill identity
   });
   const skill = { id: 'a'.repeat(64), label: 'Proof', start: 0, end: 7 };
   const payload = { text: '⬡ Proof', skills: [skill] };
+  const entryId = randomUUID();
+  f.store.changeQueue(id, { action: 'add', entryId, content: payload });
+  const queued = f.store.readQueue(id).entries[0]!;
+  const earlyId = randomUUID();
+  assert.throws(() => f.store.claimQueue(id, entryId, queued.version, earlyId, { mode: 'current', target: 'synthetic-turn' }),
+    { code: 'queue_skill_requires_next_turn' });
+  assert.equal(f.store.getOperation(earlyId), null);
+  assert.deepEqual(f.store.readQueue(id).entries, [queued]);
+  f.store.changeQueue(id, { action: 'remove', entryId, version: queued.version });
   assert.equal((await send({ ...payload, skills: [{ ...skill, end: 8 }] }, randomUUID())).status, 400);
   const operationId = randomUUID();
   assert.equal((await send(payload, operationId)).status, 202);
