@@ -82,6 +82,38 @@ test('repeated snapshot GET behavior does not create an idle native refresh feed
   assert.equal(f.peer.historyCalls.length, histories);
 });
 
+for (const refresh of ['poll', 'invalidation'] as const) test(`${refresh} crossing asynchronous admission keeps its correct execution authority`, async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const f = fixture(t); await f.service.reconcile(f.id);
+  // Let the completed reconciliation's queue-drain microtasks settle before
+  // arming the admission boundary (this fixture's storage calls are local).
+  await delay(1);
+  const readQueue = f.service.store.readQueue;
+  let crossed = false;
+  f.service.store.readQueue = async id => {
+    const value = await readQueue(id);
+    if (!crossed) {
+      crossed = true;
+      // Cross the actual scheduled poll with the asynchronous admission read.
+      // A native invalidation is a separate authority change and must fence it.
+      if (refresh === 'poll') t.mock.timers.tick(5000);
+      else f.peer.emit({ type: 'invalidate' });
+    }
+    return value;
+  };
+  const input = operation(f.id);
+  if (refresh === 'invalidation') {
+    await assert.rejects(f.service.enqueue(input), { code: 'operation_needs_reconciliation' });
+    assert.equal(f.store.getOperation(input.id), null);
+    assert.equal(f.peer.submitCalls.length, 0);
+  } else {
+    await f.service.enqueue(input);
+    await until(() => f.store.getOperation(input.id)?.status === 'accepted');
+    assert.deepEqual(f.peer.submitCalls, [input.id]);
+  }
+  assert.equal(crossed, true);
+});
+
 test('async eligibility is awaited before skills or early queue dispatch can reach the native adapter', async t => {
   const f = fixture(t); const entryId = randomUUID();
   f.peer.current = { status: 'running', runId: 'active', pendingInputs: 0, configurationVerified: true };

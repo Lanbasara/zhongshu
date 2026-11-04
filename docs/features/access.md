@@ -56,3 +56,4 @@ SSE 观察在浏览器网络面板或自动化的 EventSource 事件记录中进
 - `node --test test/execution-store.test.ts test/execution-workspaces.test.ts test/workspace-writer.test.ts` 覆盖超过 10,000 段未决对话的真实备份恢复、执行日志保留、真实文件写者强杀和重启核实；原生执行部分使用明确替身，真实 Host 收束另验。
 - `node --test test/storage-capacity.test.ts test/body-store.test.ts` 覆盖配额、缓存/WAL 计量、有界上传与正文回收、未知阶段保全、并发旧页和异源版本不能误退役、预约内续传及扩容恢复。Linux 实际磁盘耗尽入口为 `node test/support/storage-enospc.ts /space`；只接受不超过 128 MiB 的一次性 tmpfs，推荐隔离容器提供 32 MiB 挂载。它实际分配至 ENOSPC、固定 WAL 读者，并用耗尽前的样本模拟 statfs 与提交之间的抢盘竞态，核对未提交条目、旧正文、操作身份、释放空间和重开后的完整性；不证明浏览器或原生 Harness。
 - `node --test test/operation-payload-store.test.ts` 覆盖终态压缩资格、原样重试、摘要损坏关闭读取、队列摘要、单调检查点，以及 schema 10 备份迁移、压缩后再次备份恢复的正文/图片 SHA、原操作身份、原生绑定和会话吊销。
+- `node --test test/backup-integrity.test.ts` 覆盖备份副本及恢复暂存库的正文清单、块顺序/长度、总 SHA-256 与归属引用审计：同长损坏、缺块或悬空引用必须在原子发布前拒绝；正常旧库可恢复，合法空正文与未知未完成暂存保留。全库审计只在操作者备份/恢复入口执行，逐块读取，不进入服务请求路径。

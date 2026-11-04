@@ -31,14 +31,15 @@ async function login() {
   csrf = (await result.json() as { csrfToken: string }).csrfToken; cookie = result.headers.getSetCookie()[0]!.split(';')[0]!;
   await browser.evaluate(`(async()=>{const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:${JSON.stringify(password)}})});if(!r.ok)throw Error('login_failed');return true})()`);
 }
-type Metric = { path: string; ms: number; bytes: number; status: number; expectedConflict?: string };
+type Metric = { path: string; ms: number; bytes: number; status: number; operationId?: string; expectedConflict?: string };
 async function request(path: string, body?: unknown, metrics?: Metric[]) {
   const start = performance.now();
   const result = await fetch(origin + '/api/private/workbench' + path, { method: body === undefined ? 'GET' : 'POST',
     headers: { cookie, origin, 'x-csrf-token': csrf, ...(body === undefined ? {} : { 'content-type': 'application/json' }) },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(10000) });
   const bytes = new Uint8Array(await result.arrayBuffer());
-  metrics?.push({ path: path.split('?')[0]!, ms: performance.now() - start, bytes: bytes.length, status: result.status });
+  const operationId = body && typeof body === 'object' && 'id' in body ? z.uuid().safeParse(body.id).data : undefined;
+  metrics?.push({ path: path.split('?')[0]!, ms: performance.now() - start, bytes: bytes.length, status: result.status, ...(operationId ? { operationId } : {}) });
   if (!result.ok) {
     let code: string | undefined;
     try { code = z.object({ error: z.string().regex(/^[a-z_]{1,100}$/) }).parse(JSON.parse(Buffer.from(bytes).toString())).error; } catch { /* No raw response or credentials enter error evidence. */ }
@@ -149,7 +150,8 @@ try {
     } catch (error) {
       failures++;
       await appendFile(input.output, JSON.stringify({ cycle: cycles, time: new Date().toISOString(), failure: error instanceof Error && /^soak_[a-z_0-9]+$/.test(error.message) ? error.message : 'soak_cycle_failed',
-        endpoint: error && typeof error === 'object' && 'endpoint' in error ? error.endpoint : undefined, metrics }) + '\n');
+        endpoint: error && typeof error === 'object' && 'endpoint' in error ? error.endpoint : undefined,
+        code: error && typeof error === 'object' && 'code' in error && typeof error.code === 'string' && /^[a-z_]{1,100}$/.test(error.code) ? error.code : undefined, metrics }) + '\n');
       // An uncertain send must not be retried with a fresh operation ID.
       stopped = true;
     }

@@ -6,6 +6,9 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { constants, zstdCompressSync } from 'node:zlib';
 import { createHash, randomBytes } from 'node:crypto';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { pathToFileURL } from 'node:url';
 import { BoundedDshReader } from '../src/harness/dsh/bounded-reader.ts';
 import { BoundedJsonEnvelope } from '../src/harness/dsh/bounded-json.ts';
 import { createDshAdapter } from '../src/harness/dsh/index.ts';
@@ -15,6 +18,85 @@ const binding = { sessionId: 'synthetic', cwd: '/synthetic' };
 const header = JSON.stringify({ type: 'session', version: 4, id: binding.sessionId, cwd: binding.cwd, createdAt: 0, isSeeded: false, delegationDepth: 0 }) + '\n';
 const event = (seq: number, text = 'synthetic') => JSON.stringify({ type: seq === 0 ? 'turn/start' : 'assistant/message', seq, time: seq, data: seq === 0 ? { turn: 1 } : { text } }) + '\n';
 const compress = (value: string) => zstdCompressSync(value, { params: { [constants.ZSTD_c_checksumFlag]: 1 } });
+
+test('DSH item pages touch only their event records at 20k and 40k source sizes', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'zs-dsh-item-cost-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const preload = join(root, 'sqlite-probe.mjs');
+  // Test-only SQLite instrumentation. The old join visits every record in its
+  // generation. The point query visits exactly the requested composite key.
+  // EXPLAIN below checks that adding the counter did not change either plan.
+  await writeFile(preload, `import { DatabaseSync } from 'node:sqlite';
+import { isMainThread, parentPort } from 'node:worker_threads';
+if (!isMainThread) {
+  const prepare = DatabaseSync.prototype.prepare, registered = new WeakSet();
+  const stats = { visits: 0, calls: 0, eventVisits: 0, eventCalls: 0, plans: [] };
+  DatabaseSync.prototype.prepare = function(sql) {
+    let counted, eventQuery = false;
+    if (sql === 'SELECT * FROM records WHERE generation=? AND seq=?') counted = sql.replace('SELECT *', 'SELECT *, zh_record_visit(seq) AS __visited');
+    else if (sql.includes('SELECT r.* FROM records r JOIN') && sql.includes('MAX(seq)')) counted = sql.replace('e.seq=r.seq', 'e.seq=zh_record_visit(r.seq)');
+    else if (sql === 'SELECT seq FROM item_events WHERE generation=? AND key=? AND type=? AND seq<=? ORDER BY seq DESC LIMIT 1') { counted = sql.replace('SELECT seq', 'SELECT seq, zh_event_visit(seq) AS __visited'); eventQuery = true; }
+    if (!counted) return prepare.call(this, sql);
+    if (!registered.has(this)) { this.function('zh_record_visit', value => { stats.visits++; return value; }); this.function('zh_event_visit', value => { stats.eventVisits++; return value; }); registered.add(this); }
+    const database = this, statement = prepare.call(this, counted);
+    for (const method of ['get', 'all']) {
+      const execute = statement[method].bind(statement);
+      statement[method] = (...args) => {
+        if (eventQuery) stats.eventCalls++; else stats.calls++;
+        if (!stats.plans.some(value => value.sql === sql)) stats.plans.push({ sql, original: prepare.call(database, 'EXPLAIN QUERY PLAN ' + sql).all(...args).map(row => row.detail), counted: prepare.call(database, 'EXPLAIN QUERY PLAN ' + counted).all(...args).map(row => row.detail) });
+        return execute(...args);
+      };
+    }
+    return statement;
+  };
+  const post = parentPort.postMessage.bind(parentPort);
+  parentPort.postMessage = reply => { if (reply.result?.frameReads && 'budget' in reply.result) reply.result.__sqlProbe = structuredClone(stats); post(reply); };
+}
+`, { mode: 0o600 });
+  const readerUrl = new URL('../src/harness/dsh/bounded-reader.ts', import.meta.url).href;
+  const script = `import { mkdir, writeFile, appendFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { BoundedDshReader } from ${JSON.stringify(readerUrl)};
+const root = process.argv[2], nativeRoot = join(root, 'native'), cacheRoot = join(root, 'cache');
+const directory = join(nativeRoot, '--synthetic--', 'synthetic'); await mkdir(directory, {recursive:true});
+const path = join(directory, 'session.v4.jsonl');
+await writeFile(path, ${JSON.stringify(header)} + ${JSON.stringify(event(0))});
+const binding = {sessionId:'synthetic',cwd:'/synthetic'}, reader = new BoundedDshReader({nativeRoot,cacheRoot});
+const results=[];
+try { for (const count of [20000,40000]) {
+  const start = count === 20000 ? 1 : 20001;
+  await appendFile(path, Array.from({length:20000},(_,n)=>{const seq=start+n;return JSON.stringify({seq,time:seq,type:'assistant/message',data:{turn:1,step:seq,message:{content:[{type:'text',text:'exact-'+seq}]}}})+'\\n';}).join(''));
+  let scan; do {scan=await reader.scan(binding);} while(!scan.complete);
+  const before=(await reader.cacheStatus()).__sqlProbe;
+  const begun=performance.now(), page=await reader.items({...binding,sourceGeneration:scan.sourceGeneration,throughSeq:scan.throughSeq,maxRecords:16});
+  const after=(await reader.cacheStatus()).__sqlProbe;
+  results.push({kind:'source-size',count,items:page.groups.length,visits:after.visits-before.visits,calls:after.calls-before.calls,eventVisits:after.eventVisits-before.eventVisits,eventCalls:after.eventCalls-before.eventCalls,elapsedMs:performance.now()-begun,plans:after.plans});
+}
+for (const count of [20000,40000]) {
+  const start=count===20000?40001:60001;
+  await appendFile(path,Array.from({length:20000},(_,n)=>{const seq=start+n;return JSON.stringify({seq,time:seq,type:'assistant/message',data:{turn:1,step:1,message:{content:[{type:'text',text:'revision-'+seq}]}}})+'\\n';}).join(''));
+  let scan;do{scan=await reader.scan(binding);}while(!scan.complete);
+  const before=(await reader.cacheStatus()).__sqlProbe,begun=performance.now();
+  const page=await reader.itemsByKeys({...binding,sourceGeneration:scan.sourceGeneration,throughSeq:scan.throughSeq,keys:['assistant:1:1']});
+  const after=(await reader.cacheStatus()).__sqlProbe;
+  results.push({kind:'same-item-revisions',count,items:page.groups.length,visits:after.visits-before.visits,calls:after.calls-before.calls,eventVisits:after.eventVisits-before.eventVisits,eventCalls:after.eventCalls-before.eventCalls,elapsedMs:performance.now()-begun,plans:after.plans});
+}
+console.log(JSON.stringify(results)); } finally {await reader.close();}
+`;
+  const runner = join(root, 'measure.mjs'); await writeFile(runner, script, { mode: 0o600 });
+  const run = await promisify(execFile)(process.execPath, ['--import', pathToFileURL(preload).href, runner, root], { timeout: 60_000, maxBuffer: 64 * 1024 });
+  const measured = JSON.parse(run.stdout) as { kind: string; count: number; items: number; visits: number; calls: number; eventVisits: number; eventCalls: number; elapsedMs: number; plans: { original: string[]; counted: string[] }[] }[];
+  t.diagnostic(JSON.stringify(measured.map(({ kind, count, visits, calls, eventVisits, eventCalls, elapsedMs }) => ({ kind, count, visits, calls, eventVisits, eventCalls, elapsedMs }))));
+  assert.equal(measured.length, 4);
+  for (const result of measured) {
+    const expected = result.kind === 'source-size' ? 16 : 1;
+    assert.equal(result.items, expected); assert.equal(result.calls, expected); assert.equal(result.visits, expected, `record visits grew with ${result.count} source events`);
+    assert.equal(result.eventVisits, expected); assert.equal(result.eventCalls, expected);
+    assert(result.plans.length > 0);
+    for (const plan of result.plans) { assert.deepEqual(plan.counted, plan.original); assert(plan.original.every(detail => detail.includes('generation=? AND seq=?') || detail.includes('generation=? AND key=? AND type=? AND seq<?'))); }
+  }
+});
+
 async function fixture(t: TestContext, compressed = false, maxCacheBytes = 64 * 1024 ** 2) {
   const root = await mkdtemp(join(tmpdir(), 'zs-dsh-bounded-')), nativeRoot = join(root, 'native'), cacheRoot = join(root, 'cache');
   const directory = join(nativeRoot, '--synthetic--', binding.sessionId); await mkdir(directory, { recursive: true });
@@ -25,6 +107,34 @@ async function fixture(t: TestContext, compressed = false, maxCacheBytes = 64 * 
   return { path, directory, nativeRoot, cacheRoot, get reader() { return reader; }, append: (text: string) => appendFile(path, compressed ? compress(text) : text),
     async reopen() { await reader.close(); reader = new BoundedDshReader({ nativeRoot, cacheRoot, maxCacheBytes }); } };
 }
+
+for (const compressed of [false, true]) test(`DSH ${compressed ? 'zstd' : 'JSONL'} change feed retains old completed updates across fixed cuts and rebuilds`, async t => {
+  const f = await fixture(t, compressed), options = { launchFile: join(f.nativeRoot, 'absent'), boundedHistory: { nativeRoot: f.nativeRoot, cacheRoot: f.cacheRoot } };
+  let adapter = createDshAdapter(options); t.after(() => adapter.close());
+  const bound = { id: binding.sessionId, cwd: binding.cwd, configuration: { modelId: modelId({ provider: 'synthetic', model: 'synthetic' }), permissionId: 'read-only' }, details: {} };
+  const changed = (cursor?: string) => adapter.historyChanges!(bound, cursor, 16);
+  const row = (seq: number, step = seq, text = `original-${step}`) => JSON.stringify({ seq, time: seq, type: 'assistant/message', data: { turn: 1, step, message: { content: [{ type: 'text', text }] } } }) + '\n';
+  const id = (step: number) => `dsh:${binding.sessionId}:assistant:1:${step}`;
+  assert.equal(adapter.historyReadOnly, true);
+  const empty = await changed(); assert.deepEqual(empty.itemIds, []); assert(empty.cursor); assert.equal(empty.hasMore, false); assert.deepEqual(await changed(empty.cursor), empty);
+  await f.append(event(0)); const nonItem = await changed(empty.cursor); assert.deepEqual(nonItem.itemIds, []); assert.equal(nonItem.hasMore, false); assert.notEqual(nonItem.cursor, empty.cursor);
+  await f.append(Array.from({ length: 35 }, (_, n) => row(n + 1)).join(''));
+  const first = await changed(nonItem.cursor); assert.equal(first.itemIds.length, 16); assert(first.hasMore);
+  await f.append(row(36, 1, 'updated-completed-body'));
+  let page = first; const ids = [...page.itemIds];
+  while (page.hasMore) { page = await changed(page.cursor); assert(page.itemIds.length <= 16); ids.push(...page.itemIds); }
+  assert.deepEqual(ids, Array.from({ length: 35 }, (_, n) => id(n + 1)));
+  const revision = await changed(page.cursor); assert.deepEqual(revision.itemIds, [id(1)]); assert.equal(revision.hasMore, false);
+  const updated = (await adapter.readItems!(bound, revision.itemIds))[0]!; assert.equal(updated.text, 'updated-completed-body'); assert.equal(updated.status, 'completed'); assert.equal(updated.sourceRevision?.sequence, 36);
+  await f.append(Array.from({ length: 20 }, (_, n) => row(37 + n, 1, `revision-${n}`)).join(''));
+  const repeated = await changed(revision.cursor); assert.deepEqual(repeated.itemIds, [id(1)]); assert(repeated.hasMore);
+  await adapter.close(); await rm(f.cacheRoot, { recursive: true, force: true }); adapter = createDshAdapter(options);
+  const resumed = await changed(repeated.cursor); assert.deepEqual(resumed.itemIds, [id(1)]); assert.equal(resumed.hasMore, false);
+  assert.deepEqual(await changed(resumed.cursor), { ...resumed, itemIds: [] });
+  await assert.rejects(adapter.historyChanges!({ ...bound, id: 'other' }, resumed.cursor), /history_cursor_invalid/);
+  await rename(f.path, f.path + '.old'); await writeFile(f.path, compressed ? compress(header) : header);
+  await assert.rejects(changed(resumed.cursor), /history_cursor_invalid/);
+});
 
 for (const compressed of [false, true]) test(`DSH bounded ${compressed ? 'zstd' : 'plaintext'} reads exact raw pages, appends and resumes after worker restart`, async t => {
   const f = await fixture(t, compressed); await f.append(Array.from({ length: 12 }, (_, i) => event(i)).join(''));

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import type { Binding, HarnessAdapter, HistoryPage, NativeBodyChunk, NativeItem, Receipt } from '../harness/types.ts';
+import type { Binding, HarnessAdapter, HistoryChanges, HistoryPage, NativeBodyChunk, NativeItem, Receipt } from '../harness/types.ts';
 import { HarnessError } from '../harness/types.ts';
 import { stateSchema } from '../shared/workbench.ts';
 import type { Conversation } from './workbench-store.ts';
@@ -22,10 +22,11 @@ export async function managedHarnessReadAdapter(client: ManagedHarnessRpc, stopp
     return { id: stoppedHarness, methods: [] as ManagedNativeMethod[], earlyInput: stoppedHarness === 'codex' ? 'current' as const : 'soon' as const };
   });
   return {
-    id: capabilities.id, ...(capabilities.earlyInput ? { earlyInput: capabilities.earlyInput } : {}),
+    id: capabilities.id, historyReadOnly: true, ...(capabilities.earlyInput ? { earlyInput: capabilities.earlyInput } : {}),
     catalog: async () => await client.read('catalog', []) as Awaited<ReturnType<HarnessAdapter['catalog']>>,
     create: noActivation, state: noActivation, submit: noActivation, reconcile: noActivation, stop: noActivation, watch: noActivation,
     history: async (binding, cursor, limit) => await client.read('history', [binding, cursor, limit]) as HistoryPage,
+    ...(capabilities.methods.includes('historyChanges') ? { historyChanges: async (binding: Binding, cursor?: string, limit?: number) => await client.read('historyChanges', [binding, cursor, limit]) as HistoryChanges } : {}),
     ...(capabilities.methods.includes('readItems') ? { readItems: async (binding: Binding, itemIds: string[]) => await client.read('readItems', [binding, itemIds]) as NativeItem[] } : {}),
     ...(capabilities.methods.includes('readBodyChunk') ? { readBodyChunk: async (binding: Binding, token: string, offset: number, maxBytes: number) => await client.read('readBodyChunk', [binding, token, offset, maxBytes]) as NativeBodyChunk } : {}),
     ...(capabilities.methods.includes('releaseBodySource') ? { releaseBodySource: async (binding: Binding, token: string) => { await client.read('releaseBodySource', [binding, token]); } } : {}),
@@ -83,6 +84,7 @@ export async function createManagedHarnessAdapter(host: ExecutionHost, client: M
       if (result.status !== 'settled') throw new HarnessError('managed_native_watch_unknown'); return () => host.releaseWatch(request.requestId); },
     ...(capabilities.methods.includes('skills') ? { skills: async (binding: Binding) => { sameBinding(binding); return await observe('skills') as Awaited<ReturnType<NonNullable<HarnessAdapter['skills']>>>; } } : {}),
     history: async (binding, cursor, limit) => await read('history', binding, [cursor, limit]) as HistoryPage,
+    ...(capabilities.methods.includes('historyChanges') ? { historyChanges: async (binding: Binding, cursor?: string, limit?: number) => await read('historyChanges', binding, [cursor, limit]) as HistoryChanges } : {}),
     ...(capabilities.methods.includes('readItems') ? { readItems: async (binding: Binding, itemIds: string[]) => await read('readItems', binding, [itemIds]) as NativeItem[] } : {}),
     ...(capabilities.methods.includes('readBodyChunk') ? { readBodyChunk: async (binding: Binding, token: string, offset: number, maxBytes: number) => await read('readBodyChunk', binding, [token, offset, maxBytes]) as NativeBodyChunk } : {}),
     ...(capabilities.methods.includes('releaseBodySource') ? { releaseBodySource: async (binding: Binding, token: string) => { await read('releaseBodySource', binding, [token]); } } : {}),

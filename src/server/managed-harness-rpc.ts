@@ -12,9 +12,9 @@ import type { NativeInvocation } from './execution-host.ts';
 import { pluginCommand, pluginKey, pluginSourceCommand } from '../shared/plugins.ts';
 import { PluginSourceError, type PluginBackend } from './plugin-backend.ts';
 
-const methods = ['catalog', 'skills', 'create', 'state', 'history', 'submit', 'submitQueued', 'wakeQueued', 'readImage', 'readBodyChunk', 'releaseBodySource', 'readItems', 'reconcile', 'stop', 'watch', 'pluginCatalog', 'pluginDetail', 'pluginSources', 'pluginChange', 'pluginRecover', 'pluginSource', 'pluginRecoverSource'] as const;
+const methods = ['catalog', 'skills', 'create', 'state', 'history', 'historyChanges', 'submit', 'submitQueued', 'wakeQueued', 'readImage', 'readBodyChunk', 'releaseBodySource', 'readItems', 'reconcile', 'stop', 'watch', 'pluginCatalog', 'pluginDetail', 'pluginSources', 'pluginChange', 'pluginRecover', 'pluginSource', 'pluginRecoverSource'] as const;
 export type ManagedNativeMethod = typeof methods[number];
-const readonlyMethods = new Set<ManagedNativeMethod>(['catalog', 'history', 'readImage', 'readBodyChunk', 'releaseBodySource', 'readItems', 'pluginCatalog', 'pluginDetail', 'pluginSources', 'pluginRecover', 'pluginRecoverSource']);
+const readonlyMethods = new Set<ManagedNativeMethod>(['catalog', 'history', 'historyChanges', 'readImage', 'readBodyChunk', 'releaseBodySource', 'readItems', 'pluginCatalog', 'pluginDetail', 'pluginSources', 'pluginRecover', 'pluginRecoverSource']);
 const optionsSchema = z.object({ socketPath: z.string().min(1).max(100).refine(isAbsolute), token: z.string().regex(/^[A-Za-z0-9_-]{43}$/), timeoutMs: z.number().int().min(100).max(120_000).default(30_000) }).strict();
 const MAX_BYTES = 12 * 1024 * 1024;
 const requestSchema = z.object({ type: z.literal('call'), id: z.number().int().positive().safe(), method: z.enum(methods), args: z.array(z.unknown()).max(4) }).strict();

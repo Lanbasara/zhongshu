@@ -8,7 +8,7 @@ import { createHash } from 'node:crypto';
 import { createZstdDecompress, constants as zstdConstants } from 'node:zlib';
 import { DatabaseSync } from 'node:sqlite';
 import { z } from 'zod';
-import { boundedBinding, boundedOptions, boundedPageArgs, boundedChunkArgs, boundedProjectArgs, boundedBodyArgs, boundedTerminalArgs, boundedItemsArgs } from './bounded-reader.ts';
+import { boundedBinding, boundedOptions, boundedPageArgs, boundedChunkArgs, boundedProjectArgs, boundedBodyArgs, boundedTerminalArgs, boundedItemsArgs, boundedChangesArgs } from './bounded-reader.ts';
 import type { BoundedRecord, BoundedItemGroup } from './bounded-reader.ts';
 import { BoundedJsonEnvelope } from './bounded-json.ts';
 import { extractRecord } from './bounded-extract.ts';
@@ -142,6 +142,7 @@ async function cache(binding: z.infer<typeof boundedBinding>) {
     CREATE TABLE IF NOT EXISTS items(generation TEXT NOT NULL,key TEXT NOT NULL,first_seq INTEGER NOT NULL,latest_seq INTEGER NOT NULL,turn INTEGER,PRIMARY KEY(generation,key)) STRICT;
     CREATE INDEX IF NOT EXISTS items_order ON items(generation,first_seq DESC);
     CREATE TABLE IF NOT EXISTS item_events(generation TEXT NOT NULL,key TEXT NOT NULL,type TEXT NOT NULL,seq INTEGER NOT NULL,PRIMARY KEY(generation,key,type,seq)) STRICT;
+    CREATE INDEX IF NOT EXISTS item_events_sequence ON item_events(generation,seq);
     PRAGMA user_version=4;`);
   db.exec('CREATE INDEX IF NOT EXISTS records_call ON records(generation,call_id,turn,type,seq);');
   const current = db.prepare('SELECT g.id,g.source_bytes,g.modified FROM generations g JOIN current c ON c.generation=g.id').get();
@@ -371,12 +372,26 @@ async function itemPage(method: string, args: unknown) {
     const selected = 'keys' in parsed
       ? parsed.keys.flatMap(key => { const row = store.db.prepare('SELECT key,first_seq FROM items WHERE generation=? AND key=? AND first_seq<=?').get(parsed.sourceGeneration, key, parsed.throughSeq); return row ? [row] : []; })
       : store.db.prepare('SELECT key,first_seq FROM items WHERE generation=? AND first_seq<? ORDER BY first_seq DESC LIMIT ?').all(parsed.sourceGeneration, Math.min(parsed.beforeSeq ?? parsed.throughSeq + 1, parsed.throughSeq + 1), parsed.maxRecords);
+    const latestEvent = store.db.prepare('SELECT seq FROM item_events WHERE generation=? AND key=? AND type=? AND seq<=? ORDER BY seq DESC LIMIT 1');
+    const recordAt = store.db.prepare('SELECT * FROM records WHERE generation=? AND seq=?');
     const groups: BoundedItemGroup[] = []; let remaining = ('maxBytes' in parsed ? parsed.maxBytes : 256 * 1024) - 256;
     for (const anchor of selected) {
-      const rows = store.db.prepare(`SELECT r.* FROM records r JOIN
-        (SELECT MAX(seq) seq FROM item_events WHERE generation=? AND key=? AND seq<=? GROUP BY type) e ON e.seq=r.seq
-        WHERE r.generation=? ORDER BY r.seq ASC`).all(parsed.sourceGeneration, String(anchor.key), parsed.throughSeq, parsed.sourceGeneration) as Row[];
-      if (rows.length > 3) fail('item_event_limit');
+      const key = String(anchor.key);
+      // Event kinds are fixed by the indexer's item-key mapping. Seek each kind's
+      // latest revision, so one item with years of revisions also stays bounded.
+      const types = key.startsWith('tool:') ? ['tool/call', 'tool/result', 'job/settled'] : key.startsWith('assistant:') ? ['assistant/message'] : [];
+      const latest = types.length ? types.flatMap(type => {
+        const event = latestEvent.get(parsed.sourceGeneration, key, type, parsed.throughSeq); return event ? [event] : [];
+      }) : [{ seq: anchor.first_seq }];
+      // A join plus ORDER BY made SQLite walk every record in the generation
+      // for each item. Resolve the at-most-three event identities first, then
+      // force composite-primary-key point reads; sort only these bounded rows.
+      const rows = latest.map(event => {
+        const seq = Number(event.seq); if (!Number.isSafeInteger(seq) || seq < 0) fail('record_missing');
+        const row = recordAt.get(parsed.sourceGeneration, seq) as Row | undefined;
+        if (!row) fail('record_missing');
+        return row;
+      }).sort((left, right) => left.seq - right.seq);
       const metadataBytes = rows.reduce((sum, row) => sum + Buffer.byteLength(JSON.stringify({ seq: row.seq, type: row.type, time: row.time, turn: row.turn, bytes: row.bytes, sha256: row.sha256 })) + 16, 128);
       if (metadataBytes > remaining) { if (!groups.length) fail('page_budget'); break; } remaining -= metadataBytes;
       const records: BoundedRecord[] = [];
@@ -398,6 +413,29 @@ async function relatedCall(args: unknown) {
     return store.db.prepare(`SELECT c.seq,c.turn,c.call_id callId,c.tool_name name FROM records r JOIN records c
       ON c.generation=r.generation AND c.call_id=r.call_id AND c.turn=r.turn AND c.seq<r.seq AND c.type='tool/call'
       WHERE r.generation=? AND r.seq=? AND r.type='tool/result' AND c.tool_name IS NOT NULL ORDER BY c.seq DESC LIMIT 1`).get(parsed.sourceGeneration, parsed.seq) ?? null;
+  } finally { store.db.close(); }
+}
+async function changes(args: unknown) {
+  const parsed = boundedChangesArgs.parse(args), binding = boundedBinding.parse({ sessionId: parsed.sessionId, cwd: parsed.cwd });
+  if (parsed.cursor) {
+    const native = await source(binding);
+    try {
+      const stat = await native.handle.stat({ bigint: true }), meta = await header(native.handle, Number(stat.size), native.compressed, binding);
+      if (generationId(`${stat.dev}:${stat.ino}:${stat.birthtimeNs}`, meta.hash) !== parsed.cursor.generation) fail('generation_changed');
+    } finally { await native.handle.close(); }
+  }
+  // One incremental indexing step per request; callers retry indexing explicitly.
+  const scanned = await scan(binding);
+  if (!scanned.complete) fail('indexing');
+  const cursor = parsed.cursor;
+  if (cursor && (cursor.generation !== scanned.sourceGeneration || cursor.through > scanned.throughSeq)) fail('generation_changed');
+  const through = cursor && cursor.after < cursor.through ? cursor.through : scanned.throughSeq, after = cursor?.after ?? -1;
+  const store = await indexed(binding, scanned.sourceGeneration, through);
+  try {
+    const rows = store.db.prepare('SELECT key,seq FROM item_events WHERE generation=? AND seq>? AND seq<=? ORDER BY seq LIMIT ?').all(scanned.sourceGeneration, after, through, parsed.limit);
+    const last = rows.length ? Number(rows.at(-1)!.seq) : through;
+    const hasMore = !!store.db.prepare('SELECT 1 FROM item_events WHERE generation=? AND seq>? AND seq<=? LIMIT 1').get(scanned.sourceGeneration, last, through);
+    return { keys: [...new Set(rows.map(row => String(row.key)))], cursor: { generation: scanned.sourceGeneration, through, after: hasMore ? last : through }, hasMore };
   } finally { store.db.close(); }
 }
 async function terminal(args: unknown) {
@@ -431,7 +469,7 @@ parentPort?.on('message', (message: { id: number; method: string; args: unknown 
         result = null;
       }
       else if (message.method === 'status') result = null;
-      else result = ['items', 'itemsByKeys'].includes(message.method) ? await itemPage(message.method, message.args) : message.method === 'scan' ? await scan(message.args) : message.method === 'terminal' ? await terminal(message.args) : message.method === 'call' ? await relatedCall(message.args) : ['page', 'chunk'].includes(message.method) ? await read(message.method, message.args) : ['project', 'body'].includes(message.method) ? await projectBody(message.method, message.args) : fail('invalid_method');
+      else result = ['items', 'itemsByKeys'].includes(message.method) ? await itemPage(message.method, message.args) : message.method === 'changes' ? await changes(message.args) : message.method === 'scan' ? await scan(message.args) : message.method === 'terminal' ? await terminal(message.args) : message.method === 'call' ? await relatedCall(message.args) : ['page', 'chunk'].includes(message.method) ? await read(message.method, message.args) : ['project', 'body'].includes(message.method) ? await projectBody(message.method, message.args) : fail('invalid_method');
       await quota.ensure();
       const status = { ...quota.status(), frameReads: frameBlocks.stats() };
       reply = { id: message.id, result: message.method === 'status' ? status : result, cacheStatus: status };

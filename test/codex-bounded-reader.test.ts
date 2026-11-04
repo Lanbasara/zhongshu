@@ -30,6 +30,33 @@ async function fixture() {
   return { root, binding, header, options, reader, append, item, close, restart, full, release, latest };
 }
 
+test('Codex change feed finds completed old-item revisions with fixed cuts, empty progress and restart', async () => {
+  const f = await fixture(); let reader = f.reader;
+  try {
+    const empty = await reader.historyChanges(f.binding); assert.deepEqual(empty.itemIds, []); assert.equal(empty.hasMore, false); assert(empty.cursor);
+    assert.deepEqual(await reader.historyChanges(f.binding, empty.cursor), empty);
+    await f.append({ type: 'event_msg', payload: { type: 'task_started', turn_id: 'run-1' } });
+    const nonItem = await reader.historyChanges(f.binding, empty.cursor); assert.deepEqual(nonItem.itemIds, []); assert.equal(nonItem.hasMore, false); assert.notEqual(nonItem.cursor, empty.cursor);
+    for (let n = 0; n < 35; n++) await f.append(f.item({ type: 'AgentMessage', id: `message-${n}`, content: [{ type: 'Text', text: `original-${n}` }] }));
+    const first = await reader.historyChanges(f.binding, nonItem.cursor); assert.equal(first.itemIds.length, 16); assert(first.hasMore);
+    await f.append(f.item({ type: 'AgentMessage', id: 'message-0', content: [{ type: 'Text', text: 'revised-completed-body' }] }));
+    let page = first; const ids = [...first.itemIds];
+    while (page.hasMore) { page = await reader.historyChanges(f.binding, page.cursor); assert(page.itemIds.length <= 16); ids.push(...page.itemIds); }
+    assert.deepEqual(ids, Array.from({ length: 35 }, (_, n) => `message-${n}`));
+    const revision = await reader.historyChanges(f.binding, page.cursor); assert.deepEqual(revision.itemIds, ['message-0']); assert.equal(revision.hasMore, false);
+    const updated = (await reader.readItems(f.binding, revision.itemIds))[0]!; assert.equal(updated.text, 'revised-completed-body'); assert.equal(updated.status, 'completed');
+    // Twenty revisions of one ID still consume two pages of raw indexed changes.
+    for (let n = 0; n < 20; n++) await f.append(f.item({ type: 'AgentMessage', id: 'message-0', content: [{ type: 'Text', text: `revision-${n}` }] }));
+    const repeated = await reader.historyChanges(f.binding, revision.cursor); assert.deepEqual(repeated.itemIds, ['message-0']); assert(repeated.hasMore);
+    await reader.close(); await rm(f.options.cacheRoot, { recursive: true, force: true }); reader = await f.restart();
+    const resumed = await reader.historyChanges(f.binding, repeated.cursor); assert.deepEqual(resumed.itemIds, ['message-0']); assert.equal(resumed.hasMore, false);
+    assert.deepEqual(await reader.historyChanges(f.binding, resumed.cursor), { ...resumed, itemIds: [] });
+    await assert.rejects(async () => reader.historyChanges({ ...f.binding, id: 'other' }, resumed.cursor), /history_cursor_invalid/);
+    await rename(f.binding.path, f.binding.path + '.old'); await writeFile(f.binding.path, JSON.stringify(f.header) + '\n');
+    await assert.rejects(reader.historyChanges(f.binding, resumed.cursor), /history_cursor_invalid/);
+  } finally { await f.close(); }
+});
+
 test('Codex streams a 32 MiB persisted reply, bounded preview/chunks, exact SHA and worker restart cursor', async () => {
   const f = await fixture(); let ticks = 0; const timer = setInterval(() => ticks++, 5);
   try {

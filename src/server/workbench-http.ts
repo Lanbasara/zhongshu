@@ -86,8 +86,9 @@ function snapshotView(value: Awaited<ReturnType<Workbench['snapshot']>>): Workbe
   const hasOlder = trimmed || Boolean(history.olderBeforeItemId || history.nativeOlderCursor);
   const progress = (kind: 'latest' | 'backfill') => {
     const job = value.archive.find(job => job.kind === kind);
-    return job ? { complete: !job.working && !job.coverageError && !job.error && (kind === 'latest' ? job.cursor === null && job.lastSuccessAt !== null : job.complete),
-      error: job.error ?? job.coverageError, lastSuccessAt: job.lastSuccessAt, pages: job.pages } : null;
+    return job ? { complete: !job.working && !job.coverageError && !job.error && (kind === 'latest' ? job.cursor === null && job.lastSuccessAt !== null && job.updatesComplete === true : job.complete),
+      error: job.error ?? job.coverageError, lastSuccessAt: kind === 'latest' && job.updatesLastSuccessAt !== undefined
+        ? job.lastSuccessAt === null || job.updatesLastSuccessAt === null ? null : Math.min(job.lastSuccessAt, job.updatesLastSuccessAt) : job.lastSuccessAt, pages: job.pages } : null;
   };
   const result = { conversation, operationState: value.operationState, archive: { latest: progress('latest'), backfill: progress('backfill') }, history: {
     items, liveItems, liveItemsLimited: history.liveItemsLimited || liveItems.length < history.liveItems.length, loaded: history.historyLoaded,

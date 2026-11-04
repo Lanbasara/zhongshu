@@ -8,7 +8,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { z } from 'zod';
 import { BoundedJsonEnvelope } from '../dsh/bounded-json.ts';
 import { BoundedCache } from '../dsh/bounded-cache.ts';
-import { boundedCodexOptions, rolloutBinding, rolloutCursor, rolloutBody, rolloutKey, encodeRolloutToken } from './bounded-reader.ts';
+import { boundedCodexOptions, rolloutBinding, rolloutCursor, rolloutChangesCursor, rolloutBody, rolloutKey, encodeRolloutToken } from './bounded-reader.ts';
 import type { RolloutBinding } from './bounded-reader.ts';
 import type { NativeItem, NativeBodySource, HistoryPage } from '../types.ts';
 import { editPath } from '../edit-paths.ts';
@@ -291,9 +291,12 @@ async function project(handle: FileHandle, db: DatabaseSync, row: Row, key: stri
   if (['McpToolCall', 'DynamicToolCall'].includes(row.kind) && sources.text) sources.output = sources.text;
   return { ...value.item, ...(Object.keys(sources).length ? { bodySources: sources } : {}), ...(imageSource ? { imageSources: imageSource } : {}) };
 }
-async function withSource<T>(binding: RolloutBinding, action: (handle: FileHandle, db: DatabaseSync, key: string, state: State) => Promise<T>) {
+async function withSource<T>(binding: RolloutBinding, action: (handle: FileHandle, db: DatabaseSync, key: string, state: State) => Promise<T>, expectedGeneration?: string) {
   const key = rolloutKey(binding); quota.protect(key); const handle = await source(binding); let db: DatabaseSync | undefined;
-  try { db = await database(key); const state = await scan(handle, db, binding); return await action(handle, db, key, state); }
+  try {
+    if (expectedGeneration) { const stat = await handle.stat({ bigint: true }), head = await header(handle, binding, Number(stat.size)); if (uuid(`${stat.dev}:${stat.ino}:${stat.birthtimeNs}` + head.sha) !== expectedGeneration) fail('history_cursor_invalid'); }
+    db = await database(key); const state = await scan(handle, db, binding); return await action(handle, db, key, state);
+  }
   finally { db?.close(); await handle.close(); }
 }
 const pageArgs = z.object({ binding: rolloutBinding, cursor: rolloutCursor.optional(), limit: count.min(1).max(100) });
@@ -324,6 +327,18 @@ async function history(raw: unknown): Promise<HistoryPage> {
 }
 async function dispatch(method: string, args: unknown): Promise<unknown> {
   if (method === 'history') return history(args);
+  if (method === 'changes') {
+    const parsed = z.object({ binding: rolloutBinding, cursor: rolloutChangesCursor.optional(), limit: count.min(1).max(16) }).parse(args);
+    return withSource(parsed.binding, async (_handle, db, key, state) => {
+      const cursor = parsed.cursor;
+      if (cursor && (cursor.key !== key || cursor.generation !== state.generation || cursor.through > state.seq)) fail('history_cursor_invalid');
+      const through = cursor && cursor.after < cursor.through ? cursor.through : state.seq, after = cursor?.after ?? 0;
+      const rows = db.prepare('SELECT id,seq FROM records WHERE seq>? AND seq<=? ORDER BY seq LIMIT ?').all(after, through, parsed.limit);
+      const last = rows.length ? Number(rows.at(-1)!.seq) : through;
+      const hasMore = !!db.prepare('SELECT 1 FROM records WHERE seq>? AND seq<=? LIMIT 1').get(last, through);
+      return { itemIds: [...new Set(rows.map(row => String(row.id)))], cursor: encodeRolloutToken('cc1.', { v: 1, key, generation: state.generation, through, after: hasMore ? last : through }), hasMore };
+    }, parsed.cursor?.generation);
+  }
   if (method === 'items') {
     const parsed = z.object({ binding: rolloutBinding, ids: z.array(id).max(16) }).parse(args);
     return withSource(parsed.binding, async (handle, db, key, state) => {

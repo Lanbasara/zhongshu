@@ -227,7 +227,7 @@ async function main() {
       return receipt;
     }
     const synthetic: HarnessAdapter = {
-      id, earlyInput: id === 'codex' ? 'current' : 'soon', submit, submitQueued: submit,
+      id, historyReadOnly: true, earlyInput: id === 'codex' ? 'current' : 'soon', submit, submitQueued: submit,
       async skills(binding) { return skillOptions(skills(binding)); },
       async catalog() { return { id, available: true, models: [{ id: 'fixture-model', label: 'Fixture · 非真实模型' }], permissions: [{ id: 'fixture-write', label: 'Fixture write', description: 'Synthetic boundary; no actual agent execution.' }, { id: 'fixture-read', label: 'Fixture read', description: 'Synthetic configuration selection only.' }] }; },
       async create(input, onBound) {
@@ -248,6 +248,17 @@ async function main() {
         const value = checked(binding); const end = cursor === undefined ? value.items.length : z.coerce.number().int().min(0).max(value.items.length).parse(cursor);
         const start = Math.max(0, end - limit);
         return { items: value.items.slice(start, end), olderCursor: start ? String(start) : null, ...(cursor === undefined && value.usage ? { usage: value.usage } : {}) };
+      },
+      async readItems(binding, ids) { return checked(binding).items.filter(item => ids.includes(item.id)); },
+      async historyChanges(binding, cursor, limit = 16) {
+        const value = checked(binding); z.number().int().min(1).max(16).parse(limit);
+        const prior = cursor ? z.object({ binding: z.literal(binding.id), revision: z.number().int().nonnegative(), after: z.number().int().min(0).max(1000) }).strict()
+          .parse(JSON.parse(Buffer.from(cursor, 'base64url').toString())) : undefined;
+        // The finite synthetic peer has no append log. Re-scan its bounded item
+        // array after each revision; real physical sources use their append feed.
+        const after = prior?.revision === value.revision ? prior.after : 0;
+        const items = value.items.slice(after, after + limit), next = after + items.length;
+        return { itemIds: items.map(item => item.id), cursor: Buffer.from(JSON.stringify({ binding: binding.id, revision: value.revision, after: next })).toString('base64url'), hasMore: next < value.items.length };
       },
       async reconcile(binding, operationId) {
         const value = checked(binding); const message = value.submissions.find(item => item.id === operationId);
@@ -276,7 +287,8 @@ async function main() {
       state: (binding, target) => owns(binding) ? Promise.resolve(idle()) : synthetic.state(binding, target),
       watch: (binding, listener) => owns(binding) ? Promise.resolve(() => {}) : synthetic.watch(binding, listener),
       history: (binding, ...args) => owns(binding) ? source.reads.history(binding, ...args) : synthetic.history(binding, ...args),
-      readItems: (binding, ids) => owns(binding) ? source.reads.readItems!(binding, ids) : Promise.resolve(checked(binding).items.filter(item => ids.includes(item.id))),
+      historyChanges: (binding, ...args) => owns(binding) ? source.reads.historyChanges!(binding, ...args) : synthetic.historyChanges!(binding, ...args),
+      readItems: (binding, ids) => owns(binding) ? source.reads.readItems!(binding, ids) : synthetic.readItems!(binding, ids),
       readBodyChunk: source.reads.readBodyChunk, releaseBodySource: source.reads.releaseBodySource, readImage: source.reads.readImage,
       async close() { await synthetic.close(); await source.close(); },
     };

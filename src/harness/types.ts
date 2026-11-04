@@ -61,6 +61,11 @@ export type HistoryPage = {
   olderCursor: string | null;
   usage?: ConversationUsage;
 };
+/** A bounded change feed independent of the item's chronological position.
+ * The opaque checkpoint pins a native generation and a stable append cutoff.
+ * A completed page can be polled again to capture the next cutoff.
+ */
+export type HistoryChanges = { itemIds: string[]; cursor: string; hasMore: boolean };
 export type Receipt =
   | { outcome: 'accepted'; runId?: string }
   | { outcome: 'rejected'; reason: string }
@@ -77,6 +82,8 @@ export type NativeChange =
 export interface HarnessAdapter {
   readonly id: HarnessId;
   readonly earlyInput?: 'current' | 'soon';
+  /** History/body reads cannot activate or resume native execution. */
+  readonly historyReadOnly?: true;
   catalog(): Promise<Catalog>;
   skills?(binding: Binding): Promise<SkillOption[]>;
   /** Persist the identity immediately, before later model/permission setup can fail. */
@@ -84,6 +91,7 @@ export interface HarnessAdapter {
   /** A target may precede the current/latest run (for example a later native notification turn). Never infer its terminal result from that ordering. */
   state(binding: Binding, targetRunId?: string): Promise<NativeState>;
   history(binding: Binding, olderCursor?: string, limit?: number): Promise<HistoryPage>;
+  historyChanges?(binding: Binding, cursor?: string, limit?: number): Promise<HistoryChanges>;
   /** operationId is retained in the native message for reconciliation. Never auto-resend. */
   submit(binding: Binding, operation: HarnessInput): Promise<Receipt>;
   submitQueued?(binding: Binding, operation: HarnessInput, delivery: QueueDelivery): Promise<Receipt>;

@@ -52,7 +52,7 @@ export function projectBodyPreview(item: NativeItem): NativeItem {
  * All publication calls run inside the owning store's transaction. No native I/O
  * or user callbacks are allowed while that transaction is open.
  */
-export function createBodyStore(db: DatabaseSync, options: { transientBytes?: number } = {}) {
+export function createBodyStore(db: DatabaseSync, options: { transientBytes?: number; assertRetentionCapacity?: (bytes: number) => void } = {}) {
   const transientBytes = options.transientBytes ?? 512 * 1024 ** 2;
   if (!Number.isSafeInteger(transientBytes) || transientBytes < bodyChunkBytes) throw new StoreError('invalid_storage_capacity', 500);
   const managed = Boolean(db.prepare("SELECT 1 FROM sqlite_schema WHERE name='workbench_body_usage'").get());
@@ -175,7 +175,7 @@ export function createBodyStore(db: DatabaseSync, options: { transientBytes?: nu
         if (typeof text !== 'string') continue;
         const bytes = Buffer.from(text);
         if (bytes.length !== reference.bytes || createHash('sha256').update(bytes).digest('hex') !== reference.version) continue;
-        if (offset >= bytes.length) throw new StoreError('body_offset_invalid', 416);
+        if (offset >= bytes.length && !(offset === 0 && bytes.length === 0)) throw new StoreError('body_offset_invalid', 416);
         const data = bytes.subarray(offset, offset + bodyChunkBytes); const next = offset + data.length;
         return { ...reference, offset, nextOffset: next < bytes.length ? next : null, data };
       }
@@ -183,11 +183,48 @@ export function createBodyStore(db: DatabaseSync, options: { transientBytes?: nu
     }
     if (Number(manifest.bytes) !== reference.bytes) throw new StoreError('body_not_found', 404);
     if (offset >= reference.bytes && !(offset === 0 && reference.bytes === 0)) throw new StoreError('body_offset_invalid', 416);
+    if (reference.bytes === 0) {
+      if (Number(manifest.chunks) !== 0 || reference.version !== createHash('sha256').digest('hex')) throw new StoreError('body_incomplete', 503);
+      return { ...reference, offset: 0, nextOffset: null, data: new Uint8Array(0) };
+    }
     const row = db.prepare('SELECT data FROM workbench_body_chunks WHERE version=? AND part=?').get(reference.version, offset / bodyChunkBytes);
     if (!row || !(row.data instanceof Uint8Array) || row.data.byteLength !== Math.min(bodyChunkBytes, reference.bytes - offset))
       throw new StoreError('body_incomplete', 503);
     const next = offset + row.data.byteLength;
     return { ...reference, offset, nextOffset: next < reference.bytes ? next : null, data: row.data };
+  }
+  /** Inline completed fields become immutable records only when superseded.
+   * Unchanged metadata and streaming drafts incur no body/chunk/ref writes.
+   * The caller's item/checkpoint transaction also owns these retention writes.
+   */
+  function retainReplaced(conversationId: string, previous: NativeItem, replacement: NativeItem) {
+    if (previous.status === 'running' || previous.previewOnly) return;
+    const value = (item: NativeItem, field: z.infer<typeof bodyFieldSchema>) => field === 'text' ? item.text
+      : field === 'references' ? item.references === undefined ? undefined : JSON.stringify(item.references, null, 2) : item.tool?.[field];
+    const pending: { field: z.infer<typeof bodyFieldSchema>; bytes: Buffer; version: string }[] = [];
+    for (const field of ['text', 'input', 'output', 'references'] as const) {
+      if (previous.bodies?.[field]) continue; // Already published with immutable ownership.
+      const old = value(previous, field); if (old === undefined) continue;
+      const nextReference = replacement.bodies?.[field];
+      if (!nextReference && old === value(replacement, field)) continue;
+      const bytes = Buffer.from(old), version = createHash('sha256').update(bytes).digest('hex');
+      if (nextReference?.version === version && nextReference.bytes === bytes.length || owned.get(conversationId, previous.id, field, version)) continue;
+      pending.push({ field, bytes, version });
+    }
+    if (!pending.length) return;
+    options.assertRetentionCapacity?.(pending.reduce((sum, entry) => sum + entry.bytes.length + 4096, 0));
+    for (const { field, bytes, version } of pending) {
+      const chunks = Math.ceil(bytes.length / bodyChunkBytes);
+      db.prepare('INSERT OR IGNORE INTO workbench_bodies(version,bytes,chunks,complete) VALUES(?,?,?,0)').run(version, bytes.length, chunks);
+      const manifest = db.prepare('SELECT bytes,chunks,complete FROM workbench_bodies WHERE version=?').get(version)!;
+      if (Number(manifest.bytes) !== bytes.length || Number(manifest.chunks) !== chunks) throw new StoreError('body_reference_invalid', 409);
+      if (manifest.complete !== 1) {
+        const write = db.prepare('INSERT INTO workbench_body_chunks VALUES(?,?,?) ON CONFLICT(version,part) DO UPDATE SET data=excluded.data');
+        for (let part = 0; part < chunks; part++) write.run(version, part, bytes.subarray(part * bodyChunkBytes, (part + 1) * bodyChunkBytes));
+        db.prepare('UPDATE workbench_bodies SET complete=1 WHERE version=?').run(version);
+      }
+      bind.run(conversationId, previous.id, field, version);
+    }
   }
   function publish(conversationId: string, item: NativeItem): NativeItem {
     let remaining = itemPreviewBytes;
@@ -205,7 +242,9 @@ export function createBodyStore(db: DatabaseSync, options: { transientBytes?: nu
         const manifest = owned.get(conversationId, item.id, field, previous.version) ?? staged.get(conversationId, item.id, field, previous.version);
         if (!manifest || Number(manifest.bytes) !== previous.bytes) throw new StoreError('body_reference_invalid', 409);
         const first = db.prepare('SELECT data FROM workbench_body_chunks WHERE version=? AND part=0').get(previous.version);
-        if (bytes.length > itemPreviewBytes || !first || !(first.data instanceof Uint8Array) || !Buffer.from(first.data).subarray(0, bytes.length).equals(bytes))
+        if (bytes.length > itemPreviewBytes || (previous.bytes === 0
+          ? bytes.length !== 0 || Number(manifest.chunks) !== 0
+          : !first || !(first.data instanceof Uint8Array) || !Buffer.from(first.data).subarray(0, bytes.length).equals(bytes)))
           throw new StoreError('body_preview_invalid', 409);
         bind.run(conversationId, item.id, field, previous.version);
         db.prepare('DELETE FROM workbench_body_stages WHERE conversation_id=? AND item_id=? AND field=? AND version=?').run(conversationId, item.id, field, previous.version);
@@ -278,5 +317,5 @@ export function createBodyStore(db: DatabaseSync, options: { transientBytes?: nu
     }
     return changed;
   }
-  return { publish, read, begin, append, validate, finish, confirmPublication, maintenance };
+  return { publish, read, begin, append, validate, finish, confirmPublication, retainReplaced, maintenance };
 }

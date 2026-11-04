@@ -12,6 +12,9 @@ export const boundedProjectArgs = boundedBinding.extend({ sourceGeneration: z.st
 export const boundedBodyArgs = boundedChunkArgs.extend({ field: z.enum(['text', 'input']), lease: z.string().uuid().optional() });
 export const boundedTerminalArgs = boundedBinding.extend({ sourceGeneration: z.string().uuid(), throughSeq: count, turn: count.min(1) });
 export const boundedItemsArgs = boundedBinding.extend({ sourceGeneration: z.string().uuid(), throughSeq: count, keys: z.array(z.string().min(1).max(600)).min(1).max(16) });
+export const boundedChangesCursor = z.object({ generation: z.string().uuid(), through: z.number().int().min(-1).max(Number.MAX_SAFE_INTEGER), after: z.number().int().min(-1).max(Number.MAX_SAFE_INTEGER) }).strict().refine(value => value.after <= value.through);
+export const boundedChangesArgs = boundedBinding.extend({ cursor: boundedChangesCursor.optional(), limit: count.min(1).max(16).default(16) });
+export type BoundedChanges = { keys: string[]; cursor: z.infer<typeof boundedChangesCursor>; hasMore: boolean };
 export type BoundedBinding = z.infer<typeof boundedBinding>;
 export const boundedOptions = z.object({ nativeRoot: path, cacheRoot: path, maxCacheBytes: z.number().int().min(1024 * 1024).max(16 * 1024 ** 3).default(512 * 1024 ** 2) }).strict();
 export type BoundedDshOptions = z.input<typeof boundedOptions>;
@@ -67,6 +70,7 @@ export class BoundedDshReader {
   page(args: z.input<typeof boundedPageArgs>): Promise<BoundedPage> { return this.request('page', boundedPageArgs.parse(args)); }
   items(args: z.input<typeof boundedPageArgs>): Promise<BoundedItemPage> { return this.request('items', boundedPageArgs.parse(args)); }
   itemsByKeys(args: z.input<typeof boundedItemsArgs>): Promise<BoundedItemPage> { return this.request('itemsByKeys', boundedItemsArgs.parse(args)); }
+  changes(args: z.input<typeof boundedChangesArgs>): Promise<BoundedChanges> { return this.request('changes', boundedChangesArgs.parse(args)); }
   readChunk(args: z.input<typeof boundedChunkArgs>): Promise<BoundedChunk> { return this.request('chunk', boundedChunkArgs.parse(args)); }
   project(args: z.input<typeof boundedProjectArgs>): Promise<ExtractedRecord> { return this.request('project', boundedProjectArgs.parse(args)); }
   readBody(args: z.input<typeof boundedBodyArgs>): Promise<BoundedChunk> { return this.request('body', boundedBodyArgs.parse(args)); }

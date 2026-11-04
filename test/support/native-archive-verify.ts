@@ -127,7 +127,7 @@ export async function verifyNativeArchive(input: z.infer<typeof parameters>) {
       lastBatch = batches;
       const jobs = await storage!.store.archiveJobs(id), job = jobs.find(row => row.kind === kind)!;
       if (job.error && !['DSH_HISTORY_INDEXING', 'codex_bounded_indexing'].includes(job.error)) throw new Error(`archive:${kind}:${job.error}`);
-      if (job.complete || kind === 'latest' && !job.working && job.cursor === null && job.lastSuccessAt !== null && !job.error) { assert.equal(job.coverageError, null); return batches; }
+      if (job.complete || kind === 'latest' && !job.working && job.cursor === null && job.lastSuccessAt !== null && !job.error && job.updatesComplete === true) { assert.equal(job.coverageError, null); return batches; }
       assert(batches < Math.ceil((options.count + options.gap) / 2) + 100, 'archive checkpoint made no progress');
       if (options.progress && performance.now() - lastProgress > 5000) { lastProgress = performance.now(); console.log(JSON.stringify({ harness: options.harness, phase: kind, batches, elapsedSeconds: Math.round((performance.now() - begun) / 1000) })); }
     } while (true);

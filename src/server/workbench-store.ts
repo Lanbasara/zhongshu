@@ -11,7 +11,7 @@ import { createCapacityGuard, type CapacityOptions, type StorageCapacity } from 
 import { createOperationPayloadStore } from './operation-payload-store.ts';
 import { activeHistoryOrder, advanceHistoryRebuild, allocateHistoryPositions, requestHistoryRebuild } from './history-order.ts';
 import { createResourceStore } from './resources.ts';
-import type { Binding, Configuration, HarnessId, NativeItem, NativeState, Receipt } from '../harness/types.ts';
+import type { Binding, Configuration, HarnessId, HistoryChanges, NativeItem, NativeState, Receipt } from '../harness/types.ts';
 
 export type Readiness = 'preparing' | 'ready' | 'blocked';
 export type Conversation = {
@@ -46,7 +46,9 @@ export type ArchiveJob = {
   nextAt: number; lastSuccessAt: number | null; error: string | null; failures: number;
   scanGeneration: number; targetId: string | null; targetSeen: boolean; coverageError: string | null;
   refreshAfter: string | null; working: boolean;
+  updatesComplete?: boolean; updatesLastSuccessAt?: number | null;
 };
+export type ArchiveUpdateCheckpoint = { cursor: string | null; complete: boolean; lastSuccessAt: number | null };
 type ConversationList = {
   beforeId?: string; limit?: number; workspaceId?: string; archived?: boolean;
 };
@@ -101,6 +103,9 @@ export interface WorkbenchStore {
   advanceStorageMaintenance(): boolean;
   pendingArchiveItems(conversationId: string, after: string | null): string[];
   refreshArchiveItems(job: ArchiveJob, items: NativeItem[], requested: string[]): void;
+  archiveUpdates(conversationId: string): ArchiveUpdateCheckpoint | null;
+  commitArchiveUpdates(job: ArchiveJob, expectedCursor: string | null, page: HistoryChanges, items: NativeItem[]): boolean;
+  resetArchiveUpdates(job: ArchiveJob, expectedCursor: string | null): void;
   readBody: ReturnType<typeof createBodyStore>['read'];
   beginBodyStage: ReturnType<typeof createBodyStore>['begin'];
   stageBodyChunk: ReturnType<typeof createBodyStore>['append'];
@@ -281,7 +286,10 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
   };
   const conversationRow = (id: string) => db.prepare('SELECT * FROM workbench_conversations WHERE id = ?').get(id);
   const hasArchiveTables = Boolean(db.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='workbench_archive_jobs'").get());
-  const bodies = db.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='workbench_bodies'").get() ? createBodyStore(db, { transientBytes: options.capacity?.transientBytes }) : undefined;
+  const hasArchiveUpdates = Boolean(db.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='workbench_archive_updates'").get());
+  const bodies = db.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='workbench_bodies'").get() ? createBodyStore(db, {
+    transientBytes: options.capacity?.transientBytes, assertRetentionCapacity: bytes => capacity.assertWritable('archive', bytes),
+  }) : undefined;
   const operationPayloads = createOperationPayloadStore(db);
   const readOperation = (row: Row) => operationFromRow(row, operationPayloads.read(String(row.id), String(row.payload_json)));
   const removedWorkspace = db.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='workbench_workspaces'").get() ?
@@ -355,21 +363,28 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
     return row;
   };
   const metadata = (item: NativeItem) => JSON.stringify({ ...(item.images?.length ? { images: item.images } : {}), ...(item.references?.length ? { references: item.references } : {}), ...(item.tool ? { tool: item.tool } : {}), ...(item.bodies ? { bodies: item.bodies } : {}), ...(item.previewOnly ? { previewOnly: true } : {}), ...(item.mediaPending ? { mediaPending: true } : {}), ...(item.sourceRevision ? { sourceRevision: item.sourceRevision } : {}) });
-  const preserveLegacy = (conversationId: string, itemId: string) => {
-    if (!bodies) return;
-    const canonical = db.prepare('SELECT * FROM workbench_items WHERE conversation_id=? AND id=?').get(conversationId, itemId);
+  const preserveReplaced = (conversationId: string, incoming: NativeItem, canonicalExists = true): NativeItem => {
+    const itemId = incoming.id;
+    if (!bodies) return mergeNativeRevision(store.getItem(conversationId, itemId), incoming);
+    const canonical = canonicalExists ? db.prepare('SELECT * FROM workbench_items WHERE conversation_id=? AND id=?').get(conversationId, itemId) : undefined;
     const live = db.prepare('SELECT * FROM workbench_live_items WHERE conversation_id=? AND id=?').get(conversationId, itemId);
+    const previous: NativeItem[] = [];
     for (const [row, statement] of [[canonical, 'UPDATE workbench_items SET text=?,metadata_json=? WHERE conversation_id=? AND id=?'],
       [live, 'UPDATE workbench_live_items SET text=?,metadata_json=? WHERE conversation_id=? AND id=?']] as const) {
       if (!row) continue;
       const raw = itemFromRow(row);
       const projected = projectBodyPreview(raw);
-      if (raw.text === projected.text && raw.tool?.input === projected.tool?.input && raw.tool?.output === projected.tool?.output && raw.references === projected.references) continue;
+      if (raw.text === projected.text && raw.tool?.input === projected.tool?.input && raw.tool?.output === projected.tool?.output && raw.references === projected.references) { previous.push(raw); continue; }
       capacity.assertWritable('archive', Buffer.byteLength(raw.text) + 4096);
       const preview = bodies.publish(conversationId, raw);
       bodies.confirmPublication(conversationId, preview);
       db.prepare(statement).run(preview.text, metadata(preview), conversationId, itemId);
+      previous.push(preview);
     }
+    // Match getItem's live-before-canonical precedence without another lookup.
+    const accepted = mergeNativeRevision(previous.at(-1) ?? null, incoming);
+    for (const old of previous) bodies.retainReplaced(conversationId, old, accepted);
+    return accepted;
   };
   const store: WorkbenchStore = {
     resources,
@@ -784,12 +799,16 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
       try { return mutate(changed => {
         requireConversation(conversationId);
         capacity.assertWritable('archive', items.reduce((bytes, item) => bytes + Buffer.byteLength(item.text) + 4096, 0));
-        const added = [...incoming.keys()].some(id => !store.hasHistoryItem(conversationId, id));
+        // The order allocator inserts empty positioning placeholders. They are
+        // not published completed bodies and must never create retained empty
+        // versions. Capture only the existing IDs, not full legacy payloads.
+        const existing = new Set(db.prepare('SELECT id FROM workbench_items WHERE conversation_id=? AND id IN (SELECT value FROM json_each(?))')
+          .all(conversationId, JSON.stringify([...incoming.keys()])).map(row => String(row.id)));
+        const added = existing.size < incoming.size;
         const positions = allocateHistoryPositions(db, conversationId, [...incoming.keys()], beforeItemId);
         if (added) changed(conversationId);
         for (const raw of incoming.values()) {
-          preserveLegacy(conversationId, raw.id);
-          const accepted = mergeNativeRevision(store.getItem(conversationId, raw.id), raw);
+          const accepted = preserveReplaced(conversationId, raw, existing.has(raw.id));
           const item = bodies?.publish(conversationId, accepted) ?? accepted;
           bodies?.confirmPublication(conversationId, item);
           const written = upsertItem.run(conversationId, item.id, positions.get(item.id)!, item.kind, item.text, item.status, item.runId ?? null, item.operationId ?? null, metadata(item));
@@ -807,8 +826,7 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
       return mutate(changed => {
         requireConversation(conversationId);
         capacity.assertWritable('archive', Buffer.byteLength(raw.text) + 4096);
-        preserveLegacy(conversationId, raw.id);
-        const accepted = mergeNativeRevision(store.getItem(conversationId, raw.id), raw);
+        const accepted = preserveReplaced(conversationId, raw);
         const item = bodies?.publish(conversationId, accepted) ?? accepted;
         bodies?.confirmPublication(conversationId, item);
         if (recordTurnFiles(conversationId, item)) changed(conversationId);
@@ -927,6 +945,11 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
           ?? db.prepare("SELECT id FROM workbench_live_items WHERE conversation_id=? AND (status='running' OR json_extract(metadata_json,'$.previewOnly')=1 OR json_extract(metadata_json,'$.mediaPending')=1) LIMIT 1").get(conversationId);
         return db.prepare('SELECT * FROM workbench_archive_jobs WHERE conversation_id=? ORDER BY kind').all(conversationId).map(row => {
           const job = archiveJobFromRow(row);
+          if (job.kind === 'latest' && hasArchiveUpdates) {
+            const updates = store.archiveUpdates(conversationId);
+            job.updatesComplete = updates?.complete ?? false;
+            job.updatesLastSuccessAt = updates?.lastSuccessAt ?? null;
+          }
           return pending && !job.error ? { ...job, error: 'archive_items_pending' } : job;
         });
       });
@@ -956,6 +979,60 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
         changed(job.conversationId);
       });
     },
+    archiveUpdates(conversationId) {
+      parse(uuid, conversationId);
+      if (!hasArchiveUpdates) return null;
+      return storage(() => {
+        const row = db.prepare('SELECT cursor,complete,last_success_at FROM workbench_archive_updates WHERE conversation_id=?').get(conversationId);
+        return row ? { cursor: row.cursor === null ? null : String(row.cursor), complete: row.complete === 1,
+          lastSuccessAt: row.last_success_at === null ? null : Number(row.last_success_at) } : null;
+      });
+    },
+    commitArchiveUpdates(job, expectedCursor, value, values) {
+      parse(uuid, job.conversationId); parse(boundedText(65_536).nullable(), expectedCursor);
+      const page = parse(z.object({ itemIds: z.array(identifier).max(16), cursor: boundedText(65_536).min(1), hasMore: z.boolean() }).strict(), value);
+      const items = parse(z.array(nativeItemSchema).max(16), values);
+      if (job.kind !== 'latest' || new Set(page.itemIds).size !== page.itemIds.length || new Set(items.map(item => item.id)).size !== items.length ||
+        items.length !== page.itemIds.length || items.some(item => !page.itemIds.includes(item.id))) throw new StoreError('archive_update_identity_changed', 502);
+      if (page.hasMore && page.cursor === expectedCursor) throw new StoreError('history_no_progress', 502);
+      return mutate(changed => {
+        if (!hasArchiveUpdates) throw new StoreError('archive_updates_unavailable', 503);
+        const row = db.prepare('SELECT epoch,binding_id FROM workbench_archive_jobs WHERE conversation_id=? AND kind=?').get(job.conversationId, job.kind);
+        const checkpoint = db.prepare('SELECT * FROM workbench_archive_updates WHERE conversation_id=?').get(job.conversationId);
+        if (!row || Number(row.epoch) !== job.epoch || row.binding_id !== job.bindingId || checkpoint?.binding_id !== job.bindingId || checkpoint.cursor !== expectedCursor ||
+          requireConversation(job.conversationId).binding?.id !== job.bindingId) return false;
+        // Changes never invent an ordering position. A newly appended item must
+        // first enter through chronological history; retry the same feed cursor
+        // after that path catches up instead of silently skipping unknown IDs.
+        if (items.some(item => !store.hasHistoryItem(job.conversationId, item.id))) throw new StoreError('archive_update_waiting_for_history', 409);
+        for (const item of items) {
+          const previous = store.getItem(job.conversationId, item.id);
+          if (previous?.sourceRevision && item.sourceRevision && previous.sourceRevision.generation !== item.sourceRevision.generation)
+            db.prepare("UPDATE workbench_archive_jobs SET coverage_error='archive_source_gap' WHERE conversation_id=? AND kind='latest'").run(job.conversationId);
+        }
+        // Feed order is append/revision order, not chronological item order.
+        // All IDs were checked above; update one existing position at a time
+        // inside this same outer transaction instead of reordering the page.
+        for (const item of items) store.mergeHistory(job.conversationId, [item]);
+        db.prepare('UPDATE workbench_archive_updates SET cursor=?,complete=?,last_success_at=? WHERE conversation_id=?').run(page.cursor, page.hasMore ? 0 : 1, now(), job.conversationId);
+        db.prepare("UPDATE workbench_archive_jobs SET next_at=?,working=?,error=NULL,failures=0 WHERE conversation_id=? AND kind='latest'")
+          .run(now() + (page.hasMore ? 1 : 15_000), page.hasMore ? 1 : 0, job.conversationId);
+        changed(job.conversationId); return true;
+      });
+    },
+    resetArchiveUpdates(job, expectedCursor) {
+      parse(uuid, job.conversationId); parse(boundedText(65_536).nullable(), expectedCursor);
+      mutate(changed => {
+        if (!hasArchiveUpdates || job.kind !== 'latest') return;
+        const row = db.prepare("SELECT epoch,binding_id FROM workbench_archive_jobs WHERE conversation_id=? AND kind='latest'").get(job.conversationId);
+        if (!row || Number(row.epoch) !== job.epoch || row.binding_id !== job.bindingId) return;
+        const result = db.prepare('UPDATE workbench_archive_updates SET cursor=NULL,complete=0 WHERE conversation_id=? AND binding_id=? AND cursor IS ?')
+          .run(job.conversationId, job.bindingId, expectedCursor);
+        if (!Number(result.changes)) return;
+        db.prepare("UPDATE workbench_archive_jobs SET coverage_error='archive_continuity_unverified',next_at=? WHERE conversation_id=? AND kind='latest'").run(now() + 1000, job.conversationId);
+        changed(job.conversationId);
+      });
+    },
     dueArchiveJobs(limit = 8) {
       parse(z.number().int().min(1).max(64), limit);
       return storage(() => db.prepare('SELECT * FROM workbench_archive_jobs WHERE complete=0 AND next_at<=? ORDER BY next_at,conversation_id,kind LIMIT ?').all(now(), limit).map(archiveJobFromRow));
@@ -971,6 +1048,7 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
           db.prepare('UPDATE workbench_archive_jobs SET target_id=?,target_seen=0 WHERE conversation_id=? AND kind=?').run(head ? String(head.id) : null, conversationId, kind);
         }
         db.prepare('UPDATE workbench_archive_jobs SET epoch=epoch+1,working=1,next_at=? WHERE conversation_id=? AND kind=?').run(now() + 30_000, conversationId, kind);
+        if (kind === 'latest' && hasArchiveUpdates) db.prepare('UPDATE workbench_archive_updates SET complete=0 WHERE conversation_id=?').run(conversationId);
         return archiveJobFromRow(db.prepare('SELECT * FROM workbench_archive_jobs WHERE conversation_id=? AND kind=?').get(conversationId, kind)!);
       });
     },

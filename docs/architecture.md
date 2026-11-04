@@ -54,13 +54,15 @@ Web manifest 提供独立窗口入口。有限且已完成的 Markdown 预览按
 | --- | --- | --- |
 | 用户提交 → 操作落库 → adapter 派发 | Workbench 持有派发、排队、观察与恢复；观察连接的寿命不等于原生运行寿命 | [执行登记与门禁](adr/0011-managed-workspace-execution.md#持久未决登记与代次) |
 | 原生变更 → Workbench → 存储 → SSE 提示重取 | 执行状态、正文覆盖独立持久化；快照读取不重启已有观察或同步循环，存档失败不撤销已证实的执行状态 | [三种事实独立](adr/0010-durable-reading-archive.md#三种事实独立) |
-| 原生物理历史 → 持久任务 → 逐页提交 | 每个绑定有 latest/backfill 任务，不依赖页面访问或观察 runtime；页、游标、源代次与覆盖一起提交；全局两个槽，正文每 1 MiB 让出任务 | [可恢复同步](adr/0010-durable-reading-archive.md#可恢复同步) |
+| 原生物理历史 → 持久任务 → 逐页提交 | 每个绑定有 latest/backfill 任务和独立修订水位，不依赖页面访问或观察 runtime；历史页确立顺序，原生追加索引发现旧条目修订，正文与水位同事务提交；全局两个槽，正文每 1 MiB 让出任务 | [可恢复同步](adr/0010-durable-reading-archive.md#可恢复同步) |
 | 存储 → 摘要页 / 独立正文 → 浏览器窗口 | 对话快照合计至多 50 个条目、256 KiB；单条文本/工具/引用合用 8 KiB 预览；正文按不可变摘要和 64 KiB 字节块读取；队列编辑和本轮文件另读 | [查询、正文和渲染](adr/0012-bounded-data-paths.md#查询正文和渲染) |
 | 历史合并 → storage worker | 按稳定 ID 和索引位置增量合并；局部重排有界，大范围重建在另一套位置列分批推进后原子发布；移除累计对话/历史/操作条数上限 | [存储与调度](adr/0012-bounded-data-paths.md#存储与调度) |
 | 文件编辑资格 → 持久运行组 → 独占写者 | 一次旧绑定基线后只跟踪未决受理；冲突闭包一起封门、排空、进程收束，再条件写入；未知副作用保留门禁 | [编辑窗口协议](adr/0011-managed-workspace-execution.md#编辑窗口协议) |
 | 文件选择 → 代次清单 → keyset 页 | 目录 worker 分批扫描、发布代次，游标绑定目录身份/代次；后台刷新和旧页继续可区分，工作区本身也分页搜索 | [目录清单](adr/0012-bounded-data-paths.md#目录清单) |
 
 状态、历史和传输游标入口在 [Workbench](../src/server/workbench.ts)、[存储](../src/server/workbench-store.ts)、[HTTP](../src/server/workbench-http.ts) 与 [浏览器工作台](../src/web/workbench.tsx)。正文身份、暂存、分块、所有权和校验归 [body-store](../src/server/body-store.ts)；历史位置重建归 [history-order](../src/server/history-order.ts)。旧源游标失效会保留存档并重新锚定，同时标记连续性未确认；源缺口不会因一次新扫描成功而消失。运行中的实时前缀标记 `previewOnly`，不冒充可下载的完整正文；物理记录的可比较修订和终态负责完成它。
+
+修订流的游标绑定原生源代次与一轮固定上界，每页最多扫描 16 条追加索引记录，再按 ID 点读最新条目；空批次也推进水位。修订顺序不改变历史位置，尚未进入历史的 ID 必须等待历史路径补齐。已完成正文发生变化时，旧版本先保留为不可变正文；稳定重读和流式前缀不累积重复版本。只有历史回填与修订水位都确认，公开状态才可表示同步完整。登记已移除时，后台仍可核对原登记、目录身份和绑定后使用明确只读的物理读取能力；不能由存档获得执行许可或任意原文件读取权限。
 
 有界接入的 Codex reader 读取校验过身份和版本的持久 rollout，DSH reader 读取原生日志并建立稳定条目/工具锚点；巨型标量流式提取，缓存配额和正文租约由各 reader 管理。DSH 专用 Host plugin 缩减状态和 watch 投影。原生 state/watch/reconcile 仍可能加载或激活会话，必须走受控执行许可；物理 history/readItems/body 路径不恢复执行。原生模型运行时的内存成本独立于中书的分页预算，不能据此宣称原生 Agent loop 为常量空间。固定版本和复验归 [execution](features/execution.md) 与 [continuity](features/continuity.md)。
 
@@ -99,6 +101,8 @@ Codex 以原生 image input、DSH 以原生 image content 接图片，无需新�
 输入草稿的文本/已上传资源/引用沿用 sessionStorage；失败或中断的上传文件单独在 IndexedDB 暂存，重新加载后需明确重试。发送前必须先持久化操作编号及原提交内容；上传未完成或暂存失败不会悄悄只发文本。退出清理浏览器草稿与暂存。两端文件读取与生成能力的具体差异留在 adapter，验证入口统一归 [对话基本可用性](features/conversation-usability.md)。
 
 单次输入限制与永久存档容量是不同边界。[storage-capacity](../src/server/storage-capacity.ts) 实时计量主库/WAL、分批计量数据目录其他文件并检查文件系统余量。容量不足暂停新工作/上传及不能完成的回填，保留旧档和已受理任务；扩容后按余量与回差重新开放。暂存有独立预算，已发布正文版本不会因临时缓存清理而消失。Host 和独占文件写者的效果账本独立保留，不能随产品数据库回滚。承诺与退出条件见[容量规格](spec/storage-longevity.md)。
+
+管理员备份与恢复由 [database](../src/server/database.ts) 在私有暂存副本上核对已发布正文的所有权、分块顺序、字节数与完整摘要，校验通过才发布文件；未完成暂存继续保留其未完成状态。全量核验不放入在线应用启动或请求路径。
 
 技能目录从当前对话绑定的 Harness 读取。私有接口给浏览器显示信息和不透明 ID，草稿与操作保存已选技能的 ID 及文本位置。派发时 adapter 按原生清单核对并转换为本端输入。用量由 adapter 从原生事件或当前投影读取，Workbench 保存每段对话最近一次已确认的用量快照，通过原有变更流提示页面重取。复验见[技能引用](features/conversation-usability.md#u12-技能引用)与[对话用量](features/conversation-usability.md#u13-对话用量)。
 

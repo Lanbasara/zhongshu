@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -10,6 +10,27 @@ import { createWorkbenchStore } from '../src/server/workbench-store.ts';
 import type { NativeItem } from '../src/harness/types.ts';
 
 const item = (id: string, text = id): NativeItem => ({ id, text, kind: 'assistant', status: 'completed' });
+
+test('retained small-body versions and their corrected item roll back with a failed archive checkpoint', t => {
+  const root = mkdtempSync(join(tmpdir(), 'zhongshu-small-body-checkpoint-')); const db = openDatabase(root, productMigrations);
+  t.after(() => { db.close(); rmSync(root, { recursive: true, force: true }); });
+  const store = createWorkbenchStore(db), id = randomUUID(), configuration = { modelId: 'fixture', permissionId: 'fixture' };
+  store.createConversation({ id, harnessId: 'codex', workspaceId: 'fixture', cwd: '/synthetic', configuration });
+  store.saveBinding(id, { id: 'native-fixture', cwd: '/synthetic', configuration, details: {} });
+  store.mergeHistory(id, [{ ...item('small', 'old'), sourceRevision: { generation: 'native', sequence: 1 } }]);
+  const job = store.claimArchiveJob(id, 'latest', true)!;
+  const replacement = { ...item('small', 'corrected'), sourceRevision: { generation: 'native', sequence: 2 } };
+  db.exec("CREATE TRIGGER fail_small_checkpoint BEFORE UPDATE OF cursor ON workbench_archive_jobs BEGIN SELECT RAISE(ABORT,'synthetic checkpoint failure'); END");
+  assert.throws(() => store.commitArchivePage(job, [replacement], null));
+  assert.equal(store.getItem(id, 'small')!.text, 'old');
+  assert.equal(db.prepare('SELECT count(*) n FROM workbench_body_refs').get()!.n, 0);
+  assert.equal(db.prepare('SELECT count(*) n FROM workbench_bodies').get()!.n, 0);
+  assert.equal(store.archiveJobs(id).find(row => row.kind === 'latest')!.pages, 0);
+  db.exec('DROP TRIGGER fail_small_checkpoint');
+  assert.equal(store.commitArchivePage(job, [replacement], null), true);
+  assert.equal(store.getItem(id, 'small')!.text, 'corrected');
+  assert.equal(Buffer.from(store.readBody(id, 'small', 'text', { version: createHash('sha256').update('old').digest('hex'), bytes: 3 }).data).toString(), 'old');
+});
 
 test('page body and cursor publish atomically; stale readers cannot commit after a replacement claim', t => {
   const root = mkdtempSync(join(tmpdir(), 'zhongshu-archive-'));

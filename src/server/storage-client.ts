@@ -33,6 +33,7 @@ export const storageMethods = {
   archiveJobs: 'read', dueArchiveJobs: 'read', claimArchiveJob: 'write', commitArchivePage: 'write', failArchiveJob: 'write',
   restartArchiveJob: 'write', advanceArchiveMaintenance: 'write',
   pendingArchiveItems: 'read', refreshArchiveItems: 'write',
+  archiveUpdates: 'read', commitArchiveUpdates: 'write', resetArchiveUpdates: 'write',
   yieldArchiveJob: 'write',
   beginBodyStage: 'write', stageBodyChunk: 'write', validateBodyStage: 'write', finishBodyStage: 'write',
   capacity: 'read', advanceHistoryIndex: 'write', advanceStorageMaintenance: 'write',

@@ -561,6 +561,21 @@ CREATE TABLE execution_baseline_sources (
     run_id TEXT NOT NULL,
     PRIMARY KEY(conversation_id,run_id)
   ) STRICT;
+` }, { version: 30, sql: `
+  CREATE TABLE workbench_archive_updates (
+    conversation_id TEXT PRIMARY KEY REFERENCES workbench_conversations(id) ON DELETE CASCADE,
+    binding_id TEXT NOT NULL,
+    cursor TEXT,
+    complete INTEGER NOT NULL DEFAULT 0 CHECK(complete IN (0,1)),
+    last_success_at INTEGER
+  ) STRICT;
+  INSERT INTO workbench_archive_updates(conversation_id,binding_id)
+    SELECT id,json_extract(binding_json,'$.id') FROM workbench_conversations WHERE binding_json IS NOT NULL;
+  CREATE TRIGGER workbench_archive_updates_binding AFTER UPDATE OF binding_json ON workbench_conversations
+    WHEN NEW.binding_json IS NOT NULL BEGIN
+    INSERT OR IGNORE INTO workbench_archive_updates(conversation_id,binding_id)
+      VALUES(NEW.id,json_extract(NEW.binding_json,'$.id'));
+  END;
 ` }];
 
 /** Runs inside restoreDatabase's private staging transaction, before the database is published. */

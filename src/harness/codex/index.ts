@@ -1,7 +1,7 @@
 import { basename, isAbsolute, normalize } from 'node:path';
 import { z } from 'zod';
 import { HarnessError } from '../types.ts';
-import type { Binding, Catalog, Configuration, HarnessAdapter, HarnessInput, HistoryPage, NativeChange, NativeItem, NativeState, Receipt } from '../types.ts';
+import type { Binding, Catalog, Configuration, HarnessAdapter, HarnessInput, HistoryPage, HistoryChanges, NativeChange, NativeItem, NativeState, Receipt } from '../types.ts';
 import { CodexRpc, RpcError } from './rpc.ts';
 import { inputFields } from '../../shared/content.ts';
 import { revisionSchema, skillRequiresNextTurn } from '../../shared/workbench.ts';
@@ -56,6 +56,7 @@ const permissionLabels: Record<string, string> = { ':read-only': '只读', ':wor
 class CodexAdapter implements HarnessAdapter {
   readonly id = 'codex' as const;
   readonly earlyInput = 'current' as const;
+  readonly historyReadOnly = true as const;
   private rpc: CodexRpc;
   private watches = new Map<string, Watch>();
   private live = new Map<string, Live>();
@@ -265,6 +266,11 @@ class CodexAdapter implements HarnessAdapter {
     const binding = parse(bindingSchema, input);
     if (!this.bounded) throw new HarnessError('codex_bounded_history_required');
     return this.bounded.readItems(await this.rollout(binding), ids);
+  }
+  async historyChanges(input: Binding, cursor?: string, limit = 16): Promise<HistoryChanges> {
+    const binding = parse(bindingSchema, input);
+    if (!this.bounded) throw new HarnessError('codex_bounded_history_required');
+    return this.bounded.historyChanges(await this.rollout(binding), cursor, limit);
   }
   async readBodyChunk(binding: Binding, token: string, offset: number, maxBytes: number) {
     if (!this.bounded) throw new HarnessError('codex_bounded_history_required');

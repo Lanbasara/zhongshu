@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
-import type { Binding, HistoryPage, NativeBodyChunk, NativeBodySource, NativeItem } from '../types.ts';
+import type { Binding, HistoryPage, HistoryChanges, NativeBodyChunk, NativeBodySource, NativeItem } from '../types.ts';
 import { HarnessError } from '../types.ts';
 import { BoundedDshReader } from './bounded-reader.ts';
 import type { BoundedItemGroup } from './bounded-reader.ts';
@@ -10,6 +10,8 @@ import type { TurnOutline } from './native.ts';
 const integer = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
 const pageCursor = z.object({ v: z.literal(2), binding: hash, generation: z.string().uuid(), through: integer, before: integer }).strict();
+const changeSequence = z.number().int().min(-1).max(Number.MAX_SAFE_INTEGER);
+const changesCursor = z.object({ v: z.literal(1), binding: hash, generation: z.string().uuid(), through: changeSequence, after: changeSequence }).strict().refine(value => value.after <= value.through);
 const bodyToken = z.object({ v: z.literal(1), binding: hash, generation: z.string().uuid(), seq: integer, field: z.enum(['text', 'input']), version: hash, bytes: integer, lease: z.string().uuid() }).strict();
 const identity = (binding: Binding) => createHash('sha256').update(JSON.stringify([binding.id, binding.cwd])).digest('hex');
 function decode<T>(value: string, schema: z.ZodType<T>, prefix: string): T {
@@ -100,6 +102,12 @@ export function boundedHistory(reader: BoundedDshReader) {
     const page = await reader.itemsByKeys({ ...source, sourceGeneration: scan.sourceGeneration, throughSeq: scan.throughSeq, keys });
     return (await materialize(binding, scan.sourceGeneration, page.groups)).items;
   }
+  async function historyChanges(binding: Binding, cursor?: string, limit = 16): Promise<HistoryChanges> {
+    const parsed = cursor === undefined ? undefined : decode(cursor, changesCursor, 'dc1.'), key = identity(binding);
+    if (parsed && parsed.binding !== key) throw new HarnessError('history_cursor_invalid');
+    const page = await reader.changes({ sessionId: binding.id, cwd: binding.cwd, limit, ...(parsed ? { cursor: { generation: parsed.generation, through: parsed.through, after: parsed.after } } : {}) });
+    return { itemIds: page.keys.map(key => `dsh:${binding.id}:${key}`), cursor: encode('dc1.', { v: 1, binding: key, ...page.cursor }), hasMore: page.hasMore };
+  }
   async function readBodyChunk(binding: Binding, token: string, offset: number, maxBytes: number): Promise<NativeBodyChunk> {
     const source = decode(token, bodyToken, 'bb1.');
     if (source.binding !== identity(binding)) throw new HarnessError('DSH_BODY_IDENTITY_MISMATCH');
@@ -113,5 +121,5 @@ export function boundedHistory(reader: BoundedDshReader) {
     const source = decode(token, bodyToken, 'bb1.'); if (source.binding !== identity(binding)) throw new HarnessError('DSH_BODY_IDENTITY_MISMATCH');
     await reader.release(source.lease);
   }
-  return { history, readItems, readBodyChunk, releaseBodySource };
+  return { history, historyChanges, readItems, readBodyChunk, releaseBodySource };
 }

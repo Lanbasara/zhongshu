@@ -11,7 +11,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { StoreError, type ArchiveJob, type WorkbenchStore, type CreateConversation, type OperationInput, type Conversation, type Operation } from './workbench-store.ts';
 import type { WorkspaceRegistry } from './workspace-registry.ts';
 import type { QueueCommand, QueueView, WorkbenchConfiguration, workspaceAddSchema, workspaceManagementSchema } from '../shared/workbench.ts';
-import type { z } from 'zod';
+import { z } from 'zod';
 import { storageMethods, storageResourceMethods, type AsyncWorkbenchStore } from './storage-client.ts';
 import type { DirectoryIndex, DirectoryPage } from './directory-index.ts';
 import type { ManagedWorkspaceExecution } from './execution-workspaces.ts';
@@ -32,6 +32,7 @@ type Runtime = {
   timer?: NodeJS.Timeout; poll?: NodeJS.Timeout; flush?: NodeJS.Timeout;
   live: Map<string, NativeItem>; generation: number; stateGeneration: number; dirty: boolean; state?: NativeState['status']; stateWrite?: Promise<unknown>;
 };
+type ArchiveReader = Pick<HarnessAdapter, 'history' | 'historyChanges' | 'readItems' | 'readBodyChunk' | 'releaseBodySource' | 'readImage'>;
 
 /** One application writer. Native execution outlives browser observers and application connections. */
 export class Workbench {
@@ -201,6 +202,19 @@ export class Workbench {
     }
     const raw = this.adapters.get(conversation.harnessId)!;
     return this.managedAdapter ? await this.managedAdapter(conversation, raw, context) : raw;
+  }
+  private async archiveAccess(conversation: Conversation): Promise<{ reader: ArchiveReader; removed: boolean }> {
+    const workspace = this.registry ? await this.registry.configured(conversation.workspaceId, true) : this.workspaces.find(value => value.id === conversation.workspaceId);
+    const raw = this.adapters.get(conversation.harnessId);
+    if (!workspace || workspace.directory !== conversation.cwd || !raw || raw.id !== conversation.harnessId ||
+      !conversation.binding || conversation.binding.cwd !== conversation.cwd) throw new StoreError('archive_source_changed', 409);
+    const registration = await this.registry?.get(conversation.workspaceId);
+    if (registration) this.registry!.verify(registration);
+    const removed = Boolean(registration?.removed);
+    if (removed && !raw.historyReadOnly) throw new StoreError('archive_read_requires_permission', 409);
+    // The connection-wide managed projection exposes read methods only; never
+    // create an execution/observation permit merely to archive a removed scope.
+    return { reader: raw, removed };
   }
   private unknown(id: string, reason: string): Promise<void> {
     const runtime = this.runtimes.get(id);
@@ -582,8 +596,7 @@ export class Workbench {
     }
     if (totalImageBytes > 4 * 1024 * 1024) throw new StoreError('message_images_too_large', 413);
   }
-  private async materialize(conversation: Conversation, items: NativeItem[], bodyBudget = Infinity): Promise<NativeItem[]> {
-    const adapter = (await this.adapter(conversation));
+  private async materialize(conversation: Conversation, items: NativeItem[], adapter: ArchiveReader, allowFileImages: boolean, bodyBudget = Infinity): Promise<NativeItem[]> {
     const output: NativeItem[] = [];
     const leased = new Set(items.flatMap(item => [...Object.values(item.bodySources ?? {}).map(source => source.token),
       ...(item.imageSources ?? []).flatMap(source => source.releaseToken ? [source.releaseToken] : [])]));
@@ -649,7 +662,11 @@ export class Workbench {
             if (saved) { images.push({ id: saved.id, name: saved.name, mediaType: saved.mediaType }); continue; }
             const old = !previous?.mediaPending ? previous?.images?.[index] : undefined;
             if (old) { await this.store.resources.pin(conversation.id, old.id, owner); images.push(old); continue; }
-            const encoded = source.data ?? (source.path && adapter.readImage ? await adapter.readImage(conversation.binding, source.path) : undefined);
+            // A removed workspace does not regain arbitrary file reads. Only
+            // already materialized media or an immutable native cache lease can
+            // be imported there; unavailable file images remain explicitly pending.
+            const encoded = source.data ?? (source.path && adapter.readImage && (allowFileImages || source.releaseToken)
+              ? await adapter.readImage(conversation.binding, source.path) : undefined);
             if (!encoded) throw new Error('image_unavailable');
             const image = (await this.store.resources.put(conversation.id, 'Agent 图片 ' + (index + 1), decodeImage(encoded.replace(/^data:image\/[a-z]+;base64,/, '')), 'archive'));
             (await this.store.resources.pin(conversation.id, image.id, owner)); images.push(image);
@@ -1142,14 +1159,19 @@ export class Workbench {
         } catch { this.launch(this.unknown(id, 'native_update_requires_sync')); this.scheduleSync(id); }
       });
       if (this.closed || this.runtimes.get(id) !== runtime) stop();
-      else { runtime.stop = stop; runtime.poll = setInterval(() => this.scheduleSync(id), 5000); runtime.poll.unref(); }
+      else { runtime.stop = stop; runtime.poll = setInterval(() => this.scheduleSync(id, false), 5000); runtime.poll.unref(); }
     });
     void runtime.watching.then(() => { runtime.watching = undefined; }, () => { runtime.watching = undefined; });
     return runtime.watching;
   }
-  private scheduleSync(id: string): void {
+  private scheduleSync(id: string, invalidated = true): void {
     if (this.closed) return;
-    const runtime = this.runtime(id); runtime.dirty = true;
+    const runtime = this.runtime(id);
+    // A periodic refresh is not evidence that the verified native state changed.
+    // Marking it dirty can reject an otherwise valid send between its async
+    // eligibility checks. Native events still invalidate immediately, and actual
+    // dispatch always waits for a fresh state read before reaching the Harness.
+    if (invalidated) runtime.dirty = true;
     if (runtime.syncing || runtime.timer) return;
     runtime.timer = setTimeout(() => { runtime.timer = undefined; this.launch(this.sync(id)); }, 120); runtime.timer.unref();
   }
@@ -1177,6 +1199,29 @@ export class Workbench {
     } catch { /* A failed storage read cannot advance a durable checkpoint. */ }
     finally { this.archiveAdvancing = false; }
   }
+  private async archiveRevisions(conversation: Conversation, job: ArchiveJob, reader: ArchiveReader, removed: boolean) {
+    const progress = await this.store.archiveJobs(conversation.id);
+    if (!progress.some(value => value.kind === 'backfill' && value.complete) || progress.find(value => value.kind === 'latest')?.cursor !== null) return;
+    if (!reader.historyChanges || !reader.readItems) throw new StoreError('archive_updates_unavailable', 503);
+    const checkpoint = await this.store.archiveUpdates(conversation.id);
+    if (!checkpoint) throw new StoreError('archive_updates_unavailable', 503);
+    let page;
+    try {
+      page = z.object({ itemIds: z.array(z.string().min(1).max(1024)).max(16), cursor: z.string().min(1).max(65_536), hasMore: z.boolean() }).strict()
+        .parse(await reader.historyChanges(conversation.binding!, checkpoint.cursor ?? undefined, 16));
+    } catch (error) {
+      if (error instanceof HarnessError && error.code === 'history_cursor_invalid') await this.store.resetArchiveUpdates(job, checkpoint.cursor);
+      throw error;
+    }
+    if (new Set(page.itemIds).size !== page.itemIds.length || page.hasMore && page.cursor === checkpoint.cursor) throw new StoreError('history_no_progress', 502);
+    for (const id of page.itemIds) if (!await this.store.hasHistoryItem(conversation.id, id)) throw new StoreError('archive_update_waiting_for_history', 409);
+    const raw = page.itemIds.length ? await reader.readItems(conversation.binding!, page.itemIds) : [];
+    if (!Array.isArray(raw) || raw.length !== page.itemIds.length || new Set(raw.map(item => item.id)).size !== raw.length || raw.some(item => !page.itemIds.includes(item.id)))
+      throw new StoreError('archive_update_identity_changed', 502);
+    const items = await this.materialize(conversation, raw, reader, !removed, 1024 * 1024);
+    this.assertOpen(); await this.archiveAccess(await this.conversation(conversation.id));
+    await this.store.commitArchiveUpdates(job, checkpoint.cursor, page, items);
+  }
   private archivePage(id: string, kind: ArchiveJob['kind'], force = false): Promise<void> {
     if (this.closed) return Promise.resolve();
     const running = this.archiveInFlight.get(id);
@@ -1186,16 +1231,16 @@ export class Workbench {
       const job = await this.store.claimArchiveJob(id, kind, force);
       if (!job || this.closed) return;
       try {
-        const conversation = (await this.conversation(id)); const adapter = (await this.adapter(conversation));
+        const conversation = (await this.conversation(id)); const { reader: adapter, removed } = await this.archiveAccess(conversation);
         if (!conversation.binding || conversation.binding.id !== job.bindingId) throw new StoreError('archive_source_changed', 409);
         const runtime = this.runtimes.get(id); const generation = runtime?.generation;
         const page: HistoryPage = await adapter.history(conversation.binding, job.cursor ?? undefined, HISTORY_PAGE_SIZE);
-        this.assertOpen(); (await this.assertWorkspaceAvailable(conversation.workspaceId));
+        this.assertOpen(); await this.archiveAccess(await this.conversation(id));
         if (runtime && (this.runtimes.get(id) !== runtime || runtime.generation !== generation)) throw new StoreError('history_changed_retry', 409);
         if (!Array.isArray(page.items) || page.items.length > HISTORY_PAGE_SIZE ||
           page.items.reduce((total, item) => total + Buffer.byteLength(JSON.stringify(item)), 0) > HISTORY_MAX_BYTES)
           throw new StoreError('native_history_page_limit', 502);
-        const items = (await this.materialize(conversation, page.items, 1024 * 1024)).map(item => {
+        const items = (await this.materialize(conversation, page.items, adapter, !removed, 1024 * 1024)).map(item => {
           const live = runtime?.live.get(item.id);
           if (!live) return item;
           if (item.sourceRevision && !item.previewOnly && item.status !== 'running') { runtime!.live.delete(item.id); return item; }
@@ -1205,17 +1250,21 @@ export class Workbench {
           return live;
         });
         if (runtime && (this.runtimes.get(id) !== runtime || runtime.generation !== generation)) throw new StoreError('history_changed_retry', 409);
+        await this.archiveAccess(await this.conversation(id));
         if (!(await this.store.commitArchivePage(job, items, page.olderCursor))) return;
         if (kind === 'latest' && adapter.readItems) {
           const pending = await this.store.pendingArchiveItems(id, job.refreshAfter);
           const repaired = pending.length ? await adapter.readItems(conversation.binding, pending) : [];
           if (!Array.isArray(repaired) || repaired.length > 16 || repaired.some(item => !pending.includes(item.id))) throw new StoreError('native_item_identity_changed', 502);
           if (runtime && (this.runtimes.get(id) !== runtime || runtime.generation !== generation)) throw new StoreError('history_changed_retry', 409);
-          await this.store.refreshArchiveItems(job, await this.materialize(conversation, repaired, 1024 * 1024), pending);
+          const refreshed = await this.materialize(conversation, repaired, adapter, !removed, 1024 * 1024);
+          await this.archiveAccess(await this.conversation(id));
+          await this.store.refreshArchiveItems(job, refreshed, pending);
         }
         if (!job.cursor && page.usage) (await this.store.setUsage(id, page.usage));
         if (runtime) for (const item of runtime.live.values()) (await this.store.saveLiveItem(id, item));
         (await this.enrichReceipts(id));
+        if (kind === 'latest') await this.archiveRevisions(conversation, job, adapter, removed);
       } catch (error) {
         if (!this.closed) {
           const reason = error instanceof StoreError || error instanceof HarnessError ? error.code : 'native_archive_unavailable';

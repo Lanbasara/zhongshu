@@ -38,9 +38,10 @@ async function fixture(t: TestContext, limits: Parameters<typeof createWorkbench
   const submissions: string[] = []; let receipt: Receipt = { outcome: 'unknown', reason: 'synthetic_receipt_lost' };
   let state = nativeState;
   let historyItems: NativeItem[] = [];
+  const historyChangeIds: string[] = [];
   let nextStateRead: (() => Promise<void>) | undefined;
   const adapter: HarnessAdapter = {
-    id: 'dsh',
+    id: 'dsh', historyReadOnly: true,
     async skills() { return [{ id: 'a'.repeat(64), name: 'proof', label: 'Proof', description: 'Synthetic skill' }]; },
     async catalog() { return { id: 'dsh', available: true, models: [{ id: configuration.modelId, label: 'Synthetic model' }], permissions: [{ id: configuration.permissionId, label: 'Workspace', description: 'Synthetic test only' }] }; },
     async create(input, onBound) { const binding = { id: 'private-native-binding', cwd: input.cwd, configuration: input.configuration, details: { privateNativeField: 'never-public' } }; await onBound(binding); return binding; },
@@ -51,6 +52,13 @@ async function fixture(t: TestContext, limits: Parameters<typeof createWorkbench
       return state;
     },
     async history() { return { items: historyItems, olderCursor: null }; },
+    async historyChanges(_binding, cursor, limit = 16) {
+      const offset = cursor === undefined ? 0 : Number(cursor);
+      assert.ok(Number.isSafeInteger(offset) && offset >= 0 && offset <= historyChangeIds.length);
+      const end = Math.min(historyChangeIds.length, offset + limit);
+      return { itemIds: [...new Set(historyChangeIds.slice(offset, end))], cursor: String(end), hasMore: end < historyChangeIds.length };
+    },
+    async readItems(_binding, ids) { return ids.map(id => historyItems.find(item => item.id === id)!); },
     async submit(_binding, operation) { submissions.push(operation.id); return receipt; },
     async reconcile() { return { outcome: 'accepted', runId: 'synthetic-turn' }; },
     async stop() { return { outcome: 'accepted', runId: 'synthetic-turn' }; },
@@ -112,10 +120,11 @@ async function fixture(t: TestContext, limits: Parameters<typeof createWorkbench
   }
   return { db, auth, store, storage, workbench, transport, app, base, credentials, login, request, seed, stream, submissions, root, roots,
     setReceipt(value: Receipt) { receipt = value; }, setState(value: NativeState) { state = value; },
-    setHistory(value: NativeItem[]) { historyItems = value; },
+    setHistory(value: NativeItem[]) { historyItems = value; historyChangeIds.push(...value.map(item => item.id)); },
     setBodyReader(value: NonNullable<HarnessAdapter['readBodyChunk']>) { adapter.readBodyChunk = value; },
     setImageReader(value: NonNullable<HarnessAdapter['readImage']>) { adapter.readImage = value; },
     setItemsReader(value: NonNullable<HarnessAdapter['readItems']>) { adapter.readItems = value; },
+    setHistoryChanges(value: NonNullable<HarnessAdapter['historyChanges']>) { adapter.historyChanges = value; },
     pauseNextState() {
       let entered = false;
       let release!: () => void;
@@ -227,6 +236,33 @@ test('workspace registration gates real HTTP and retains disk files, history and
   assert.equal((await manage({ action: 'restore' })).body.error, 'workspace_directory_changed');
   assert.equal((await f.request(`/conversations/${id}`)).body.history.items[0]?.text, 'Saved conversation');
   assert.deepEqual(f.submissions, []);
+});
+
+test('removed workspaces keep authorized background text archiving without restoring execution or file access', async t => {
+  const f = await fixture(t, {}, true, true);
+  const folder = join(f.root, 'archived'); await mkdir(folder); await writeFile(join(folder, 'notes.md'), 'private workspace bytes');
+  const added = await f.request('/workspaces', { method: 'POST', body: { rootId: 'shared', path: ['archived'] } });
+  assert.equal(added.status, 200); const workspaceId = added.body.id;
+  const id = randomUUID();
+  assert.equal((await f.request('/conversations', { method: 'POST', body: { id, harnessId: 'dsh', workspaceId, configuration } })).status, 202);
+  await eventually(() => f.store.getConversation(id)?.readiness === 'ready');
+  assert.equal((await f.request('/workspaces/' + workspaceId + '/manage', { method: 'POST', body: { action: 'remove' } })).status, 200);
+  const items: NativeItem[] = [{ id: 'unread-after-removal', kind: 'assistant', status: 'completed', text: 'Archived after removal. '.repeat(600) }];
+  f.setHistory(items); f.setItemsReader(async (_binding, ids) => items.filter(item => ids.includes(item.id)));
+  f.setHistoryChanges(async () => ({ itemIds: items.map(item => item.id), cursor: 'synthetic-revision-1', hasMore: false }));
+  // Only the due time is controlled. Actual bodies/checkpoints must be produced
+  // by the background Workbench path and its real storage worker.
+  f.db.prepare('UPDATE workbench_archive_jobs SET next_at=0 WHERE conversation_id=?').run(id);
+  await f.workbench.start();
+  await eventually(() => f.store.archiveUpdates(id)?.complete === true);
+  const archived = f.store.getItem(id, items[0]!.id)!;
+  assert.equal(Buffer.from(f.store.readBody(id, archived.id, 'text', archived.bodies!.text!, 0).data).toString(), items[0]!.text);
+  const snapshot = await f.request('/conversations/' + id);
+  assert.equal(snapshot.body.archive.latest.complete, true);
+  assert.equal((await f.request(`/conversations/${id}/operations`, { method: 'POST', body: { id: randomUUID(), type: 'message', payload: { text: 'must stay blocked' } } })).body.error, 'workspace_removed');
+  assert.equal((await f.request(`/workspaces/${workspaceId}/file?path=notes.md`)).body.error, 'workspace_removed');
+  assert.deepEqual(f.submissions, []);
+  assert.equal(await readFile(join(folder, 'notes.md'), 'utf8'), 'private workspace bytes');
 });
 
 test('workbench real HTTP enforces authentication, input limits and the public DTO boundary', async t => {
@@ -520,6 +556,9 @@ test('a failed image preserves immutable text, remains pending and repairs all i
   assert.equal(item.mediaPending, true); assert.equal(response.body.archive.latest.complete, false);
   assert.equal(secondReads, 1, 'a successful ordinal is durably pinned across retries');
   missing = false; await f.workbench.reconcile(id);
+  await f.workbench.start();
+  await eventually(() => f.store.archiveJobs(id).some(job => job.kind === 'backfill' && job.complete));
+  await f.workbench.reconcile(id);
   response = await f.request(`/conversations/${id}`); item = response.body.history.items.find((value: { id: string }) => value.id === native.id);
   assert.equal(item.mediaPending, undefined); assert.equal(item.images.length, 2);
   assert.equal(item.bodies.text.version, version); assert.equal(secondReads, 1);
@@ -583,6 +622,10 @@ test('native giant bodies stage through the real worker and private HTTP streams
   assert.deepEqual(item.bodies.text, { version, bytes: content.byteLength });
   assert.equal(JSON.stringify(snapshot.body).includes(token), false);
   assert.equal(JSON.stringify(snapshot.body.archive).includes('private-native-binding'), false);
+  await f.workbench.start();
+  await eventually(() => f.store.archiveJobs(id).some(job => job.kind === 'backfill' && job.complete));
+  await f.workbench.reconcile(id);
+  snapshot = await f.request(`/conversations/${id}`);
   assert.equal(snapshot.body.archive.latest.complete, true);
   const query = new URLSearchParams({ item: item.id, field: 'text', version, bytes: String(content.byteLength), offset: '0' });
   const endpoint = `${f.base}/api/private/workbench/conversations/${id}/body?`;

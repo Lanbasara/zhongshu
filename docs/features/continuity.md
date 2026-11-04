@@ -61,11 +61,25 @@ node test/support/performance-corpus.ts --root "$zh_verify_root" --items 60000 -
 
 另建样本，在页导入中 SIGKILL 本次应用；按 Doctor 确认退出后重启，核对已经完成的正文没有再次导入、检查点继续前进、全部 ID/摘要最终一致。源文件被替换、游标失效或源内容缺失时，保留旧档，页面明确显示连续性未确认或来源缺口；一次新扫描成功不能清掉旧缺口。实时条目标记“完整内容正在存档”期间不得出现针对截断前缀的完整正文链接；持久终态到达后才有可独立核对的全文。原生版本、物理读源和大量离线条目用下方原生分支另证，不用 fixture 推断。
 
+旧条目修订须单独构造：先存档至少 35 条已完成消息，再在原生源末尾修订最早的两条，修订顺序与历史顺序相反。不要打开旧页，等后台变更水位推进后核对新正文、原有历史顺序和旧摘要正文均可读取；短正文、空正文及巨型正文各覆盖一例。中途杀应用再恢复，正文和水位不能出现只提交一方。只读观察 `workbench_archive_updates`，并核对公开“完整”状态不会在变更页尚未完成时提前成立。原生替身缺少变更流时须显示 `archive_updates_unavailable`，不能拿一次头页成功代替旧条目覆盖。事务、迟到页和真实 worker 重启入口见 [修订回归](../../test/archive-updates.test.ts)。
+
+按 [W03](workspace-management.md) 移除工作区后，再向已授权的同一物理源追加未读正文；保持工作区移除，等待归档并通过原对话全文接口核对。发送和原文件接口仍须拒绝；后台不得启动原生执行或任意读取已移除目录中的图片路径。目录被替换或绑定变化时暂停新读取，旧档仍在。
+
 联合持续运行使用 R07 的可销毁规模现场。固定源码副本和已通过 `check:release` 的构建目录；应用运行时不要重建其 `dist` 或替换源码，worker 也必须使用同一版本。以 `feature-fixture.ts serve --root "$zh_verify_root" --port 4391 --build <固定构建绝对目录> --physical` 启动：两个独立原生格式源各含 20,000 条消息，实际物理 reader 和产品后台泵负责导入；执行/state/watch 仍是明确替身。每 30 秒把进程内存、event loop、storage 队列与失败分类、数据库/WAL 大小、归档检查点及独立源清单摘要写入私有 `performance-service.ndjson`，每十次采样给两个源各追加 100 条。永久正文不通过测试脚本直接写入。
 
 在自己拥有的 Chromium 调试 profile 上运行 `node test/support/performance-soak.ts --root "$zh_verify_root" --port 4391 --browser <自有调试端口> --output <新建仓库外NDJSON绝对路径> --seconds 86400`。客户端持续发送/停止两种合成执行、读取历史和正文块、刷新和翻阅目录、搜索元数据、保持两个 SSE 客户端（其中一个延迟读取），并在 4 倍 CPU 节流、80 ms/10 Mbps 下实测页面首屏和键入。`--seconds 300` 只用于先验证装配，不能代替 24 小时。浏览器客户端放在应用资源限额之外；Linux 应用及其 workers 共用测量配置的 2 CPU/4 GiB，原生执行 Host 另计。本入口没有证明真实 Harness 模型执行或编辑保存，这些仍需执行地图的受管原生分支。
 
 保存源码/构建清单、容器约束、客户端 NDJSON/summary 和服务端采样；独立确认计时完整、无失败、每项阈值符合测量配置，并检查归档检查点持续前进及最终内容全集。脚本退出码不能代替 RSS/WAL/缓存曲线和原生源完整性核对。中断、worker 退出或字节不一致都保留原失败；定位修复后用新的固定候选重新运行。取消时只向自己拥有的客户端/应用发停止信号，等待清理完成。
+
+24 小时结束后，先按本现场的停止步骤关闭应用并确认 `app.lock` 已消失，再用相同代码位置和迁移版本运行离线核验。输出父目录须为自己拥有的私有目录，输出文件必须不存在且位于 fixture root 外；脚本拒绝升级或修改不匹配的数据库结构。
+
+```sh
+node test/support/performance-archive-audit.ts --root "$zh_verify_root" --output <新建仓库外JSON绝对路径> --seconds 3600
+```
+
+该入口读取两个 `physical-*/state.json`、`expected.ndjson` 和私有对话身份文件，将期望清单流式放入自有临时 SQLite 索引；通过真实 storage worker 每页最多 100 条、正文每块最多 64 KiB 核对完整 SHA-256、字节数、稳定 ID、顺序、重复和缺项。关闭 worker 后重新启动再核验一次，源文件起止身份/指纹及产品库 `data_version` 必须不变。报告保留原始归档任务检查点；`complete` 表示清单内容全集完整，不覆盖任务原有 `complete/error/working` 字段。当前物理 factory 只有文本预期，图片、工具或文件形状若意外出现会失败，不会宣称已核验这些额外资源。
+
+默认且唯一模式不补齐：不启动 Workbench、原生 reader 或归档泵。缺项、正文/顺序差异和仍存在的 app.lock 均退出非零，原源和产品库保留；临时期望索引会清理。若结束时缺项，先保存这份失败报告，再显式启动补齐流程、停止后用另一个输出文件复验；补齐后的通过不能替换结束时失败。
 
 R05：在对应 A 页面安装 browser-faults，执行 `zhVerify.holdNext('/api/private/workbench/conversations/' + location.hash.slice(1))`，点“重新连接”，等待 held，再按表中顺序通过侧栏切换。确认新结果可见后 `release()`，等待 held 清空再检查标题、正文与快照。若页面工具无法控制该顺序，单列 `BLOCKED`；直接快速点击不等于确定覆盖。
 
@@ -98,7 +112,7 @@ R06 的真实 Codex Host 分支按下面的独立判据执行；使用同一应�
 - 页面时序/窗口/阅读锚点：[workbench.tsx](../../src/web/workbench.tsx)；标签页草稿：[workbench-client.ts](../../src/web/workbench-client.ts)。
 - 持久投影/操作/水位：[workbench-store.ts](../../src/server/workbench-store.ts)、[migrations.ts](../../src/server/migrations.ts)；恢复与补齐：[workbench.ts](../../src/server/workbench.ts)。
 - 公共分页/有界 SSE：[workbench-http.ts](../../src/server/workbench-http.ts)；契约：[shared/workbench.ts](../../src/shared/workbench.ts)。
-- 不可变正文/分块/暂存：[body-store](../../src/server/body-store.ts)、[body-reader](../../src/web/body-reader.tsx)；`node --test test/body-store.test.ts test/archive-checkpoint.test.ts test/history-order.test.ts` 保护正文、检查点和位置索引恢复。
+- 不可变正文/分块/暂存：[body-store](../../src/server/body-store.ts)、[body-reader](../../src/web/body-reader.tsx)；`node --test test/body-store.test.ts test/archive-checkpoint.test.ts test/archive-updates.test.ts test/history-order.test.ts` 保护正文、检查点和位置索引恢复。
 - `node --test test/codex-workbench.test.ts test/workbench-store.test.ts test/workbench.test.ts test/workbench-http.test.ts`：覆盖真实 RPC/adapter 失联落库、失败重连不重复失效、旧连接/迟到读取隔离、SIGKILL 后未知派发、历史补齐预算、SSE 水位重置、慢端背压与连接回收。协议 peer 是替身；这些不证明真实 Host/模型或 R03–R05 的浏览器状态。
 
 ### 原生有界读取复验
@@ -129,5 +143,7 @@ node test/support/native-archive-verify.ts --harness dsh --dsh-compressed --coun
 代次和缓存反例：替换原生日志后旧 cursor 应失效，已发布中书正文保持可读；仍持有租约的旧正文在释放前保持版本不变。不断增加绑定/代次使原生源总量超过兼容缓存预算，缓存应回收可重建索引及临时正文，旧源仍可按需重建和归档；租约占满时须明确暂停，释放后可恢复。不能删除中书永久存档来通过。对应 [Codex](../../test/codex-bounded-reader.test.ts)、[DSH](../../test/dsh-bounded-reader.test.ts) 与 [状态投影](../../test/dsh-bounded-state.test.ts) 的反例覆盖必须一并通过。
 
 DSH 的迁移可能把多年事件写入单个 Zstandard frame。索引扫描同时生成受同一全局 quota 约束、可校验和重建的 256 KiB 解压块；常驻内存最多四块。复验需构造单 frame 20,001 事件，重启后随机旧页的 `cacheStatus().frameReads` 不得新增 frame 解码；原生源超过缓存预算时，冷旧窗口应共享一次重建，不得每条消息从 frame 开头重解压。缓存损坏应从未改动的原生源重建，同大小原生改写则拒绝。冷缓存重建仍可能扫描原生压缩 frame，不能把首次随机读取宣称为常数时间。
+
+增量索引一次处理普通 JSONL 约 8 MiB 或最多 8 个压缩 frame。压缩 frame 必须完整通过 CRC 校验才发布其索引，单个巨型 frame 可以超过 8 MiB，因此没有严格每次调用 8 MiB 或固定耗时的保证。冷扫描仍由独立 worker 流式执行并受内存和缓存配额约束；热页的点查成本不能外推到首次冷扫描。DSH 每条目的最新事件按类型取 seq，再以复合键读取记录；[reader 回归](../../test/dsh-bounded-reader.test.ts)分别增加源条目数与同条目修订数，核对每页实际索引访问不随二者线性增长。
 
 边界仍须如实报告：兼容层不使原生 Host 的模型上下文和冷恢复内存成为常数；DSH 原生 `userQuestions.settled` 的历史增长也未由状态出口消除。单个工作索引和正文暂存仍受操作者缓存容量约束，容量不足会暂停完整性推进，不能静默截断或把预览标成完整正文。

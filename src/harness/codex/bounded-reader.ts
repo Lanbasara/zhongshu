@@ -2,7 +2,7 @@ import { Worker } from 'node:worker_threads';
 import { isAbsolute, normalize } from 'node:path';
 import { z } from 'zod';
 import { HarnessError } from '../types.ts';
-import type { Binding, HistoryPage, NativeBodyChunk, NativeItem, Receipt } from '../types.ts';
+import type { Binding, HistoryPage, HistoryChanges, NativeBodyChunk, NativeItem, Receipt } from '../types.ts';
 import { createHash } from 'node:crypto';
 
 const path = z.string().min(1).max(4096).refine(value => isAbsolute(value) && normalize(value) === value && !value.includes('\0'));
@@ -12,6 +12,7 @@ export const rolloutBinding = z.object({ id: z.string().min(1).max(512), cwd: pa
 export type RolloutBinding = z.infer<typeof rolloutBinding>;
 const count = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 export const rolloutCursor = z.object({ v: z.literal(1), key: z.string().regex(/^[a-f0-9]{64}$/), generation: z.string().uuid(), through: count, before: count }).strict();
+export const rolloutChangesCursor = z.object({ v: z.literal(1), key: z.string().regex(/^[a-f0-9]{64}$/), generation: z.string().uuid(), through: count, after: count }).strict().refine(value => value.after <= value.through);
 export const rolloutBody = z.object({ v: z.literal(1), key: z.string().regex(/^[a-f0-9]{64}$/), generation: z.string().uuid(), seq: count, field: z.enum(['text', 'input', 'output', 'image']), lease: z.string().uuid(), version: z.string().regex(/^[a-f0-9]{64}$/), bytes: count }).strict();
 export const rolloutKey = (binding: Pick<Binding, 'id' | 'cwd'>) => createHash('sha256').update(JSON.stringify([binding.id, binding.cwd])).digest('hex');
 export const encodeRolloutToken = (prefix: string, value: unknown) => prefix + Buffer.from(JSON.stringify(value)).toString('base64url');
@@ -50,6 +51,11 @@ export class BoundedCodexReader {
     return this.request('history', { binding: rolloutBinding.parse(binding), cursor: parsed, limit: z.number().int().min(1).max(100).parse(limit) });
   }
   readItems(binding: RolloutBinding, ids: string[]): Promise<NativeItem[]> { return this.request('items', { binding: rolloutBinding.parse(binding), ids: z.array(z.string().min(1).max(512)).max(16).parse(ids) }); }
+  historyChanges(binding: RolloutBinding, cursor?: string, limit = 16): Promise<HistoryChanges> {
+    const parsed = cursor === undefined ? undefined : decode('cc1.', cursor, rolloutChangesCursor);
+    if (parsed && parsed.key !== rolloutKey(binding)) throw new HarnessError('history_cursor_invalid');
+    return this.request('changes', { binding: rolloutBinding.parse(binding), cursor: parsed, limit: count.min(1).max(16).parse(limit) });
+  }
   reconcile(binding: RolloutBinding, operationId: string): Promise<Receipt> { return this.request('reconcile', { binding: rolloutBinding.parse(binding), operationId: z.string().min(1).max(512).parse(operationId) }); }
   readBodyChunk(binding: Binding, token: string, offset: number, maxBytes: number): Promise<NativeBodyChunk> {
     const body = decodeRolloutBody(token); if (body.key !== rolloutKey(binding)) throw new HarnessError('codex_body_invalid');

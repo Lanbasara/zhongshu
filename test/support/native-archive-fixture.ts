@@ -93,8 +93,10 @@ export async function createPhysicalArchiveFixture(input: z.input<typeof schema>
     : createDshAdapter({ launchFile: join(root, 'absent-launch'), boundedHistory: { nativeRoot, cacheRoot }, managedExecution: true });
   const binding: Binding = { id: options.bindingId, cwd, configuration: options.harness === 'codex' ? { modelId: 'synthetic', permissionId: ':read-only' } : { modelId: modelId({ provider: 'synthetic', model: 'synthetic' }), permissionId: 'read-only' }, details: options.harness === 'codex' ? { version: 1, approvalPolicy: 'never' } : {} };
   const check = (binding: Binding) => { if (binding.id !== options.bindingId || binding.cwd !== cwd) throw new Error('physical_fixture_binding_mismatch'); };
-  const reads: Pick<HarnessAdapter, 'history' | 'readItems' | 'readBodyChunk' | 'releaseBodySource' | 'readImage'> = {
+  const reads: Pick<HarnessAdapter, 'history' | 'historyChanges' | 'historyReadOnly' | 'readItems' | 'readBodyChunk' | 'releaseBodySource' | 'readImage'> = {
+    historyReadOnly: true,
     history: (binding, ...args) => { check(binding); return adapter.history(binding, ...args); },
+    historyChanges: (binding, ...args) => { check(binding); return adapter.historyChanges!(binding, ...args); },
     readItems: (binding, ...args) => { check(binding); return adapter.readItems!(binding, ...args); },
     readBodyChunk: (binding, ...args) => { check(binding); return adapter.readBodyChunk!(binding, ...args); },
     releaseBodySource: (binding, ...args) => { check(binding); return adapter.releaseBodySource!(binding, ...args); },
