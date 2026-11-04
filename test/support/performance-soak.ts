@@ -63,7 +63,10 @@ async function create(harness: 'codex' | 'dsh') {
   await waitState(id, 'idle'); return id;
 }
 const summaries: { firstVisibleMs: number; inputPaintMs: number; heapBytes: number; dom: number; failures: number }[] = [];
-const started = Date.now(); let cycles = 0, failures = 0;
+// Duration uses a monotonic clock. Wall-clock adjustments must not turn a
+// shorter experiment into a completed 24-hour run.
+const started = performance.now(); let cycles = 0, failures = 0;
+let previousCycleAt: number | undefined;
 let active: string[] = [], directoryCursor: string | null = null, historyCursor: string | undefined;
 const streamControllers: AbortController[] = []; const streams: Promise<void>[] = [];
 async function directoryPage(metrics: Metric[]) {
@@ -104,8 +107,10 @@ try {
   await login(); await startStreams();
   await browser.command('Page.addScriptToEvaluateOnNewDocument', { source: `(()=>{const o=new MutationObserver(()=>{if(document.querySelector('.message-text')?.textContent?.trim()){o.disconnect();requestAnimationFrame(()=>performance.mark('soak-visible'))}});o.observe(document,{childList:true,subtree:true,characterData:true})})()` });
   await browser.command('Network.emulateNetworkConditions', { offline: false, latency: 80, downloadThroughput: 10_000_000 / 8, uploadThroughput: 10_000_000 / 8 });
-  while (!stopped && Date.now() - started < input.seconds * 1000) {
-    const begin = Date.now(), metrics: Metric[] = [];
+  while (!stopped && performance.now() - started < input.seconds * 1000) {
+    const begin = performance.now(), metrics: Metric[] = [];
+    const sampleGapSeconds = previousCycleAt === undefined ? null : (begin - previousCycleAt) / 1000;
+    previousCycleAt = begin;
     try {
       if (cycles && cycles % 120 === 0) { await login(); await startStreams(); }
       if (cycles % 40 === 0) active = [await create('codex'), await create('dsh')];
@@ -146,7 +151,7 @@ try {
       }
       if (dom > performanceProfile.data.chatDomNodes || heapBytes > performanceProfile.browser.steadyHeapBytes || exceptions) failures++;
       const sample = { firstVisibleMs, inputPaintMs: after - before, heapBytes, dom, failures };
-      summaries.push(sample); await appendFile(input.output, JSON.stringify({ cycle: cycles, time: new Date().toISOString(), elapsedSeconds: (Date.now() - started) / 1000, ...sample, metrics }) + '\n');
+      summaries.push(sample); await appendFile(input.output, JSON.stringify({ cycle: cycles, time: new Date().toISOString(), elapsedSeconds: (performance.now() - started) / 1000, sampleGapSeconds, ...sample, metrics }) + '\n');
     } catch (error) {
       failures++;
       await appendFile(input.output, JSON.stringify({ cycle: cycles, time: new Date().toISOString(), failure: error instanceof Error && /^soak_[a-z_0-9]+$/.test(error.message) ? error.message : 'soak_cycle_failed',
@@ -155,12 +160,12 @@ try {
       // An uncertain send must not be retried with a fresh operation ID.
       stopped = true;
     }
-    cycles++; const remaining = 30_000 - (Date.now() - begin);
-    if (!stopped && remaining > 0) await pause(Math.min(remaining, Math.max(0, input.seconds * 1000 - (Date.now() - started))));
+    cycles++; const remaining = 30_000 - (performance.now() - begin);
+    if (!stopped && remaining > 0) await pause(Math.min(remaining, Math.max(0, input.seconds * 1000 - (performance.now() - started))));
   }
   const p95 = (key: 'firstVisibleMs' | 'inputPaintMs') => summaries.map(value => value[key]).sort((a, b) => a - b)[Math.max(0, Math.ceil(summaries.length * .95) - 1)] ?? null;
-  const result = { mode: 'synthetic-execution-real-app-browser-physical-import', plannedSeconds: input.seconds, elapsedSeconds: (Date.now() - started) / 1000,
-    complete: !stopped && Date.now() - started >= input.seconds * 1000, cycles, failures, exceptions, p95: { firstVisibleMs: p95('firstVisibleMs'), inputPaintMs: p95('inputPaintMs') },
+  const result = { mode: 'synthetic-execution-real-app-browser-physical-import', clock: 'monotonic', plannedSeconds: input.seconds, elapsedSeconds: (performance.now() - started) / 1000,
+    complete: !stopped && performance.now() - started >= input.seconds * 1000, cycles, failures, exceptions, p95: { firstVisibleMs: p95('firstVisibleMs'), inputPaintMs: p95('inputPaintMs') },
     peakHeapBytes: Math.max(0, ...summaries.map(value => value.heapBytes)), peakDom: Math.max(0, ...summaries.map(value => value.dom)) };
   await writeFile(input.output + '.summary.json', JSON.stringify(result, null, 2), { mode: 0o600 }); console.log(JSON.stringify(result));
   if (!result.complete || failures || (p95('firstVisibleMs') ?? Infinity) > performanceProfile.latency.archiveVisibleP95Ms || (p95('inputPaintMs') ?? Infinity) > performanceProfile.latency.inputPaintP95Ms) process.exitCode = 1;
