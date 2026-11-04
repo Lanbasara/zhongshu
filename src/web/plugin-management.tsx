@@ -71,8 +71,13 @@ function PluginCatalog({ harness, onHarness, csrf, report }: {
     if (busy) return;
     setBusy(true); setError('');
     try {
-      await request(path + (reconcile ? '/reconcile' : '/operations'), pluginOperation, { csrf, body: command, timeoutMs: 45_000 });
-      if (mounted.current) setUncertain(undefined);
+      const received = await request(path + (reconcile ? '/reconcile' : '/operations'), pluginOperation, {
+        csrf, body: command, timeoutMs: 45_000,
+      });
+      if (mounted.current) {
+        setView(current => current && { ...current, operation: received });
+        setUncertain(undefined);
+      }
     } catch (reason) {
       if (!mounted.current) return;
       if (reason instanceof RequestError && reason.status === 401) onReport.current(reason);
