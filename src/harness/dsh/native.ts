@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { HarnessError } from '../types.ts';
 import type { Binding, NativeItem, NativeState } from '../types.ts';
 import { editPath } from '../edit-paths.ts';
+import { revisionSchema, usageSchema } from '../../shared/workbench.ts';
 
 export const identifier = z.string().min(1).max(240);
 export const modelSchema = z.object({ provider: identifier, model: identifier, reasoningEffort: identifier.optional() });
@@ -18,9 +19,24 @@ export const projectionsSchema = z.object({ asOfSeq: z.number().int().nonnegativ
   turnOutline: outlineSchema.optional(),
   inbox: z.object({ 'next-turn': z.array(z.unknown()).max(1000), 'next-step': z.array(z.unknown()).max(1000) }).optional(),
   userQuestions: z.object({ active: z.array(z.unknown()).max(1000) }).optional(),
+  tokenUsage: z.unknown().optional(), contextPressure: z.unknown().optional(),
 }) });
 export const snapshotSchema = z.object({ type: z.literal('snapshot'), header: z.object({ id: identifier, cwd: z.string().max(4096).optional() }), cursor: z.number().int().nonnegative(), records: z.array(recordSchema).max(20000), hasMore: z.boolean(), projections: projectionsSchema, assistantStream: z.object({ revision: z.number().int(), activeAttempt: z.object({ attemptId: identifier, turn: z.number().int(), step: z.number().int(), nextIndex: z.number().int().nonnegative(), stream: z.array(z.unknown()).max(20000) }).optional() }).optional() });
 export type Snapshot = z.infer<typeof snapshotSchema>;
+const usageTotals = z.object({ uncachedInputTokens: revisionSchema, outputTokens: revisionSchema, cacheReadTokens: revisionSchema, cacheWriteTokens: revisionSchema });
+const contextPressure = z.object({ projectedTokens: revisionSchema.optional(), pressureTokens: revisionSchema.optional(), contextWindow: revisionSchema.min(1).optional() });
+export function usageFrom(snapshot: Snapshot) {
+  if (snapshot.projections.asOfSeq !== snapshot.cursor) return;
+  const values = snapshot.projections.values;
+  const totals = usageTotals.safeParse(values.tokenUsage).data;
+  const pressure = contextPressure.safeParse(values.contextPressure).data;
+  const total = totals && totals.uncachedInputTokens + totals.outputTokens + totals.cacheReadTokens + totals.cacheWriteTokens;
+  const used = pressure?.projectedTokens ?? pressure?.pressureTokens;
+  return usageSchema.safeParse({
+    ...(total ? { total } : {}),
+    ...(pressure?.contextWindow && used !== undefined ? { context: { used, capacity: pressure.contextWindow, estimated: true } } : {}),
+  }).data;
+}
 export const pageSchema = z.object({ records: z.array(recordSchema).max(20000), hasMore: z.boolean() });
 // rc.4 approval-policy changes inject this non-waking context into next-step.
 // It is consumed with the next user prompt, so it must not block that prompt.

@@ -64,6 +64,38 @@ async function peer(t: TestContext, override?: (request: Request, socket: WebSoc
 }
 async function until(predicate: () => boolean) { for (let tries = 0; tries < 100; tries++) { if (predicate()) return; await delay(20); } assert.fail('Expected protocol observation did not arrive'); }
 
+test('Codex resolves explicit skill occurrences from the current cwd and observes usage on the bound thread', async t => {
+  let enabled = true;
+  const path = saved.cwd + '/.agents/skills/zhi-proof/SKILL.md';
+  const p = await peer(t, request => {
+    if (request.method === 'skills/list') return { data: [{ cwd: saved.cwd, skills: [
+      { name: 'zhi-proof', path, enabled, description: 'Synthetic skill', interface: { displayName: 'Proof' } },
+      { name: 'invalid', path: '/foreign/file.txt', enabled: true, description: 'Invalid path' },
+    ] }] };
+    return undefined;
+  });
+  const [skill] = await p.adapter.skills!(saved);
+  assert.ok(skill);
+  assert.equal(skill.label, 'Proof');
+  assert.equal('path' in skill, false);
+  const operation = { id: 'explicit', text: '⬡ Proof now', skills: [{ id: skill.id, label: skill.label, start: 0, end: 7 }] };
+  assert.equal((await p.adapter.submit(saved, operation)).outcome, 'accepted');
+  const inputs = () => p.calls.filter(call => call.method === 'turn/start').map(call => call.params.input);
+  assert.deepEqual(inputs()[0], [{ type: 'text', text: ' $zhi-proof  now', text_elements: [] }, { type: 'skill', name: 'zhi-proof', path }]);
+  assert.equal((await p.adapter.submit(saved, { id: 'manual', text: '/zhi-proof now' })).outcome, 'accepted');
+  assert.deepEqual(inputs()[1], [{ type: 'text', text: '/zhi-proof now', text_elements: [] }]);
+  enabled = false;
+  assert.deepEqual(await p.adapter.submit(saved, { ...operation, id: 'stale' }), { outcome: 'rejected', reason: 'skill_reference_unavailable' });
+  assert.equal(inputs().length, 2);
+  const changes: NativeChange[] = [];
+  await p.adapter.watch(saved, change => changes.push(change));
+  const tokenUsage = { total: { totalTokens: 1024 }, last: { totalTokens: 128 }, modelContextWindow: 4096 };
+  p.notify('thread/tokenUsage/updated', { threadId: 'another-thread', tokenUsage });
+  p.notify('thread/tokenUsage/updated', { threadId: saved.id, tokenUsage });
+  await until(() => changes.some(change => change.type === 'usage'));
+  assert.deepEqual(changes.filter(change => change.type === 'usage'), [{ type: 'usage', usage: { total: 1024, context: { used: 128, capacity: 4096, estimated: true } } }]);
+});
+
 test('Codex uses a guarded native steer and reconciles a pending next-turn item by client identity', async t => {
   const p = await peer(t, (request, socket) => {
     if (request.method === 'thread/read') return { thread: { id: saved.id, status: { type: 'active' } } };

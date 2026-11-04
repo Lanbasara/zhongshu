@@ -19,8 +19,10 @@
 | U09 | 私有资源授权与寿命正确，既不越界读取，也不提前清理已关联资源 |
 | U10 | 桌面/窄屏完成同一旅程；旧纯文本对话及既有创建/发送/停止/恢复路径不退化 |
 | U11 | 对话轮末显示有原生编辑证据的文件，点开所属工作区中的当前文件 |
+| U12 | 用 `/` 筛选本对话技能，确认后发送，核对原生调用和草稿恢复 |
+| U13 | 在输入框下查看本对话累计 Token 与上下文占用，刷新、压缩和缺数据时仍能区分两者 |
 
-编号用于引用验证场景。U01 是整体验收主线，U02–U11 是其针对性分支。分支证据各自注明覆盖的 Harness。
+编号用于引用验证场景。U01 是整体验收主线，U02–U13 是其针对性分支。分支证据各自注明覆盖的 Harness。
 
 ## How to get to it (user POV)
 
@@ -67,6 +69,20 @@
 3. 完整刷新并重启本次中书应用，回看第一轮及第二轮。用可信端改写一个文件并移除另一个，再从第一轮分别点击。阅读器应显示当前内容，或提示不可用并保留清单路径。窄屏重开可读文件，核对底部面板、关闭返回与焦点。跨工作区同名、越界路径和符号链接不能读到其他位置的内容。
 
 清单按读取到的原生编辑证据建立。旧历史尚未取得这些证据时继续显示原消息。单轮超过 500 项时，清单标明只显示部分记录。
+
+### U12 技能引用
+
+1. 按 [Native 入口](README.md#native真实接入分支)启动隔离 Host 和应用。在工作区 A 放 `zhi-proof` 与 `zhi-secondary` 两个技能，各有 `SKILL.md`、名称和简述。Codex 用 `.agents/skills/`，DSH 用 `.dsh/skills/`。给 `zhi-proof` 的正文放独有合成标记，DSH front matter 设 `disable-model-invocation: true`。工作区 B 保持空白。分别建两段对话并核对就绪。
+2. 在 A 输入 `/` 再输入 `zhi`，用方向键切到 `zhi-proof`，按 Tab 并接着输入任务。完整刷新，确认强调的引用、余下文字与选择身份仍在。另测 Escape、无匹配时 Tab、输入路径或 URL、手打完整 `/zhi-proof` 后直接发送。原生收到的手打文本保留原样。390px 视口点按候选，继续输入。
+3. 发送选中的 `zhi-proof`，查原生同一轮用户输入和指令内容。Codex 查 `rawResponseItem/completed` 或隔离 rollout 的 `response_item`，核对 skill 正文标记。DSH 用 `session/follow` 或 `session/page` 查 `user/message`，要求 `source.kind=skill-invocation`、名称及正文标记同时匹配。模型复述不是调用证明。按 [E06/E07](execution.md#e06--e07-排队与提前发送)跑排队派发和回执核对，检查原操作只出现一次。
+4. 切到 B 再查 `/zhi`，确认 A 的技能不出现。选中技能后在实验现场使它从原生目录消失并核对原生清单，再发送旧引用。应拒绝调用并保留草稿或排队条目。点「继续编辑」或队列行的「编辑」，核对保留内容可修改后重发。若该 Host 对旧会话冻结技能范围，使用能改变清单的原生禁用方式或下方 fixture。未登录端请求 `/api/private/workbench/conversations/<id>/skills` 应被拒绝，已登录结果只含显示信息与不透明 ID。
+
+### U13 对话用量
+
+1. 在 U12 的两端真实对话各完成两次模型请求。对照浮层累计值、已用量与窗口容量。Codex 从隔离原生连接记录 `thread/tokenUsage/updated` 的 `total.totalTokens`、`last.totalTokens` 和 `modelContextWindow`。DSH 查 `session/projections`，累计值为 `tokenUsage` 四项之和，上下文优先用 `contextPressure.projectedTokens`，回退用 `pressureTokens`。只读本次原生绑定。记录数值和百分比，区分近似显示与精确累计值。
+2. 完整刷新、切到另一对话再切回，确认数据归属。用足够长的合成对话触发原生压缩，或从隔离 Host 请求压缩。DSH 可将约 26 KiB ASCII 合成材料分两条发送，每条少于 16,000 字符，再在该会话执行原生 `/compact`。核对原生事件和独立读数。占用变小时圆环与详情随之变化，累计值不因压缩降低。只有原生缺少容量或 fixture 分支可检验容量缺失。
+
+**Fixture 分支。** 按[共同入口](README.md)建 Fixture A 和 B。A 提供上述两项合成技能，B 为空。对本轮唯一标题运行 `node test/support/feature-fixture.ts <disable-skills|usage-full|usage-compact|usage-total-only> --root "$zh_verify_root" --title '<标题>'`。`disable-skills` 后发送旧引用，核对草稿或排队条目保留，`inspect` 的接收操作 ID 未增加。依次运行三个用量命令，观察 `18% → 8% → 暂无数据`，精确累计值一直为 `176,222,262`，最后一次只显示累计入口。刷新后核对本对话数值，B 无用量。fixture 覆盖工作台与浏览器行为，原生调用与统计口径各用真实 Host 验证。
 
 ## Gotchas
 

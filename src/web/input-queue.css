@@ -69,6 +69,7 @@
 .input-queue .input-queue-send:enabled:hover { background:var(--zs-surface-hover); }
 .input-queue-edit { grid-column:2/-1; display:grid; gap:var(--zs-space-2); padding:var(--zs-space-1) 0; }
 .input-queue-edit textarea {
+  display:block;
   width:100%;
   min-height:56px;
   max-height:100px;
@@ -80,6 +81,9 @@
   border-radius:var(--zs-radius-item);
   resize:vertical;
 }
+.input-queue-edit .writing-editor-mirror { padding:var(--zs-space-2); border:1px solid transparent; font:inherit; }
+.input-queue-edit .writing-editor[data-decorated=true] { background:var(--zs-surface); border-radius:var(--zs-radius-item); }
+.input-queue-edit .writing-editor[data-decorated=true] textarea { background:transparent; }
 .input-queue li:has(.input-queue-edit) .input-queue-marker { align-self:start; padding-top:var(--zs-space-3); }
 @media (max-width:759px) {
   .input-queue { padding-inline:var(--zs-space-2); }

@@ -38,6 +38,7 @@ async function fixture(t: TestContext, limits: Parameters<typeof createWorkbench
   let nextStateRead: (() => Promise<void>) | undefined;
   const adapter: HarnessAdapter = {
     id: 'dsh',
+    async skills() { return [{ id: 'a'.repeat(64), name: 'proof', label: 'Proof', description: 'Synthetic skill' }]; },
     async catalog() { return { id: 'dsh', available: true, models: [{ id: configuration.modelId, label: 'Synthetic model' }], permissions: [{ id: configuration.permissionId, label: 'Workspace', description: 'Synthetic test only' }] }; },
     async create(input, onBound) { const binding = { id: 'private-native-binding', cwd: input.cwd, configuration: input.configuration, details: { privateNativeField: 'never-public' } }; onBound(binding); return binding; },
     async state() {
@@ -118,6 +119,38 @@ async function fixture(t: TestContext, limits: Parameters<typeof createWorkbench
     },
   };
 }
+
+test('skills and usage stay behind conversation authorization and skill identity is frozen for retry', async t => {
+  const f = await fixture(t);
+  const id = f.seed();
+  const root = `/conversations/${id}`;
+  assert.equal((await f.request(root + '/skills', { authenticated: false })).status, 401);
+  assert.equal((await f.request(root + '/skills?cwd=outside')).status, 400);
+  const catalog = await f.request(root + '/skills');
+  assert.equal(catalog.status, 200);
+  assert.equal(catalog.headers.get('cache-control'), 'no-store');
+  assert.deepEqual(catalog.body, { skills: [{ id: 'a'.repeat(64), name: 'proof', label: 'Proof', description: 'Synthetic skill' }] });
+  const context = { used: 600, capacity: 1000, estimated: true };
+  f.store.setUsage(id, { total: 1200, context });
+  f.store.setUsage(id, { total: 1199 });
+  assert.deepEqual(snapshotSchema.parse((await f.request(root)).body).usage, { total: 1200, context });
+  f.store.setUsage(id, { total: 1200, context: { ...context, used: 80 } });
+  assert.equal(snapshotSchema.parse((await f.request(root)).body).usage?.context?.used, 80);
+  f.store.setUsage(id, { total: 1200 });
+  assert.deepEqual(snapshotSchema.parse((await f.request(root)).body).usage, { total: 1200 });
+  const send = (payload: unknown, operationId: string) => f.request(root + '/operations', {
+    method: 'POST', body: { id: operationId, type: 'message', payload },
+  });
+  const skill = { id: 'a'.repeat(64), label: 'Proof', start: 0, end: 7 };
+  const payload = { text: '⬡ Proof', skills: [skill] };
+  assert.equal((await send({ ...payload, skills: [{ ...skill, end: 8 }] }, randomUUID())).status, 400);
+  const operationId = randomUUID();
+  assert.equal((await send(payload, operationId)).status, 202);
+  assert.equal((await send(payload, operationId)).status, 202);
+  assert.equal((await send({ ...payload, skills: [{ ...skill, id: 'b'.repeat(64) }] }, operationId)).status, 409);
+  await eventually(() => f.submissions.length === 1);
+  assert.deepEqual(f.submissions, [operationId]);
+});
 
 test('workspace registration gates real HTTP and retains disk files, history and binding across removal', async t => {
   const f = await fixture(t, {}, true);

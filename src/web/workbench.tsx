@@ -8,7 +8,7 @@ import {
   snapshotSchema, changeEventSchema, resetEventSchema, queueViewSchema,
   type WorkbenchConfiguration, type Conversation, type WorkbenchSnapshot, type WorkbenchItem, type QueueCommand, type TurnFileSummary,
 } from '../shared/workbench.ts';
-import { request, RequestError, readDraft, saveDraft, type Draft } from './workbench-client.ts';
+import { request, RequestError, readDraft, sameInput, saveDraft, type Draft } from './workbench-client.ts';
 import { sessionSchema } from '../shared/http.ts';
 import './workbench.css';
 import { Transcript, FilePicker } from './conversation-content.tsx';
@@ -39,6 +39,7 @@ const failures: Record<string, string> = {
   file_reference_unavailable: '引用文件已删除或无法读取，请重新选择；输入已保留。', file_reference_forbidden: '该文件不在可引用的工作区范围内。',
   quote_source_changed: '引用的原消息无法读取，请重新选择。', image_unavailable: '图片暂时无法读取，请重新添加；文字和引用已保留。',
   image_reference_changed: '图片引用已变化，请重新添加。', message_images_too_large: '这一条消息的图片合计超过 4 MiB，请减少图片后再发送。',
+  skill_reference_unavailable: '无法核对所选技能。输入已保留，请重新选择技能或移除该引用。',
 };
 const stateReasons: Record<string, string> = {
   workspace_removed: failures.workspace_removed!,
@@ -169,9 +170,9 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
       if (pending && !pending.queued) {
         const operation = result.operations.find(op => op.id === pending.id);
         if (operation?.status === 'accepted') {
-          setDraft(current => { const { pending: _pending, ...editable } = current; const same = editable.text === pending.text && JSON.stringify(editable.images ?? []) === JSON.stringify(pending.images ?? []) && JSON.stringify(editable.references ?? []) === JSON.stringify(pending.references ?? []); const next = same ? { text: '' } : editable; saveDraft(id, next); return next; });
+          setDraft(current => { const { pending: _pending, ...editable } = current; const next = sameInput(editable, pending) ? { text: '' } : editable; saveDraft(id, next); return next; });
           setError('');
-        } else if (operation?.status === 'rejected') setError(operation.reason ?? '本次发送未被接受，输入已保留。');
+        } else if (operation?.status === 'rejected') setError(operation.reason ? failures[operation.reason] ?? operation.reason : '本次发送未被接受，输入已保留。');
       }
     } catch (reason) { if (gen === generation.current) report(reason); }
     })().finally(() => {
@@ -265,7 +266,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
     const id = selected; const gen = generation.current;
     const operation: NonNullable<Draft['pending']> = draft.pending ?? {
       id: crypto.randomUUID(), text: draft.text, ...(draft.images?.length ? { images: draft.images } : {}),
-      ...(draft.references?.length ? { references: draft.references } : {}), ...(queueing ? { queued: true } : {}),
+      ...(draft.references?.length ? { references: draft.references } : {}), ...(draft.skills?.length ? { skills: draft.skills } : {}), ...(queueing ? { queued: true } : {}),
     };
     const { id: _operationId, queued, ...payload } = operation;
     const body = queued ? { action: 'add', entryId: operation.id, content: payload } : { id: operation.id, type: 'message', payload };
@@ -280,8 +281,11 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
       else result = await request(`/conversations/${id}/operations`, operationResponseSchema, { csrf, body });
       if (!alive.current || gen !== generation.current) return;
       if (queued || result?.operation.status === 'accepted') {
-        setDraft(current => { const { pending: _pending, ...editable } = current; const same = editable.text === operation.text && JSON.stringify(editable.images ?? []) === JSON.stringify(operation.images ?? []) && JSON.stringify(editable.references ?? []) === JSON.stringify(operation.references ?? []); const clean = same ? { text: '' } : editable; saveDraft(id, clean); return clean; });
-      } else if (result && ['unknown', 'rejected'].includes(result.operation.status)) setError(result.operation.reason ?? '操作结果待核实。');
+        setDraft(current => { const { pending: _pending, ...editable } = current; const clean = sameInput(editable, operation) ? { text: '' } : editable; saveDraft(id, clean); return clean; });
+      } else if (result && ['unknown', 'rejected'].includes(result.operation.status)) {
+        const reason = result.operation.reason;
+        setError(reason ? failures[reason] ?? reason : '操作结果待核实。');
+      }
       atBottom.current = true; await load(id);
     } catch (reason) {
       if (gen === generation.current && reason instanceof RequestError && ([400, 413].includes(reason.status) || ['conversation_archived','workspace_save_in_progress','workspace_execution_blocked','workspace_removed','workspace_remove_busy','workspace_directory_changed','workspace_directory_unavailable','workspace_identity_unavailable','operation_needs_reconciliation','file_reference_unavailable','file_reference_forbidden','quote_source_changed','image_reference_changed','image_unavailable','queue_full','queue_mode_unavailable'].includes(reason.code))) {
@@ -436,6 +440,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
           {!workspaceRemoved && !conversation?.archived && <Composer key={selected} conversation={selected} csrf={csrf} draft={draft} onChange={updateDraft}
             onSend={() => { if (ready || draft.pending) void send(); }} onStop={() => void stop()} onFiles={() => setPickingFile(true)}
             ready={ready} sending={sending} running={running} queueing={queueing}
+            skillsEnabled={conversation?.id === selected && !!usable} usage={conversation?.id === selected ? snapshot?.usage : undefined}
             queue={queue && <InputQueue queue={queue} busy={sending}
               target={running && usable && !unresolved ? conversation.state.runId : undefined} canResume={!!usable && !unresolved} onCommand={changeQueue}/>}
             permission={conversation?.state.configurationVerified ? permission?.label ?? '配置按对话固定' : '配置待核实'}

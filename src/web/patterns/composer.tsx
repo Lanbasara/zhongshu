@@ -1,4 +1,4 @@
-import { useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { useId, useLayoutEffect, useRef, useState, type ComponentPropsWithRef, type ReactNode } from 'react';
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 import { ArrowUp, FileText, ImagePlus, ListPlus, LoaderCircle, Plus, ShieldCheck, Square } from 'lucide-react';
 import { Information, Menu, MenuItem } from '../ui/controls.tsx';
@@ -11,6 +11,8 @@ export type ComposerViewProps = {
   editDisabled: boolean; imagesDisabled: boolean; filesDisabled: boolean; sendDisabled: boolean;
   sending: boolean; running: boolean; queueing?: boolean; model: string; permission: string; configurationNote: string;
   queue?: ReactNode; materials?: ReactNode; hasMaterials: boolean; error?: string;
+  renderEditor?(props: ComponentPropsWithRef<'textarea'>): ReactNode;
+  footerDetails?: ReactNode;
 };
 
 /** Presentation only: the caller owns submission, upload and persistence decisions. */
@@ -41,6 +43,21 @@ export function ComposerView(props: ComposerViewProps) {
     observer.observe(node);
     return () => observer.disconnect();
   }, []);
+  const editor: ComponentPropsWithRef<'textarea'> = {
+    ref: field, 'aria-label': '给 Agent 的消息', 'aria-describedby': `${hintId}${error ? ` ${errorId}` : ''}`,
+    rows: 2, value, disabled: editDisabled, maxLength: 16000,
+    placeholder: queueing ? '写下下一条消息，加入队列…' : running ? '可以先写下下一步，完成后继续…' : '继续思考，或开始一件新工作…',
+    onChange: event => onChange(event.currentTarget.value),
+    onPaste: event => {
+      const files = [...event.clipboardData.items].filter(item => item.kind === 'file').map(item => item.getAsFile()).filter((file): file is File => !!file);
+      if (files.length) { event.preventDefault(); if (!imagesDisabled) onImages(files); }
+    },
+    onKeyDown: event => {
+      if ((event.metaKey || event.ctrlKey) && event.key === 'Enter' && !event.nativeEvent.isComposing) {
+        event.preventDefault(); if (canSubmit) onSend();
+      }
+    },
+  };
   return <div className="writing-region">
     <div className="writing-dock">
     {queue}
@@ -50,11 +67,7 @@ export function ComposerView(props: ComposerViewProps) {
       onDragLeave={() => { depth.current = Math.max(0, depth.current - 1); if (!depth.current) setDragging(false); }}
       onDrop={event => { event.preventDefault(); depth.current = 0; setDragging(false); if (!imagesDisabled) onImages([...event.dataTransfer.files]); }}>
       <AnimatePresence initial={false}>{hasMaterials && <motion.div className="writing-materials" initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }} transition={transition}>{materials}</motion.div>}</AnimatePresence>
-      <textarea ref={field} aria-label="给 Agent 的消息" aria-describedby={`${hintId}${error ? ` ${errorId}` : ''}`} rows={2} value={value} disabled={editDisabled} maxLength={16000}
-        placeholder={queueing ? '写下下一条消息，加入队列…' : running ? '可以先写下下一步，完成后继续…' : '继续思考，或开始一件新工作…'}
-        onChange={event => onChange(event.target.value)}
-        onPaste={event => { const files = [...event.clipboardData.items].filter(item => item.kind === 'file').map(item => item.getAsFile()).filter((file): file is File => !!file); if (files.length) { event.preventDefault(); if (!imagesDisabled) onImages(files); } }}
-        onKeyDown={event => { if ((event.metaKey || event.ctrlKey) && event.key === 'Enter' && !event.nativeEvent.isComposing) { event.preventDefault(); if (canSubmit) onSend(); } }}/>
+      {props.renderEditor ? props.renderEditor(editor) : <textarea {...editor}/>}
       {error && <p id={errorId} className="writing-error" role="alert">{error}</p>}
       <div className="writing-toolbar">
         <input ref={picker} type="file" accept="image/png,image/jpeg,image/webp" multiple hidden onChange={event => { onImages([...event.target.files ?? []]); event.target.value = ''; }}/>
@@ -78,6 +91,6 @@ export function ComposerView(props: ComposerViewProps) {
       {dragging && !imagesDisabled && <div className="writing-drop"><ImagePlus size={24}/><span>松开，添加图片</span></div>}
     </form>
     </div>
-    <div className="writing-footnote"><span title={configurationNote}><ShieldCheck size={12}/>{permission}</span><span id={hintId}><kbd>⌘ / Ctrl</kbd><kbd>↵</kbd>{queueing ? '排队' : '发送'}</span></div>
+    <div className="writing-footnote"><span title={configurationNote}><ShieldCheck size={12}/>{permission}</span>{props.footerDetails}<span id={hintId}><kbd>⌘ / Ctrl</kbd><kbd>↵</kbd>{queueing ? '排队' : '发送'}</span></div>
   </div>;
 }

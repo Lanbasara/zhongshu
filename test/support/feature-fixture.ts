@@ -14,6 +14,7 @@ import { parseArgs } from 'node:util';
 import { DatabaseSync } from 'node:sqlite';
 import { z } from 'zod';
 import type { Binding, HarnessAdapter, HarnessId, HarnessInput, NativeItem, NativeState, Receipt } from '../../src/harness/types.ts';
+import { nativeSkill, resolveSkillInput, skillOptions } from '../../src/harness/skills.ts';
 import type { QueueDelivery } from '../../src/shared/workbench.ts';
 import { buildApp } from '../../src/server/app.ts';
 import { openDatabase } from '../../src/server/database.ts';
@@ -22,12 +23,12 @@ import { createWorkbenchStore } from '../../src/server/workbench-store.ts';
 import { Workbench } from '../../src/server/workbench.ts';
 import { createWorkbenchHttp } from '../../src/server/workbench-http.ts';
 import { WorkspaceRegistry } from '../../src/server/workspace-registry.ts';
-import { itemSchema, stateSchema } from '../../src/shared/workbench.ts';
+import { itemSchema, stateSchema, usageSchema } from '../../src/shared/workbench.ts';
 
 process.umask(0o077);
 const repository = fileURLToPath(new URL('../../', import.meta.url));
 const cliSchema = z.object({
-  command: z.enum(['serve', 'init', 'reset', 'inspect', 'complete', 'prove', 'seed', 'disconnect', 'reconnect', 'unknown-receipt', 'reject-next', 'fail-create', 'repair']),
+  command: z.enum(['serve', 'init', 'reset', 'inspect', 'complete', 'prove', 'seed', 'disconnect', 'reconnect', 'unknown-receipt', 'reject-next', 'fail-create', 'repair', 'disable-skills', 'usage-full', 'usage-compact', 'usage-total-only']),
   root: z.string().min(1).max(4096).refine(isAbsolute),
   port: z.coerce.number().int().min(1024).max(65535).default(4391),
   title: z.string().min(1).max(200).optional(),
@@ -42,6 +43,7 @@ const recordSchema = z.object({
   rejectedOperationIds: z.array(z.uuid()).max(100).default([]), rejectNext: z.boolean().default(false),
   submitCalls: z.number().int().min(0), stopCalls: z.number().int().min(0),
   offline: z.boolean(), unknownReceipt: z.boolean(), hidden: z.boolean(), revision: z.number().int().min(0),
+  skillsDisabled: z.boolean().optional(), usage: usageSchema.optional(),
 });
 type Native = z.infer<typeof recordSchema>;
 const idle = (): NativeState => ({ status: 'idle', pendingInputs: 0, configurationVerified: true });
@@ -54,7 +56,7 @@ function privateFile(path: string): void {
 async function main() {
   const args = parseArgs({ options: { root: { type: 'string' }, port: { type: 'string' }, title: { type: 'string' }, count: { type: 'string' }, chars: { type: 'string' }, help: { type: 'boolean' } }, allowPositionals: true, strict: true });
   if (args.values.help) {
-    console.log('node test/support/feature-fixture.ts <serve|init|reset|inspect|complete|prove|seed|disconnect|reconnect|unknown-receipt|reject-next|fail-create|repair> --root ABSOLUTE_DIRECTORY [--port 4391] [--title TITLE] [--count 650 --chars 80]');
+    console.log(`node test/support/feature-fixture.ts <${cliSchema.shape.command.options.join('|')}> --root ABSOLUTE_DIRECTORY [--port 4391] [--title TITLE] [--count 650 --chars 80]`);
     return;
   }
   if (args.positionals.length !== 1) throw new Error('one_command_required');
@@ -119,6 +121,11 @@ async function main() {
         const matches = all().filter(value => value.title === input.title);
         if (matches.length !== 1) throw new Error('title_must_select_exactly_one_fixture_session');
         change(matches[0]!.id, value => {
+          if (input.command === 'disable-skills') value.skillsDisabled = true;
+          if (input.command === 'usage-full' || input.command === 'usage-compact') {
+            value.usage = { total: 176_222_262, context: { used: input.command === 'usage-full' ? 188_743 : 83_886, capacity: 1_048_576, estimated: true } };
+          }
+          if (input.command === 'usage-total-only') value.usage = { total: 176_222_262 };
           if (input.command === 'disconnect') value.offline = true;
           if (input.command === 'reconnect') value.offline = false;
           if (input.command === 'repair') value.state = idle();
@@ -163,8 +170,15 @@ async function main() {
   const timers = new Set<NodeJS.Timeout>();
   function adapter(id: HarnessId): HarnessAdapter {
     const checked = (binding: Binding) => { const value = load(binding.id); if (value.offline) throw new Error('fixture_disconnected'); return value; };
+    function skills(binding: Binding) {
+      const value = checked(binding);
+      if (value.skillsDisabled || binding.cwd !== workspaces[0]!.directory) return [];
+      return ['zhi-proof', 'zhi-secondary'].map(name => nativeSkill(binding, { name, description: '合成验证技能' })!);
+    }
     async function submit(binding: Binding, operation: HarnessInput, delivery?: QueueDelivery): Promise<Receipt> {
       checked(binding);
+      const resolved = operation.skills?.length ? resolveSkillInput(operation, skills(binding), '/') : { text: operation.text };
+      if (!resolved) return { outcome: 'rejected', reason: 'skill_reference_unavailable' };
       let receipt: Receipt = { outcome: 'unknown', reason: 'fixture_receipt_lost' };
       change(binding.id, value => {
         if (value.submissions.some(item => item.id === operation.id) || value.rejectedOperationIds.includes(operation.id)) throw new Error('duplicate_fixture_dispatch');
@@ -178,7 +192,7 @@ async function main() {
           return;
         }
         const runId = delivery && delivery.mode !== 'next' && active ? active : 'fixture-run:' + operation.id;
-        value.submissions.push({ id: operation.id, text: operation.text, runId });
+        value.submissions.push({ id: operation.id, text: resolved.text, runId });
         const unknown = value.unknownReceipt; value.unknownReceipt = false; value.hidden = unknown;
         value.state = { status: 'running', runId, pendingInputs: 0, configurationVerified: true };
         if (!unknown) { prove(value); receipt = delivery ? { outcome: 'accepted' } : { outcome: 'accepted', runId }; }
@@ -187,6 +201,7 @@ async function main() {
     }
     return {
       id, earlyInput: id === 'codex' ? 'current' : 'soon', submit, submitQueued: submit,
+      async skills(binding) { return skillOptions(skills(binding)); },
       async catalog() { return { id, available: true, models: [{ id: 'fixture-model', label: 'Fixture · 非真实模型' }], permissions: [{ id: 'fixture-write', label: 'Fixture write', description: 'Synthetic boundary; no actual agent execution.' }, { id: 'fixture-read', label: 'Fixture read', description: 'Synthetic configuration selection only.' }] }; },
       async create(input, onBound) {
         const fail = native.prepare('SELECT fail_create FROM settings WHERE id = 1').get()!.fail_create === 1;
@@ -205,7 +220,7 @@ async function main() {
       async history(binding, cursor, limit = 100) {
         const value = checked(binding); const end = cursor === undefined ? value.items.length : z.coerce.number().int().min(0).max(value.items.length).parse(cursor);
         const start = Math.max(0, end - limit);
-        return { items: value.items.slice(start, end), olderCursor: start ? String(start) : null };
+        return { items: value.items.slice(start, end), olderCursor: start ? String(start) : null, ...(cursor === undefined && value.usage ? { usage: value.usage } : {}) };
       },
       async reconcile(binding, operationId) {
         const value = checked(binding); const message = value.submissions.find(item => item.id === operationId);

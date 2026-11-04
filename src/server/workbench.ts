@@ -22,7 +22,7 @@ type Runtime = {
   timer?: NodeJS.Timeout; poll?: NodeJS.Timeout; flush?: NodeJS.Timeout;
   live: Map<string, NativeItem>; generation: number; stateGeneration: number; dirty: boolean;
 };
-type HistoryRead = { items: NativeItem[]; cursor: string | null; establishCursor: boolean };
+type HistoryRead = { items: NativeItem[]; cursor: string | null; establishCursor: boolean; usage?: HistoryPage['usage'] };
 
 /** One application writer. Native execution outlives browser observers and application connections. */
 export class Workbench {
@@ -492,6 +492,19 @@ export class Workbench {
     if (conversation.binding && !this.workspaceUnavailable(conversation.workspaceId) && !this.executionBlocked(conversation.cwd)) this.launch(this.restoreConversation(id));
     return this.snapshot(id);
   }
+  async skills(id: string) {
+    this.assertOpen();
+    const conversation = this.conversation(id);
+    this.assertQueueDispatchable(conversation);
+    const adapter = this.adapter(conversation);
+    if (!adapter.skills) throw new StoreError('skill_catalog_unavailable', 503);
+    return this.task(async () => {
+      const skills = await adapter.skills!(conversation.binding!).catch(() => { throw new StoreError('skill_catalog_unavailable', 503); });
+      this.assertOpen();
+      this.assertQueueDispatchable(this.conversation(id));
+      return skills;
+    });
+  }
   snapshot(id: string, beforeItemId?: string) {
     this.assertOpen(); let conversation = this.conversation(id);
     const unavailable = this.workspaceUnavailable(conversation.workspaceId);
@@ -830,8 +843,9 @@ export class Workbench {
     runtime.watching = this.task(async () => {
       const stop = await adapter.watch(conversation.binding!, change => {
         if (this.closed || this.runtimes.get(id) !== runtime) return;
-        runtime.generation++;
         try {
+          if (change.type === 'usage') { this.store.setUsage(id, change.usage); return; }
+          runtime.generation++;
           if (change.type === 'item') {
             if (change.item.imageSources?.length) { this.scheduleSync(id); return; }
             if (change.item.kind === 'user' && change.item.operationId) {
@@ -874,18 +888,20 @@ export class Workbench {
     const existing = this.store.readHistory(conversation.id, { limit: 1 }).items.length > 0;
     const establishCursor = !conversation.historyLoaded || !existing;
     let cursor: string | undefined; let lastCursor: string | null = null; let bytes = 0;
+    let usage: HistoryPage['usage'];
     const seenCursors = new Set<string>(); const pages: NativeItem[][] = []; let count = 0;
     for (let number = 0; number < HISTORY_MAX_PAGES; number++) {
       const page: HistoryPage = await adapter.history(conversation.binding!, cursor, HISTORY_PAGE_SIZE);
+      if (!cursor) usage = page.usage;
       this.assertOpen();
       if (!Array.isArray(page.items) || page.items.length > HISTORY_PAGE_SIZE) throw new StoreError('native_history_page_limit', 502);
       bytes += page.items.reduce((total, item) => total + Buffer.byteLength(JSON.stringify(item)), 0); count += page.items.length;
       if (bytes > HISTORY_MAX_BYTES || count > HISTORY_MAX_ITEMS) throw new StoreError('history_gap_limit', 502);
       pages.push(await this.materialize(conversation, page.items)); lastCursor = page.olderCursor;
       const intersects = page.items.some(item => this.store.hasHistoryItem(conversation.id, item.id));
-      if (intersects || (establishCursor && (count > 0 || !page.olderCursor))) return { items: pages.reverse().flat(), cursor: lastCursor, establishCursor };
+      if (intersects || (establishCursor && (count > 0 || !page.olderCursor))) return { items: pages.reverse().flat(), cursor: lastCursor, establishCursor, usage };
       if (!page.olderCursor) {
-        if (!existing) return { items: pages.reverse().flat(), cursor: null, establishCursor: true };
+        if (!existing) return { items: pages.reverse().flat(), cursor: null, establishCursor: true, usage };
         throw new StoreError('native_history_diverged', 502);
       }
       if (seenCursors.has(page.olderCursor)) throw new StoreError('history_no_progress', 502);
@@ -924,6 +940,7 @@ export class Workbench {
             else if (outcome === 'interrupted' || state.value.status === 'interrupted') this.store.pauseQueue(id, 'stopped');
           }
           if (runtime.generation !== generation) { runtime.dirty = true; continue; }
+          if (state.value.configurationVerified && history.value.usage) this.store.setUsage(id, history.value.usage);
           const items = history.value.items.map(item => {
             const live = runtime.live.get(item.id);
             if (!live) return item;

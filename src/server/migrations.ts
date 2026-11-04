@@ -142,6 +142,9 @@ export const productMigrations: Migration[] = [{ version: 2, sql: `
     WHERE status IN ('applying', 'unknown', 'restart-required');
 ` }, { version: 9, sql: `
   ALTER TABLE plugin_operations ADD COLUMN version TEXT;
+` }, { version: 10, sql: `
+  ALTER TABLE workbench_conversations ADD COLUMN usage_json TEXT;
+  ALTER TABLE workbench_queue_entries ADD COLUMN skill_unavailable INTEGER NOT NULL DEFAULT 0 CHECK (skill_unavailable IN (0, 1));
 ` }];
 
 /** Runs inside restoreDatabase's private staging transaction, before the database is published. */

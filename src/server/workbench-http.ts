@@ -9,7 +9,7 @@ import type { Workbench } from './workbench.ts';
 import { StoreError, type Conversation, type Operation, type WorkbenchChange } from './workbench-store.ts';
 import { decodeImage, ResourceError } from './resources.ts';
 import { textLimit } from './workspace-documents.ts';
-import { imageSchema } from '../shared/content.ts';
+import { imageSchema, skillCatalogSchema } from '../shared/content.ts';
 
 const uuidParams = z.object({ id: z.uuid() }).strict();
 const workspaceParams = z.object({ id: workspaceIdSchema }).strict();
@@ -65,7 +65,7 @@ function snapshotView(value: ReturnType<Workbench['snapshot']>): WorkbenchSnapsh
   return { conversation, history: {
     items, liveItems, liveItemsLimited: history.liveItemsLimited || liveItems.length < history.liveItems.length, loaded: history.historyLoaded,
     olderBeforeItemId: hasOlder ? (trimmed ? items[0]?.id : history.olderBeforeItemId) ?? items[0]?.id ?? null : null, hasOlder,
-  }, operations, queue, ...(turnFiles.length ? { turnFiles } : {}), revision: value.revision };
+  }, operations, queue, ...(turnFiles.length ? { turnFiles } : {}), ...(value.conversation.usage ? { usage: value.conversation.usage } : {}), revision: value.revision };
 }
 function json(reply: FastifyReply, value: unknown): FastifyReply {
   const body = JSON.stringify(value);
@@ -226,6 +226,11 @@ export function createWorkbenchHttp(workbench: Workbench, input: Partial<z.input
       privateApp.get('/conversations/:id', async (request, reply) => {
         parse(noQuery, request.query); const { id } = parse(uuidParams, request.params);
         return json(reply, snapshotView(await workbench.open(id)));
+      });
+      privateApp.get('/conversations/:id/skills', async (request, reply) => {
+        parse(noQuery, request.query);
+        const { id } = parse(uuidParams, request.params);
+        return json(reply, skillCatalogSchema.parse({ skills: await workbench.skills(id) }));
       });
       privateApp.get('/workspaces/:id/files', async (request, reply) => {
         const { id } = parse(workspaceParams, request.params);
