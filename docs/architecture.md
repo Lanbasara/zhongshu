@@ -66,6 +66,8 @@ Web manifest 提供独立窗口入口。有限且已完成的 Markdown 预览按
 
 有界接入的 Codex reader 读取校验过身份和版本的持久 rollout，DSH reader 读取原生日志并建立稳定条目/工具锚点；巨型标量流式提取，缓存配额和正文租约由各 reader 管理。DSH 专用 Host plugin 缩减状态和 watch 投影。原生 state/watch/reconcile 仍可能加载或激活会话，必须走受控执行许可；物理 history/readItems/body 路径不恢复执行。原生模型运行时的内存成本独立于中书的分页预算，不能据此宣称原生 Agent loop 为常量空间。固定版本和复验归 [execution](features/execution.md) 与 [continuity](features/continuity.md)。
 
+Codex 的旧目标轮核对在 reader 私有缓存中持久保存查询位置，通过有限元数据页跨多次调用继续。位置只决定下一页从哪读，不是终态证明；精确目标和当前状态仍由原生端重新给出。缓存 worker 负责位置 CAS、容量及清理，不进入产品操作账本。正常头页命中不扫描缓存目录，故障和复验路径见 [execution](features/execution.md#e05-真实原生工作)。
+
 ## 界面与设计系统
 
 当前界面以安静、清晰、有质感为方向：导航紧凑，正文舒展，动作利落。设计参考保存在 [reference](../design/reference/index.html)，它记录已接受的原型，不参与产品运行。产品通过自己的布局与真实状态实现设计意图，引用、上传、执行与恢复沿用原有能力。

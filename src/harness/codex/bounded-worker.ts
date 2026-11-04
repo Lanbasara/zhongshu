@@ -8,7 +8,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { z } from 'zod';
 import { BoundedJsonEnvelope } from '../dsh/bounded-json.ts';
 import { BoundedCache } from '../dsh/bounded-cache.ts';
-import { boundedCodexOptions, rolloutBinding, rolloutCursor, rolloutChangesCursor, rolloutBody, rolloutKey, encodeRolloutToken } from './bounded-reader.ts';
+import { boundedCodexOptions, rolloutBinding, rolloutCursor, rolloutChangesCursor, rolloutBody, rolloutKey, encodeRolloutToken, turnQueryKey, turnQueryUpdate, turnQueryRetirement } from './bounded-reader.ts';
 import type { RolloutBinding } from './bounded-reader.ts';
 import type { NativeItem, NativeBodySource, HistoryPage } from '../types.ts';
 import { editPath } from '../edit-paths.ts';
@@ -326,6 +326,15 @@ async function history(raw: unknown): Promise<HistoryPage> {
   });
 }
 async function dispatch(method: string, args: unknown): Promise<unknown> {
+  if (method === 'retire-turn-query') {
+    const parsed = turnQueryRetirement.parse(args);
+    return quota.retireQuery(hash(JSON.stringify([options.nativeRoot, parsed.key])), parsed.before);
+  }
+  if (method === 'turn-query') return quota.queryPosition(hash(JSON.stringify([options.nativeRoot, turnQueryKey.parse(args)])));
+  if (method === 'advance-turn-query') {
+    const parsed = turnQueryUpdate.parse(args);
+    return quota.advanceQuery(hash(JSON.stringify([options.nativeRoot, parsed.key])), parsed.expected, parsed.cursor, parsed.settled);
+  }
   if (method === 'history') return history(args);
   if (method === 'changes') {
     const parsed = z.object({ binding: rolloutBinding, cursor: rolloutChangesCursor.optional(), limit: count.min(1).max(16) }).parse(args);
@@ -382,7 +391,23 @@ let chain = Promise.resolve();
 parentPort!.on('message', (message: { id: number; method: string; args: unknown }) => {
   chain = chain.then(async () => {
     let result: unknown, error: string | undefined, cache: unknown;
-    try { await roots(); quota = await BoundedCache.lock(options.cacheRoot, options.maxCacheBytes); try { result = await dispatch(message.method, message.args); await quota.ensure(); cache = quota.status(); } finally { quota.close(); } }
+    try {
+      // Recent-target success only retires an existing checkpoint. Do not create
+      // a cache or enumerate its historical files on this hot path.
+      let exists = true;
+      if (message.method === 'retire-turn-query') {
+        turnQueryRetirement.parse(message.args);
+        try { await lstat(join(options.cacheRoot, '.bounded-cache.sqlite')); }
+        catch (cause) { if ((cause as NodeJS.ErrnoException).code === 'ENOENT') exists = false; else throw cause; }
+      }
+      if (exists) {
+        await roots(); quota = await BoundedCache.lock(options.cacheRoot, options.maxCacheBytes);
+        try {
+          result = await dispatch(message.method, message.args);
+          if (message.method !== 'retire-turn-query') { await quota.ensure(); cache = quota.status(); }
+        } finally { quota.close(); }
+      }
+    }
     catch (cause) { const code = cause instanceof Error ? cause.message : ''; error = /^(?:codex_bounded_|history_|codex_body_)[a-z_]+$/.test(code) ? code : code.startsWith('dsh_bounded_') ? code.replace('dsh_bounded_', 'codex_bounded_') : (cause as NodeJS.ErrnoException)?.code === 'ENOENT' ? 'history_source_missing' : 'codex_bounded_invalid_data'; }
     parentPort!.postMessage({ id: message.id, ...(error ? { error } : { result }), ...(cache ? { cache } : {}) });
   }).catch(() => { parentPort!.postMessage({ id: message.id, error: 'codex_bounded_read_failed' }); });

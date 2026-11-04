@@ -1,9 +1,10 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { setTimeout as delay } from 'node:timers/promises';
 import { WebSocketServer, WebSocket } from 'ws';
 import { createCodexAdapter } from '../src/harness/codex/index.ts';
@@ -16,7 +17,7 @@ const saved: Binding = { id: 'thread-1', cwd: '/workspace/synthetic', configurat
 const nativeConfiguration = () => ({ thread: { id: saved.id, status: { type: 'idle' } }, cwd: saved.cwd, model: 'model-a', activePermissionProfile: { id: 'workspace' }, approvalPolicy: 'never' });
 function userItem(id: string, clientId = id) { return { turnId: 'run-1', item: { id, type: 'userMessage', clientId, content: [{ type: 'text', text: id }] }, completedAtMs: 1 }; }
 
-async function peer(t: TestContext, override?: (request: Request, socket: WebSocket) => unknown, managedExecution = false) {
+async function peer(t: TestContext, override?: (request: Request, socket: WebSocket) => unknown, managedExecution = false, persistentQueries = false) {
   const dir = await mkdtemp(join(tmpdir(), 'zh codex test '));
   const socketPath = join(dir, 'rpc.sock');
   const http = createServer(); const sockets = new Set<WebSocket>(); const calls: Request[] = []; const clientResponses: unknown[] = [];
@@ -52,7 +53,10 @@ async function peer(t: TestContext, override?: (request: Request, socket: WebSoc
     });
   });
   await new Promise<void>(resolve => http.listen(socketPath, resolve));
-  const adapter = createCodexAdapter({ socketPath, managedExecution });
+  const nativeRoot = join(dir, 'native'), cacheRoot = join(dir, 'cache');
+  if (persistentQueries) await mkdir(nativeRoot);
+  const options = { socketPath, managedExecution, ...(persistentQueries ? { boundedHistory: { nativeRoot, cacheRoot } } : {}) };
+  let adapter = createCodexAdapter(options);
   t.after(async () => {
     await adapter.close();
     for (const socket of sockets) socket.terminate();
@@ -60,7 +64,9 @@ async function peer(t: TestContext, override?: (request: Request, socket: WebSoc
     await new Promise<void>(resolve => http.close(() => resolve()));
     await rm(dir, { recursive: true, force: true });
   });
-  return { adapter, calls, sockets, clientResponses, notify(method: string, params: unknown) { for (const socket of sockets) socket.send(JSON.stringify({ method, params })); } };
+  return { get adapter() { return adapter; }, calls, sockets, clientResponses, cacheRoot,
+    async restart() { await adapter.close(); adapter = createCodexAdapter(options); },
+    notify(method: string, params: unknown) { for (const socket of sockets) socket.send(JSON.stringify({ method, params })); } };
 }
 async function until(predicate: () => boolean) { for (let tries = 0; tries < 100; tries++) { if (predicate()) return; await delay(20); } assert.fail('Expected protocol observation did not arrive'); }
 
@@ -355,6 +361,176 @@ test('Codex target proof requires an exact terminal record and remains bounded w
   unfinished = false; pages = 0;
   const missing = await p.adapter.state(saved, 'missing-run');
   assert.equal(missing.status, 'idle'); assert.equal(missing.terminalRunId, undefined); assert.equal(pages, 10);
+});
+
+test('Codex exact target beyond 2000 turns progresses across bounded state calls and reader restarts', async t => {
+  const offsets: number[] = [];
+  let terminal = 'completed';
+  const p = await peer(t, request => {
+    if (request.method !== 'thread/turns/list') return undefined;
+    if (request.params.limit === 1) return { data: [{ id: 'notification-run', status: 'completed' }], nextCursor: null };
+    const offset = Number(request.params.cursor ?? 0); offsets.push(offset);
+    return { data: Array.from({ length: Math.min(100, 2001 - offset) }, (_, n) => ({ id: offset + n === 2000 ? 'old-user-run' : `turn-${offset + n}`, status: offset + n === 2000 ? terminal : 'completed' })),
+      nextCursor: offset + 100 < 2001 ? String(offset + 100) : null };
+  }, false, true);
+  for (let round = 0; round < 2; round++) {
+    const before = offsets.length;
+    assert.equal((await p.adapter.state(saved, 'old-user-run')).terminalRunId, undefined);
+    assert.equal(offsets.length - before, 10);
+    await p.restart();
+  }
+  const found = await p.adapter.state(saved, 'old-user-run');
+  assert.equal(found.terminalRunId, 'old-user-run');
+  assert.equal(found.terminalStatus, 'completed');
+  assert.deepEqual(offsets, [...Array.from({ length: 10 }, (_, n) => n * 100), 0, ...Array.from({ length: 9 }, (_, n) => 1000 + n * 100), 0, 1900, 2000]);
+  // A second forced proof reads the native page again, including a changed result.
+  terminal = 'inProgress';
+  assert.equal((await p.adapter.state(saved, 'old-user-run')).terminalRunId, undefined);
+  terminal = 'interrupted';
+  assert.equal((await p.adapter.state(saved, 'old-user-run')).terminalStatus, 'interrupted');
+  assert.deepEqual(offsets.slice(-4), [0, 2000, 0, 2000]);
+});
+
+test('Codex target progress survives disconnect, resets invalid cursors and never publishes a cached terminal fact', async t => {
+  let disconnected = false, invalidate = false, generation = 'first';
+  let terminal = 'completed';
+  const offsets: string[] = [];
+  const p = await peer(t, (request, socket) => {
+    if (request.method !== 'thread/turns/list') return undefined;
+    if (request.params.limit === 1) return { data: [{ id: 'latest', status: 'completed' }], nextCursor: null };
+    const entry = String(request.params.cursor ?? `${generation}:0`); offsets.push(entry);
+    if (!disconnected && entry === 'first:300') { disconnected = true; socket.terminate(); return NO_RESPONSE; }
+    if (invalidate && request.params.cursor) {
+      invalidate = false; generation = 'second';
+      socket.send(JSON.stringify({ id: request.id, error: { code: -32602, message: 'Synthetic cursor invalid' } })); return NO_RESPONSE;
+    }
+    const offset = Number(entry.split(':')[1]);
+    return { data: [{ id: offset === 1100 ? 'target' : 'other-' + offset, status: offset === 1100 ? terminal : 'completed' }],
+      nextCursor: offset < 1100 ? `${generation}:${offset + 100}` : null };
+  }, false, true);
+  assert.equal((await p.adapter.state(saved, 'target')).status, 'unknown');
+  assert.deepEqual(offsets, ['first:0', 'first:100', 'first:200', 'first:300']);
+  await p.restart();
+  assert.equal((await p.adapter.state(saved, 'target')).terminalStatus, 'completed');
+  assert.deepEqual(offsets.slice(4, 6), ['first:0', 'first:300']);
+  invalidate = true;
+  const invalid = await p.adapter.state(saved, 'target');
+  assert.equal(invalid.status, 'unknown'); assert.equal(invalid.reason, 'codex_turn_cursor_reset'); assert.equal(invalid.terminalRunId, undefined);
+  const before = offsets.length;
+  assert.equal((await p.adapter.state(saved, 'target')).terminalRunId, undefined);
+  assert.equal(offsets[before], 'second:0'); assert.equal(offsets.length - before, 10);
+  terminal = 'inProgress';
+  assert.equal((await p.adapter.state(saved, 'target')).terminalRunId, undefined);
+  terminal = 'failed';
+  assert.equal((await p.adapter.state(saved, 'target')).terminalStatus, 'failed');
+  assert.equal(offsets.at(-1), 'second:1100');
+});
+
+test('Codex more than 64 unresolved bindings retain independent query progress without LRU starvation', async t => {
+  const starts: string[] = [];
+  const p = await peer(t, request => {
+    if (request.method === 'thread/resume') return { ...nativeConfiguration(), thread: { id: request.params.threadId, status: { type: 'idle' } } };
+    if (request.method === 'thread/read') return { thread: { id: request.params.threadId, status: { type: 'idle' } } };
+    if (request.method !== 'thread/turns/list') return undefined;
+    if (request.params.limit === 1) return { data: [{ id: 'latest', status: 'completed' }], nextCursor: null };
+    const offset = Number(request.params.cursor ?? 0);
+    if (!offset) starts.push(String(request.params.threadId));
+    return { data: [{ id: offset === 1000 ? 'target' : `other-${offset}`, status: 'completed' }], nextCursor: offset < 1000 ? String(offset + 100) : null };
+  }, false, true);
+  for (let n = 0; n < 70; n++) assert.equal((await p.adapter.state({ ...saved, id: `binding-${n}` }, 'target')).terminalRunId, undefined);
+  await p.restart();
+  const before = p.calls.length;
+  for (let n = 0; n < 70; n++) assert.equal((await p.adapter.state({ ...saved, id: `binding-${n}` }, 'target')).terminalRunId, 'target');
+  assert.equal(starts.length, 140);
+  assert.equal(p.calls.slice(before).filter(call => call.method === 'thread/turns/list' && call.params.limit === 100).length, 140);
+});
+
+test('Codex target positions isolate target, cwd and configuration; in-process compatibility also progresses', async t => {
+  let expected = saved, actualTarget = 'target-a';
+  const starts: string[] = [];
+  const p = await peer(t, request => {
+    if (request.method === 'thread/resume') return { ...nativeConfiguration(), cwd: expected.cwd, model: expected.configuration.modelId, activePermissionProfile: { id: expected.configuration.permissionId } };
+    if (request.method !== 'thread/turns/list') return undefined;
+    if (request.params.limit === 1) return { data: [{ id: 'latest', status: 'completed' }], nextCursor: null };
+    const offset = Number(request.params.cursor ?? 0);
+    if (!offset) starts.push(actualTarget + ':' + expected.cwd + ':' + expected.configuration.modelId + ':' + expected.configuration.permissionId);
+    return { data: [{ id: offset === 1000 ? actualTarget : 'other-' + offset, status: 'completed' }], nextCursor: offset < 1000 ? String(offset + 100) : null };
+  });
+  const lookup = async () => {
+    assert.equal((await p.adapter.state(expected, actualTarget)).terminalRunId, undefined);
+    assert.equal((await p.adapter.state(expected, actualTarget)).terminalRunId, actualTarget);
+  };
+  await lookup();
+  actualTarget = 'target-b'; await lookup();
+  expected = { ...saved, cwd: '/workspace/other' }; await lookup();
+  expected = { ...expected, configuration: { ...saved.configuration, modelId: 'model-b' } }; await lookup();
+  expected = { ...expected, configuration: { modelId: 'model-b', permissionId: 'read-only' } }; await lookup();
+  assert.equal(starts.length, 10); assert.equal(new Set(starts).size, 5);
+});
+
+test('Codex repeated cursor fails closed and resets its position for recovery', async t => {
+  let cycle = true;
+  const p = await peer(t, request => {
+    if (request.method !== 'thread/turns/list') return undefined;
+    if (request.params.limit === 1) return { data: [], nextCursor: null };
+    return cycle ? { data: [], nextCursor: 'same' } : { data: [{ id: 'target', status: 'completed' }], nextCursor: null };
+  }, false, true);
+  const failed = await p.adapter.state(saved, 'target'); assert.equal(failed.status, 'unknown'); assert.equal(failed.reason, 'codex_history_no_progress');
+  cycle = false;
+  assert.equal((await p.adapter.state(saved, 'target')).terminalRunId, 'target');
+  assert.equal(p.calls.filter(call => call.method === 'thread/turns/list' && call.params.limit === 100).at(-1)!.params.cursor, undefined);
+});
+
+test('Codex concurrent delayed page cannot roll back a newer target checkpoint or publish stale proof', async t => {
+  let held: { request: Request; socket: WebSocket } | undefined, heldOnce = false;
+  const p = await peer(t, (request, socket) => {
+    if (request.method !== 'thread/turns/list') return undefined;
+    if (request.params.limit === 1) return { data: [], nextCursor: null };
+    const offset = Number(request.params.cursor ?? 0);
+    if (offset === 100 && !heldOnce) { held = { request, socket }; heldOnce = true; return NO_RESPONSE; }
+    return { data: [{ id: offset === 1000 ? 'target' : 'other-' + offset, status: 'completed' }], nextCursor: offset < 1000 ? String(offset + 100) : null };
+  }, false, true);
+  const old = p.adapter.state(saved, 'target');
+  await until(() => !!held);
+  assert.equal((await p.adapter.state(saved, 'target')).terminalRunId, undefined);
+  assert.equal((await p.adapter.state(saved, 'target')).terminalRunId, 'target');
+  held!.socket.send(JSON.stringify({ id: held!.request.id, result: { data: [], nextCursor: '200' } }));
+  const stale = await old; assert.equal(stale.status, 'unknown'); assert.equal(stale.reason, 'codex_turn_query_conflict');
+  assert.equal((await p.adapter.state(saved, 'target')).terminalRunId, 'target');
+  assert.equal(p.calls.filter(call => call.method === 'thread/turns/list' && call.params.limit === 100).at(-1)!.params.cursor, '1000');
+});
+
+test('Codex recent target proof never creates a cache directory or checkpoint', async t => {
+  let status = 'completed';
+  const p = await peer(t, request => request.method === 'thread/turns/list'
+    ? { data: [{ id: 'recent', status }], nextCursor: null } : undefined, false, true);
+  assert.equal((await p.adapter.state(saved, 'recent')).terminalStatus, 'completed');
+  status = 'inProgress'; assert.equal((await p.adapter.state(saved, 'recent')).terminalRunId, undefined);
+  status = 'interrupted'; assert.equal((await p.adapter.state(saved, 'recent')).terminalStatus, 'interrupted');
+  await assert.rejects(stat(p.cacheRoot), { code: 'ENOENT' });
+  assert.equal(p.calls.filter(call => call.method === 'thread/turns/list' && call.params.limit === 100).length, 3);
+});
+
+test('Codex newly materialized target at the head supersedes its old scanning position', async t => {
+  let materialized = false;
+  const p = await peer(t, request => {
+    if (request.method !== 'thread/turns/list') return undefined;
+    if (request.params.limit === 1) return { data: [], nextCursor: null };
+    const offset = Number(request.params.cursor ?? 0);
+    return { data: [{ id: materialized && !offset ? 'target' : 'unrelated-' + offset, status: 'completed' }], nextCursor: String(offset + 100) };
+  }, false, true);
+  assert.equal((await p.adapter.state(saved, 'target')).terminalRunId, undefined);
+  const active = new DatabaseSync(join(p.cacheRoot, '.bounded-cache.sqlite'), { readOnly: true });
+  try { assert.equal(active.prepare('SELECT count(*) n FROM query_positions WHERE expires IS NULL').get()!.n, 1); }
+  finally { active.close(); }
+  await p.restart(); await delay(2);
+  const before = p.calls.length; materialized = true;
+  assert.equal((await p.adapter.state(saved, 'target')).terminalRunId, 'target');
+  const lookups = p.calls.slice(before).filter(call => call.method === 'thread/turns/list' && call.params.limit === 100);
+  assert.equal(lookups.length, 1); assert.equal(lookups[0]!.params.cursor, undefined);
+  const cleared = new DatabaseSync(join(p.cacheRoot, '.bounded-cache.sqlite'), { readOnly: true });
+  try { assert.equal(cleared.prepare('SELECT count(*) n FROM query_positions').get()!.n, 0); }
+  finally { cleared.close(); }
 });
 
 test('Watch streams stable live items, rejects interactive requests, reports unavailability and releases without cancelling', async t => {

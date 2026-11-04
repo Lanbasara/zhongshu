@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { HarnessError } from '../types.ts';
 import type { Binding, HistoryPage, HistoryChanges, NativeBodyChunk, NativeItem, Receipt } from '../types.ts';
 import { createHash } from 'node:crypto';
+import type { CachedQueryPosition } from '../dsh/bounded-cache.ts';
 
 const path = z.string().min(1).max(4096).refine(value => isAbsolute(value) && normalize(value) === value && !value.includes('\0'));
 export const boundedCodexOptions = z.object({ nativeRoot: path, cacheRoot: path, maxCacheBytes: z.number().int().min(1024 * 1024).max(16 * 1024 ** 3).default(512 * 1024 ** 2) }).strict();
@@ -11,6 +12,9 @@ export type BoundedCodexOptions = z.input<typeof boundedCodexOptions>;
 export const rolloutBinding = z.object({ id: z.string().min(1).max(512), cwd: path, path, cliVersion: z.literal('0.166.0-alpha.5.1') }).strict();
 export type RolloutBinding = z.infer<typeof rolloutBinding>;
 const count = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+export const turnQueryKey = z.string().regex(/^[a-f0-9]{64}$/);
+export const turnQueryUpdate = z.object({ key: turnQueryKey, expected: z.string().uuid(), cursor: z.string().min(1).max(4096).nullable(), settled: z.boolean() }).strict();
+export const turnQueryRetirement = z.object({ key: turnQueryKey, before: count }).strict();
 export const rolloutCursor = z.object({ v: z.literal(1), key: z.string().regex(/^[a-f0-9]{64}$/), generation: z.string().uuid(), through: count, before: count }).strict();
 export const rolloutChangesCursor = z.object({ v: z.literal(1), key: z.string().regex(/^[a-f0-9]{64}$/), generation: z.string().uuid(), through: count, after: count }).strict().refine(value => value.after <= value.through);
 export const rolloutBody = z.object({ v: z.literal(1), key: z.string().regex(/^[a-f0-9]{64}$/), generation: z.string().uuid(), seq: count, field: z.enum(['text', 'input', 'output', 'image']), lease: z.string().uuid(), version: z.string().regex(/^[a-f0-9]{64}$/), bytes: count }).strict();
@@ -34,7 +38,7 @@ export class BoundedCodexReader {
     this.worker = new Worker(new URL(import.meta.url.endsWith('.ts') ? './bounded-worker.ts' : './bounded-worker.js', import.meta.url), { workerData: boundedCodexOptions.parse(options), resourceLimits: { maxOldGenerationSizeMb: 128, stackSizeMb: 4 } });
     this.worker.on('message', (reply: { id: number; result?: unknown; error?: string; cache?: { bytes: number; budget: number; activeLeases: number } }) => {
       const pending = this.pending.get(reply.id); if (!pending) return; this.pending.delete(reply.id);
-      this.observed = { phase: reply.error?.includes('cache_') ? 'paused' : reply.error?.includes('indexing') ? 'indexing' : 'ready', ...(reply.error ? { reason: reply.error } : {}), ...(reply.cache ? { cache: reply.cache } : {}) };
+      this.observed = { phase: reply.error?.includes('cache_') ? 'paused' : reply.error?.includes('indexing') ? 'indexing' : 'ready', ...(reply.error ? { reason: reply.error } : {}), ...(reply.cache ? { cache: reply.cache } : this.observed.cache ? { cache: this.observed.cache } : {}) };
       if (reply.error) pending.reject(new HarnessError(reply.error)); else pending.resolve(reply.result);
     });
     this.worker.on('error', () => this.fail()); this.worker.on('exit', () => this.fail());
@@ -57,6 +61,11 @@ export class BoundedCodexReader {
     return this.request('changes', { binding: rolloutBinding.parse(binding), cursor: parsed, limit: count.min(1).max(16).parse(limit) });
   }
   reconcile(binding: RolloutBinding, operationId: string): Promise<Receipt> { return this.request('reconcile', { binding: rolloutBinding.parse(binding), operationId: z.string().min(1).max(512).parse(operationId) }); }
+  turnQuery(key: string): Promise<CachedQueryPosition> { return this.request('turn-query', turnQueryKey.parse(key)); }
+  retireTurnQuery(key: string, before: number): Promise<void> { return this.request('retire-turn-query', turnQueryRetirement.parse({ key, before })); }
+  advanceTurnQuery(key: string, expected: string, cursor: string | null, settled: boolean): Promise<CachedQueryPosition | null> {
+    return this.request('advance-turn-query', turnQueryUpdate.parse({ key, expected, cursor, settled }));
+  }
   readBodyChunk(binding: Binding, token: string, offset: number, maxBytes: number): Promise<NativeBodyChunk> {
     const body = decodeRolloutBody(token); if (body.key !== rolloutKey(binding)) throw new HarnessError('codex_body_invalid');
     return this.request('body', { body, offset: count.parse(offset), maxBytes: count.min(1).max(64 * 1024).parse(maxBytes) });

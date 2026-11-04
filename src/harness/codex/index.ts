@@ -1,4 +1,5 @@
 import { basename, isAbsolute, normalize } from 'node:path';
+import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { HarnessError } from '../types.ts';
 import type { Binding, Catalog, Configuration, HarnessAdapter, HarnessInput, HistoryPage, HistoryChanges, NativeChange, NativeItem, NativeState, Receipt } from '../types.ts';
@@ -10,6 +11,7 @@ import { configuredThread, cursor, itemsPage, mapItem, nativeId, nativeItem, rec
 import { nativeSkill, resolveSkillInput, skillOptions, type NativeSkill } from '../skills.ts';
 import { BoundedCodexReader, boundedCodexOptions, rolloutBinding } from './bounded-reader.ts';
 import type { BoundedCodexOptions, RolloutBinding } from './bounded-reader.ts';
+import type { CachedQueryPosition } from '../dsh/bounded-cache.ts';
 
 const configuration = z.object({ modelId: nativeId, permissionId: nativeId });
 const workspace = z.string().min(1).max(4096).refine(path => isAbsolute(path) && normalize(path) === path && !path.includes('\0'));
@@ -70,9 +72,12 @@ class CodexAdapter implements HarnessAdapter {
   private closed = false;
   private bounded?: BoundedCodexReader;
   private managedExecution: boolean;
+  private socketPath: string;
+  private turnQueries = new Map<string, CachedQueryPosition & { expires: number | null; updated: number }>();
 
   constructor(socketPath: string, boundedHistory?: BoundedCodexOptions, managedExecution = false) {
     this.managedExecution = managedExecution;
+    this.socketPath = socketPath;
     if (boundedHistory) this.bounded = new BoundedCodexReader(boundedHistory);
     this.rpc = new CodexRpc(socketPath, {
       notification: (method, params) => this.notification(method, params),
@@ -181,19 +186,84 @@ class CodexAdapter implements HarnessAdapter {
   }
 
   private async terminalRun(binding: Binding, targetRunId: string): Promise<NativeState['terminalStatus']> {
-    const target = parse(nativeId, targetRunId); let next: string | undefined;
-    const cursors = new Set<string>();
-    for (let page = 0; page < 10; page++) {
-      const turns = parse(z.object({ data: z.array(turn).max(100), nextCursor: cursor.nullable() }), await this.rpc.request('thread/turns/list', {
-        threadId: binding.id, limit: 100, sortDirection: 'desc', itemsView: 'notLoaded', ...(next ? { cursor: next } : {}),
-      }));
+    const target = parse(nativeId, targetRunId);
+    const key = createHash('sha256').update(JSON.stringify([1, this.socketPath, binding.id, binding.cwd, binding.configuration.modelId, binding.configuration.permissionId, target])).digest('hex');
+    const started = Date.now();
+    const pageSchema = z.object({ data: z.array(turn).max(100), nextCursor: cursor.nullable() });
+    const head = parse(pageSchema, await this.rpc.request('thread/turns/list', {
+      threadId: binding.id, limit: 100, sortDirection: 'desc', itemsView: 'notLoaded',
+    }));
+    const recent = head.data.find(value => value.id === target);
+    // A recent-run proof never loads/creates a position or enumerates cache
+    // files. This also catches a newly materialized target while an older search
+    // has progressed far away.
+    if (recent) {
+      if (recent.status === 'inProgress') return undefined;
+      if (Date.now() < started) return recent.status;
+      if (this.bounded) {
+        // Cleanup cannot retract a fresh native fact. A failed hint retains the
+        // old position and is retried on the next observation; no result is cached.
+        await this.bounded.retireTurnQuery(key, started).catch(() => {});
+      } else if ((this.turnQueries.get(key)?.updated ?? Infinity) < started) this.turnQueries.delete(key);
+      return recent.status;
+    }
+    let position = await this.turnQuery(key);
+    if (!head.nextCursor) { await this.advanceTurnQuery(key, position.revision, null, true); return undefined; }
+    if (!position.cursor) position = await this.advanceTurnQuery(key, position.revision, head.nextCursor, false);
+    const cursors = new Set<string>(position.cursor ? [position.cursor] : []);
+    for (let page = 1; page < 10; page++) {
+      let turns: { data: z.infer<typeof turn>[]; nextCursor: string | null };
+      try {
+        turns = parse(pageSchema, await this.rpc.request('thread/turns/list', {
+          threadId: binding.id, limit: 100, sortDirection: 'desc', itemsView: 'notLoaded', ...(position.cursor ? { cursor: position.cursor } : {}),
+        }));
+      } catch (error) {
+        // Native invalidated an opaque cursor. Never treat failure as absence or
+        // reuse a remembered terminal status. Transport failures keep the cursor.
+        if (position.cursor && error instanceof RpcError && [-32600, -32602].includes(error.nativeCode ?? 0)) {
+          await this.advanceTurnQuery(key, position.revision, null, false);
+          throw new HarnessError('codex_turn_cursor_reset');
+        }
+        throw error;
+      }
       const found = turns.data.find(value => value.id === target);
-      if (found) return found.status === 'inProgress' ? undefined : found.status;
+      if (found) {
+        // Retain the page entrance, not the result. A second proof (including
+        // force sync) must read this exact target again from the native service.
+        await this.advanceTurnQuery(key, position.revision, position.cursor, found.status !== 'inProgress');
+        return found.status === 'inProgress' ? undefined : found.status;
+      }
+      if (turns.nextCursor && cursors.has(turns.nextCursor)) {
+        await this.advanceTurnQuery(key, position.revision, null, false);
+        throw new HarnessError('codex_history_no_progress');
+      }
+      position = await this.advanceTurnQuery(key, position.revision, turns.nextCursor, turns.nextCursor === null);
       if (!turns.nextCursor) return undefined;
-      if (cursors.has(turns.nextCursor)) throw new HarnessError('codex_history_no_progress');
-      cursors.add(turns.nextCursor); next = turns.nextCursor;
+      cursors.add(turns.nextCursor);
     }
     return undefined;
+  }
+
+  private async turnQuery(key: string): Promise<CachedQueryPosition> {
+    if (this.bounded) return this.bounded.turnQuery(key);
+    // Legacy/test-only adapters have no operator-provided cache directory. Keep
+    // bounded process-local progress without LRU starvation; production uses
+    // the worker's persistent quota-accounted positions instead.
+    for (const [id, position] of this.turnQueries) if (position.expires !== null && position.expires <= Date.now()) this.turnQueries.delete(id);
+    const existing = this.turnQueries.get(key); if (existing) return existing;
+    if (this.turnQueries.size >= 4096) throw new HarnessError('codex_turn_query_capacity');
+    const position = { revision: randomUUID(), cursor: null, expires: null, updated: Date.now() };
+    this.turnQueries.set(key, position); return position;
+  }
+  private async advanceTurnQuery(key: string, expected: string, cursor: string | null, settled: boolean): Promise<CachedQueryPosition> {
+    if (this.bounded) {
+      const updated = await this.bounded.advanceTurnQuery(key, expected, cursor, settled);
+      if (!updated) throw new HarnessError('codex_turn_query_conflict');
+      return updated;
+    }
+    if (this.turnQueries.get(key)?.revision !== expected) throw new HarnessError('codex_turn_query_conflict');
+    const position = { revision: randomUUID(), cursor, expires: settled ? Date.now() + 7 * 24 * 60 * 60_000 : null, updated: Date.now() };
+    this.turnQueries.set(key, position); return position;
   }
 
   async state(input: Binding, targetRunId?: string): Promise<NativeState> {

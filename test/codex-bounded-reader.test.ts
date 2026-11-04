@@ -1,19 +1,21 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, appendFile, rm, rename, readdir } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, appendFile, rm, rename, readdir, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
+import { DatabaseSync } from 'node:sqlite';
+import { setTimeout as delay } from 'node:timers/promises';
 import { BoundedCodexReader } from '../src/harness/codex/bounded-reader.ts';
 import type { NativeItem } from '../src/harness/types.ts';
 
-async function fixture() {
+async function fixture(maxCacheBytes?: number) {
   const root = await mkdtemp(join(tmpdir(), 'zs-codex-bounded-')), nativeRoot = join(root, 'native'), cacheRoot = join(root, 'cache'), cwd = join(root, 'workspace');
   await mkdir(join(nativeRoot, 'sessions', '2026'), { recursive: true }); await mkdir(cwd);
   const binding = { id: 'synthetic-thread', cwd, path: join(nativeRoot, 'sessions', '2026', 'rollout-synthetic.jsonl'), cliVersion: '0.166.0-alpha.5.1' as const };
   const header = { ordinal: 0, type: 'session_meta', payload: { id: binding.id, cwd, cli_version: binding.cliVersion, history_mode: 'paginated' } };
   await writeFile(binding.path, JSON.stringify(header) + '\n', { mode: 0o600 });
-  const options = { nativeRoot, cacheRoot };
+  const options = { nativeRoot, cacheRoot, ...(maxCacheBytes ? { maxCacheBytes } : {}) };
   let reader = new BoundedCodexReader(options);
   let ordinal = 0;
   const append = async (...rows: unknown[]) => appendFile(binding.path, rows.map(row => JSON.stringify({ ordinal: ++ordinal, ...(row as object) }) + '\n').join(''));
@@ -29,6 +31,110 @@ async function fixture() {
   const latest = async () => { for (let n = 0; n < 100; n++) { try { return await reader.history(binding); } catch (error) { if (!(error instanceof Error) || error.message !== 'codex_bounded_indexing') throw error; } } throw new Error('index did not finish'); };
   return { root, binding, header, options, reader, append, item, close, restart, full, release, latest };
 }
+
+test('Codex persistent query positions use cross-worker CAS, restart identity and native-root scoping', async () => {
+  const f = await fixture(), key = 'a'.repeat(64), second = new BoundedCodexReader(f.options);
+  try {
+    const first = await f.reader.turnQuery(key), same = await second.turnQuery(key); assert.deepEqual(same, first);
+    const next = await f.reader.advanceTurnQuery(key, first.revision, 'native-cursor-1000', false); assert(next);
+    assert.equal(await second.advanceTurnQuery(key, first.revision, 'stale-cursor', false), null);
+    assert.deepEqual(await second.turnQuery(key), next);
+    const restarted = await f.restart(); assert.deepEqual(await restarted.turnQuery(key), next);
+    const otherRoot = join(f.root, 'other-native'); await mkdir(otherRoot);
+    const other = new BoundedCodexReader({ ...f.options, nativeRoot: otherRoot });
+    try { const isolated = await other.turnQuery(key); assert.equal(isolated.cursor, null); assert.notEqual(isolated.revision, next.revision); }
+    finally { await other.close(); }
+    await assert.rejects(async () => restarted.turnQuery('invalid'), /Invalid string/);
+    await assert.rejects(async () => restarted.advanceTurnQuery(key, next.revision, 'x'.repeat(4097), false));
+  } finally { await second.close(); await f.close(); }
+});
+
+test('Codex query cleanup expires only completed positions in batches and rejects deleted-row ABA', async () => {
+  const f = await fixture(); const key = 'a'.repeat(64); let reader = f.reader;
+  try {
+    const active = await reader.turnQuery(key); await reader.advanceTurnQuery(key, active.revision, 'unfinished', false);
+    let obsolete = '', oldKey = '';
+    for (let n = 0; n < 80; n++) {
+      const completedKey = createHash('sha256').update(String(n)).digest('hex'), position = await reader.turnQuery(completedKey);
+      const complete = await reader.advanceTurnQuery(completedKey, position.revision, `found-page-${n}`, true); assert(complete);
+      if (!n) { obsolete = complete.revision; oldKey = completedKey; }
+    }
+    await reader.close();
+    const db = new DatabaseSync(join(f.options.cacheRoot, '.bounded-cache.sqlite'));
+    try {
+      assert.equal(db.prepare('SELECT count(*) n FROM query_positions WHERE expires IS NULL').get()!.n, 1);
+      db.prepare('UPDATE query_positions SET expires=? WHERE expires IS NOT NULL').run(Date.now() - 1);
+    } finally { db.close(); }
+    reader = await f.restart();
+    assert.equal((await reader.turnQuery(key)).cursor, 'unfinished');
+    const inspect = new DatabaseSync(join(f.options.cacheRoot, '.bounded-cache.sqlite'), { readOnly: true });
+    try { assert.equal(inspect.prepare('SELECT count(*) n FROM query_positions WHERE expires IS NOT NULL').get()!.n, 16); }
+    finally { inspect.close(); }
+    assert.equal((await reader.turnQuery(key)).cursor, 'unfinished');
+    const recreated = await reader.turnQuery(oldKey); assert.equal(recreated.cursor, null); assert.notEqual(recreated.revision, obsolete);
+    assert.equal(await reader.advanceTurnQuery(oldKey, obsolete, 'stale-page', true), null);
+  } finally { await f.close(); }
+});
+
+test('Codex head completion hints do not delete newer progress and stale replies cannot recreate retired positions', async () => {
+  const f = await fixture(), key = 'b'.repeat(64);
+  try {
+    const first = await f.reader.turnQuery(key), headStarted = Date.now();
+    await delay(2);
+    const advanced = await f.reader.advanceTurnQuery(key, first.revision, 'concurrent-new-page', false); assert(advanced);
+    await f.reader.retireTurnQuery(key, headStarted);
+    assert.deepEqual(await f.reader.turnQuery(key), advanced);
+    await delay(2); await f.reader.retireTurnQuery(key, Date.now());
+    assert.equal(await f.reader.advanceTurnQuery(key, advanced.revision, 'delayed-old-page', false), null);
+    const recreated = await f.reader.turnQuery(key); assert.equal(recreated.cursor, null); assert.notEqual(recreated.revision, advanced.revision);
+    assert.equal(await f.reader.advanceTurnQuery(key, advanced.revision, 'old-page', false), null);
+  } finally { await f.close(); }
+});
+
+test('Codex query quota rejects growth without evicting active progress or committing failed checkpoints', async () => {
+  const budget = 1024 * 1024, f = await fixture(budget);
+  const positions: { key: string; revision: string; cursor: string }[] = [];
+  let failed = false;
+  try {
+    for (let n = 0; n < 200; n++) {
+      const key = createHash('sha256').update(String(n)).digest('hex');
+      try {
+        const before = await f.reader.turnQuery(key), cursor = `${n}:` + '界'.repeat(4090);
+        const next = await f.reader.advanceTurnQuery(key, before.revision, cursor, false); assert(next);
+        positions.push({ key, ...next, cursor });
+      } catch (error) { assert.match(String(error), /codex_bounded_cache_paused/); failed = true; break; }
+    }
+    assert(failed); assert(positions.length > 10);
+    for (const position of [positions[0]!, positions.at(-1)!]) assert.deepEqual(await f.reader.turnQuery(position.key), { revision: position.revision, cursor: position.cursor });
+    const bytes = (await Promise.all((await readdir(f.options.cacheRoot)).map(async name => (await stat(join(f.options.cacheRoot, name))).size))).reduce((a, b) => a + b, 0);
+    assert(bytes <= budget);
+    const reader = await f.restart(); assert.equal((await reader.turnQuery(positions[0]!.key)).cursor, positions[0]!.cursor);
+    // More cache space resumes the same checkpoint; a quota failure did not
+    // create success or discard an older unresolved binding to admit new work.
+    const expanded = new BoundedCodexReader({ ...f.options, maxCacheBytes: 2 * budget });
+    try { const position = positions[0]!; assert(await expanded.advanceTurnQuery(position.key, position.revision, 'later-page', false)); }
+    finally { await expanded.close(); }
+  } finally { await f.close(); }
+});
+
+test('Codex query checkpoint rolls back when the post-write physical quota check fails', async () => {
+  const f = await fixture(1024 * 1024), key = 'c'.repeat(64);
+  try {
+    const position = await f.reader.turnQuery(key);
+    const inject = new DatabaseSync(join(f.options.cacheRoot, '.bounded-cache.sqlite'));
+    try {
+      inject.exec(`CREATE TABLE quota_fault(bytes BLOB) STRICT;
+        CREATE TRIGGER quota_fault AFTER UPDATE OF cursor ON query_positions BEGIN
+        INSERT INTO quota_fault VALUES(zeroblob(2097152)); END;`);
+    } finally { inject.close(); }
+    await assert.rejects(f.reader.advanceTurnQuery(key, position.revision, 'must-not-commit', false), /codex_bounded_cache_paused/);
+    assert.deepEqual(await f.reader.turnQuery(key), position);
+    const inspect = new DatabaseSync(join(f.options.cacheRoot, '.bounded-cache.sqlite'));
+    try { assert.equal(inspect.prepare('SELECT count(*) n FROM quota_fault').get()!.n, 0); inspect.exec('DROP TRIGGER quota_fault; DROP TABLE quota_fault;'); }
+    finally { inspect.close(); }
+    assert(await f.reader.advanceTurnQuery(key, position.revision, 'safe-page', false));
+  } finally { await f.close(); }
+});
 
 test('Codex change feed finds completed old-item revisions with fixed cuts, empty progress and restart', async () => {
   const f = await fixture(); let reader = f.reader;
