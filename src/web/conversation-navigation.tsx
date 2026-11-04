@@ -88,6 +88,7 @@ function Results({ query, revision, csrf, report, rows, hideEmpty, workspaceLabe
     if (!visible) return;
     const controller = new AbortController();
     let loading = false;
+    let displayedCursor = beforeId;
     let refreshRequested = false; let paused = false; pauseSearch.current = () => { paused = true; };
     const fetchPage = async (foreground = false) => {
       loading = true;
@@ -95,14 +96,14 @@ function Results({ query, revision, csrf, report, rows, hideEmpty, workspaceLabe
       // Only an explicit page/query change owns the loading indicator/lock.
       if (foreground) { setLoadingPage(true); setScanned(0); }
       try {
-        await progressiveSearch({ cursor: beforeId, signal: controller.signal, continuous: foreground && !!query.title, paused: () => paused,
+        await progressiveSearch({ cursor: foreground ? beforeId : displayedCursor, signal: controller.signal, continuous: foreground && !!query.title, paused: () => paused,
           fetch: async current => {
             const result = await request('/conversation-search', conversationListSchema, {
               csrf, signal: controller.signal, body: { ...JSON.parse(queryKey), beforeId: current },
             });
-            return { value: result, nextCursor: result.olderBeforeId, scanned: result.scanned ?? result.conversations.length, found: result.conversations.length > 0 };
+            return { value: { result, cursor: current }, nextCursor: result.olderBeforeId, scanned: result.scanned ?? result.conversations.length, found: result.conversations.length > 0 };
           },
-          progress: ({ value: result }, total) => { setResults(result.conversations); setResultLabels(new Map(result.workspaceLabels?.map(value => [value.id, value.label]))); setNext(result.olderBeforeId); setScanned(total); setLoaded(true); setFailed(false); },
+          progress: ({ value: { result, cursor } }, total) => { displayedCursor = cursor; setResults(result.conversations); setResultLabels(new Map(result.workspaceLabels?.map(value => [value.id, value.label]))); setNext(result.olderBeforeId); setScanned(total); setLoaded(true); setFailed(false); },
         });
       } catch (reason) {
         if (controller.signal.aborted) return;
