@@ -132,9 +132,13 @@ try {
       await browser.command('Page.reload', { ignoreCache: cycles % 120 === 0 });
       await waitBrowser(`performance.timeOrigin!==${previous}&&performance.getEntriesByName('soak-visible').length>0`);
       const firstVisibleMs = await browser.evaluate<number>("performance.getEntriesByName('soak-visible')[0].startTime");
-      await browser.evaluate("document.querySelector('.writing-surface textarea').focus()");
-      const before = await browser.evaluate<number>('performance.now()'); await browser.command('Input.insertText', { text: '测' });
-      const after = await browser.evaluate<number>('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(()=>resolve(performance.now()))))');
+      // A gated or read-only input must not count as a fast successful edit.
+      // Readiness waiting is separate from the measured keystroke and paint.
+      await waitBrowser("(()=>{const e=document.querySelector('.writing-surface textarea');return !!e&&!e.disabled&&!e.readOnly})()");
+      const before = await browser.evaluate<{ at: number; value: string }>("(()=>{const e=document.querySelector('.writing-surface textarea');e.focus();e.setSelectionRange(e.value.length,e.value.length);return {at:performance.now(),value:e.value}})()");
+      await browser.command('Input.insertText', { text: '测' });
+      const after = await browser.evaluate<{ at: number; value: string }>("new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(()=>resolve({at:performance.now(),value:document.querySelector('.writing-surface textarea')?.value}))))");
+      if (after.value !== before.value + '测') throw new Error('soak_input_not_applied');
       const browserMetrics = await browser.command('Performance.getMetrics');
       const heapBytes = browserMetrics.metrics.find((value: any) => value.name === 'JSHeapUsedSize')?.value ?? 0;
       const dom = await browser.evaluate<number>("document.querySelectorAll('*').length");
@@ -150,7 +154,7 @@ try {
         await waitState(run.id, 'interrupted');
       }
       if (dom > performanceProfile.data.chatDomNodes || heapBytes > performanceProfile.browser.steadyHeapBytes || exceptions) failures++;
-      const sample = { firstVisibleMs, inputPaintMs: after - before, heapBytes, dom, failures };
+      const sample = { firstVisibleMs, inputPaintMs: after.at - before.at, inputVerified: true, heapBytes, dom, failures };
       summaries.push(sample); await appendFile(input.output, JSON.stringify({ cycle: cycles, time: new Date().toISOString(), elapsedSeconds: (performance.now() - started) / 1000, sampleGapSeconds, ...sample, metrics }) + '\n');
     } catch (error) {
       failures++;
