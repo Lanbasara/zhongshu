@@ -60,7 +60,9 @@ export async function startManagedHarnesses(input: { configurations: ManagedHost
         input.adapters.set(config.harnessId, await managedHarnessReadAdapter(client, config.harnessId));
         if (config.pluginManagement) {
           if (!input.plugins) throw new Error('managed_plugins_store_required');
-          if ((await ledger.load()).state.admission === 'open' && !(await client.capabilities()).methods.includes('pluginChange')) throw new Error('managed_plugins_native_configuration_required');
+          // An existing Host may be stopped or unavailable. Plugin discovery
+          // happens on use and fails closed; it must not prevent archive access
+          // or restart the Host merely to make the application boot.
           input.plugins[config.harnessId] = managedHarnessPlugins({ harnessId: config.harnessId, host, client, store: input.storage.plugins, execution: input.storage.execution });
         }
       } catch (error) { if (host) await host.close(); else { await ledger.close(); await owner.close(); } await client.close(); throw error; }

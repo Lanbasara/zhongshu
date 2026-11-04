@@ -194,7 +194,12 @@ export class ManagedHarnessRpc {
     const catalog = await this.call('catalog', []) as { available?: unknown };
     if (catalog?.available !== true) throw new ExecutionHostError('managed_native_unavailable', 503);
   }
-  async capabilities() { if (!this.capability) await this.ready(); return this.capability!; }
+  async capabilities() {
+    // The wire protocol exists independently of model/catalog availability.
+    // Only ready(), used by explicit bootstrap/resume, requires execution readiness.
+    if (!this.capability) this.capability = capabilitySchema.parse(await this.call('catalog', ['capabilities']));
+    return this.capability;
+  }
   async read(method: ManagedNativeMethod, args: unknown[]) { if (!readonlyMethods.has(method)) throw new ExecutionHostError('managed_native_activation_requires_permission'); return await this.call(method, args); }
   async invoke(invocation: NativeInvocation, onBound: (binding: Binding) => Promise<void>, listener?: (change: NativeChange) => void) {
     return await this.call(invocation.method, invocation.args, onBound, invocation.method === 'watch' && listener ? { requestId: invocation.requestId, listener } : undefined);

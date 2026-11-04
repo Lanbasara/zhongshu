@@ -3,6 +3,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { mkdtemp, mkdir, realpath, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createServer } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
 import { test } from 'node:test';
 import type { Binding, HarnessAdapter, NativeState } from '../src/harness/types.ts';
@@ -17,8 +18,56 @@ import { ManagedWorkspaceExecution } from '../src/server/execution-workspaces.ts
 import { Workbench } from '../src/server/workbench.ts';
 import { WorkspaceFileWriter } from '../src/server/workspace-writer.ts';
 import type { ContainerProof } from '../src/server/execution-host-docker.ts';
+import { hostDigest } from '../src/server/execution-host-docker.ts';
+import { managedHostConfigurationSchema, startManagedHarnesses } from '../src/server/managed-harness-config.ts';
+import type { PluginBackend } from '../src/server/plugin-backend.ts';
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 async function until(action: () => Promise<boolean>) { const end = Date.now() + 8000; while (!await action()) { if (Date.now() > end) throw new Error('condition timeout'); await delay(5); } }
+
+test('reopening an initialized Host with plugin management offline preserves archive access and closed execution admission', { skip: process.platform !== 'linux' }, async t => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'zh-offline-')));
+  const workspace = join(root, 'workspace'), writer = join(root, 'writer'), nativeData = join(root, 'native');
+  for (const directory of [workspace, writer, nativeData]) await mkdir(directory, { mode: 0o700 });
+  const allocator = createServer(); await new Promise<void>(resolve => allocator.listen(0, '127.0.0.1', resolve));
+  const address = allocator.address(); assert.ok(address && typeof address === 'object');
+  const ownershipPort = address.port; await new Promise<void>((resolve, reject) => allocator.close(error => error ? reject(error) : resolve()));
+  const nativeToken = join(root, 'native-token'), gatewayToken = join(root, 'gateway-token');
+  await writeFile(nativeToken, randomBytes(32).toString('base64url'), { mode: 0o600 });
+  await writeFile(gatewayToken, randomBytes(32).toString('base64url'), { mode: 0o600 });
+  const config = managedHostConfigurationSchema.parse({ groupId: 'offline', harnessId: 'codex', workspaceIds: ['synthetic'],
+    ledgerDirectory: join(root, 'ledger'), pluginManagement: true,
+    native: { socketPath: join(root, 'n.sock'), tokenFile: nativeToken }, gateway: { socketPath: join(root, 'g.sock'), tokenFile: gatewayToken },
+    docker: { socketPath: join(root, 'absent-docker.sock'), ownershipPort, image: 'sha256:' + 'a'.repeat(64), argv: ['/synthetic'], user: '1000:1000',
+      mounts: [{ source: nativeData, target: '/native', kind: 'data' }] } });
+  // Durable evidence of an earlier successful bootstrap; the native and Docker
+  // sockets are now absent. No process is launched by this isolated test.
+  const configurationDigest = hostDigest({ docker: config.docker, workspaceWriterDirectory: writer });
+  const ledger = createExecutionHostLedger({ directory: config.ledgerDirectory, groupId: config.groupId, configurationDigest });
+  await ledger.ready;
+  const generation = (await ledger.load()).state.generation;
+  const proof = { id: 'b'.repeat(64), groupId: config.groupId, generation, configurationDigest, running: true, pid: 123, status: 'running' };
+  await ledger.attachContainer(proof); await ledger.initialize(proof); await ledger.close();
+  const storage = createStorageClient({ dataDirectory: join(root, 'product') }); await storage.ready;
+  const workspaces = [{ id: 'synthetic', label: 'Synthetic', directory: workspace, managedWrites: true }];
+  const registry = new WorkspaceRegistry(storage.workspaces, workspaces, []); await registry.ready;
+  const id = randomUUID(), configuration = { modelId: 'synthetic', permissionId: 'workspace' };
+  await storage.store.createConversation({ id, workspaceId: 'synthetic', harnessId: 'codex', cwd: workspace, configuration });
+  await storage.store.saveBinding(id, { id: 'offline-binding', cwd: workspace, configuration, details: {} });
+  await storage.store.mergeHistory(id, [{ id: 'archived', kind: 'assistant', text: 'durable synthetic archive', status: 'completed' }]);
+  const adapters = new Map<'codex' | 'dsh', HarnessAdapter>();
+  const plugins: Partial<Record<'codex' | 'dsh', PluginBackend>> = {};
+  let managed: Awaited<ReturnType<typeof startManagedHarnesses>> | undefined, service: Workbench | undefined;
+  t.after(async () => { await service?.close(); await managed?.close(); await storage.close(); await rm(root, { recursive: true, force: true }); });
+  managed = await startManagedHarnesses({ configurations: [config], storage, registry, adapters, plugins, dataDirectory: join(root, 'product'), workspaceWriterDirectory: writer });
+  service = new Workbench(storage.store, workspaces, adapters, registry, undefined, managed);
+  await service.start();
+  const snapshot = await service.snapshot(id);
+  assert.equal(snapshot.history.items.find(item => item.id === 'archived')?.text, 'durable synthetic archive');
+  assert.equal((await service.workspaceEditStatus('synthetic')).editable, false);
+  await assert.rejects(service.enqueue({ id: randomUUID(), conversationId: id, type: 'message', payload: { text: 'must not execute' } }));
+  await assert.rejects(plugins.codex!.catalog!());
+  assert.equal(typeof adapters.get('codex')?.readBodyChunk, 'function');
+});
 
 test('trusted worker admission, Unix native RPC and durable Host gateway drain before file editing and resume the same binding', async t => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'zh-managed-'))); const workspace = join(root, 'workspace'); await mkdir(workspace); await writeFile(join(workspace, 'note.md'), 'original');

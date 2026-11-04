@@ -16,21 +16,31 @@ const noActivation = async (): Promise<never> => { throw new HarnessError('manag
 
 /** A connection-wide read projection has no execution methods that can bypass
  * the per-conversation gateway. state/watch/reconcile are activation entrances. */
-export async function managedHarnessReadAdapter(client: ManagedHarnessRpc, stoppedHarness?: 'codex' | 'dsh'): Promise<HarnessAdapter> {
-  const capabilities = await client.capabilities().catch(error => {
-    if (!stoppedHarness) throw error;
-    return { id: stoppedHarness, methods: [] as ManagedNativeMethod[], earlyInput: stoppedHarness === 'codex' ? 'current' as const : 'soon' as const };
-  });
+export async function managedHarnessReadAdapter(client: ManagedHarnessRpc, configuredHarness?: 'codex' | 'dsh'): Promise<HarnessAdapter> {
+  // Managed configuration requires the bounded native adapters. Keep their
+  // read proxies across an offline startup; actual support and identity are
+  // checked against each connection's capabilities before use. An unavailable
+  // Host must not permanently turn body/revision methods into undefined.
+  const discovered = configuredHarness ? undefined : await client.capabilities();
+  const id = configuredHarness ?? discovered!.id;
+  const earlyInput = discovered?.earlyInput ?? (configuredHarness === 'codex' ? 'current' as const : configuredHarness === 'dsh' ? 'soon' as const : undefined);
+  const offers = (method: ManagedNativeMethod) => !!configuredHarness || !!discovered?.methods.includes(method);
+  async function read(method: ManagedNativeMethod, args: unknown[]) {
+    const current = await client.capabilities();
+    if (current.id !== id) throw new HarnessError('managed_native_harness_changed');
+    if (!current.methods.includes(method)) throw new HarnessError('managed_native_method_unavailable');
+    return await client.read(method, args);
+  }
   return {
-    id: capabilities.id, historyReadOnly: true, ...(capabilities.earlyInput ? { earlyInput: capabilities.earlyInput } : {}),
-    catalog: async () => await client.read('catalog', []) as Awaited<ReturnType<HarnessAdapter['catalog']>>,
+    id, historyReadOnly: true, ...(earlyInput ? { earlyInput } : {}),
+    catalog: async () => await read('catalog', []) as Awaited<ReturnType<HarnessAdapter['catalog']>>,
     create: noActivation, state: noActivation, submit: noActivation, reconcile: noActivation, stop: noActivation, watch: noActivation,
-    history: async (binding, cursor, limit) => await client.read('history', [binding, cursor, limit]) as HistoryPage,
-    ...(capabilities.methods.includes('historyChanges') ? { historyChanges: async (binding: Binding, cursor?: string, limit?: number) => await client.read('historyChanges', [binding, cursor, limit]) as HistoryChanges } : {}),
-    ...(capabilities.methods.includes('readItems') ? { readItems: async (binding: Binding, itemIds: string[]) => await client.read('readItems', [binding, itemIds]) as NativeItem[] } : {}),
-    ...(capabilities.methods.includes('readBodyChunk') ? { readBodyChunk: async (binding: Binding, token: string, offset: number, maxBytes: number) => await client.read('readBodyChunk', [binding, token, offset, maxBytes]) as NativeBodyChunk } : {}),
-    ...(capabilities.methods.includes('releaseBodySource') ? { releaseBodySource: async (binding: Binding, token: string) => { await client.read('releaseBodySource', [binding, token]); } } : {}),
-    ...(capabilities.methods.includes('readImage') ? { readImage: async (binding: Binding, path: string) => await client.read('readImage', [binding, path]) as string } : {}),
+    history: async (binding, cursor, limit) => await read('history', [binding, cursor, limit]) as HistoryPage,
+    ...(offers('historyChanges') ? { historyChanges: async (binding: Binding, cursor?: string, limit?: number) => await read('historyChanges', [binding, cursor, limit]) as HistoryChanges } : {}),
+    ...(offers('readItems') ? { readItems: async (binding: Binding, itemIds: string[]) => await read('readItems', [binding, itemIds]) as NativeItem[] } : {}),
+    ...(offers('readBodyChunk') ? { readBodyChunk: async (binding: Binding, token: string, offset: number, maxBytes: number) => await read('readBodyChunk', [binding, token, offset, maxBytes]) as NativeBodyChunk } : {}),
+    ...(offers('releaseBodySource') ? { releaseBodySource: async (binding: Binding, token: string) => { await read('releaseBodySource', [binding, token]); } } : {}),
+    ...(offers('readImage') ? { readImage: async (binding: Binding, path: string) => await read('readImage', [binding, path]) as string } : {}),
     async close() { await client.close(); },
   };
 }

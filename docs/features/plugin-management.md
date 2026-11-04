@@ -25,6 +25,8 @@
 
 受管部署在 `managedHosts` 的对应项设置 `pluginManagement: true`。Codex 容器原生配置增加 `native.plugins: { "configurationFile": "/runtime/codex-plugins.json" }`；文件内容为下方 Codex 管理配置，入口在同一容器中启动管理器，无需另开绕过网关的应用连接。`nativeSocket` 必须等于该容器的 Codex socket，`codexHome` 必须等于 `boundedHistory.nativeRoot`。镜像应包含 Git；管理 socket、`market-sources.json` 和 `market-source-intent.json` 位于该原生实例的持久私有数据目录。后者在实际执行市场命令前保存选定提交，回执丢失后仍可核对当时的 Git 引用。
 
+已初始化 Host 离线时，插件管理配置不阻止应用启动。插件目录使用时才核对当前连接的 Harness 与插件能力，失败显示不可用且不受理新变更；不会为读取目录启动 Host。按 [R08 的受管冷启动路径](continuity.md#r08离页补齐与故障) 验证停机启动、持久阅读及明确恢复后的能力重新发现。
+
 DSH 容器原生配置增加 `native.plugins: { "sources": [] }`（或操作者预设索引）。固定 rc.4 Host 需要在持久 Web profile 的 `dsh.profile.bundles` 中启用 `@deepseek-ai/dsh-experimental-plugin-market-bundle`，并提供包管理器；仅通过临时 `--patch` 插入市场服务不能代替可写 profile 中的来源配置。插件接口随整个容器退出；应用只通过受管 RPC 调用，不另行配置直连 `codex` / `dsh` 入口。下面的独立管理进程和直连配置适用于未启用受管 Host 的兼容部署。
 
 **Codex** 使用 `0.166.0-alpha.5.1`。在目标 App Server 所在实例运行管理进程。两者使用同一个实例专用的 `HOME` 和 `CODEX_HOME`。将下例保存为操作者所有的 `0600` JSON，目录使用真实路径。管理 socket 的父目录、`home` 和 `codexHome` 归管理进程用户所有，权限设为 `0700`。保留管理 socket 目录中的 `market-sources.json`，以便重启后恢复用户添加的市场。

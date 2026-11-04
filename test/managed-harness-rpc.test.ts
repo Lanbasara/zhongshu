@@ -44,6 +44,65 @@ test('physical read projection cannot activate state/watch/reconcile; bodies rem
   await assert.rejects(raw.state(binding)); assert.equal(f.activated, 0); assert.equal(raw.readItems, undefined);
   const chunk = await raw.readBodyChunk!(binding, 'private-token', 0, 65536); assert.ok(chunk.data instanceof Uint8Array); assert.equal(chunk.data.length, 65536); assert.equal(chunk.data[65535], 7);
 });
+
+test('a managed read projection created offline discovers body and revision methods after Host recovery', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'zh-rpc-cold-'));
+  const options = { socketPath: join(root, 'native.sock'), token: randomBytes(32).toString('base64url'), timeoutMs: 250 };
+  const client = new ManagedHarnessRpc(options);
+  let server: Awaited<ReturnType<typeof serveManagedHarness>> | undefined;
+  let activated = 0, historyReads = 0;
+  const adapter: HarnessAdapter = {
+    id: 'codex', earlyInput: 'current', async catalog() { return { id: 'codex', available: true, models: [], permissions: [] }; },
+    async create() { activated++; throw Error('must_not_activate'); }, async state() { activated++; throw Error('must_not_activate'); },
+    async submit() { activated++; throw Error('must_not_activate'); }, async reconcile() { activated++; throw Error('must_not_activate'); },
+    async stop() { activated++; throw Error('must_not_activate'); }, async watch() { activated++; throw Error('must_not_activate'); },
+    async history() { historyReads++; return { items: [], olderCursor: null }; },
+    async historyChanges() { return { itemIds: ['revised'], cursor: 'cut', hasMore: false }; },
+    async readItems() { return [{ id: 'revised', kind: 'assistant', text: 'revised body', status: 'completed' }]; },
+    async readBodyChunk(_binding, _token, offset) { return { version: 'a'.repeat(64), bytes: 4, offset, nextOffset: null, data: Uint8Array.of(1, 2, 3, 4) }; },
+    async releaseBodySource() {}, async close() {},
+  };
+  t.after(async () => { await client.close(); await server?.close(); await rm(root, { recursive: true, force: true }); });
+  const raw = await managedHarnessReadAdapter(client, 'codex');
+  await assert.rejects(raw.history(binding));
+  server = await serveManagedHarness(adapter, options);
+  await raw.history(binding);
+  assert.equal(typeof raw.readBodyChunk, 'function', 'temporary offline discovery must not permanently remove body reading');
+  assert.deepEqual(Array.from((await raw.readBodyChunk!(binding, 'body', 0, 4)).data), [1, 2, 3, 4]);
+  assert.deepEqual(await raw.historyChanges!(binding), { itemIds: ['revised'], cursor: 'cut', hasMore: false });
+  assert.equal((await raw.readItems!(binding, ['revised']))[0]?.text, 'revised body');
+  await raw.releaseBodySource!(binding, 'body');
+  for (const method of ['state', 'watch', 'reconcile'] as const) await assert.rejects(raw[method](binding, '' as never));
+  assert.equal(activated, 0);
+  await server.close(); server = undefined;
+  await assert.rejects(raw.history(binding));
+  server = await serveManagedHarness({ ...adapter, id: 'dsh' }, options);
+  const before = historyReads;
+  await assert.rejects(raw.history(binding), { code: 'managed_native_harness_changed' });
+  assert.equal(historyReads, before, 'a reconnected Host of another identity must not receive the history request');
+  await server.close(); server = undefined;
+  await assert.rejects(raw.history(binding));
+  server = await serveManagedHarness({ ...adapter, historyChanges: undefined }, options);
+  await assert.rejects(raw.historyChanges!(binding), { code: 'managed_native_method_unavailable' });
+  assert.deepEqual(Array.from((await raw.readBodyChunk!(binding, 'body', 0, 4)).data), [1, 2, 3, 4]);
+  assert.equal(activated, 0);
+});
+
+test('declared RPC capabilities remain readable when the native catalog is temporarily unavailable', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'zh-rpc-caps-'));
+  const options = { socketPath: join(root, 'native.sock'), token: randomBytes(32).toString('base64url'), timeoutMs: 250 };
+  let catalogReads = 0;
+  const unusable = async (): Promise<never> => { throw Error('must_not_activate'); };
+  const adapter: HarnessAdapter = { id: 'codex', async catalog() { catalogReads++; return { id: 'codex', available: false, models: [], permissions: [] }; },
+    async history() { return { items: [], olderCursor: null }; }, async close() {},
+    create: unusable, state: unusable, submit: unusable, reconcile: unusable, stop: unusable, watch: unusable };
+  const server = await serveManagedHarness(adapter, options); const client = new ManagedHarnessRpc(options);
+  t.after(async () => { await client.close(); await server.close(); await rm(root, { recursive: true, force: true }); });
+  assert.ok((await client.capabilities()).methods.includes('history'));
+  assert.equal(catalogReads, 0, 'protocol discovery must not depend on execution readiness');
+  await assert.rejects(client.ready(), { code: 'managed_native_unavailable' });
+  assert.equal(catalogReads, 1, 'explicit Host readiness still requires an available native catalog');
+});
 test('watch sends bounded invalidation hints, releases native watchers, and timeout never retransmits', async t => {
   const f = await fixture(t); let hints = 0;
   const request = f.invocation('watch', [binding]);
