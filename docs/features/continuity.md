@@ -144,6 +144,8 @@ node test/support/native-archive-verify.ts --harness dsh --dsh-compressed --coun
 
 真实 Host 复验另外执行：从隔离本地协议模型产生超过 32 MiB 的 Codex 回复，用 `optOutNotificationMethods` 抑制完整条目/轮次通知，检查仍有有限实时预览、无完整正文伪装成预览、原生终态可核实；停止 Host 后按块读回全文，重启后续用旧 cursor 与精确 `readItems`，逐字节核对预期 SHA。文件、图片、Plan、Reasoning、MCP 与动态工具须使用固定版本实际接受的持久化形状；合成原生记录只证明解析和产品归档，不证明模型真的编辑过文件或生成过图片，后者仍按 [会话可用性 U03/U05](conversation-usability.md) 独立执行。
 
+原生上下文压缩须另外调用真实 Codex `thread/compact/start` 或 DSH `commands/execute /compact`，核对原生持久压缩事件，再用压缩前的历史 cursor、精确 `readItems` 和 Workbench 存档逐项核对旧正文 SHA；重启 Host、reader 和 storage worker 后重复。DSH rc.4 空闲压缩的 `compaction/start/end` 合法地使用 `data.turn:null`；兼容层只在这两类事件接纳空归属，其余事件的非法 turn 仍拒绝。[reader 回归](../../test/dsh-bounded-reader.test.ts) 的 `idle compaction` 分支覆盖 JSONL/Zstandard、旧 cursor、增量水位推进和压缩后新增轮次；它不能替代真实原生压缩验收。
+
 代次和缓存反例：替换原生日志后旧 cursor 应失效，已发布中书正文保持可读；仍持有租约的旧正文在释放前保持版本不变。不断增加绑定/代次使原生源总量超过兼容缓存预算，缓存应回收可重建索引及临时正文，旧源仍可按需重建和归档；租约占满时须明确暂停，释放后可恢复。不能删除中书永久存档来通过。对应 [Codex](../../test/codex-bounded-reader.test.ts)、[DSH](../../test/dsh-bounded-reader.test.ts) 与 [状态投影](../../test/dsh-bounded-state.test.ts) 的反例覆盖必须一并通过。
 
 DSH 的迁移可能把多年事件写入单个 Zstandard frame。索引扫描同时生成受同一全局 quota 约束、可校验和重建的 256 KiB 解压块；常驻内存最多四块。复验需构造单 frame 20,001 事件，重启后随机旧页的 `cacheStatus().frameReads` 不得新增 frame 解码；原生源超过缓存预算时，冷旧窗口应共享一次重建，不得每条消息从 frame 开头重解压。缓存损坏应从未改动的原生源重建，同大小原生改写则拒绝。冷缓存重建仍可能扫描原生压缩 frame，不能把首次随机读取宣称为常数时间。

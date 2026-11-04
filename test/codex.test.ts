@@ -348,6 +348,35 @@ test('Codex rereads current activity after target proof, so a notification turn 
   assert.equal(state.terminalRunId, 'user-run'); assert.equal(state.status, 'running'); assert.equal(state.runId, 'notification-run');
 });
 
+test('Codex does not expose a transient terminal projection for the same active turn', async t => {
+  let activity = 'active', target = 'interrupted', latest = 'inProgress';
+  const p = await peer(t, request => {
+    if (request.method === 'thread/turns/list') return { data: [{ id: 'user-run', status: request.params.limit === 100 ? target : latest }], nextCursor: null };
+    if (request.method === 'thread/read') return { thread: { id: saved.id, status: { type: activity, activeFlags: [] } } };
+    return undefined;
+  });
+  for (const projected of ['interrupted', 'completed', 'failed']) {
+    target = projected;
+    const state = await p.adapter.state(saved, 'user-run');
+    assert.equal(state.status, 'running'); assert.equal(state.runId, 'user-run');
+    assert.equal(state.terminalStatus, undefined); assert.equal(state.terminalRunId, undefined);
+  }
+  // Even two identical terminal projections cannot override current activity.
+  target = latest = 'interrupted';
+  assert.equal((await p.adapter.state(saved, 'user-run')).terminalStatus, undefined);
+  activity = 'idle'; latest = 'completed';
+  assert.equal((await p.adapter.state(saved, 'user-run')).terminalStatus, undefined, 'disagreeing target/current views are not a coherent terminal proof');
+  target = latest = 'completed';
+  const completed = await p.adapter.state(saved, 'user-run');
+  assert.equal(completed.status, 'idle'); assert.equal(completed.terminalStatus, 'completed');
+  target = latest = 'interrupted';
+  assert.equal((await p.adapter.state(saved, 'user-run')).terminalStatus, 'interrupted');
+  activity = 'systemError'; latest = 'inProgress';
+  const unknown = await p.adapter.state(saved, 'user-run');
+  assert.equal(unknown.status, 'unknown'); assert.equal(unknown.reason, 'codex_native_failure');
+  assert.equal(unknown.terminalStatus, undefined);
+});
+
 test('Codex target proof requires an exact terminal record and remains bounded when it is absent', async t => {
   let unfinished = true; let pages = 0;
   const p = await peer(t, request => {

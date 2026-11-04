@@ -108,6 +108,59 @@ async function fixture(t: TestContext, compressed = false, maxCacheBytes = 64 * 
     async reopen() { await reader.close(); reader = new BoundedDshReader({ nativeRoot, cacheRoot, maxCacheBytes }); } };
 }
 
+test('DSH only idle compaction boundaries permit a null owner turn', () => {
+  for (const type of ['compaction/start', 'compaction/end']) {
+    const parser = new BoundedJsonEnvelope();
+    for (const char of JSON.stringify({ type, seq: 1, time: 1, data: { compactionId: 'compact', sourceCommandId: 'command', turn: null } })) parser.write(char);
+    assert.deepEqual(parser.finish(), { type, seq: 1, time: 1 });
+    for (const invalid of [-1, 0.5, '1', false]) {
+      const invalidParser = new BoundedJsonEnvelope();
+      invalidParser.write(JSON.stringify({ type, seq: 1, time: 1, data: { turn: invalid } }));
+      assert.throws(() => invalidParser.finish(), /dsh_bounded_invalid_json/);
+    }
+  }
+  for (const type of ['turn/start', 'turn/end', 'assistant/message', 'unknown/event']) {
+    const parser = new BoundedJsonEnvelope();
+    parser.write(JSON.stringify({ type, seq: 1, time: 1, data: { turn: null } }));
+    assert.throws(() => parser.finish(), /dsh_bounded_invalid_json/);
+  }
+});
+
+for (const compressed of [false, true]) test(`DSH ${compressed ? 'zstd' : 'JSONL'} idle compaction preserves old cursors and subsequent change feed after restart`, async t => {
+  const f = await fixture(t, compressed), options = { launchFile: join(f.nativeRoot, 'absent'), boundedHistory: { nativeRoot: f.nativeRoot, cacheRoot: f.cacheRoot } };
+  let adapter = createDshAdapter(options); t.after(() => adapter.close());
+  const bound = { id: binding.sessionId, cwd: binding.cwd, configuration: { modelId: modelId({ provider: 'synthetic', model: 'synthetic' }), permissionId: 'read-only' }, details: {} };
+  const row = (seq: number, type: string, data: unknown) => JSON.stringify({ seq, time: seq, type, data }) + '\n';
+  const exchange = (seq: number, turn: number) => row(seq, 'turn/start', { turn })
+    + row(seq + 1, 'user/message', { role: 'user', content: [{ type: 'text', text: `user-${turn}` }], source: { kind: 'rpc', rpcId: `operation-${turn}` } })
+    + row(seq + 2, 'assistant/message', { turn, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: `assistant-${turn}` }] } })
+    + row(seq + 3, 'turn/end', { turn, reason: { kind: 'completed' } });
+  await f.append(exchange(0, 1));
+  const initial = await adapter.history(bound, undefined, 100), head = await adapter.history(bound, undefined, 1);
+  assert.equal(initial.items.length, 2); assert(head.olderCursor);
+  const checkpoint = await adapter.historyChanges!(bound); assert.equal(checkpoint.itemIds.length, 2); assert(!checkpoint.hasMore);
+  const compaction = { compactionId: 'compact', sourceCommandId: 'command', turn: null };
+  await f.append(row(4, 'compaction/start', compaction)
+    + row(5, 'compaction/summary', { compactionId: 'compact', sourceCommandId: 'command', summary: 'synthetic summary', shadowedRange: [0, 3] })
+    + row(6, 'user/message', { role: 'user', source: { kind: 'plugin', plugin: 'compact', compactionId: 'compact' }, content: [{ type: 'text', text: 'synthetic summary' }] })
+    + row(7, 'compaction/end', compaction));
+  const compacted = await adapter.historyChanges!(bound, checkpoint.cursor);
+  assert.deepEqual(compacted.itemIds, []); assert(!compacted.hasMore); assert.notEqual(compacted.cursor, checkpoint.cursor);
+  await f.append(exchange(8, 2));
+  const sourceSHA = createHash('sha256').update(await readFile(f.path)).digest('hex');
+  await adapter.close(); adapter = createDshAdapter(options);
+  const old = await adapter.history(bound, head.olderCursor, 100);
+  assert.deepEqual(old.items, initial.items.slice(0, 1)); assert.equal(old.olderCursor, null);
+  assert.deepEqual(await adapter.readItems!(bound, initial.items.map(item => item.id)), initial.items);
+  const changed = await adapter.historyChanges!(bound, compacted.cursor);
+  assert.equal(changed.itemIds.length, 2); assert(!changed.hasMore);
+  const newItems = await adapter.readItems!(bound, changed.itemIds);
+  assert.deepEqual(newItems.map(item => item.text), ['user-2', 'assistant-2']);
+  const all = await adapter.history(bound, undefined, 100);
+  assert.deepEqual(all.items, [...initial.items, ...newItems]);
+  assert.equal(createHash('sha256').update(await readFile(f.path)).digest('hex'), sourceSHA);
+});
+
 for (const compressed of [false, true]) test(`DSH ${compressed ? 'zstd' : 'JSONL'} change feed retains old completed updates across fixed cuts and rebuilds`, async t => {
   const f = await fixture(t, compressed), options = { launchFile: join(f.nativeRoot, 'absent'), boundedHistory: { nativeRoot: f.nativeRoot, cacheRoot: f.cacheRoot } };
   let adapter = createDshAdapter(options); t.after(() => adapter.close());

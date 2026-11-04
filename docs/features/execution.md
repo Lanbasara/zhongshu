@@ -75,6 +75,8 @@ node test/support/feature-fixture.ts inspect --root "$zh_verify_root" --title '�
 
 Codex 的精确目标轮核实每次最多读取 10 页、每页 100 条 `itemsView=notLoaded` 的原生轮次元数据，再核对最新轮、队列与当前状态。目标不在头页时，生产 bounded reader 将查询位置保存在有配额的私有缓存 SQLite 中；后续轮次与重启从该位置继续，未决位置不按 LRU 淘汰。找到目标只保留页入口，下一次仍从原生读取精确目标的终态；断线保留位置，原生拒绝游标则显式待核实并重置。位置按端点、原生根、绑定 ID、cwd、配置和目标轮隔离，CAS 防止并发旧响应覆盖新位置。已完成/穷尽的位置连续 7 天不再核实时成为清理候选，每次最多清理 64 条；已在头页找到的终态也会清理旧位置。配额不足暂停位置更新，不把未找到或缓存结果当成完成。无 bounded reader 的兼容适配器仅有进程内位置，重启后重查，不能据其测试宣称持久恢复。
 
+目标就是当前最新轮时，目标页和最新页必须给出相同终态，且随后读取的 thread 状态为 idle，才公开目标终态。固定原生版本在 task_started 与用户条目落盘之间可能暂把活动轮投影为 interrupted；active/waiting 或相互矛盾的读取不能证明该轮已经结束。不同 ID 的旧目标已完成、新轮仍活动可同时成立；thread 的 systemError 只表示待核实，不凭系统错误清除未决执行。真实原生复验须保持与产品相同的 watch→dispatch 生命周期，同一请求只提交一次，在异常终态出现时保留 Host，按固定时间预算继续只读核对原生完成通知及 task_complete/turn_aborted；不能先杀 Host 再把缺少完成记录归因于原生取消。
+
 定向复跑 `node --test test/codex.test.ts test/codex-bounded-reader.test.ts`：使用明确的协议 peer 核对第 2001 个目标经多次有界读取及 reader 重启最终找到、70 个未决绑定轮换、断线/失效游标、第二次证明重新读取变化的终态、并发 CAS、头页快路、缓存配额回滚与过期清理。这些测试不证明真实 Codex 游标跨压缩或 Host 重启的行为；真实验证必须另用固定版本和独立原生现场。
 
 ### E06 / E07 排队与提前发送

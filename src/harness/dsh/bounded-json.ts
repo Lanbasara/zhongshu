@@ -118,7 +118,11 @@ export class BoundedJsonEnvelope {
   }
   finish(): { type: string; seq: number; time: number; turn?: number; callId?: string; toolName?: string } {
     this.finishDocument();
-    const type = this.fields['/type'], seq = this.fields['/seq'], time = this.fields['/time'], turn = this.fields['/data/turn'];
+    const type = this.fields['/type'], seq = this.fields['/seq'], time = this.fields['/time'], rawTurn = this.fields['/data/turn'];
+    // rc.4 manual compaction can run while no execution turn is open. Its
+    // start/end records explicitly encode that owner as null. This is not a
+    // turn/start and must not relax the integer requirement for other events.
+    const turn = rawTurn === null && (type === 'compaction/start' || type === 'compaction/end') ? undefined : rawTurn;
     if (typeof type !== 'string' || !type || type.length > 256 || !Number.isSafeInteger(seq) || Number(seq) < 0 || !Number.isSafeInteger(time) || Number(time) < 0) this.fail();
     if (turn !== undefined && (!Number.isSafeInteger(turn) || Number(turn) < 0)) this.fail();
     const callId = this.fields['/data/callId'] ?? this.fields['/data/message/toolCallId'] ?? this.fields['/data/toolCall/callId'], name = this.fields['/data/name'];

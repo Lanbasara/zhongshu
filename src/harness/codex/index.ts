@@ -286,10 +286,16 @@ class CodexAdapter implements HarnessAdapter {
       const native = parse(z.object({ thread: z.object({ id: nativeId, status: threadStatus }) }), await this.rpc.request('thread/read', { threadId: binding.id, includeTurns: false }));
       if (native.thread.id !== binding.id) throw new HarnessError('codex_native_identity_mismatch');
       const status = native.thread.status;
-      const common = { pendingInputs, configurationVerified: verified, ...(latest ? { runId: latest.id } : {}), ...(terminalStatus ? { terminalRunId: targetRunId, terminalStatus } : {}) };
+      // Native paginated history can briefly reconstruct a newly started turn
+      // as interrupted before its live projection catches up. For the current
+      // target, only coherent terminal metadata AND a fresh idle thread prove
+      // completion. A genuinely older terminal target may coexist with a newer
+      // active run; keep that separate proof intact.
+      const coherentTerminal = terminalStatus && (latest?.id !== targetRunId || status.type === 'idle' && latest?.status === terminalStatus);
+      const common = { pendingInputs, configurationVerified: verified, ...(latest ? { runId: latest.id } : {}), ...(coherentTerminal ? { terminalRunId: targetRunId, terminalStatus } : {}) };
       if (!verified) return { ...common, status: 'unknown', reason: 'codex_configuration_mismatch' };
       if (status.type === 'active') return { ...common, status: status.activeFlags?.length ? 'waiting' : 'running' };
-      if (status.type === 'systemError') return { ...common, status: 'failed', reason: 'codex_native_failure' };
+      if (status.type === 'systemError') return { ...common, status: 'unknown', reason: 'codex_native_failure' };
       if (status.type !== 'idle' || latest?.status === 'inProgress') return { ...common, status: 'unknown', reason: 'codex_state_unconfirmed' };
       if (latest?.status === 'interrupted') return { ...common, status: 'interrupted', runId: latest.id };
       if (latest?.status === 'failed') return { ...common, status: 'failed', runId: latest.id };
