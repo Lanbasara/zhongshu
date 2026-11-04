@@ -16,12 +16,12 @@
 
 ## Driving it with Harness
 
-使用[共同入口的 Native 现场](README.md#native真实接入分支)和 [README 的插件配置](../../README.md#instance-plugin-management)。操作者准备独占的 Codex Unix socket、对应管理 socket，以及 DSH `0.2.1-rc.5` Web Host；两者分别配置知行原生市场和固定版本。用没有真实数据的合成工作区；先保留工作区文件摘要及两端原生未安装记录。P03 同账号分支需要操作者提供两个独立且允许实验的原生环境。
+使用[共同入口的 Native 现场](README.md#native真实接入分支)和 [README 的插件配置](../../README.md#instance-plugin-management)。操作者为被测 Harness 准备独占连接。Codex 使用原生 Unix socket 和管理 socket，DSH 使用 `0.2.1-rc.5` Web Host。P01–P04 使用预设的知行市场。P05 从该端的空市场配置开始，可分别跑单端，再用双端实例核对隔离。用没有真实数据的合成工作区；先保留工作区文件摘要及两端原生未安装记录。P03 同账号分支需要操作者提供两个独立且允许实验的原生环境。
 
 - P01：先装其中一端，另一端刷新仍不显示安装。Codex 通过同一 `CODEX_HOME` 的原生 `codex plugin list --marketplace <name> --available --json` 核对 `pluginId`、版本和 `enabled`，并从同一 App Server 用 `skills/list` 查询合成工作区的插件技能。DSH 通过同一 launch 对应的 Web Host `pluginManager/listBundles` 核对包来源、版本、启用和加载条目；再查新会话的能力。原生读回示例见下方。DSH 有可用实验模型时，发送一条调用知行 Skill 的合成请求，核对原生会话事件实际加载的 Skill 内容。
 - P02：分别做停用、重新启用、卸载，每次等待页面落定并刷新，再独立读回上面的包清单。停用后包仍在且为 disabled；卸载后当前端没有已安装项。操作其中一端时保留另一端已安装，比较其清单。
 - P03：比较工作区摘要和独立原生环境的前后清单。从无登录上下文读私有插件入口应返回 401。从已登录的同源页面读取 `/api/session` 的 `csrfToken`，仅用于同源请求的 `x-csrf-token` 头。对 `/api/private/workbench/plugins/codex/operations` POST JSON `{ id: crypto.randomUUID(), pluginId: "gmail@openai-curated-remote", action: "install" }` 应返回 403 `plugin_action_forbidden`。省略 CSRF 或使用错误 Origin 返回 403，加入 `workspaceId` 返回 400。保留状态和错误码，不记录认证信息。
-- P05：从允许管理来源的空目录开始。在 Codex 添加 `Lanbasara/jianwei-marketplace`，从 GitHub 市场读出见微；在 DSH 添加 `https://raw.githubusercontent.com/Lanbasara/jianwei-marketplace/main/dsh/index.json`，确认来源下拉项和详情版本历史。在 DSH 选择一个兼容版本安装，切换到另一兼容版本，每次在原生包清单读回准确版本。DSH 来源通过 `pluginMarket/listIndexes` 核对 URL，读包清单时将下方示例中的 `zhixing` 改为 `jianwei`；在 Codex 安装当前市场固定的发行。刷新页面核对来源与状态。保留一个已安装项尝试移除其市场，预期保留来源并提示卸载；卸载后移除，另一 Harness 的来源保持原样。给 DSH 输入私有地址，预期拒绝。
+- P05：从允许管理来源的空目录开始。在 Codex 添加 `Lanbasara/jianwei-marketplace`，从 GitHub 市场读出见微；在 DSH 添加 `https://raw.githubusercontent.com/Lanbasara/jianwei-marketplace/main/dsh/index.json`，确认来源下拉项和详情版本历史。在 DSH 选择一个兼容版本安装，切换到另一兼容版本，每次在原生包清单读回准确版本。DSH 来源通过 `pluginMarket/listIndexes` 核对 URL，读包清单时将下方示例中的 `zhixing` 改为 `jianwei`；在 Codex 安装当前市场固定的发行，用上面的 CLI 清单命令指定 `--marketplace jianwei`。刷新页面核对来源与状态。保留一个已安装项尝试移除其市场，预期保留来源并提示卸载；卸载后移除，另一 Harness 的来源保持原样。给 DSH 输入私有地址，预期拒绝。
 - P04：在独占现场用[浏览器故障控制](README.md#drive控制与读回)在确认前用 `window.zhVerify.dropNext("/api/private/workbench/plugins/dsh/operations")` 丢弃一次操作响应，Codex 场景替换为 `codex`。保存 `window.zhVerify.status().journal` 中的请求 ID，再刷新，从同源 `GET /api/private/workbench/plugins/<harness>` 的 `operation` 读回同一 ID 和状态，并核对原生清单。需要重启的分支必须由原生返回该结果，记录回执，再按操作者入口重启本轮 Host，点击「核对原生结果」。未观察到原生重启结果时把该分支记为未覆盖。
 
 原生读回可在仓库根目录用 `node --input-type=module` 执行。以本轮绝对路径替换 `<…>`，不要把 launch 文件正文复制到脚本或报告。按需要执行其中一个 Harness 的部分。
