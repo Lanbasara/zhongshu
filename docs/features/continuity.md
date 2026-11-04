@@ -63,6 +63,8 @@ node test/support/performance-corpus.ts --root "$zh_verify_root" --items 60000 -
 
 旧条目修订须单独构造：先存档至少 35 条已完成消息，再在原生源末尾修订最早的两条，修订顺序与历史顺序相反。不要打开旧页，等后台变更水位推进后核对新正文、原有历史顺序和旧摘要正文均可读取；短正文、空正文及巨型正文各覆盖一例。中途杀应用再恢复，正文和水位不能出现只提交一方。只读观察 `workbench_archive_updates`，并核对公开“完整”状态不会在变更页尚未完成时提前成立。原生替身缺少变更流时须显示 `archive_updates_unavailable`，不能拿一次头页成功代替旧条目覆盖。事务、迟到页和真实 worker 重启入口见 [修订回归](../../test/archive-updates.test.ts)。
 
+修订积压超过一页时，后台续页应直接推进变更水位，不为每批旧修订重复提取同一巨型头页。强制同步仍读取新头；出现尚未进入历史的 ID 或源游标失效时，必须回到历史路径恢复，不能跳过对应变更。用 `node --test --test-name-pattern='change-feed' test/workbench.test.ts` 同时验证调用量和恢复分支。
+
 按 [W03](workspace-management.md) 移除工作区后，再向已授权的同一物理源追加未读正文；保持工作区移除，等待归档并通过原对话全文接口核对。发送和原文件接口仍须拒绝；后台不得启动原生执行或任意读取已移除目录中的图片路径。目录被替换或绑定变化时暂停新读取，旧档仍在。
 
 联合持续运行使用 R07 的可销毁规模现场。固定源码副本和已通过 `check:release` 的构建目录；应用运行时不要重建其 `dist` 或替换源码，worker 也必须使用同一版本。以 `feature-fixture.ts serve --root "$zh_verify_root" --port 4391 --build <固定构建绝对目录> --physical` 启动：两个独立原生格式源各含 20,000 条消息，实际物理 reader 和产品后台泵负责导入；执行/state/watch 仍是明确替身。每 30 秒把进程内存、event loop、storage 队列与失败分类、数据库/WAL 大小、归档检查点及独立源清单摘要写入私有 `performance-service.ndjson`，每十次采样给两个源各追加 100 条。永久正文不通过测试脚本直接写入。

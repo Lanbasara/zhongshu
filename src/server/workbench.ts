@@ -6,7 +6,7 @@ import { decodeImage, ResourceError, workspacePath } from './resources.ts';
 import { nativeText } from '../shared/content.ts';
 import { referenceSchema } from '../shared/content.ts';
 import { isAbsolute, relative } from 'node:path';
-import { listWorkspaceDocuments, openWorkspaceDocument, saveWorkspaceDocument } from './workspace-documents.ts';
+import { listWorkspaceDocuments, openWorkspaceDocument, saveWorkspaceDocument, validateWorkspaceText } from './workspace-documents.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import { StoreError, type ArchiveJob, type WorkbenchStore, type CreateConversation, type OperationInput, type Conversation, type Operation } from './workbench-store.ts';
 import type { WorkspaceRegistry } from './workspace-registry.ts';
@@ -14,7 +14,7 @@ import type { QueueCommand, QueueView, WorkbenchConfiguration, workspaceAddSchem
 import { z } from 'zod';
 import { storageMethods, storageResourceMethods, type AsyncWorkbenchStore } from './storage-client.ts';
 import type { DirectoryIndex, DirectoryPage } from './directory-index.ts';
-import type { ManagedWorkspaceExecution } from './execution-workspaces.ts';
+import type { ManagedEditStatus, ManagedWorkspaceExecution } from './execution-workspaces.ts';
 import type { WorkspaceFileWriter } from './workspace-writer.ts';
 import type { BaselineBinding, BaselineObservation, PendingExecution, HostPendingExecution, ExecutionCursor } from './execution-coordinator.ts';
 
@@ -271,7 +271,7 @@ export class Workbench {
   }
   async changeWorkspaceMaintenance(id: string, action: 'pause' | 'resume') {
     const workspace = (await this.workspace(id));
-    if (this.execution && await this.execution.managed(id)) return this.task(() => this.execution!.change(id, action));
+    if (this.execution && await this.execution.managed(id)) return this.task(async () => this.readyEditStatus(id, await this.execution!.change(id, action)));
     const controller = workspace.maintenance;
     const { directory } = workspace;
     if (!controller) throw new StoreError('workspace_maintenance_unavailable', 409);
@@ -450,8 +450,19 @@ export class Workbench {
     await this.store.settleOperation(operation.id, receipt);
     return receipt.outcome === 'unknown' ? 'unknown' : 'pending';
   }
+  private async readyEditStatus(id: string, status: ManagedEditStatus): Promise<ManagedEditStatus> {
+    if (!status.editable) return status;
+    // An edit window includes a ready, exclusively owned file writer. Its cold
+    // startup belongs to entering the window, not the user's first save.
+    try {
+      if (!this.writer) throw new StoreError('file_writer_unavailable', 503);
+      await this.writer.owner();
+    } catch { return { ...await this.execution!.status(id), editable: false, reason: 'file_writer_unavailable' }; }
+    this.assertOpen(); await this.workspace(id);
+    return this.execution!.status(id); // A concurrent resume may have changed it.
+  }
   async workspaceEditStatus(id: string) {
-    if (this.execution && await this.execution.managed(id)) { await this.workspace(id); return this.execution.status(id); }
+    if (this.execution && await this.execution.managed(id)) { await this.workspace(id); return this.readyEditStatus(id, await this.execution.status(id)); }
     const { directory, managedWrites, maintenance } = (await this.workspace(id));
     if (!managedWrites) return { editable: false, reason: 'workspace_writes_unmanaged' };
     if (this.saving(directory)) return { editable: false, reason: 'workspace_save_in_progress' };
@@ -500,6 +511,9 @@ export class Workbench {
   }
   async saveWorkspaceFile(id: string, path: string, version: string, text: string, saveId: string = randomUUID()) {
     const { directory, maintenance } = (await this.workspace(id));
+    // Reject invalid payloads before starting a writer or admitting a durable
+    // save. Otherwise a transport/schema rejection could leave an unknown effect.
+    validateWorkspaceText(text);
     const entry = await this.registry?.get(id);
     const identity = entry?.identity;
     const assertRegistration = () => { if (entry) this.registry!.verify(entry); };
@@ -1201,7 +1215,7 @@ export class Workbench {
   }
   private async archiveRevisions(conversation: Conversation, job: ArchiveJob, reader: ArchiveReader, removed: boolean) {
     const progress = await this.store.archiveJobs(conversation.id);
-    if (!progress.some(value => value.kind === 'backfill' && value.complete) || progress.find(value => value.kind === 'latest')?.cursor !== null) return;
+    if (!progress.some(value => value.kind === 'backfill' && value.complete) || progress.find(value => value.kind === 'latest')?.cursor !== null) return false;
     if (!reader.historyChanges || !reader.readItems) throw new StoreError('archive_updates_unavailable', 503);
     const checkpoint = await this.store.archiveUpdates(conversation.id);
     if (!checkpoint) throw new StoreError('archive_updates_unavailable', 503);
@@ -1221,6 +1235,7 @@ export class Workbench {
     const items = await this.materialize(conversation, raw, reader, !removed, 1024 * 1024);
     this.assertOpen(); await this.archiveAccess(await this.conversation(conversation.id));
     await this.store.commitArchiveUpdates(job, checkpoint.cursor, page, items);
+    return true;
   }
   private archivePage(id: string, kind: ArchiveJob['kind'], force = false): Promise<void> {
     if (this.closed) return Promise.resolve();
@@ -1228,11 +1243,17 @@ export class Workbench {
     if (running) return running;
     if (this.archiveInFlight.size >= 2) return Promise.resolve();
     const task = this.task(async () => {
+      // Read before claim revokes public completeness. An unfinished fixed cut
+      // continues directly; polling a giant head again per 16 changes adds no
+      // evidence. Explicit execution sync and failed/unknown IDs still read it.
+      const pendingUpdates = kind === 'latest' && !force ? await this.store.archiveUpdates(id) : null;
       const job = await this.store.claimArchiveJob(id, kind, force);
       if (!job || this.closed) return;
       try {
         const conversation = (await this.conversation(id)); const { reader: adapter, removed } = await this.archiveAccess(conversation);
         if (!conversation.binding || conversation.binding.id !== job.bindingId) throw new StoreError('archive_source_changed', 409);
+        if (pendingUpdates?.cursor && !pendingUpdates.complete && job.cursor === null && !job.error &&
+          await this.archiveRevisions(conversation, job, adapter, removed)) return;
         const runtime = this.runtimes.get(id); const generation = runtime?.generation;
         const page: HistoryPage = await adapter.history(conversation.binding, job.cursor ?? undefined, HISTORY_PAGE_SIZE);
         this.assertOpen(); await this.archiveAccess(await this.conversation(id));

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -82,7 +82,7 @@ async function fixture(t: TestContext, count: number) {
     const workbench = new Workbench(client.store, workspaces, new Map([['codex', raw]]), registry, undefined, { execution, managedAdapter: wrapper, writer });
     owned.push({ client, workbench }); await workbench.start();
     await until(async () => execution.initialized, 30_000);
-    return { client, execution, workbench };
+    return { client, execution, workbench, writer };
   }
   return { open, conversationIds, workspaceDirectory, writerDirectory: join(dataDirectory, 'workspace-writer'), controllerState: () => controllerState,
     counts: () => ({ stateReads, watches, submits, stops }), runContinuously: () => { keepRunning = true; },
@@ -121,6 +121,75 @@ test('a closed edit window survives Workbench and worker restart, rejects stale 
   assert.equal(f.controllerState().admission, 'open');
 });
 
+test('invalid UTF-8 save payloads are rejected before acquiring a save or starting the writer', async t => {
+  const f = await fixture(t, 1); const instance = await f.open();
+  const original = await instance.workbench.openWorkspaceFile('workspace', 'note.md');
+  const valid = '中'.repeat(87_381) + 'a';
+  assert.equal(Buffer.byteLength(valid), 256 * 1024);
+  const inputs = [
+    { text: valid + 'x', code: 'file_too_large', statusCode: 413 },
+    { text: 'embedded\0null', code: 'file_encoding_unsupported', statusCode: 415 },
+    { text: 'lone\ud800surrogate', code: 'file_encoding_unsupported', statusCode: 415 },
+  ];
+  for (const input of inputs) {
+    await assert.rejects(instance.workbench.saveWorkspaceFile('workspace', 'note.md', original.version, input.text, randomUUID()),
+      { message: input.code, statusCode: input.statusCode });
+    assert.equal((await instance.client.execution.load(['host']))[0]!.windowId, undefined);
+    await assert.rejects(stat(f.writerDirectory), { code: 'ENOENT' });
+    assert.equal(await readFile(join(f.workspaceDirectory, 'note.md'), 'utf8'), original.text);
+  }
+  assert.equal((await instance.workbench.changeWorkspaceMaintenance('workspace', 'pause')).editable, true);
+  assert.equal((await stat(f.writerDirectory)).isDirectory(), true, 'editable requires the writer to be ready');
+  assert.equal(f.controllerState().admission, 'closed');
+  const owner = await instance.writer.owner();
+  const windowId = (await instance.client.execution.load(['host']))[0]!.windowId!;
+  for (const input of inputs) {
+    await assert.rejects(instance.workbench.saveWorkspaceFile('workspace', 'note.md', original.version, input.text, randomUUID()),
+      { message: input.code, statusCode: input.statusCode });
+    assert.equal((await instance.client.execution.pendingSaves({ windowId, limit: 16 })).entries.length, 0);
+    assert.equal(await instance.writer.owner(), owner);
+    assert.equal((await instance.workbench.workspaceEditStatus('workspace')).editable, true);
+    assert.equal(await readFile(join(f.workspaceDirectory, 'note.md'), 'utf8'), original.text);
+  }
+  const before = f.counts();
+  const saved = await instance.workbench.saveWorkspaceFile('workspace', 'note.md', original.version, valid, randomUUID());
+  const persisted = await readFile(join(f.workspaceDirectory, 'note.md'));
+  assert.equal(persisted.byteLength, 256 * 1024);
+  assert.equal(createHash('sha256').update(persisted).digest('hex'), createHash('sha256').update(valid).digest('hex'));
+  assert.equal((await instance.client.execution.pendingSaves({ windowId, limit: 16 })).entries.length, 0);
+  assert.equal((await instance.workbench.workspaceEditStatus('workspace')).editable, true);
+  assert.equal(await instance.writer.owner(), owner, 'first save reuses the prewarmed writer');
+  assert.deepEqual(f.counts(), before);
+  const escaped = '\u0001'.repeat(256 * 1024);
+  await instance.workbench.saveWorkspaceFile('workspace', 'note.md', saved.version, escaped, randomUUID());
+  const escapedBytes = await readFile(join(f.workspaceDirectory, 'note.md'));
+  assert.equal(escapedBytes.byteLength, 256 * 1024);
+  assert.equal(createHash('sha256').update(escapedBytes).digest('hex'), createHash('sha256').update(escaped).digest('hex'));
+  assert.equal((await instance.client.execution.pendingSaves({ windowId, limit: 16 })).entries.length, 0);
+  assert.equal((await instance.workbench.workspaceEditStatus('workspace')).editable, true);
+  assert.equal(await instance.writer.owner(), owner);
+  assert.deepEqual(f.counts(), before);
+});
+
+test('a concurrent resume cannot return stale edit readiness while the writer starts', async t => {
+  const f = await fixture(t, 1); const instance = await f.open();
+  const originalOwner = instance.writer.owner.bind(instance.writer);
+  let entered!: () => void; let release!: () => void;
+  const starting = new Promise<void>(resolve => { entered = resolve; });
+  const allowed = new Promise<void>(resolve => { release = resolve; });
+  instance.writer.owner = async () => { entered(); await allowed; return originalOwner(); };
+  const pausing = instance.workbench.changeWorkspaceMaintenance('workspace', 'pause');
+  try {
+    await starting;
+    assert.equal(f.controllerState().admission, 'closed');
+    assert.equal((await instance.workbench.changeWorkspaceMaintenance('workspace', 'resume')).maintenance, 'online');
+  } finally { release(); }
+  const status = await pausing;
+  assert.equal(status.editable, false);
+  assert.equal(status.maintenance, 'online');
+  assert.equal(f.controllerState().admission, 'open');
+});
+
 test('an edit request drains the original queued operation, blocks newcomers, and waits for its exact terminal result without cancelling it', async t => {
   const f = await fixture(t, 1); const instance = await f.open(); f.runContinuously();
   const original = { id: randomUUID(), conversationId: f.conversationIds[0]!, type: 'message' as const, payload: { text: 'accepted before the edit request' } };
@@ -137,8 +206,11 @@ test('an edit request drains the original queued operation, blocks newcomers, an
 
 test('Workbench automatically reconciles a killed writer and settles its durable save before allowing explicit resume', async t => {
   const f = await fixture(t, 1); const instance = await f.open();
-  await instance.workbench.changeWorkspaceMaintenance('workspace', 'pause');
   const oldWriter = await pausedWriter(t, f.writerDirectory, 'renamed');
+  const unavailable = await instance.workbench.changeWorkspaceMaintenance('workspace', 'pause');
+  assert.equal(unavailable.editable, false);
+  assert.equal(unavailable.reason, 'file_writer_unavailable');
+  assert.equal(f.controllerState().admission, 'closed');
   const registration = (await instance.client.workspaces.get('workspace'))!;
   const document = await instance.workbench.openWorkspaceFile('workspace', 'note.md');
   const gates = await instance.client.execution.load(['host']);

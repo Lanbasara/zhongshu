@@ -11,6 +11,10 @@ for (const extension of ['.ts', '.tsx', '.js', '.jsx', '.mts', '.cts', '.mjs', '
   formats.set(extension, 'source');
 }
 export const textLimit = 256 * 1024;
+export function validateWorkspaceText(text: string): void {
+  if (Buffer.byteLength(text) > textLimit) throw new ResourceError('file_too_large', 413);
+  if (text.includes('\0') || /\p{Surrogate}/u.test(text)) throw new ResourceError('file_encoding_unsupported', 415);
+}
 const htmlLimit = 1024 * 1024;
 const directoryFlags = constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW;
 
@@ -100,8 +104,7 @@ export function saveWorkspaceDocument(root: string, path: string, version: strin
   const parts = documentParts(path);
   const kind = format(path);
   if (kind === 'html' || kind === 'source') throw new ResourceError('file_read_only', 403);
-  if (Buffer.byteLength(text) > textLimit) throw new ResourceError('file_too_large', 413);
-  if (text.includes('\0') || /\p{Surrogate}/u.test(text)) throw new ResourceError('file_encoding_unsupported', 415);
+  validateWorkspaceText(text);
   return withWorkspaceDirectory(root, parts.slice(0, -1), async directory => {
     const name = basename(path);
     const original = await readDocument(directory, name, kind);

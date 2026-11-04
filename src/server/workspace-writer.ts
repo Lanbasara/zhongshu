@@ -3,6 +3,7 @@ import { isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import type { WriterRequest, WriterResult, WriterTarget } from './workspace-writer-worker.ts';
+import { textLimit } from './workspace-documents.ts';
 
 const resultSchema = z.union([
   z.object({ outcome: z.enum(['committed', 'rejected']), proof: z.string().regex(/^[a-f0-9]{64}$/), reason: z.string().max(128).optional(),
@@ -102,9 +103,10 @@ export class WorkspaceFileWriter {
   private async request(method: 'write' | 'recover', input: WriterRequest | WriterTarget) {
     await this.owner();
     if (this.closing) throw new WorkspaceWriterError('file_writer_closed', 'not_started');
-    // Each file is at most 512 KiB; reject before retaining a full queue.
+    // UTF-8 file bytes and JSON transport bytes differ: valid control characters
+    // can expand sixfold. Permit every accepted 256 KiB text plus bounded metadata.
     const bytes = Buffer.byteLength(JSON.stringify(input));
-    if (bytes > 1024 * 1024 || this.queue.length + Number(!!this.current) >= 32 || this.queuedBytes + bytes > 4 * 1024 * 1024) throw new WorkspaceWriterError('file_writer_busy', 'not_started');
+    if (bytes > 6 * textLimit + 64 * 1024 || this.queue.length + Number(!!this.current) >= 32 || this.queuedBytes + bytes > 4 * 1024 * 1024) throw new WorkspaceWriterError('file_writer_busy', 'not_started');
     return new Promise<WriterResult>((resolve, reject) => { this.queuedBytes += bytes; this.queue.push({ id: ++this.sequence, method, input, bytes, resolve, reject }); this.pump(); });
   }
   write(input: WriterRequest) { return this.request('write', input); }

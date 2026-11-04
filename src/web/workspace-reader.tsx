@@ -40,6 +40,7 @@ const errors = new Map([
   ['execution_save_already_resolved', '这次保存请求已处理，请重新打开文件核对结果。'],
   ['execution_pending_unknown', '部分已受理任务仍待核实，暂时不能保存；其他已受理任务仍会继续完成。'],
   ['file_writer_capacity_reached', '保存记录空间不足，文件尚未写入；修改已保留，扩容后可再次保存。'],
+  ['file_writer_unavailable', '文件保存服务尚未就绪，修改已保留；请稍后重试。'],
   ['file_version_changed', '远程文件已变化，当前修改已保留。'],
   ['file_reference_unavailable', '文件或目录不可用，可能已被移动或删除。'],
   ['file_reference_forbidden', '这个路径不在可读的工作区文件范围内。'],

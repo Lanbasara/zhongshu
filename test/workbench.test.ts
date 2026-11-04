@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { test, type TestContext } from 'node:test';
+import { HarnessError } from '../src/harness/types.ts';
 import type { Binding, Catalog, Configuration, HarnessAdapter, HistoryPage, NativeChange, NativeItem, NativeState, Receipt } from '../src/harness/types.ts';
 import { openDatabase } from '../src/server/database.ts';
 import { productMigrations } from '../src/server/migrations.ts';
@@ -28,6 +29,8 @@ class Peer implements HarnessAdapter {
   createCalls = 0; closed = false; unwatchCount = 0;
   stateRead?: (targetRunId?: string) => Promise<NativeState>;
   historyRead?: (cursor?: string) => Promise<HistoryPage>;
+  historyChanges?: HarnessAdapter['historyChanges'];
+  readItems?: HarnessAdapter['readItems'];
   submitRead?: (id: string) => Promise<Receipt>;
   createRead?: (input: { cwd: string; configuration: Configuration }, bound: (value: Binding) => void | Promise<void>) => Promise<Binding>;
   closeRead?: () => Promise<void>;
@@ -232,9 +235,9 @@ test('startup recovers claimed queue input by identity and observes older queued
     assert.equal(f.store.getOperation(operationId)?.runId, 'old-run');
   } finally { await restarted.close(); }
 });
-function fixture(t: TestContext) {
+function fixture(t: TestContext, now?: () => number) {
   const directory = mkdtempSync(join(tmpdir(), 'zhongshu-service-')); const db = openDatabase(directory, productMigrations);
-  const store = createWorkbenchStore(db); const peer = new Peer(); const workspaces = [{ id: 'fixture', label: 'fixture', directory: '/synthetic/workspace' }];
+  const store = createWorkbenchStore(db, { now }); const peer = new Peer(); const workspaces = [{ id: 'fixture', label: 'fixture', directory: '/synthetic/workspace' }];
   const service = new Workbench(store, workspaces, new Map([['codex', peer]]));
   const id = randomUUID(); const configuration = { modelId: 'model', permissionId: 'workspace' };
   store.createConversation({ id, harnessId: 'codex', workspaceId: 'fixture', cwd: workspaces[0]!.directory, configuration });
@@ -245,6 +248,121 @@ function fixture(t: TestContext) {
   t.after(async () => { await service.close(); closeDatabase(); rmSync(directory, { recursive: true, force: true }); });
   return { db, store, peer, service, id, workspaces, closeDatabase };
 }
+
+function revisionArchiveFixture(t: TestContext, count = 33, largeHead = false) {
+  let clock = 1_000;
+  const f = fixture(t, () => clock);
+  const original = Array.from({ length: count }, (_, index) => ({ ...nativeItem(`revised-${index}`), sourceRevision: { generation: 'fixture-source', sequence: 1 } }));
+  if (largeHead) for (let index = 0; index < 2; index++) original.push({ ...nativeItem(`large-head-${index}`), text: 'x'.repeat(660_000), sourceRevision: { generation: 'fixture-source', sequence: 1 } });
+  f.peer.records = original;
+  const backfill = f.store.claimArchiveJob(f.id, 'backfill', true)!;
+  assert.equal(f.store.commitArchivePage(backfill, original, null), true);
+  const changed: NativeItem[] = original.slice(0, count).map(value => ({ ...value, text: 'corrected-' + value.id, sourceRevision: { generation: 'fixture-source', sequence: 2 } }));
+  const feedCursors: (string | undefined)[] = [], itemReads: string[][] = [];
+  f.peer.historyChanges = async (_binding, cursor, limit) => {
+    assert.equal(limit, 16); feedCursors.push(cursor);
+    const start = cursor === undefined ? 0 : Number(cursor), end = Math.min(start + 16, changed.length);
+    return { itemIds: changed.slice(start, end).map(value => value.id), cursor: String(end), hasMore: end < changed.length };
+  };
+  f.peer.readItems = async (_binding, ids) => {
+    itemReads.push([...ids]);
+    return ids.map(id => changed.find(value => value.id === id) ?? f.peer.records.find(value => value.id === id)!);
+  };
+  const advance = async (force = false) => {
+    clock += 60_001;
+    await (f.service as unknown as { archivePage(id: string, kind: 'latest', force: boolean): Promise<void> }).archivePage(f.id, 'latest', force);
+  };
+  return { ...f, changed, feedCursors, itemReads, advance };
+}
+
+test('background change-feed continuation advances bounded pages without rereading a large unchanged head', async t => {
+  const f = revisionArchiveFixture(t, 33, true);
+  for (let page = 0; page < 3; page++) await f.advance();
+  assert.deepEqual(f.feedCursors, [undefined, '16', '32']);
+  assert.deepEqual(f.itemReads.map(ids => ids.length), [16, 16, 1]);
+  assert.equal(f.store.archiveUpdates(f.id)!.cursor, '33');
+  assert.equal(f.store.archiveUpdates(f.id)!.complete, true);
+  for (const value of f.changed) assert.equal(f.store.getItem(f.id, value.id)!.text, value.text);
+  t.diagnostic(JSON.stringify({ changePages: f.feedCursors.length, historyCalls: f.peer.historyCalls.length, repeatedHeadTextBytes: f.peer.records.reduce((sum, value) => sum + Buffer.byteLength(value.text), 0) * f.peer.historyCalls.length }));
+  assert.equal(f.peer.historyCalls.length, 1, 'only the first pass needs the unchanged chronological head');
+});
+
+test('forced archive synchronization still reads a new chronological head while the change feed is incomplete', async t => {
+  const f = revisionArchiveFixture(t);
+  await f.advance();
+  assert.equal(f.store.archiveUpdates(f.id)!.cursor, '16');
+  assert.equal(f.store.archiveUpdates(f.id)!.complete, false);
+  const head: NativeItem = { ...nativeItem('new-head-during-feed'), sourceRevision: { generation: 'fixture-source', sequence: 3 } };
+  f.peer.records.push(head);
+  await f.advance(true);
+  assert.equal(f.peer.historyCalls.length, 2);
+  assert.equal(f.store.getItem(f.id, head.id)!.text, head.text);
+  assert.equal(f.store.readHistory(f.id).items.at(-1)!.id, head.id);
+  assert.equal(f.store.archiveUpdates(f.id)!.cursor, '32');
+  assert.equal(f.store.archiveUpdates(f.id)!.complete, false);
+  await f.advance();
+  assert.equal(f.peer.historyCalls.length, 2, 'background continuation resumes after the explicit head refresh');
+  assert.equal(f.store.archiveUpdates(f.id)!.cursor, '33');
+  assert.equal(f.store.archiveUpdates(f.id)!.complete, true);
+});
+
+test('an unseen change-feed ID retains its cursor and retries chronological history before resuming', async t => {
+  const f = revisionArchiveFixture(t, 16);
+  const unseen: NativeItem = { ...nativeItem('unseen-head'), text: 'corrected-unseen', sourceRevision: { generation: 'fixture-source', sequence: 2 } };
+  f.changed.push(unseen);
+  await f.advance();
+  const checkpoint = f.store.archiveUpdates(f.id);
+  assert.equal(checkpoint!.cursor, '16');
+  assert.equal(checkpoint!.complete, false);
+  await f.advance();
+  assert.deepEqual(f.store.archiveUpdates(f.id), checkpoint);
+  assert.equal(f.store.hasHistoryItem(f.id, unseen.id), false);
+  assert.equal(f.store.archiveJobs(f.id).find(job => job.kind === 'latest')!.error, 'archive_update_waiting_for_history');
+  assert.equal(f.peer.historyCalls.length, 1);
+  assert.deepEqual(f.itemReads.map(ids => ids.length), [16], 'unknown order is detected before reading or materializing bodies');
+
+  f.peer.records.push({ ...unseen, text: 'original-unseen', sourceRevision: { generation: 'fixture-source', sequence: 1 } });
+  await f.advance();
+  assert.equal(f.peer.historyCalls.length, 2, 'a failed continuation returns through chronological discovery');
+  assert.deepEqual(f.feedCursors, [undefined, '16', '16']);
+  assert.equal(f.store.archiveUpdates(f.id)!.cursor, '17');
+  assert.equal(f.store.archiveUpdates(f.id)!.complete, true);
+  assert.equal(f.store.archiveJobs(f.id).find(job => job.kind === 'latest')!.error, null);
+  assert.equal(f.store.readHistory(f.id).items.at(-1)!.id, unseen.id);
+  for (const value of f.changed) assert.equal(f.store.getItem(f.id, value.id)!.text, value.text);
+});
+
+test('invalid change-feed cursors reset coverage and force chronological discovery before a fresh feed', async t => {
+  const f = revisionArchiveFixture(t, 17);
+  const historyChanges = f.peer.historyChanges!;
+  let invalidate = true;
+  f.peer.historyChanges = async (binding, cursor, limit) => {
+    if (cursor === '16' && invalidate) {
+      invalidate = false; f.feedCursors.push(cursor);
+      throw new HarnessError('history_cursor_invalid');
+    }
+    return historyChanges(binding, cursor, limit);
+  };
+  await f.advance();
+  assert.equal(f.store.archiveUpdates(f.id)!.cursor, '16');
+  await f.advance();
+  assert.equal(f.peer.historyCalls.length, 1);
+  assert.equal(f.store.archiveUpdates(f.id)!.cursor, null);
+  assert.equal(f.store.archiveUpdates(f.id)!.complete, false);
+  assert.equal(f.store.archiveJobs(f.id).find(job => job.kind === 'latest')!.coverageError, 'archive_continuity_unverified');
+  assert.equal(f.store.archiveJobs(f.id).find(job => job.kind === 'latest')!.error, 'history_cursor_invalid');
+  assert.equal(f.store.getItem(f.id, f.changed[0]!.id)!.text, f.changed[0]!.text);
+  await f.advance();
+  assert.equal(f.peer.historyCalls.length, 2);
+  assert.equal(f.store.archiveUpdates(f.id)!.cursor, '16');
+  await f.advance();
+  assert.equal(f.peer.historyCalls.length, 2, 'the fresh feed can continue without another unchanged head');
+  assert.deepEqual(f.feedCursors, [undefined, '16', undefined, '16']);
+  assert.equal(f.store.archiveUpdates(f.id)!.cursor, '17');
+  assert.equal(f.store.archiveUpdates(f.id)!.complete, true);
+  assert.equal(f.store.archiveJobs(f.id).find(job => job.kind === 'latest')!.coverageError, 'archive_continuity_unverified');
+  for (const value of f.changed) assert.equal(f.store.getItem(f.id, value.id)!.text, value.text);
+});
 
 test('accepted ACK cannot open the next send until the same native run reaches a terminal state', async t => {
   const f = fixture(t); const first = operation(f.id); await f.service.enqueue(first);

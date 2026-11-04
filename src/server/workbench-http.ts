@@ -11,7 +11,7 @@ import type { NativeItem } from '../harness/types.ts';
 import { bodyFieldSchema } from '../shared/content.ts';
 import { StoreError, type Conversation, type Operation, type WorkbenchChange } from './workbench-store.ts';
 import { decodeImage, ResourceError } from './resources.ts';
-import { textLimit } from './workspace-documents.ts';
+import { textLimit, validateWorkspaceText } from './workspace-documents.ts';
 import { imageSchema, skillCatalogSchema } from '../shared/content.ts';
 import { DirectoryIndexError } from './directory-index.ts';
 
@@ -350,7 +350,8 @@ export function createWorkbenchHttp(workbench: Workbench, input: Partial<z.input
         const { id } = parse(workspaceParams, request.params);
         parse(noQuery, request.query);
         const { path, version, text, saveId } = parse(z.object({ path: documentPath,
-          version: z.string().regex(/^[a-f0-9]{64}$/), text: z.string().max(textLimit), saveId: z.uuid().optional() }).strict(), request.body);
+          version: z.string().regex(/^[a-f0-9]{64}$/), text: z.string().max(6 * textLimit), saveId: z.uuid().optional() }).strict(), request.body);
+        validateWorkspaceText(text);
         return json(reply, await workbench.saveWorkspaceFile(id, path, version, text, saveId));
       });
       privateApp.get('/conversations/:id/files', async (request, reply) => {

@@ -238,6 +238,22 @@ test('workspace registration gates real HTTP and retains disk files, history and
   assert.deepEqual(f.submissions, []);
 });
 
+test('workspace save validates UTF-8 bytes and encoding before accepting an operation', async t => {
+  const f = await fixture(t);
+  const endpoint = '/workspaces/fixture/file';
+  const text = '中'.repeat(Math.floor(256 * 1024 / 3)) + 'xx';
+  assert.equal(Buffer.byteLength(text), 256 * 1024 + 1);
+  for (const value of [text, 'a'.repeat(256 * 1024 + 1)]) {
+    const result = await f.request(endpoint, { method: 'POST', body: { path: 'note.md', version: '0'.repeat(64), text: value } });
+    assert.equal(result.status, 413); assert.equal(result.body.error, 'file_too_large');
+  }
+  for (const value of ['invalid\0text', '\ud800']) {
+    const result = await f.request(endpoint, { method: 'POST', body: { path: 'note.md', version: '0'.repeat(64), text: value } });
+    assert.equal(result.status, 415); assert.equal(result.body.error, 'file_encoding_unsupported');
+  }
+  assert.deepEqual(f.submissions, []);
+});
+
 test('removed workspaces keep authorized background text archiving without restoring execution or file access', async t => {
   const f = await fixture(t, {}, true, true);
   const folder = join(f.root, 'archived'); await mkdir(folder); await writeFile(join(folder, 'notes.md'), 'private workspace bytes');

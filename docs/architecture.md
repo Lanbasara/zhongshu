@@ -57,7 +57,7 @@ Web manifest 提供独立窗口入口。有限且已完成的 Markdown 预览按
 | 原生物理历史 → 持久任务 → 逐页提交 | 每个绑定有 latest/backfill 任务和独立修订水位，不依赖页面访问或观察 runtime；历史页确立顺序，原生追加索引发现旧条目修订，正文与水位同事务提交；全局两个槽，正文每 1 MiB 让出任务 | [可恢复同步](adr/0010-durable-reading-archive.md#可恢复同步) |
 | 存储 → 摘要页 / 独立正文 → 浏览器窗口 | 对话快照合计至多 50 个条目、256 KiB；单条文本/工具/引用合用 8 KiB 预览；正文按不可变摘要和 64 KiB 字节块读取；队列编辑和本轮文件另读 | [查询、正文和渲染](adr/0012-bounded-data-paths.md#查询正文和渲染) |
 | 历史合并 → storage worker | 按稳定 ID 和索引位置增量合并；局部重排有界，大范围重建在另一套位置列分批推进后原子发布；移除累计对话/历史/操作条数上限 | [存储与调度](adr/0012-bounded-data-paths.md#存储与调度) |
-| 文件编辑资格 → 持久运行组 → 独占写者 | 一次旧绑定基线后只跟踪未决受理；冲突闭包一起封门、排空、进程收束，再条件写入；未知副作用保留门禁 | [编辑窗口协议](adr/0011-managed-workspace-execution.md#编辑窗口协议) |
+| 文件编辑资格 → 持久运行组 → 独占写者 | 一次旧绑定基线后只跟踪未决受理；冲突闭包一起封门、排空、进程收束，写者就绪后开放编辑；正文按 UTF-8 字节和编码验证再受理保存，未知副作用保留门禁 | [编辑窗口协议](adr/0011-managed-workspace-execution.md#编辑窗口协议) |
 | 文件选择 → 代次清单 → keyset 页 | 目录 worker 分批扫描、发布代次，游标绑定目录身份/代次；后台刷新和旧页继续可区分，工作区本身也分页搜索 | [目录清单](adr/0012-bounded-data-paths.md#目录清单) |
 
 状态、历史和传输游标入口在 [Workbench](../src/server/workbench.ts)、[存储](../src/server/workbench-store.ts)、[HTTP](../src/server/workbench-http.ts) 与 [浏览器工作台](../src/web/workbench.tsx)。正文身份、暂存、分块、所有权和校验归 [body-store](../src/server/body-store.ts)；历史位置重建归 [history-order](../src/server/history-order.ts)。旧源游标失效会保留存档并重新锚定，同时标记连续性未确认；源缺口不会因一次新扫描成功而消失。运行中的实时前缀标记 `previewOnly`，不冒充可下载的完整正文；物理记录的可比较修订和终态负责完成它。
