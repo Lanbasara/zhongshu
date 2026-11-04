@@ -1,6 +1,6 @@
 /** Product-facing semantics. Native protocol types stay inside each adapter. */
-import type { ImageAttachment, InputContent } from '../shared/content.ts';
-import type { QueueDelivery } from '../shared/workbench.ts';
+import type { ImageAttachment, InputContent, SkillOption } from '../shared/content.ts';
+import type { ConversationUsage, QueueDelivery } from '../shared/workbench.ts';
 export type HarnessId = 'codex' | 'dsh';
 export type Configuration = { modelId: string; permissionId: string };
 export type Catalog = {
@@ -47,6 +47,7 @@ export type HistoryPage = {
   /** Chronological within each page. Default is the latest page. */
   items: NativeItem[];
   olderCursor: string | null;
+  usage?: ConversationUsage;
 };
 export type Receipt =
   | { outcome: 'accepted'; runId?: string }
@@ -56,6 +57,7 @@ export type HarnessInput = InputContent & { id: string; imageData?: { mediaType:
 export type NativeChange =
   | { type: 'item'; item: NativeItem }
   | { type: 'state'; state: NativeState }
+  | { type: 'usage'; usage: ConversationUsage }
   /** A confirmed loss of observation; retain last-known facts but revoke verification immediately. */
   | { type: 'unavailable'; reason: string }
   | { type: 'invalidate' };
@@ -64,6 +66,7 @@ export interface HarnessAdapter {
   readonly id: HarnessId;
   readonly earlyInput?: 'current' | 'soon';
   catalog(): Promise<Catalog>;
+  skills?(binding: Binding): Promise<SkillOption[]>;
   /** Persist the identity immediately, before later model/permission setup can fail. */
   create(input: { cwd: string; configuration: Configuration; title?: string }, onBound: (binding: Binding) => void): Promise<Binding>;
   /** A target may precede the current/latest run (for example a later native notification turn). Never infer its terminal result from that ordering. */

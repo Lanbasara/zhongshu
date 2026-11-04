@@ -5,12 +5,15 @@ import { HarnessError } from '../types.ts';
 import type { Binding, Catalog, Configuration, HarnessAdapter, HarnessInput, HistoryPage, NativeChange, NativeState, Receipt } from '../types.ts';
 import { Connection, NativeRejection } from './connection.ts';
 import { LiveAssistant } from './live.ts';
-import { boundaryFrom, decodeModel, eventSchema, historyItems, identifier, itemFrom, modelId, modelSchema, object, pageSchema, snapshotSchema, stateFrom, targetTurnRange, terminalStatusFrom, turnAt } from './native.ts';
+import { boundaryFrom, decodeModel, eventSchema, historyItems, identifier, itemFrom, modelId, modelSchema, object, pageSchema, snapshotSchema, stateFrom, targetTurnRange, terminalStatusFrom, turnAt, usageFrom } from './native.ts';
 import type { Snapshot, TurnOutline } from './native.ts';
+import { nativeSkill, resolveSkillInput, skillOptions, type NativeSkill } from '../skills.ts';
 
 const modelCatalog = z.object({ groups: z.array(z.object({ id: identifier, name: z.string().max(240), models: z.array(z.object({ id: identifier, name: z.string().max(240), reasoning: z.object({ efforts: z.array(z.object({ id: identifier, name: z.string().max(240) })).max(32) }).optional() })).max(300) })).max(100) });
 const permissionCatalog = z.object({ options: z.array(z.object({ value: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/), name: z.string().max(240), description: z.string().max(2000).optional() })).max(100) });
 const permissionNames: Record<string, string> = { 'read-only': '只读', 'workspace-write': '工作区读写', 'danger-full-access': '完全访问' };
+const nativeSkillRow = z.object({ name: z.string().min(1).max(120).regex(/^[a-z0-9][a-z0-9-]*$/), description: z.string().max(16_000), path: z.string().max(4096).optional() });
+const skillsResponse = z.object({ skills: z.array(z.unknown()).max(2000) });
 const cursorSchema = z.object({ session: identifier, through: z.number().int().nonnegative(), before: z.number().int().nonnegative() }).strict();
 const bindingSchema = z.object({ id: identifier, cwd: z.string().min(1).max(4096), configuration: z.object({ modelId: z.string().max(2048), permissionId: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/) }), details: z.record(z.string(), z.unknown()) });
 const unknown = (reason = 'DSH 连接中断，需要重新核对原生状态。'): NativeState => ({ status: 'unknown', pendingInputs: 0, configurationVerified: false, reason });
@@ -126,6 +129,7 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
     try {
       checkBinding(binding); z.number().int().min(1).max(100).parse(limit);
       let records: z.infer<typeof pageSchema>['records']; let hasMore: boolean; let through: number; let activeTurn: number | undefined; let outline: TurnOutline = [];
+      let usage: HistoryPage['usage'];
       if (olderCursor) {
         if (!/^[A-Za-z0-9_-]{1,1024}$/.test(olderCursor)) throw new HarnessError('DSH_CURSOR_INVALID');
         const cursor = cursorSchema.parse(JSON.parse(Buffer.from(olderCursor, 'base64url').toString()));
@@ -136,13 +140,14 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
         outline = current.projections.values.turnOutline ?? [];
       } else {
         const current = await snapshot(binding, limit); records = current.records; hasMore = current.hasMore; through = current.cursor;
+        usage = usageFrom(current);
         outline = current.projections.values.turnOutline ?? [];
         const boundary = boundaryFrom(current); if (boundary?.openTurnStartSeq !== null) activeTurn = boundary?.lastTurn;
       }
       const first = records.length ? Math.min(...records.map(record => record.event.seq)) : undefined;
       if (hasMore && (first === undefined || first === 0)) throw new HarnessError('DSH_HISTORY_NO_PROGRESS');
       if (records.some(record => record.event.seq > through) || new Set(records.map(record => record.event.seq)).size !== records.length) throw new HarnessError('DSH_HISTORY_INVALID');
-      return { items: historyItems(binding.id, records.map(record => record.event), activeTurn, outline, binding.cwd), olderCursor: hasMore ? Buffer.from(JSON.stringify({ session: binding.id, through, before: first })).toString('base64url') : null };
+      return { items: historyItems(binding.id, records.map(record => record.event), activeTurn, outline, binding.cwd), olderCursor: hasMore ? Buffer.from(JSON.stringify({ session: binding.id, through, before: first })).toString('base64url') : null, ...(usage ? { usage } : {}) };
     } catch (error) { throw nativeError(error); }
   }
 
@@ -152,6 +157,20 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
     if (value.absolutePath !== path) throw new HarnessError('DSH_IMAGE_PATH_CHANGED');
     return value.data;
   }
+  async function skillCatalog(binding: Binding): Promise<NativeSkill[]> {
+    const { id } = checkBinding(binding);
+    const result = skillsResponse.parse(await connection.call('skills/list', { request: { sessionId: id } }));
+    const skills = new Map<string, NativeSkill>();
+    for (const raw of result.skills) {
+      const row = nativeSkillRow.safeParse(raw);
+      if (!row.success) continue;
+      const skill = nativeSkill(binding, row.data);
+      if (skill) skills.set(skill.id, skill);
+      if (skills.size === 500) break;
+    }
+    return [...skills.values()];
+  }
+
   async function submit(binding: Binding, operation: HarnessInput, delivery?: QueueDelivery): Promise<Receipt> {
     try { checkBinding(binding); identifier.parse(operation.id); z.string().max(100000).parse(operation.text); if (!operation.text.trim() && !operation.imageData?.length) throw new Error('empty_input'); }
     catch { return { outcome: 'rejected', reason: '消息或会话参数无效。' }; }
@@ -160,8 +179,15 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
     if (!current.configurationVerified || current.status === 'unknown') return { outcome: 'rejected', reason: current.reason ?? '原生对话尚未就绪。' };
     if (!delivery && (current.pendingInputs > 0 || !['idle', 'interrupted', 'failed'].includes(current.status)))
       return { outcome: 'rejected', reason: current.reason ?? '原生对话尚未就绪。' };
+    let text = operation.text;
+    if (operation.skills?.length) {
+      const skills = await skillCatalog(binding).catch(() => undefined);
+      const resolved = skills && resolveSkillInput(operation, skills, '/');
+      if (!resolved) return { outcome: 'rejected', reason: 'skill_reference_unavailable' };
+      text = resolved.text;
+    }
     try {
-      z.object({ accepted: z.literal(true) }).parse(await connection.call('session/prompt', { request: { sessionId: binding.id, requestId: operation.id, mode: delivery?.mode === 'soon' ? 'steer' : 'queue', content: [...(operation.text ? [{ type: 'text', text: operation.text }] : []), ...(operation.imageData ?? []).map(image => ({ type: 'image', mediaType: image.mediaType, data: image.data }))] } }));
+      z.object({ accepted: z.literal(true) }).parse(await connection.call('session/prompt', { request: { sessionId: binding.id, requestId: operation.id, mode: delivery?.mode === 'soon' ? 'steer' : 'queue', content: [...(text ? [{ type: 'text', text }] : []), ...(operation.imageData ?? []).map(image => ({ type: 'image', mediaType: image.mediaType, data: image.data }))] } }));
       return { outcome: 'accepted' };
     } catch (error) { return error instanceof NativeRejection ? { outcome: 'rejected', reason: 'DSH 拒绝了这条输入。' } : { outcome: 'unknown', reason: '无法确认 DSH 是否接收；保留原操作身份核对，未自动重发。' }; }
   }
@@ -244,7 +270,7 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
                 }
                 const item = itemFrom(binding.id, event, true, turnAt(outline, event.seq)); if (item) emit({ type: 'item', item });
                 if (event.type === 'assistant/message') { pendingItem = undefined; if (textTimer) clearTimeout(textTimer); textTimer = undefined; }
-                if (/^(turn\/|agent\/inbox|approval\/|permission\/|sandbox\/|model\/|tool\/)/.test(event.type)) refresh();
+                if (/^(turn\/|agent\/inbox|approval\/|permission\/|sandbox\/|model\/|tool\/|assistant\/(?:message|attempt)$|compaction\/)/.test(event.type)) refresh();
               } else if (frame.type === 'assistant-stream') {
                 const change = live.accept(frame.frame);
                 if (change.resubscribe) { reconnect(); return; }
@@ -261,5 +287,5 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
     subscriptions.add(dispose); await start(); return dispose;
   }
 
-  return { id: 'dsh', earlyInput: 'soon', catalog, create, state, history, submit, submitQueued: submit, readImage, reconcile, stop, watch, async close() { closed = true; for (const dispose of [...subscriptions]) dispose(); lastStates.clear(); await connection.close(); } };
+  return { id: 'dsh', earlyInput: 'soon', catalog, skills: async binding => skillOptions(await skillCatalog(binding)), create, state, history, submit, submitQueued: submit, readImage, reconcile, stop, watch, async close() { closed = true; for (const dispose of [...subscriptions]) dispose(); lastStates.clear(); await connection.close(); } };
 }

@@ -4,6 +4,7 @@ import { ComposerView, type ComposerViewProps } from '../../src/web/patterns/com
 import { Button } from '../../src/web/ui/controls.tsx';
 import { InputQueue } from '../../src/web/input-queue.tsx';
 import type { QueueCommand, QueueView } from '../../src/shared/workbench.ts';
+import { ComposerDiscovery } from './ComposerDiscovery.tsx';
 
 function Example(args: Partial<ComposerViewProps>) {
   const [text, setText] = useState(args.value ?? '');
@@ -48,3 +49,5 @@ export const QueueUnknown: Story = { render: () => <QueueExample initial={{ entr
 export const Pending: Story = { args: { value:'原始提交内容', editDisabled:true, imagesDisabled:true, filesDisabled:true, sendDisabled:true, configurationNote:'发送结果尚未确认。由功能层提供核对同一发送的操作。' } };
 export const UploadFailure: Story = { args: { value:'请结合材料整理', error:'图片上传失败，文件已保留；可以重试或移除。', sendDisabled:true } };
 export const LongModel: Story = { args: { model:'非常长的模型名称 · 固定配置与运行环境的说明', permission:'配置待核实', sendDisabled:true } };
+export const SkillAndUsage: Story = { name: '技能与对话用量', render: () => <ComposerDiscovery/> };
+export const TokenOnly: Story = { name: '只有累计用量', render: () => <ComposerDiscovery contextAvailable={false}/> };

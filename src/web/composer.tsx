@@ -1,18 +1,26 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { FileText, ImagePlus, LoaderCircle, Quote, RotateCcw, X } from 'lucide-react';
-import type { Draft } from './workbench-client.ts';
-import { imageSchema } from '../shared/content.ts';
+import { request, type Draft } from './workbench-client.ts';
+import { imageSchema, skillCatalogSchema, skillLabelText, skillLimit, type SkillReference } from '../shared/content.ts';
+import type { ConversationUsage } from '../shared/workbench.ts';
 import { imageUrl } from './conversation-content.tsx';
 import { putUpload, removeUpload, uploadDrafts, type UploadDraft } from './upload-drafts.ts';
 
 import { ComposerView } from './patterns/composer.tsx';
+import { ComposerUsage, SkillEditor } from './patterns/composer-extras.tsx';
 
-type Props = { conversation: string; csrf: string; draft: Draft; onChange(draft: Draft, requireDurable?: boolean): boolean; onSend(): void; onStop(): void; onFiles(): void; ready: boolean; sending: boolean; running: boolean; queueing: boolean; queue?: ReactNode; model: string; permission: string; configurationNote: string };
+type Props = { conversation: string; csrf: string; draft: Draft; onChange(draft: Draft, requireDurable?: boolean): boolean; onSend(): void; onStop(): void; onFiles(): void; ready: boolean; sending: boolean; running: boolean; queueing: boolean; queue?: ReactNode; model: string; permission: string; configurationNote: string; skillsEnabled: boolean; usage?: ConversationUsage };
 type Upload = UploadDraft & { status: 'uploading' | 'failed' };
 export function Composer(props: Props) {
   const { conversation, csrf, draft, onChange, onSend, onStop, onFiles, ready, sending, running, queueing, queue, model, permission, configurationNote } = props;
   const current = useRef(draft); current.current = draft;
   const change = (next: Draft, requireDurable = false) => { const saved = onChange(next, requireDurable); if (!saved && requireDurable) return false; current.current = next; return saved; };
+  const loadSkills = useCallback(async (signal: AbortSignal) => (await request(`/conversations/${conversation}/skills`, skillCatalogSchema, { signal })).skills, [conversation]);
+  function edit(text: string, skills: SkillReference[]) {
+    const previous = current.current;
+    change({ ...previous, text, skills: skills.length ? skills : undefined });
+    if (text.endsWith('@') && !previous.text.endsWith('@') && (previous.references?.length ?? 0) < 8) onFiles();
+  }
   const alive = useRef(true);
   const [uploads, setUploads] = useState<Upload[]>([]);
   const [error, setError] = useState('');
@@ -45,7 +53,10 @@ export function Composer(props: Props) {
   }
   const hasContent = draft.text.trim() || draft.images?.length || draft.references?.length;
   const disabled = sending || (!ready && !draft.pending) || !hasContent || uploads.length > 0;
-  return <ComposerView value={draft.text} onChange={text => { change({ ...draft, text }); if (text.endsWith('@') && (draft.references?.length ?? 0) < 8) onFiles(); }}
+  return <ComposerView value={draft.text} onChange={text => edit(text, [])}
+    renderEditor={editor => <SkillEditor editor={editor} spans={draft.skills}
+      picker={props.skillsEnabled ? { load: loadSkills, format: skillLabelText, limit: skillLimit } : undefined} onEdit={edit}/>}
+    footerDetails={props.usage && <ComposerUsage usage={props.usage}/>}
     onSend={onSend} onStop={onStop} onFiles={onFiles} onImages={files => void add(files)}
     editDisabled={!!draft.pending} imagesDisabled={!!draft.pending || sending} filesDisabled={!!draft.pending || (draft.references?.length ?? 0) >= 8}
     sendDisabled={!!disabled} sending={sending} running={running} queueing={queueing} queue={queue} model={model} permission={permission} configurationNote={configurationNote}

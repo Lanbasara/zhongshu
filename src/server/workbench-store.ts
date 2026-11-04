@@ -1,9 +1,9 @@
 import { createHash } from 'node:crypto';
 import type { DatabaseSync, StatementSync } from 'node:sqlite';
 import { z } from 'zod';
-import { conversationTitleSchema, identifierSchema, messagePayload, queueCommandSchema, queueDeliverySchema, queueLimit, queuePauseSchema, stateSchema, turnFileLimit, workspaceLimit } from '../shared/workbench.ts';
-import type { QueueCommand, QueueDelivery, QueuePause, QueueView, TurnFileSummary } from '../shared/workbench.ts';
-import { contentFields, recordedFilePath, toolSchema, type InputContent } from '../shared/content.ts';
+import { conversationTitleSchema, identifierSchema, messagePayload, queueCommandSchema, queueDeliverySchema, queueLimit, queuePauseSchema, skillRequiresNextTurn, stateSchema, turnFileLimit, usageSchema, workspaceLimit } from '../shared/workbench.ts';
+import type { ConversationUsage, QueueCommand, QueueDelivery, QueuePause, QueueView, TurnFileSummary } from '../shared/workbench.ts';
+import { contentFields, inputFields, recordedFilePath, toolSchema, validSkillSpans, type InputContent } from '../shared/content.ts';
 import { createResourceStore } from './resources.ts';
 import type { Binding, Configuration, HarnessId, NativeItem, NativeState, Receipt } from '../harness/types.ts';
 
@@ -12,6 +12,7 @@ export type Conversation = {
   id: string; harnessId: HarnessId; workspaceId: string; cwd: string; title: string;
   configuration: Configuration; binding: Binding | null; readiness: Readiness;
   archived: boolean; state: NativeState; error: string | null; createdAt: number;
+  usage?: ConversationUsage;
   historyLoaded: boolean; nativeOlderCursor: string | null; nativeOlderBeforeItemId: string | null;
 };
 export type CreateConversation = Pick<Conversation, 'id' | 'harnessId' | 'workspaceId' | 'cwd' | 'configuration'> & { title?: string };
@@ -47,6 +48,7 @@ export interface WorkbenchStore {
   setArchived(id: string, archived: boolean, canArchive: (conversation: Conversation) => boolean): Conversation;
   saveBinding(id: string, binding: Binding): Conversation;
   setConversationState(id: string, change: { readiness?: Readiness; state?: NativeState; error?: string | null }): Conversation;
+  setUsage(id: string, value: ConversationUsage): void;
   setHistoryCursor(id: string, cursor: { loaded: boolean; olderCursor: string | null; beforeItemId: string | null }): Conversation;
   enqueueOperation(input: OperationInput): { operation: Operation; created: boolean };
   getOperation(id: string): Operation | null;
@@ -101,7 +103,7 @@ const createConversationSchema = z.object({
   configuration: configurationSchema, title: boundedText(200).min(1).optional(),
 }).strict();
 const operationInputSchema = z.discriminatedUnion('type', [
-  z.object({ id: uuid, conversationId: uuid, type: z.literal('message'), payload: z.object({ text: boundedText(MAX_TEXT_BYTES), ...contentFields }).strict().refine(v => v.text.trim() || v.images?.length || v.references?.length),
+  z.object({ id: uuid, conversationId: uuid, type: z.literal('message'), payload: z.object({ text: boundedText(MAX_TEXT_BYTES), ...inputFields }).strict().refine(v => v.text.trim() || v.images?.length || v.references?.length).refine(validSkillSpans),
     queuedInput: z.object({ entryId: uuid, version: z.number().int().nonnegative(), delivery: queueDeliverySchema }).strict().optional() }).strict(),
   z.object({ id: uuid, conversationId: uuid, type: z.literal('stop'), payload: z.object({ runId: identifier }).strict() }).strict(),
 ]);
@@ -169,6 +171,7 @@ function conversationFromRow(row: Row): Conversation {
     configuration: parseJson(configurationSchema, row.configuration_json), binding: row.binding_json === null ? null : parseJson(bindingSchema, row.binding_json),
     readiness: parse(z.enum(['preparing', 'ready', 'blocked']), row.readiness, 'corrupt_workbench_data'),
     state: parseJson(nativeStateSchema, row.state_json), error: row.error === null ? null : String(row.error), createdAt: Number(row.created_at),
+    ...(row.usage_json == null ? {} : { usage: parseJson(usageSchema, row.usage_json) }),
     historyLoaded: row.history_loaded === 1, nativeOlderCursor: row.native_older_cursor === null ? null : String(row.native_older_cursor),
     nativeOlderBeforeItemId: row.native_older_before_item_id === null ? null : String(row.native_older_before_item_id),
   };
@@ -385,6 +388,19 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
         return requireConversation(id);
       });
     },
+    setUsage(id, value) {
+      parse(uuid, id);
+      const incoming = parse(usageSchema, value);
+      mutate(changed => {
+        const current = requireConversation(id).usage;
+        if (current?.total !== undefined && incoming.total !== undefined && incoming.total < current.total) return;
+        const usage = { total: incoming.total ?? current?.total, context: incoming.context };
+        const json = JSON.stringify(usage);
+        if (json === JSON.stringify(current)) return;
+        db.prepare('UPDATE workbench_conversations SET usage_json=? WHERE id=?').run(json, id);
+        changed(id);
+      });
+    },
     setHistoryCursor(id, value) {
       parse(uuid, id);
       const cursor = parse(z.object({ loaded: z.boolean(), olderCursor: boundedText(8192).min(1).nullable(), beforeItemId: identifier.nullable() }).strict(), value);
@@ -403,7 +419,8 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
     enqueueOperation(value) {
       const input = parse(operationInputSchema, value);
       if (input.type === 'message' && input.queuedInput) throw new StoreError('invalid_workbench_input', 400);
-      const contentDigest = digest([input.conversationId, input.type, input.type === 'message' ? input.payload.text : input.payload.runId]);
+      const contentDigest = digest([input.conversationId, input.type, input.type === 'message' ? input.payload.text : input.payload.runId,
+        ...(input.type === 'message' && input.payload.skills?.length ? [input.payload.skills] : [])]);
       return mutate(changed => {
         const existing = operationRow(input.id);
         if (existing) {
@@ -481,7 +498,8 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
             db.prepare('UPDATE workbench_queues SET after_run_id=?,version=version+1 WHERE conversation_id=?').run(runId, operation.conversationId);
           } else if (receipt.outcome === 'rejected') {
             db.prepare('DELETE FROM workbench_resource_refs WHERE owner_id=?').run(id);
-            db.prepare('UPDATE workbench_queue_entries SET held=1,operation_id=NULL,version=version+1 WHERE id=? AND operation_id=?').run(entryId, id);
+            db.prepare('UPDATE workbench_queue_entries SET held=1,operation_id=NULL,version=version+1,skill_unavailable=? WHERE id=? AND operation_id=?')
+              .run(Number(reason === 'skill_reference_unavailable'), entryId, id);
             if (!setPause(operation.conversationId, reason === 'native_run_changed' ? 'missed' : 'rejected')) bumpQueue(operation.conversationId);
           }
         }
@@ -506,6 +524,7 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
         return {
           entries: rows.map(row => ({
             entryId: String(row.id), version: Number(row.version), content: parseJson(messagePayload, row.content_json),
+            ...(row.skill_unavailable === 1 ? { skillUnavailable: true as const } : {}),
             status: row.operation_status === null ? (row.held ? 'held' : 'waiting')
               : parse(z.enum(['dispatching', 'accepted', 'unknown']), row.operation_status, 'corrupt_workbench_data'),
           })),
@@ -558,7 +577,7 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
           mutableEntry(id, command.entryId, command.version);
           const content = command.action === 'edit' ? command.content : null;
           if (content) setQueuePins(id, command.entryId, content); else clearQueuePins(command.entryId);
-          db.prepare('UPDATE workbench_queue_entries SET content_json=?,version=version+1 WHERE id=? AND conversation_id=?')
+          db.prepare('UPDATE workbench_queue_entries SET content_json=?,version=version+1,skill_unavailable=0 WHERE id=? AND conversation_id=?')
             .run(content ? JSON.stringify(content) : null, command.entryId, id);
         }
         bumpQueue(id);
@@ -581,13 +600,14 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
         const count = db.prepare('SELECT COUNT(*) AS n FROM workbench_operations WHERE conversation_id=?').get(id)!;
         if (Number(count.n) >= 50_000) throw new StoreError('operation_capacity_reached', 409);
         const content = parseJson(messagePayload, entry.content_json);
+        if (skillRequiresNextTurn(delivery.mode, content)) throw new StoreError('queue_skill_requires_next_turn', 409);
         const queuedInput = { entryId, version, delivery };
         for (const image of content.images ?? []) resources.pin(id, image.id, operationId);
         const at = now();
         db.prepare(`INSERT INTO workbench_operations(id,conversation_id,type,payload_json,digest,status,created_at,updated_at)
           VALUES(?,?,'message',?,?,'dispatching',?,?)`).run(operationId, id,
             JSON.stringify({ queueRecord: true, content, queuedInput }), digest([id, content, queuedInput]), at, at);
-        db.prepare('UPDATE workbench_queue_entries SET operation_id=?,held=0 WHERE id=? AND conversation_id=?').run(operationId, entryId, id);
+        db.prepare('UPDATE workbench_queue_entries SET operation_id=?,held=0,skill_unavailable=0 WHERE id=? AND conversation_id=?').run(operationId, entryId, id);
         bumpQueue(id);
         changed(id);
         return requireOperation(operationId);

@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { errorSchema } from '../shared/http.ts';
-import { contentFields } from '../shared/content.ts';
+import { inputFields, validSkillSpans, type InputContent } from '../shared/content.ts';
 import { clearUploads } from './upload-drafts.ts';
 
 export class RequestError extends Error {
@@ -28,8 +28,13 @@ export async function request<T>(path: string, schema: z.ZodType<T>, options: { 
 }
 
 const prefix = 'zhongshu:draft:v1:';
-const draftSchema = z.object({ text: z.string().max(16_000), ...contentFields, pending: z.object({ id: z.uuid(), text: z.string().max(16_000), ...contentFields, queued: z.literal(true).optional() }).optional() });
+const draftContent = z.object({ text: z.string().max(16_000), ...inputFields });
+const draftSchema = draftContent.extend({ pending: draftContent.extend({ id: z.uuid(), queued: z.literal(true).optional() }).refine(validSkillSpans).optional() }).refine(validSkillSpans);
 export type Draft = z.infer<typeof draftSchema>;
+export function sameInput(a: InputContent, b: InputContent): boolean {
+  return a.text === b.text && JSON.stringify(a.images ?? []) === JSON.stringify(b.images ?? []) &&
+    JSON.stringify(a.references ?? []) === JSON.stringify(b.references ?? []) && JSON.stringify(a.skills ?? []) === JSON.stringify(b.skills ?? []);
+}
 export function readDraft(id: string): Draft {
   try { return draftSchema.parse(JSON.parse(sessionStorage.getItem(prefix + id) ?? '{}')); } catch { return { text: '' }; }
 }

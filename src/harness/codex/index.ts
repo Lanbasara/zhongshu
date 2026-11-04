@@ -1,17 +1,26 @@
-import { isAbsolute, normalize } from 'node:path';
+import { basename, isAbsolute, normalize } from 'node:path';
 import { z } from 'zod';
 import { HarnessError } from '../types.ts';
 import type { Binding, Catalog, Configuration, HarnessAdapter, HarnessInput, HistoryPage, NativeChange, NativeItem, NativeState, Receipt } from '../types.ts';
 import { CodexRpc, RpcError } from './rpc.ts';
-import type { InputContent } from '../../shared/content.ts';
+import { inputFields } from '../../shared/content.ts';
+import { revisionSchema, skillRequiresNextTurn } from '../../shared/workbench.ts';
 import type { QueueDelivery } from '../../shared/workbench.ts';
 import { configuredThread, cursor, itemsPage, mapItem, nativeId, nativeItem, record, threadStatus, turn } from './protocol.ts';
+import { nativeSkill, resolveSkillInput, skillOptions, type NativeSkill } from '../skills.ts';
 
 const configuration = z.object({ modelId: nativeId, permissionId: nativeId });
 const workspace = z.string().min(1).max(4096).refine(path => isAbsolute(path) && normalize(path) === path && !path.includes('\0'));
 const titleSchema = z.string().min(1).max(200).refine(value => Buffer.byteLength(value) <= 200);
 const bindingSchema = z.object({ id: nativeId, cwd: workspace, configuration, details: z.object({ version: z.literal(1), approvalPolicy: z.literal('never'), title: titleSchema.optional() }) });
-const operationSchema = z.object({ id: nativeId, text: z.string().max(100_000), imageData: z.array(z.object({ mediaType: z.enum(['image/png', 'image/jpeg', 'image/webp']), data: z.string().max(3 * 1024 * 1024) })).max(4).optional() }).refine(v => v.text.trim() || v.imageData?.length);
+const operationSchema = z.object({ id: nativeId, text: z.string().max(100_000), skills: inputFields.skills, imageData: z.array(z.object({ mediaType: z.enum(['image/png', 'image/jpeg', 'image/webp']), data: z.string().max(3 * 1024 * 1024) })).max(4).optional() }).refine(v => v.text.trim() || v.imageData?.length);
+const nativeSkillRow = z.object({
+  name: z.string().min(1).max(120).regex(/^[\p{L}\p{N}_.:-]+$/u), description: z.string().max(16_000), enabled: z.literal(true),
+  path: workspace.refine(path => basename(path) === 'SKILL.md'), interface: z.object({ displayName: z.string().nullish() }).nullish(),
+});
+const skillsResponse = z.object({ data: z.array(z.object({ cwd: workspace, skills: z.array(z.unknown()).max(2000) })).max(32) });
+const tokenUsage = z.object({ total: z.object({ totalTokens: revisionSchema }), last: z.object({ totalTokens: revisionSchema }),
+  modelContextWindow: revisionSchema.min(1).nullish() });
 const queuedMessage = z.object({ id: nativeId, clientUserMessageId: nativeId });
 const queuePage = z.object({ data: z.array(queuedMessage).max(100) });
 const userInput = (operation: z.infer<typeof operationSchema>) => [
@@ -239,15 +248,40 @@ class CodexAdapter implements HarnessAdapter {
     const response = z.object({ dataBase64: z.string().max(8 * 1024 * 1024) }).parse(await this.rpc.request('fs/readFile', { path }));
     return response.dataBase64;
   }
-  async submit(input: Binding, rawOperation: InputContent & { id: string; imageData?: { mediaType: string; data: string }[] }): Promise<Receipt> {
+  private async skillCatalog(binding: Binding): Promise<NativeSkill[]> {
+    const result = parse(skillsResponse, await this.rpc.request('skills/list', { cwds: [binding.cwd], forceReload: true }));
+    const rows = result.data.find(entry => entry.cwd === binding.cwd)?.skills;
+    if (!rows) throw new HarnessError('codex_skill_catalog_unavailable');
+    const skills = new Map<string, NativeSkill>();
+    for (const raw of rows) {
+      const row = nativeSkillRow.safeParse(raw);
+      if (!row.success) continue;
+      const skill = nativeSkill(binding, { ...row.data, label: row.data.interface?.displayName?.trim() || row.data.name });
+      if (skill) skills.set(skill.id, skill);
+      if (skills.size === 500) break;
+    }
+    return [...skills.values()];
+  }
+  async skills(binding: Binding) {
+    return skillOptions(await this.skillCatalog(parse(bindingSchema, binding)));
+  }
+  private async input(binding: Binding, operation: z.infer<typeof operationSchema>) {
+    if (!operation.skills?.length) return userInput(operation);
+    const resolved = resolveSkillInput(operation, await this.skillCatalog(binding), '$');
+    if (!resolved) return;
+    return [...userInput({ ...operation, text: resolved.text }), ...resolved.skills.map(skill => ({ type: 'skill', name: skill.name, path: skill.path }))];
+  }
+  async submit(input: Binding, rawOperation: HarnessInput): Promise<Receipt> {
     const binding = parse(bindingSchema, input); const operation = parse(operationSchema, rawOperation);
     this.retain(binding.id);
     try {
       const current = await this.state(binding);
       if (!current.configurationVerified) return { outcome: 'rejected', reason: current.reason ?? 'codex_configuration_unverified' };
       if (!['idle', 'interrupted', 'failed'].includes(current.status) || current.pendingInputs > 0) return { outcome: 'rejected', reason: 'codex_conversation_busy' };
+      const nativeInput = await this.input(binding, operation).catch(() => undefined);
+      if (!nativeInput) return { outcome: 'rejected', reason: 'skill_reference_unavailable' };
       // Every send pins the saved selection as well as checking the live native configuration.
-      const result = parse(z.object({ turn }), await this.rpc.request('turn/start', { threadId: binding.id, clientUserMessageId: operation.id, model: binding.configuration.modelId, permissions: binding.configuration.permissionId, approvalPolicy: 'never', input: userInput(operation) }));
+      const result = parse(z.object({ turn }), await this.rpc.request('turn/start', { threadId: binding.id, clientUserMessageId: operation.id, model: binding.configuration.modelId, permissions: binding.configuration.permissionId, approvalPolicy: 'never', input: nativeInput }));
       return { outcome: 'accepted', runId: result.turn.id };
     } catch (error) {
       if (error instanceof RpcError && error.nativeCode === -32602) return { outcome: 'rejected', reason: 'codex_native_rejected' };
@@ -259,11 +293,14 @@ class CodexAdapter implements HarnessAdapter {
     if (delivery.mode === 'soon') return { outcome: 'rejected', reason: 'queue_mode_unavailable' };
     const binding = parse(bindingSchema, rawBinding);
     const operation = parse(operationSchema, rawOperation);
-    const params = { threadId: binding.id, clientUserMessageId: operation.id, input: userInput(operation) };
+    if (skillRequiresNextTurn(delivery.mode, operation)) return { outcome: 'rejected', reason: 'queue_skill_requires_next_turn' };
     this.retain(binding.id);
     try {
       const current = await this.state(binding);
       if (!current.configurationVerified) return { outcome: 'rejected', reason: 'codex_configuration_unverified' };
+      const nativeInput = await this.input(binding, operation).catch(() => undefined);
+      if (!nativeInput) return { outcome: 'rejected', reason: 'skill_reference_unavailable' };
+      const params = { threadId: binding.id, clientUserMessageId: operation.id, input: nativeInput };
       if (delivery.mode === 'current') {
         const target = parse(nativeId, delivery.target);
         if (current.runId !== target || !['running', 'waiting'].includes(current.status))
@@ -378,10 +415,19 @@ class CodexAdapter implements HarnessAdapter {
   }
 
   private notification(method: string, raw: unknown): void {
-    if (!['item/started', 'item/completed', 'item/agentMessage/delta', 'turn/started', 'turn/completed', 'thread/status/changed', 'thread/queue/changed'].includes(method)) return;
+    if (!['item/started', 'item/completed', 'item/agentMessage/delta', 'turn/started', 'turn/completed', 'thread/status/changed', 'thread/queue/changed', 'thread/tokenUsage/updated'].includes(method)) return;
     const params = parse(record, raw); const threadId = parse(nativeId, params.threadId);
     const watch = this.watches.get(threadId);
     if (!watch) return;
+    if (method === 'thread/tokenUsage/updated') {
+      const update = tokenUsage.safeParse(params.tokenUsage);
+      if (update.success) {
+        const { total, last, modelContextWindow } = update.data;
+        this.emit(threadId, { type: 'usage', usage: { total: total.totalTokens,
+          ...(modelContextWindow ? { context: { used: last.totalTokens, capacity: modelContextWindow, estimated: true } } : {}) } });
+      }
+      return;
+    }
     if (method === 'item/started' || method === 'item/completed') {
       const item = parse(nativeItem, params.item); const runId = parse(nativeId, params.turnId);
       const normalized = mapItem(item, runId, watch.binding.cwd, method === 'item/started'); const key = JSON.stringify([threadId, item.id]);
