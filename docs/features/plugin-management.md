@@ -43,7 +43,9 @@ const dsh = new Connection('<独立 Host launch 文件>');
 try {
   const bundles = await dsh.call('pluginManager/listBundles');
   console.log(bundles.filter(bundle => bundle.name === 'zhixing')
-    .map(({ name, version, enabled, rows }) => ({ name, version, enabled, loaded: rows.length })));
+    .map(({ name, version, enabled, source, rows }) => ({
+      name, version, enabled, source, loaded: rows.filter(row => row.entryId).length,
+    })));
   const { sessionId } = await dsh.call('session/create', { request: { cwd } });
   const { skills } = await dsh.call('skills/list', { request: { sessionId } });
   console.log(skills.filter(skill => skill.name.startsWith('zhixing-')).map(skill => skill.name));
