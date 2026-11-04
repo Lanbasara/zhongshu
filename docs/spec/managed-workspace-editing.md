@@ -2,7 +2,7 @@
 status: active
 started: 2026-11-04
 exit: 两个真实 Harness 下，大量已结束对话不增加正常保存的逐对话核对，且执行竞争、遗留写入及门禁重启均无法覆盖人工保存
-evidence: none yet
+evidence: https://github.com/Lanbasara/zhongshu/pull/33
 ---
 
 # 受管工作区编辑

@@ -2,7 +2,7 @@
 status: active
 started: 2026-11-04
 exit: 跨越既有累计上限后继续读写与接续，容量故障保全存档及身份，扩容和一致备份恢复后可核实继续且无误重派
-evidence: none yet
+evidence: https://github.com/Lanbasara/zhongshu/pull/33
 ---
 
 # 多年容量、存储调度与恢复

@@ -2,7 +2,7 @@
 status: active
 started: 2026-11-04
 exit: 五个子规格在同一候选版本完成真实用户路径、规模与故障恢复验收，且已冻结的性能预算全部满足后才具备本轮上线条件
-evidence: none yet
+evidence: https://github.com/Lanbasara/zhongshu/pull/33
 ---
 
 # 多年使用与极限规模：上线前联合规格

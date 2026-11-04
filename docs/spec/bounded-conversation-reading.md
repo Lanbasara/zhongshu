@@ -2,7 +2,7 @@
 status: active
 started: 2026-11-04
 exit: 超长对话与巨型单条内容在预算内展示，首屏不取全历史，完整阅读、复制与下载等于原文且输入和切换保持响应
-evidence: none yet
+evidence: https://github.com/Lanbasara/zhongshu/pull/33
 ---
 
 # 有界对话阅读与完整正文入口
