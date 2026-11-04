@@ -72,6 +72,8 @@
 
 分页 UI 可单独用 fixture 验证：在 Fixture A 创建唯一标题的空对话，运行 `node test/support/feature-fixture.ts seed-turn-files --root "$zh_verify_root" --title '本轮文件分页' --count 500`（标题须与实际相同）。命令仅在替身侧生成合成编辑证据，并在其工作区生成 `turn-files-<原生ID>/0000/sample.txt` 至 `0499/sample.txt`，每份正文是 `SYNTHETIC TURN FILE <序号>` 加换行。浏览器刷新后翻完十页，逐页最多 50 项，各页打开同名文件核对序号；展开后仍不一次挂载全部 500 项。另建空对话以 `--count 501` 验证部分记录提示。此分支证明产品索引与浏览器分页，不代替上述真实工具归因验证。
 
+错误提示回收也使用上述独占 fixture：保存生成路径后，只移除本次 `workspace-a/turn-files-<原生ID>` 下的合成文件，保留替身编辑证据。在同一页面逐页打开超过提示数量预算的不同路径，每次等待实际文件读取失败、关闭阅读器，再继续；核对最近项显示“当前不可用”，早期被淘汰项重新出现打开按钮，再次点击仍得到真实读取失败。切换另一对话再返回，旧提示清空，原清单和正文仍在。可只读观察 Transcript 的 `unavailableFiles` 属性及键文本大小，按[界面缓存上限](../architecture.md#界面与设计系统)核对平台值；不得注入 React 状态或伪造响应正文来构造通过。长路径还须触发文本预算；跨许多历史轮的变体须实际翻过窗口回收边界，不能只测试切换对话后的清空。
+
 ### U12 技能引用
 
 1. 按 [Native 入口](README.md#native真实接入分支)启动隔离 Host 和应用。在工作区 A 放 `zhi-proof` 与 `zhi-secondary` 两个技能，各有 `SKILL.md`、名称和简述。Codex 用 `.agents/skills/`，DSH 用 `.dsh/skills/`。给 `zhi-proof` 的正文放独有合成标记，DSH front matter 设 `disable-model-invocation: true`。工作区 B 保持空白。分别建两段对话并核对就绪。

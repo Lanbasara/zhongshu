@@ -428,7 +428,18 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
     reader={!managingPlugins && reader && configuration && <Suspense fallback={<p role="status">正在打开文件…</p>}><WorkspaceReader workspaces={configuration.workspaces} workspaceCursor={configuration.workspaceCursor} initialWorkspace={conversation?.workspaceId}
       target={readerTarget} onTargetUnavailable={target => {
         if (target === readerTarget && readerTarget.conversationId === selectedRef.current)
-          setUnavailableFiles(previous => new Set(previous).add(JSON.stringify([readerTarget.runId, target.path])));
+          setUnavailableFiles(previous => {
+            // These are transient display hints, not file availability facts.
+            // History window eviction must not leave an ever-growing error cache.
+            const key = JSON.stringify([readerTarget.runId, target.path]);
+            const next = new Set(previous); next.delete(key); next.add(key);
+            let bytes = [...next].reduce((total, value) => total + value.length * 2, 0);
+            for (const oldest of next) {
+              if (next.size <= 256 && bytes <= 64 * 1024) break;
+              next.delete(oldest); bytes -= oldest.length * 2;
+            }
+            return next;
+          });
       }}
       csrf={csrf} editStatusSignal={JSON.stringify([conversation?.id, conversation?.state.status, conversation?.state.pendingInputs, unresolved])} expanded={readerExpanded} onExpand={setReaderExpanded} onClose={closeReader}/></Suspense>}>
 

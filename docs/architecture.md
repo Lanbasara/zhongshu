@@ -94,6 +94,8 @@ Codex 的旧目标轮核对在 reader 私有缓存中持久保存查询位置，
 
 消息行按视口挂载，离屏使用测量高度占位；历史窗口换页保留位置。完整阅读器每次只解码一块及 UTF-8 边界，全文复制由明确手势触发，下载走有背压的响应流。工作区阅读器和富文本渲染分包。构建为已核验 JS/CSS 生成 Brotli/gzip；产物封存校验压缩版本解压后与原文件一致。只有内容寻址的公开静态资源可长期缓存，HTML 和私人接口保持 no-store。
 
+本轮文件的“当前不可用”是浏览器临时提示，最多保留最近 256 项、合计 64 KiB UTF-16 键文本，超预算淘汰最旧项；切换对话清空。提示不成为文件可用性或权限事实，淘汰后再次打开仍须由服务端实际读取核对，历史窗口回收不会留下无限增长的错误缓存。
+
 工作区原文编辑按需加载 [CodeMirror](https://github.com/codemirror/view#readme)，文档状态与可见 DOM 分离，避免原生 textarea 在大量行下逐键重排整个文件。仅启用纯文本、键盘和编辑历史，不运行文件内容或加载语言服务；只读、保存和窗口资格仍由产品控制。开放 ShadowRoot 中以 constructed stylesheet 安装库和产品固定主题，兼容现有 CSP，不接收文件提供的样式。换行符、选区和撤销历史由 [编辑器](../src/web/workspace-text-editor.tsx) 维护，起始 BOM 单独作为编码标记保留；预览按当前稿件分页，过大的单一 Markdown 块转为有限原文页。官方 npm 固定 `@codemirror/view` 6.43.15、`@codemirror/state` 6.7.6、`@codemirror/commands` 6.11.1，传递依赖及完整性摘要由 lockfile 固定。
 
 本次使用官方 npm 源固定 Radix UI 1.8.1、Motion 14.9.0；开发工作台使用 Storybook / React Vite 10.6.5，边界 AST 使用 Babel parser 8.1.0。准确依赖树由 lockfile 维护；新增依赖随版本变化重新审查。库负责通用交互机制，产品的视觉语义与组件契约由上述本地模块拥有。
