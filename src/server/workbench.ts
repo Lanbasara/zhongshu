@@ -269,6 +269,17 @@ export class Workbench {
     return !!this.execution && !this.execution.initialized || this.saving(directory) || this.workspaces.some(workspace => workspace.maintenance &&
       this.overlaps(directory, workspace.directory) && this.maintenancePhases.get(workspace.id) !== 'online');
   }
+  private async assertExecutionAdmission(workspaceId: string): Promise<void> {
+    try { await this.execution?.assertAdmission(workspaceId); }
+    catch (error) {
+      // This check precedes any operation/queue claim. Its explicit rejection
+      // is not an uncertain native receipt; the client may retain an editable
+      // draft without inventing a pending send. Detailed controller diagnostics
+      // remain available through workspace edit status.
+      if (error instanceof StoreError) throw new StoreError('workspace_execution_blocked', 409);
+      throw error;
+    }
+  }
   async changeWorkspaceMaintenance(id: string, action: 'pause' | 'resume') {
     const workspace = (await this.workspace(id));
     if (this.execution && await this.execution.managed(id)) return this.task(async () => this.readyEditStatus(id, await this.execution!.change(id, action)));
@@ -712,7 +723,7 @@ export class Workbench {
     const workspace = this.registry ? await this.registry.configured(input.workspaceId) : this.workspaces.find(item => item.id === input.workspaceId);
     if (!workspace || this.adapters.get(input.harnessId)?.id !== input.harnessId) throw new StoreError('configuration_unavailable', 400);
     if (!(await this.store.getConversation(input.id))) {
-      await this.execution?.assertAdmission(input.workspaceId);
+      await this.assertExecutionAdmission(input.workspaceId);
       if (this.executionBlocked(workspace.directory)) throw new StoreError('workspace_execution_blocked', 409);
     }
     const result = (await this.store.createConversation({ ...input, cwd: workspace.directory }));
@@ -823,6 +834,14 @@ export class Workbench {
     if (unavailable) conversation = { ...conversation, readiness: 'blocked', error: unavailable,
       state: { ...conversation.state, configurationVerified: false } };
     else if (!(await this.configured(conversation))) { try { (await this.adapter(conversation)); } catch { conversation = (await this.conversation(id)); } }
+    else if (conversation.readiness === 'ready') {
+      let admissionBlocked = this.executionBlocked(conversation.cwd);
+      if (!admissionBlocked) try { await this.assertExecutionAdmission(conversation.workspaceId); } catch { admissionBlocked = true; }
+      if (admissionBlocked) conversation = { ...conversation, readiness: 'blocked', error: 'workspace_execution_blocked',
+        state: { ...conversation.state, configurationVerified: false } };
+      // This is a bounded read projection. Do not rewrite every historical
+      // conversation or activate a native session just to revoke a stale UI gate.
+    }
     const history = (await this.store.readHistory(id, { limit: 50, ...(beforeItemId ? { beforeItemId } : {}) }));
     if (unavailable) history.nativeOlderCursor = null;
     const runIds = new Set<string>();
@@ -875,7 +894,7 @@ export class Workbench {
     } else {
       if (command.action === 'add' || command.action === 'edit') {
         if (command.action === 'add' && (await this.store.queueAdmissionExists(id, command.entryId, command.content))) return (await this.queue(id));
-        await this.execution?.assertAdmission(conversation.workspaceId);
+        await this.assertExecutionAdmission(conversation.workspaceId);
         if (!conversation.binding) throw new StoreError('conversation_not_ready', 409);
         if (!(await this.adapter(conversation)).submitQueued) throw new StoreError('queue_mode_unavailable', 409);
         await this.validateReferences(conversation, { id: command.entryId, conversationId: id, type: 'message', payload: command.content });
@@ -964,7 +983,7 @@ export class Workbench {
     this.assertOpen();
     if ((await this.store.getOperation(input.id))) return (await this.store.enqueueOperation(input)).operation;
     const { cwd: directory, workspaceId } = (await this.conversation(input.conversationId));
-    if (input.type === 'message') await this.execution?.assertAdmission(workspaceId);
+    if (input.type === 'message') await this.assertExecutionAdmission(workspaceId);
     if (this.removing.has(workspaceId)) throw new StoreError('workspace_remove_busy', 409);
     (await this.assertWorkspaceAvailable(workspaceId));
     if (!this.saving(directory) && this.executionBlocked(directory)) throw new StoreError('workspace_execution_blocked', 409);

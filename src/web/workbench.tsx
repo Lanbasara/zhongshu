@@ -26,7 +26,7 @@ const states = { idle: '就绪', running: '运行中', waiting: '等待处理', 
 const stateLabel = (c: Conversation) => c.readiness === 'preparing' ? '正在准备' : c.readiness === 'blocked' ? '准备未完成' : states[c.state.status];
 const failures: Record<string, string> = {
   conversation_archived: '这段对话已归档，请恢复后继续。',
-  workspace_execution_blocked: '工作区正在维护，请先恢复 Agent。',
+  workspace_execution_blocked: '工作区暂未开放新任务。请等待执行环境核对，或先恢复 Agent；输入已保留。',
   workspace_save_in_progress: '工作区正在保存文件，保存结束后可以继续发送。',
   workspace_removed: '工作区已移除。恢复后可以继续对话。',
   workspace_remove_busy: '正在核对能否移除工作区，请稍后再试。',
@@ -46,6 +46,7 @@ const failures: Record<string, string> = {
   queue_skill_requires_next_turn: '带技能的消息将在下一轮派发，已保留在队列中。',
 };
 const stateReasons: Record<string, string> = {
+  workspace_execution_blocked: failures.workspace_execution_blocked!,
   workspace_removed: failures.workspace_removed!,
   workspace_directory_changed: failures.workspace_directory_changed!,
   workspace_directory_unavailable: failures.workspace_directory_unavailable!,
