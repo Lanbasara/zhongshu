@@ -1,15 +1,17 @@
+import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { constants } from 'node:fs';
-import { lstat, open, realpath } from 'node:fs/promises';
+import { lstat, open, realpath, rename, unlink } from 'node:fs/promises';
 import { dirname, isAbsolute, join, normalize, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import Fastify from 'fastify';
 import { z } from 'zod';
 import { CodexRpc } from '../harness/codex/rpc.ts';
-import { pluginCommand, type PluginCommand, type PluginEntry } from '../shared/plugins.ts';
+import { pluginCommand, pluginSourceCommand, pluginKey, type PluginCommand, type PluginEntry, type PluginSourceCommand } from '../shared/plugins.ts';
 import { socketIdentity } from './codex-plugin-client.ts';
-import { matchesPluginAction, type PluginResult } from './plugin-backend.ts';
+import { matchesPluginAction, PluginSourceError, type PluginResult } from './plugin-backend.ts';
+import { githubRepository, publicHttps, readGithubManifest } from './plugin-sources.ts';
 
 const runFile = promisify(execFile);
 const absolute = z.string().max(4096).refine(path => isAbsolute(path) && normalize(path) === path && !path.includes('\0'));
@@ -20,7 +22,7 @@ const market = z.object({ name: name.refine(value => !value.toLowerCase().starts
 const settingsSchema = z.object({
   socket: absolute, nativeSocket: absolute, executable: absolute, gitExecutable: absolute,
   home: absolute, codexHome: absolute, version: z.string().max(64).regex(/^[0-9][a-zA-Z0-9.-]*$/),
-  markets: z.array(market).min(1).max(8).refine(values => new Set(values.map(value => value.name)).size === values.length),
+  markets: z.array(market).max(8).refine(values => new Set(values.map(value => value.name)).size === values.length),
 }).strict();
 export type CodexPluginHostSettings = z.infer<typeof settingsSchema>;
 
@@ -32,14 +34,16 @@ const rowSchema = z.object({
   marketplaceSource: z.unknown().optional(), installPolicy: z.string(),
 });
 const catalogSchema = z.object({ installed: z.array(rowSchema).max(500), available: z.array(rowSchema).max(500) });
-const manifestMetadata = z.object({ plugins: z.array(z.object({
+const manifestMetadata = z.object({ name, interface: z.object({ displayName: z.string().min(1).max(240).optional() }).optional(), plugins: z.array(z.object({
   name, description: z.string().max(1000).optional(), interface: z.object({ displayName: z.string().min(1).max(240).optional() }).optional(),
 })).max(500) });
 const packageSource = z.object({
   source: z.enum(['url', 'git', 'git-subdir']), url: gitUrl, sha: commit,
-  path: z.string().max(240).regex(/^[a-zA-Z0-9_-]+(?:\/[a-zA-Z0-9_-]+)*$/).optional(),
+  path: z.string().max(240).regex(/^(?:\.\/)?[a-zA-Z0-9_-]+(?:\/[a-zA-Z0-9_-]+)*$/).optional(),
 });
-const inputSchema = z.object({ target: z.string().regex(/^\d+:\d+$/), command: pluginCommand }).strict();
+const managedMarket = market.extend({ label: z.string().min(1).max(240) });
+const targetSchema = z.string().regex(/^\d+:\d+$/);
+const inputSchema = z.object({ target: targetSchema, command: pluginCommand }).strict();
 const inside = (root: string, path: string) => {
   const fromRoot = relative(root, path);
   return fromRoot !== '' && fromRoot !== '..' && !fromRoot.startsWith('../') && !isAbsolute(fromRoot);
@@ -105,18 +109,50 @@ export async function createCodexPluginHost(input: CodexPluginHostSettings) {
     finally { if (connectingTarget === attempt) connectingTarget = undefined; }
   }
 
-  async function list(): Promise<PluginEntry[]> {
-    const markets = marketList.parse(JSON.parse(await cli(['plugin', 'marketplace', 'list', '--json']))).marketplaces;
-    const catalogs = await Promise.all(settings.markets.map(async allowed => {
-      const current = markets.find(value => value.name === allowed.name);
+  const registry = join(dirname(settings.socket), 'market-sources.json');
+  async function managed() {
+    const handle = await open(registry, constants.O_RDONLY | constants.O_NOFOLLOW).catch(error => {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+      throw error;
+    });
+    if (!handle) return [];
+    try {
+      const info = await handle.stat();
+      if (!info.isFile() || info.size > 32_768 || (info.mode & 0o077) ||
+        (process.getuid && info.uid !== process.getuid())) throw new Error('plugin_source_registry_invalid');
+      return z.array(managedMarket).max(8).parse(JSON.parse(await handle.readFile('utf8')));
+    } finally { await handle.close(); }
+  }
+  async function saveManaged(value: Awaited<ReturnType<typeof managed>>) {
+    const temporary = registry + '.' + randomUUID();
+    const handle = await open(temporary, 'wx', 0o600);
+    try {
+      try { await handle.writeFile(JSON.stringify(value)); await handle.sync(); }
+      finally { await handle.close(); }
+      await rename(temporary, registry);
+    } catch (error) { await unlink(temporary).catch(() => {}); throw error; }
+  }
+  const nativeMarkets = async () => marketList.parse(JSON.parse(await cli(['plugin', 'marketplace', 'list', '--json']))).marketplaces;
+  const sourceRecords = async () => [
+    ...settings.markets.map(item => ({ ...item, label: item.name, removable: false })),
+    ...(await managed()).map(item => ({ ...item, removable: true })),
+  ];
+  async function verifyMarket(allowed: z.infer<typeof market>, current: Awaited<ReturnType<typeof nativeMarkets>>[number] | undefined) {
       if (!current || marketSource.safeParse(current.marketplaceSource).data?.source !== allowed.url ||
         !inside(settings.codexHome, current.root) || await realpath(current.root) !== current.root)
         throw new Error('plugin_host_market_mismatch');
       const rev = await exec(settings.gitExecutable, ['-C', current.root, 'rev-parse', 'HEAD']);
       const dirty = await exec(settings.gitExecutable, ['-C', current.root, 'status', '--porcelain', '--untracked-files=all']);
-      // Codex writes this untracked receipt into an otherwise clean market checkout.
       const unexpected = dirty.split('\n').some(line => line && line !== '?? .codex-marketplace-install.json');
       if (rev.trim() !== allowed.revision || unexpected) throw new Error('plugin_host_market_changed');
+      return current;
+  }
+  async function list(): Promise<PluginEntry[]> {
+    const markets = await nativeMarkets();
+    const catalogs = await Promise.all((await sourceRecords()).map(async allowed => {
+      const current = await verifyMarket(allowed, markets.find(value => value.name === allowed.name)).catch(() => undefined);
+      if (!current) return [];
+
       const metadata = await marketplaceMetadata(current.root);
       const rows = catalogSchema.parse(JSON.parse(await cli(['plugin', 'list', '--marketplace', allowed.name, '--available', '--json'])));
       return [...rows.installed, ...rows.available].flatMap(row => {
@@ -124,9 +160,16 @@ export async function createCodexPluginHost(input: CodexPluginHostSettings) {
           row.pluginId !== row.name + '@' + allowed.name ||
           marketSource.safeParse(row.marketplaceSource).data?.source !== allowed.url || !packageSource.safeParse(row.source).success) return [];
         const details = metadata.get(row.name);
+        const packageInfo = packageSource.parse(row.source);
+        if (allowed.removable) {
+          try { if (githubRepository(packageInfo.url).url !== packageInfo.url) return []; }
+          catch { return []; }
+        }
         const entry: PluginEntry = {
           id: row.pluginId, name: details?.interface?.displayName ?? row.name,
-          description: details?.description ?? '', source: allowed.name, version: row.version,
+          description: details?.description ?? '', source: allowed.label, sourceId: allowed.name, version: row.version,
+          homepage: publicHttps(packageInfo.url),
+          releases: row.version ? [{ version: row.version, installable: false, repository: packageInfo.url, commit: packageInfo.sha, directory: packageInfo.path }] : undefined,
           installed: row.installed, enabled: row.enabled, application: 'unverified',
           actions: row.installed ? [row.enabled ? 'disable' : 'enable', 'remove'] :
             row.installPolicy === 'AVAILABLE' ? ['install'] : [],
@@ -140,16 +183,69 @@ export async function createCodexPluginHost(input: CodexPluginHostSettings) {
     return entries;
   }
 
+  async function updateSource(command: PluginSourceCommand) {
+    const saved = await managed();
+    const markets = await nativeMarkets();
+    if (command.action === 'remove') {
+      const source = saved.find(item => item.name === command.id);
+      if (!source) throw new PluginSourceError('invalid_plugin_source');
+      const current = markets.find(item => item.name === source.name);
+      if (current) {
+        await verifyMarket(source, current);
+        const catalog = catalogSchema.parse(JSON.parse(await cli(['plugin', 'list', '--marketplace', source.name, '--available', '--json'])));
+        if (catalog.installed.some(item => item.installed)) throw new PluginSourceError('plugin_source_in_use');
+        await cli(['plugin', 'marketplace', 'remove', source.name, '--json']);
+        if ((await nativeMarkets()).some(item => item.name === source.name)) throw new Error('plugin_source_removal_unconfirmed');
+      }
+      await saveManaged(saved.filter(item => item.name !== source.name));
+      return;
+    }
+    const repository = githubRepository(command.source);
+    const ref = command.ref ?? 'HEAD';
+    if (!/^(?!.*(?:\.\.|\/\/))[A-Za-z0-9_][A-Za-z0-9_./-]{0,127}$/.test(ref))
+      throw new PluginSourceError('invalid_plugin_source');
+    let revision = commit.safeParse(ref).data;
+    if (!revision) {
+      const selectors = ref === 'HEAD' || ref.startsWith('refs/') ? [ref] : ['refs/heads/' + ref, 'refs/tags/' + ref];
+      const output = await exec(settings.gitExecutable, ['-c', 'http.followRedirects=false', 'ls-remote', '--', repository.url, ...selectors, ...selectors.map(value => value + '^{}')]);
+      const refs = new Map(output.trim().split('\n').map(line => line.split('\t')).flatMap(([sha, key]) =>
+        key && commit.safeParse(sha).success ? [[key, sha!] as const] : []));
+      const matches = selectors.map(value => refs.get(value + '^{}') ?? refs.get(value)).filter(value => value !== undefined);
+      if (matches.length !== 1) throw new PluginSourceError('invalid_plugin_source');
+      revision = matches[0]!;
+    }
+    const manifest = manifestMetadata.safeParse(await readGithubManifest(repository.path, revision));
+    if (!manifest.success || manifest.data.name.toLowerCase().startsWith('openai-'))
+      throw new PluginSourceError('invalid_plugin_source');
+    const source = { name: manifest.data.name, label: manifest.data.interface?.displayName ?? manifest.data.name, url: repository.url, revision };
+    const existing = saved.find(item => item.name === source.name);
+    if (existing?.url === source.url && existing.revision === source.revision) {
+      await verifyMarket(existing, markets.find(item => item.name === source.name));
+      return;
+    }
+    if (existing || settings.markets.some(item => item.name === source.name) || saved.length + settings.markets.length >= 8)
+      throw new PluginSourceError('plugin_source_conflict');
+    const current = markets.find(item => item.name === source.name);
+    if (current) {
+      // An earlier request may have registered the exact checkout before losing its reply.
+      await verifyMarket(source, current).catch(() => { throw new PluginSourceError('plugin_source_conflict'); });
+    } else {
+      await cli(['plugin', 'marketplace', 'add', '--ref', source.revision, '--json', source.url], 60_000);
+      await verifyMarket(source, (await nativeMarkets()).find(item => item.name === source.name));
+    }
+    await saveManaged([...saved, source]);
+  }
+
   async function change(command: PluginCommand, expectedTarget: string): Promise<PluginResult> {
     if (busy) return 'unknown';
     const prior = completions.get(command.id);
-    if (prior) return prior.command.pluginId === command.pluginId && prior.command.action === command.action ? prior.status : 'failed';
+    if (prior) return prior.command.pluginId === command.pluginId && prior.command.action === command.action && prior.command.version === command.version ? prior.status : 'failed';
     busy = true;
     let status: PluginResult = 'failed';
     let dispatched = false;
     try {
       const row = (await list()).find(entry => entry.id === command.pluginId);
-      if (!row?.actions.includes(command.action) || await target() !== expectedTarget) return 'failed';
+      if (command.version || !row?.actions.includes(command.action) || await target() !== expectedTarget) return 'failed';
       dispatched = true;
       if (command.action === 'install' || command.action === 'remove') {
         await cli(['plugin', command.action === 'install' ? 'add' : 'remove', row.id, '--json'], 90_000);
@@ -178,9 +274,52 @@ export async function createCodexPluginHost(input: CodexPluginHostSettings) {
   app.setErrorHandler((_error, _request, reply) => { void reply.code(503).send({ error: 'plugin_host_unavailable' }); });
   app.get('/catalog', async () => {
     const expectedTarget = await target();
-    const entries = await list();
+    const [entries, records, markets] = await Promise.all([list(), sourceRecords(), nativeMarkets()]);
+    const sources = await Promise.all(records.map(async source => ({
+      id: source.name, name: source.label, url: source.url, removable: source.removable,
+      unavailable: !(await verifyMarket(source, markets.find(item => item.name === source.name)).catch(() => undefined)),
+    })));
     if (await target() !== expectedTarget) throw new Error('plugin_host_target_changed');
-    return { target: expectedTarget, entries };
+    return { target: expectedTarget, entries, sources };
+  });
+  app.post('/sources', async (request, reply) => {
+    const input = z.object({ target: targetSchema, command: pluginSourceCommand }).strict().safeParse(request.body);
+    if (!input.success) return reply.code(400).send({ error: 'invalid_plugin_source' });
+    const expectedTarget = await target();
+    if (input.data.target !== expectedTarget || busy) return reply.code(409).send({ error: 'plugin_source_conflict' });
+    busy = true;
+    try {
+      await updateSource(input.data.command);
+      if (await target() !== expectedTarget) throw new Error('plugin_host_target_changed');
+      return { target: expectedTarget };
+    } catch (error) {
+      if (error instanceof PluginSourceError)
+        return reply.code(error.code === 'invalid_plugin_source' ? 400 : 409).send({ error: error.code });
+      throw error;
+    } finally { busy = false; }
+  });
+  app.post('/detail', async (request, reply) => {
+    const input = z.object({ target: targetSchema, id: pluginKey }).strict().safeParse(request.body);
+    if (!input.success) return reply.code(400).send({ error: 'invalid_request' });
+    const expectedTarget = await target();
+    if (input.data.target !== expectedTarget) return reply.code(409).send({ error: 'plugin_host_target_mismatch' });
+    const entry = (await list()).find(item => item.id === input.data.id);
+    let skills: PluginEntry['skills'];
+    if (entry?.installed) {
+      const source = (await sourceRecords()).find(item => item.name === entry.sourceId);
+      if (source) {
+        const current = await verifyMarket(source, (await nativeMarkets()).find(item => item.name === source.name));
+        const result = z.object({ plugin: z.object({
+          skills: z.array(z.object({ name: z.string().max(200), description: z.string().max(1000) })).max(200),
+        }) }).safeParse(await rpc.requestConnected('plugin/read', {
+          marketplacePath: join(current.root, '.agents', 'plugins', 'marketplace.json'),
+          pluginName: entry.id.slice(0, -(source.name.length + 1)),
+        }).catch(() => undefined));
+        skills = result.data?.plugin.skills;
+      }
+    }
+    if (await target() !== expectedTarget) throw new Error('plugin_host_target_changed');
+    return { target: expectedTarget, entry: entry ? { ...entry, skills } : null };
   });
   app.post('/change', async (request, reply) => {
     const input = inputSchema.safeParse(request.body);

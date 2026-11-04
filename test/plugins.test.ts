@@ -4,7 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import type { PluginCommand, PluginEntry } from '../src/shared/plugins.ts';
+import type { PluginCommand, PluginEntry, PluginSourceCommand } from '../src/shared/plugins.ts';
 import { buildApp } from '../src/server/app.ts';
 import { createAuth } from '../src/server/auth.ts';
 import { openDatabase } from '../src/server/database.ts';
@@ -20,6 +20,7 @@ test('private plugin operations fence targets and reconcile a lost receipt witho
   const record: Record<'codex' | 'dsh', { installed: boolean; sent: string[] }> = {
     codex: { installed: false, sent: [] }, dsh: { installed: false, sent: [] },
   };
+  const sourceEdits: Record<'codex' | 'dsh', PluginSourceCommand[]> = { codex: [], dsh: [] };
   let loseReceipt = true;
   function backend(harness: 'codex' | 'dsh'): PluginBackend {
     const state = record[harness];
@@ -32,6 +33,7 @@ test('private plugin operations fence targets and reconcile a lost receipt witho
         };
         return [entry];
       },
+      async updateSource(command) { sourceEdits[harness].push(command); },
       async change(command) {
         state.sent.push(command.id);
         state.installed = command.action === 'install';
@@ -65,6 +67,14 @@ test('private plugin operations fence targets and reconcile a lost receipt witho
     f.app.inject({ method: 'POST', url: base + '/' + harness + '/operations', headers: { ...f.headers, ...override }, payload });
   const view = (harness: string) => f.app.inject({ method: 'GET', url: base + '/' + harness, headers: f.headers });
   assert.equal((await f.app.inject({ url: base + '/codex' })).statusCode, 401);
+  const source = { action: 'add', source: 'author/market' };
+  const editSource = (harness: string, headers: Record<string, string>) => f.app.inject({
+    method: 'POST', url: base + '/' + harness + '/sources', headers, payload: source,
+  });
+  assert.equal((await editSource('codex', { origin })).statusCode, 401);
+  assert.equal((await editSource('codex', { ...f.headers, 'x-csrf-token': '' })).statusCode, 403);
+  assert.equal((await editSource('dsh', f.headers)).statusCode, 200);
+  assert.deepEqual(sourceEdits, { codex: [], dsh: [source] });
   assert.equal((await send('codex', install, { origin: 'https://other.example' })).statusCode, 403);
   assert.equal((await send('codex', install, { 'x-csrf-token': '' })).statusCode, 403);
   assert.equal((await send('codex', { ...install, workspaceId: 'project' })).statusCode, 400);
@@ -79,6 +89,7 @@ test('private plugin operations fence targets and reconcile a lost receipt witho
   assert.equal((await send('dsh', install)).statusCode, 409);
   const remove: PluginCommand = { ...install, id: randomUUID(), action: 'remove' };
   assert.equal((await send('codex', remove)).statusCode, 409);
+  assert.equal((await editSource('codex', f.headers)).statusCode, 409);
   await f.close();
   f = await start();
   assert.equal((await send('codex', install)).json().status, 'unknown');
@@ -90,4 +101,22 @@ test('private plugin operations fence targets and reconcile a lost receipt witho
   assert.equal((await send('codex', remove)).statusCode, 202);
   assert.equal((await view('codex')).json().entries[0].installed, false);
   assert.deepEqual(record.dsh.sent, []);
+});
+
+test('browser market inputs allow public GitHub forms and reject alternate fetch targets', async () => {
+  const { githubIndex, githubRepository } = await import('../src/server/plugin-sources.ts');
+  assert.equal(githubRepository('author/market').url, 'https://github.com/author/market.git');
+  assert.equal(githubRepository('https://github.com/author/market.git').path, 'author/market');
+  const index = 'https://raw.githubusercontent.com/author/market/main/dsh/index.json';
+  assert.equal(githubIndex(index), index);
+  for (const address of [
+    'http://127.0.0.1/index.json', 'https://169.254.169.254/index.json',
+    'https://raw.githubusercontent.com.evil.example/author/market/main/dsh/index.json',
+    'https://raw.githubusercontent.com:8443/author/market/main/dsh/index.json',
+    'https://a@raw.githubusercontent.com/author/market/main/dsh/index.json',
+    'https://raw.githubusercontent.com/author/market/main/%2e%2e/index.json',
+    index + '?token=secret',
+  ]) assert.throws(() => githubIndex(address), { message: 'invalid_plugin_source' });
+  for (const address of ['file:///tmp/market', '/etc', 'git@github.com:a/b', 'https://github.com/a/../b', 'https://github.com/a/b?x=1'])
+    assert.throws(() => githubRepository(address), { message: 'invalid_plugin_source' });
 });
