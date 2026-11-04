@@ -8,6 +8,10 @@ import { LiveAssistant } from './live.ts';
 import { boundaryFrom, decodeModel, eventSchema, historyItems, identifier, itemFrom, modelId, modelSchema, object, pageSchema, snapshotSchema, stateFrom, targetTurnRange, terminalStatusFrom, turnAt, usageFrom } from './native.ts';
 import type { Snapshot, TurnOutline } from './native.ts';
 import { nativeSkill, resolveSkillInput, skillOptions, type NativeSkill } from '../skills.ts';
+import { BoundedDshReader, type BoundedDshOptions } from './bounded-reader.ts';
+import { boundedHistory } from './bounded-history.ts';
+import { boundedFrameSchema, boundedStateFrom, boundedStateSchema, readBoundedState } from './bounded-state.ts';
+import { assistantId, runId } from './native.ts';
 
 const modelCatalog = z.object({ groups: z.array(z.object({ id: identifier, name: z.string().max(240), models: z.array(z.object({ id: identifier, name: z.string().max(240), reasoning: z.object({ efforts: z.array(z.object({ id: identifier, name: z.string().max(240) })).max(32) }).optional() })).max(300) })).max(100) });
 const permissionCatalog = z.object({ options: z.array(z.object({ value: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/), name: z.string().max(240), description: z.string().max(2000).optional() })).max(100) });
@@ -17,10 +21,15 @@ const skillsResponse = z.object({ skills: z.array(z.unknown()).max(2000) });
 const cursorSchema = z.object({ session: identifier, through: z.number().int().nonnegative(), before: z.number().int().nonnegative() }).strict();
 const bindingSchema = z.object({ id: identifier, cwd: z.string().min(1).max(4096), configuration: z.object({ modelId: z.string().max(2048), permissionId: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/) }), details: z.record(z.string(), z.unknown()) });
 const unknown = (reason = 'DSH 连接中断，需要重新核对原生状态。'): NativeState => ({ status: 'unknown', pendingInputs: 0, configurationVerified: false, reason });
-const nativeError = (error: unknown): HarnessError => error instanceof HarnessError ? error : new HarnessError('DSH_PROTOCOL_INVALID');
+const nativeError = (error: unknown): HarnessError => error instanceof HarnessError ? error : new HarnessError(error instanceof Error && /^dsh_bounded_[a-z_]+$/.test(error.message) ? error.message.toUpperCase() : 'DSH_PROTOCOL_INVALID');
+const historyError = (error: unknown): HarnessError => error instanceof Error && error.message === 'dsh_bounded_generation_changed' ? new HarnessError('history_cursor_invalid')
+  : error instanceof Error && error.message === 'dsh_bounded_source_missing' ? new HarnessError('history_source_missing')
+  : error instanceof Error && ['dsh_bounded_source_changed', 'dsh_bounded_identity_mismatch'].includes(error.message) ? new HarnessError('history_source_changed') : nativeError(error);
 
-export function createDshAdapter(options: { launchFile: string }): HarnessAdapter {
+export function createDshAdapter(options: { launchFile: string; boundedHistory?: BoundedDshOptions; boundedState?: boolean; managedExecution?: boolean }): HarnessAdapter {
   const connection = new Connection(options.launchFile);
+  const reader = options.boundedHistory ? new BoundedDshReader(options.boundedHistory) : undefined;
+  const bounded = reader ? boundedHistory(reader) : undefined;
   const subscriptions = new Set<() => void>();
   const lastStates = new Map<string, NativeState>();
   let closed = false;
@@ -47,6 +56,7 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
 
   async function state(binding: Binding, targetRunId?: string): Promise<NativeState> {
     try {
+      if (options.boundedState) { checkBinding(binding); return remember(binding, boundedStateFrom(binding, await readBoundedState(connection, reader, binding, targetRunId), targetRunId)); }
       let current = await snapshot(binding, 5); let bytes = Buffer.byteLength(JSON.stringify(current.records)); let pages = 0;
       // A running turn may start before the latest message window. Read only enough
       // durable events to prove its boundary; an exhausted bound remains unknown.
@@ -110,14 +120,14 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
     } catch { return { id: 'dsh', available: false, reason: 'DSH Host 不可用或受保护的连接文件无效。', models: [], permissions: [] }; }
   }
 
-  async function create(input: { cwd: string; configuration: Configuration }, onBound: (binding: Binding) => void): Promise<Binding> {
+  async function create(input: { cwd: string; configuration: Configuration }, onBound: (binding: Binding) => void | Promise<void>): Promise<Binding> {
     try {
       const selected = decodeModel(input.configuration.modelId); const available = await catalog();
       if (!available.available || !available.models.some(model => model.id === input.configuration.modelId) || !available.permissions.some(permission => permission.id === input.configuration.permissionId)) throw new HarnessError('DSH_CONFIGURATION_UNAVAILABLE');
       if (!isAbsolute(input.cwd) || normalize(input.cwd) !== input.cwd || input.cwd.length > 4096) throw new HarnessError('DSH_CWD_INVALID');
       const native = z.object({ sessionId: identifier }).parse(await connection.call('session/create', { request: { cwd: input.cwd } }));
       const binding: Binding = { id: native.sessionId, cwd: input.cwd, configuration: { ...input.configuration }, details: { provider: selected.provider, model: selected.model, ...(selected.reasoningEffort ? { reasoningEffort: selected.reasoningEffort } : {}) } };
-      onBound(binding);
+      await onBound(binding);
       await connection.call('session/selectModel', { request: { sessionId: binding.id, ...selected } });
       const permission = z.object({ result: z.object({ kind: z.literal('success') }) }).parse(await connection.call('commands/execute', { agentId: binding.id, line: `/permission ${input.configuration.permissionId}`, submittedAttachments: [] }));
       if (permission.result.kind !== 'success' || !(await state(binding)).configurationVerified) throw new HarnessError('DSH_CONFIGURATION_NOT_VERIFIED');
@@ -127,6 +137,7 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
 
   async function history(binding: Binding, olderCursor?: string, limit = 30): Promise<HistoryPage> {
     try {
+      if (bounded) { checkBinding(binding); return await bounded.history(binding, olderCursor, limit); }
       checkBinding(binding); z.number().int().min(1).max(100).parse(limit);
       let records: z.infer<typeof pageSchema>['records']; let hasMore: boolean; let through: number; let activeTurn: number | undefined; let outline: TurnOutline = [];
       let usage: HistoryPage['usage'];
@@ -148,7 +159,7 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
       if (hasMore && (first === undefined || first === 0)) throw new HarnessError('DSH_HISTORY_NO_PROGRESS');
       if (records.some(record => record.event.seq > through) || new Set(records.map(record => record.event.seq)).size !== records.length) throw new HarnessError('DSH_HISTORY_INVALID');
       return { items: historyItems(binding.id, records.map(record => record.event), activeTurn, outline, binding.cwd), olderCursor: hasMore ? Buffer.from(JSON.stringify({ session: binding.id, through, before: first })).toString('base64url') : null, ...(usage ? { usage } : {}) };
-    } catch (error) { throw nativeError(error); }
+    } catch (error) { throw historyError(error); }
   }
 
   async function readImage(binding: Binding, path: string): Promise<string> {
@@ -195,6 +206,18 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
   async function reconcile(binding: Binding, operationId: string): Promise<Receipt> {
     try {
       checkBinding(binding); identifier.parse(operationId);
+      if (options.boundedState) {
+        const current = boundedStateSchema.parse(await connection.call('zhongshuBounded/state', { request: { sessionId: binding.id, cwd: binding.cwd, operationId } }));
+        boundedStateFrom(binding, current);
+        if (current.accepted?.id === operationId) return { outcome: 'accepted', ...(current.accepted.turn ? { runId: runId(binding.id, current.accepted.turn) } : {}) };
+        let cursor: string | undefined;
+        for (let page = 0; bounded && page < 10; page++) {
+          const result = await bounded.history(binding, cursor, 100), accepted = result.items.find(item => item.operationId === operationId);
+          if (accepted) return { outcome: 'accepted', ...(accepted.runId ? { runId: accepted.runId } : {}) };
+          if (!result.olderCursor) break; cursor = result.olderCursor;
+        }
+        return { outcome: 'unknown', reason: '在有界原生记录中尚未找到该操作；未自动重发。' };
+      }
       const current = await snapshot(binding, 100);
       const inbox = current.projections.values.inbox;
       if ([...(inbox?.['next-turn'] ?? []), ...(inbox?.['next-step'] ?? [])].some(message => object(object(message).source).rpcId === operationId)) return { outcome: 'accepted' };
@@ -231,6 +254,7 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
     let textTimer: ReturnType<typeof setTimeout> | undefined; let pendingItem: NativeChange | undefined;
     const emit = (change: NativeChange) => { if (!disposed) { try { listener(change); } catch { dispose(); } } };
     const refresh = () => {
+      if (options.managedExecution) { emit({ type: 'invalidate' }); return; }
       if (refreshTimer || refreshActive || disposed) return;
       refreshTimer = setTimeout(() => { refreshTimer = undefined; refreshActive = true; const turnGeneration = generation; void state(binding).then(value => { if (turnGeneration === generation) emit({ type: 'state', state: value }); }).catch(() => emit({ type: 'state', state: unknown() })).finally(() => { refreshActive = false; }); }, 100);
     };
@@ -239,6 +263,7 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
       if (disposed || retry) return;
       generation++; cancel?.(); cancel = undefined;
       emit({ type: 'state', state: disconnectedState(binding) }); emit({ type: 'invalidate' });
+      if (options.managedExecution) { emit({ type: 'unavailable', reason: 'DSH 连接中断，需要重新核对原生状态。' }); return; }
       retry = setTimeout(() => { retry = undefined; void start(); }, Math.min(5000, 300 * 2 ** Math.min(attempt++, 5)));
       retry.unref();
     }
@@ -246,6 +271,24 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
       if (disposed) return;
       const ownGeneration = ++generation; const live = new LiveAssistant(binding.id); let watermark = -1; let outline: TurnOutline = [];
       try {
+        if (options.boundedState) {
+          let epoch: string | undefined;
+          const stopFollow = await connection.follow({ request: { sessionId: binding.id, cwd: binding.cwd } }, {
+            item(value) {
+              if (disposed || ownGeneration !== generation) return;
+              try {
+                const frame = boundedFrameSchema.parse(value);
+                if ((epoch !== undefined && epoch !== frame.state.epoch) || frame.state.cursor < watermark) throw new HarnessError('DSH_STATE_CHANGED');
+                epoch = frame.state.epoch; watermark = frame.state.cursor; attempt = 0;
+                emit({ type: 'state', state: remember(binding, boundedStateFrom(binding, frame.state)) });
+                if (frame.invalidate) emit({ type: 'invalidate' });
+                if (frame.preview) emit({ type: 'item', item: { id: assistantId(binding.id, frame.preview.turn, frame.preview.step), runId: runId(binding.id, frame.preview.turn), kind: 'assistant', status: 'running', text: frame.preview.text, previewOnly: true } });
+              } catch { reconnect(); }
+            }, failed() { if (ownGeneration === generation) reconnect(); },
+          }, 'zhongshuBounded/follow');
+          if (disposed || ownGeneration !== generation) stopFollow(); else cancel = stopFollow;
+          return;
+        }
         const stopFollow = await connection.follow(request(binding, { maxMessages: 30, assistantStream: true }), {
           item(value) {
             if (disposed || ownGeneration !== generation) return;
@@ -258,7 +301,7 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
                 const boundary = boundaryFrom(current);
                 for (const item of historyItems(binding.id, current.records.map(record => record.event), boundary?.openTurnStartSeq !== null ? boundary?.lastTurn : undefined, outline, binding.cwd)) emit({ type: 'item', item });
                 if (!boundary) refresh();
-                const item = live.restore(current); if (item) emit({ type: 'item', item });
+                const item = live.restore(current); if (item) emit({ type: 'item', item: { ...item, previewOnly: true } });
               } else if (frame.type === 'event') {
                 const event = eventSchema.parse(frame.event);
                 if (event.seq <= watermark) return;
@@ -275,7 +318,7 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
                 const change = live.accept(frame.frame);
                 if (change.resubscribe) { reconnect(); return; }
                 if (change.invalidate) { emit({ type: 'invalidate' }); refresh(); }
-                if (change.item) { pendingItem = { type: 'item', item: change.item }; if (!textTimer) textTimer = setTimeout(() => { textTimer = undefined; const next = pendingItem; pendingItem = undefined; if (next && ownGeneration === generation) emit(next); }, 50); }
+                if (change.item) { pendingItem = { type: 'item', item: { ...change.item, previewOnly: true } }; if (!textTimer) textTimer = setTimeout(() => { textTimer = undefined; const next = pendingItem; pendingItem = undefined; if (next && ownGeneration === generation) emit(next); }, 50); }
               } else reconnect();
             } catch { reconnect(); }
           },
@@ -287,5 +330,5 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
     subscriptions.add(dispose); await start(); return dispose;
   }
 
-  return { id: 'dsh', earlyInput: 'soon', catalog, skills: async binding => skillOptions(await skillCatalog(binding)), create, state, history, submit, submitQueued: submit, readImage, reconcile, stop, watch, async close() { closed = true; for (const dispose of [...subscriptions]) dispose(); lastStates.clear(); await connection.close(); } };
+  return { id: 'dsh', earlyInput: 'soon', catalog, skills: async binding => skillOptions(await skillCatalog(binding)), create, state, history, submit, submitQueued: submit, readImage, ...(bounded ? { readBodyChunk: bounded.readBodyChunk, releaseBodySource: bounded.releaseBodySource, readItems: async (binding, ids) => { checkBinding(binding); try { return await bounded.readItems(binding, ids); } catch (error) { throw historyError(error); } } } : {}), reconcile, stop, watch, async close() { closed = true; for (const dispose of [...subscriptions]) dispose(); lastStates.clear(); await connection.close(); await reader?.close(); } };
 }

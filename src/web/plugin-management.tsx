@@ -40,7 +40,7 @@ function PluginCatalog({ harness, onHarness, csrf, report }: {
         if (controller.signal.aborted) return;
         setView(current);
         setUncertain(value => value?.id === current.operation?.id ? undefined : value);
-        if (current.operation?.status === 'applying') timer = setTimeout(() => void refresh(), 1800);
+        if (current.operation?.status === 'applying' || current.sourceOperation?.status === 'applying') timer = setTimeout(() => void refresh(), 1800);
       } catch (reason) {
         if (controller.signal.aborted) return;
         if (reason instanceof RequestError && reason.status === 401) onReport.current(reason);
@@ -97,7 +97,7 @@ function PluginCatalog({ harness, onHarness, csrf, report }: {
     if (busy) return false;
     setBusy(true); setSourceError('');
     try {
-      const current = await request(path + '/sources', pluginView, { csrf, body: command, timeoutMs: 100_000 });
+      const current = await request(path + '/sources', pluginView, { csrf, body: { requestId: crypto.randomUUID(), command }, timeoutMs: 45_000 });
       if (mounted.current) setView(current);
       return true;
     } catch (reason) {
@@ -112,11 +112,19 @@ function PluginCatalog({ harness, onHarness, csrf, report }: {
     }
   }
 
+  async function reconcileSource() {
+    if (busy || !view?.sourceOperation) return;
+    setBusy(true);
+    try { setView(await request(path + '/sources/reconcile', pluginView, { csrf, body: { id: view.sourceOperation.requestId }, timeoutMs: 45_000 })); }
+    catch (reason) { setSourceError('来源变更仍待核实，请稍后再试。'); if (reason instanceof RequestError && reason.status === 401) onReport.current(reason); }
+    finally { if (mounted.current) { setBusy(false); setRevision(value => value + 1); } }
+  }
+
   return <PluginLibrary harness={harness} onHarness={onHarness} view={view} error={error} sourceError={sourceError}
     busy={busy} uncertain={!!uncertain}
     detail={selectedEntry && detail?.id === selectedEntry.id ? { ...selectedEntry, skills: detail.skills } : undefined}
     onRefresh={() => { setError(''); setSourceError(''); setRevision(value => value + 1); }}
-    onDetail={setDetailId} onSource={changeSource}
+    onDetail={setDetailId} onSource={changeSource} onReconcileSource={() => void reconcileSource()}
     onAction={(entry, action, version) => void update({ id: crypto.randomUUID(), pluginId: entry.id, action, version })}
     onReconcile={() => { if (view?.operation) void update({ id: view.operation.id }, true); }}
     onRetry={() => { if (uncertain) void update(uncertain); }}/>;

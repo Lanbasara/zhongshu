@@ -137,13 +137,14 @@ export class Connection {
     finally { clearTimeout(timer); this.requests.delete(controller); }
   }
 
-  async follow(args: Record<string, unknown>, stream: Stream): Promise<() => void> {
+  async follow(args: Record<string, unknown>, stream: Stream, endpoint = 'session/follow'): Promise<() => void> {
     await this.ready();
+    if (!['session/follow', 'zhongshuBounded/follow'].includes(endpoint)) throw new HarnessError('DSH_ENDPOINT_INVALID');
     if (this.streams.size >= 32) throw new HarnessError('DSH_STREAM_LIMIT');
     const socket = this.socket;
     if (!socket || socket.readyState !== WebSocket.OPEN) throw new HarnessError('DSH_DISCONNECTED');
     const streamId = randomUUID(); this.streams.set(streamId, stream);
-    socket.send(JSON.stringify({ type: 'open', streamId, endpoint: 'session/follow', payload: { args } }));
+    socket.send(JSON.stringify({ type: 'open', streamId, endpoint, payload: { args } }));
     return () => { this.streams.delete(streamId); if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'cancel', streamId })); };
   }
 

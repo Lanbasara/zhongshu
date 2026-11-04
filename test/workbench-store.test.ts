@@ -28,6 +28,12 @@ function binding(input: CreateConversation): Binding {
   return { id: 'native-' + randomUUID(), cwd: input.cwd, configuration: input.configuration, details: { nativeOption: true } };
 }
 function item(id: string, text = id): NativeItem { return { id, kind: 'assistant', text, status: 'completed' }; }
+function fullText(store: ReturnType<typeof createWorkbenchStore>, conversationId: string, item: NativeItem): string {
+  if (!item.bodies?.text) return item.text;
+  const parts: Uint8Array[] = []; let offset: number | null = 0;
+  while (offset !== null) { const part = store.readBody(conversationId, item.id, 'text', item.bodies.text, offset); parts.push(part.data); offset = part.nextOffset; }
+  return Buffer.concat(parts).toString('utf8');
+}
 function message(conversationId: string): OperationInput { return { id: randomUUID(), conversationId, type: 'message', payload: { text: 'synthetic user input' } }; }
 
 test('conversation identity/configuration and an early native binding survive partial initialization and reopen', t => {
@@ -234,22 +240,20 @@ test('native cursor and complete bodies survive restart without claiming a parti
   store.setHistoryCursor(input.id, { loaded: true, olderCursor: 'opaque-provider-cursor', beforeItemId: 'latest' });
   const revision = store.version(); f.close(db); db = f.open(); store = createWorkbenchStore(db);
   const snapshot = store.readHistory(input.id); assert.equal(snapshot.revision, revision);
-  assert.equal(snapshot.items[0]?.text, text); assert.equal(snapshot.liveItems[0]?.text, text + 'next');
+  assert.equal(fullText(store, input.id, snapshot.items[0]!), text); assert.equal(fullText(store, input.id, snapshot.liveItems[0]!), text + 'next');
   assert.equal(snapshot.olderBeforeItemId, null); assert.equal(snapshot.nativeOlderCursor, 'opaque-provider-cursor');
   assert.equal('historyComplete' in snapshot, false);
 });
 
-test('history capacity, text bytes, native details and live bounds fail explicitly without partial mutation', t => {
+test('history crosses the old lifetime ceiling, giant bodies remain readable, and active/live inputs stay bounded', t => {
   const f = fixture(t); const db = f.open(); const store = createWorkbenchStore(db); const input = conversation(); store.createConversation(input);
   const insert = db.prepare("INSERT INTO workbench_items(conversation_id,id,position,kind,text,status) VALUES(?,?,?,'assistant','small body','completed')");
   db.exec('BEGIN IMMEDIATE'); for (let n = 0; n < 50_000; n++) insert.run(input.id, 'item-' + n, n * 1024); db.exec('COMMIT');
-  const before = store.version();
-  assert.throws(() => store.mergeHistory(input.id, [item('item-0', 'must roll back'), item('too-many')]), { code: 'history_capacity_reached' });
-  assert.equal(store.getItem(input.id, 'item-0')?.text, 'small body'); assert.equal(store.version(), before);
-  store.mergeHistory(input.id, [item('item-0', 'allowed update at capacity')]);
-  assert.equal(store.getItem(input.id, 'item-0')?.text, 'allowed update at capacity');
-  assert.throws(() => store.saveLiveItem(input.id, item('large', '中'.repeat(400_000))), { statusCode: 400 });
-  assert.throws(() => store.mergeHistory(input.id, [item('large', 'a'.repeat(1_048_577))]), { statusCode: 400 });
+  store.mergeHistory(input.id, [item('item-0', 'updated'), item('beyond-old-ceiling')]);
+  assert.equal(store.getItem(input.id, 'item-0')?.text, 'updated'); assert.equal(store.hasHistoryItem(input.id, 'beyond-old-ceiling'), true);
+  store.mergeHistory(input.id, [item('large', '中'.repeat(400_000)), item('larger', 'a'.repeat(1_048_577))]);
+  assert.equal(Buffer.byteLength(fullText(store, input.id, store.getItem(input.id, 'large')!)), 1_200_000);
+  assert.equal(fullText(store, input.id, store.getItem(input.id, 'larger')!).length, 1_048_577);
   for (let n = 0; n < 100; n++) store.saveLiveItem(input.id, item('live-' + n));
   assert.throws(() => store.saveLiveItem(input.id, item('live-overflow')), { code: 'live_history_capacity_reached' });
   assert.equal(store.readHistory(input.id).items.length, 100); assert.equal(store.readHistory(input.id).liveItems.length, 100);
@@ -335,21 +339,21 @@ test('a restore hook failure rolls back and never publishes the staging database
   assert.equal(store.getOperation(operation.id)?.status, 'queued');
 });
 
-test('large history and live reads have byte bounds before HTTP serialization and retain complete paging', t => {
+test('history and live summary pages are byte bounded while full bodies remain accessible by immutable reference', t => {
   const f = fixture(t); const store = createWorkbenchStore(f.open()); const input = conversation(); store.createConversation(input);
-  const body = 'x'.repeat(512 * 1024); const records = Array.from({ length: 20 }, (_, index) => item('large-' + index, body));
+  const body = 'x'.repeat(512 * 1024); const records = Array.from({ length: 40 }, (_, index) => item('large-' + index, body));
   store.mergeHistory(input.id, records);
   const first = store.readHistory(input.id);
   assert(first.items.length > 0 && first.items.length < records.length);
-  assert(first.items.reduce((bytes, entry) => bytes + Buffer.byteLength(entry.text) + 2048, 0) <= 8 * 1024 * 1024);
-  assert.equal(first.items.at(-1)?.id, 'large-19'); assert(first.olderBeforeItemId);
+  assert(Buffer.byteLength(JSON.stringify(first.items)) <= 192 * 1024);
+  assert.equal(first.items.at(-1)?.id, 'large-39'); assert(first.olderBeforeItemId);
   const older = store.readHistory(input.id, { beforeItemId: first.olderBeforeItemId });
   assert.deepEqual([...older.items, ...first.items].map(entry => entry.id), records.map(entry => entry.id));
-  assert([...older.items, ...first.items].every(entry => entry.text === body));
+  assert([...older.items, ...first.items].every(entry => fullText(store, input.id, entry) === body));
   for (let index = 0; index < 12; index++) store.saveLiveItem(input.id, { ...item('live-' + index, body), status: 'running' });
   const live = store.readHistory(input.id); assert.equal(live.liveItemsLimited, true);
-  assert(live.liveItems.reduce((bytes, entry) => bytes + Buffer.byteLength(entry.text) + 2048, 0) <= 4 * 1024 * 1024);
-  assert(live.liveItems.every(entry => entry.text === body));
+  assert(Buffer.byteLength(JSON.stringify(live.liveItems)) <= 48 * 1024);
+  assert(live.liveItems.every(entry => fullText(store, input.id, entry) === body));
 });
 
 test('v3 conversation history upgrades to active and management metadata survives reopen', t => {

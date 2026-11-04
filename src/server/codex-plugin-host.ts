@@ -19,7 +19,7 @@ const name = z.string().max(100).regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/);
 const commit = z.string().regex(/^[a-f0-9]{40}$/);
 const gitUrl = z.string().max(256).regex(/^https:\/\/[a-zA-Z0-9.-]+\/[a-zA-Z0-9_/-]+(?:\.git)?$/);
 const market = z.object({ name: name.refine(value => !value.toLowerCase().startsWith('openai-')), url: gitUrl, revision: commit }).strict();
-const settingsSchema = z.object({
+export const settingsSchema = z.object({
   socket: absolute, nativeSocket: absolute, executable: absolute, gitExecutable: absolute,
   home: absolute, codexHome: absolute, version: z.string().max(64).regex(/^[0-9][a-zA-Z0-9.-]*$/),
   markets: z.array(market).max(8).refine(values => new Set(values.map(value => value.name)).size === values.length),
@@ -123,14 +123,25 @@ export async function createCodexPluginHost(input: CodexPluginHostSettings) {
       return z.array(managedMarket).max(8).parse(JSON.parse(await handle.readFile('utf8')));
     } finally { await handle.close(); }
   }
-  async function saveManaged(value: Awaited<ReturnType<typeof managed>>) {
-    const temporary = registry + '.' + randomUUID();
+  async function savePrivate(path: string, value: unknown) {
+    const temporary = path + '.' + randomUUID();
     const handle = await open(temporary, 'wx', 0o600);
     try {
       try { await handle.writeFile(JSON.stringify(value)); await handle.sync(); }
       finally { await handle.close(); }
-      await rename(temporary, registry);
+      await rename(temporary, path);
+      const directory = await open(dirname(path), constants.O_RDONLY | constants.O_DIRECTORY);
+      try { await directory.sync(); } finally { await directory.close(); }
     } catch (error) { await unlink(temporary).catch(() => {}); throw error; }
+  }
+  const saveManaged = (value: Awaited<ReturnType<typeof managed>>) => savePrivate(registry, value);
+  const sourceIntentPath = join(dirname(settings.socket), 'market-source-intent.json');
+  const sourceIntentSchema = z.object({ requestId: z.uuid(), command: pluginSourceCommand, source: managedMarket.optional() }).strict();
+  async function readSourceIntent() {
+    const handle = await open(sourceIntentPath, constants.O_RDONLY | constants.O_NOFOLLOW).catch(error => { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error; });
+    if (!handle) return undefined;
+    try { const info = await handle.stat(); if (!info.isFile() || info.size > 4096 || info.mode & 0o077 || process.getuid && info.uid !== process.getuid()) throw new Error('plugin_source_intent_invalid');
+      return sourceIntentSchema.parse(JSON.parse(await handle.readFile('utf8'))); } finally { await handle.close(); }
   }
   const nativeMarkets = async () => marketList.parse(JSON.parse(await cli(['plugin', 'marketplace', 'list', '--json']))).marketplaces;
   const sourceRecords = async () => [
@@ -183,12 +194,13 @@ export async function createCodexPluginHost(input: CodexPluginHostSettings) {
     return entries;
   }
 
-  async function updateSource(command: PluginSourceCommand) {
+  async function updateSource(command: PluginSourceCommand, requestId?: string) {
     const saved = await managed();
     const markets = await nativeMarkets();
     if (command.action === 'remove') {
       const source = saved.find(item => item.name === command.id);
       if (!source) throw new PluginSourceError('invalid_plugin_source');
+      if (requestId) await savePrivate(sourceIntentPath, { requestId, command });
       const current = markets.find(item => item.name === source.name);
       if (current) {
         await verifyMarket(source, current);
@@ -218,6 +230,7 @@ export async function createCodexPluginHost(input: CodexPluginHostSettings) {
     if (!manifest.success || manifest.data.name.toLowerCase().startsWith('openai-'))
       throw new PluginSourceError('invalid_plugin_source');
     const source = { name: manifest.data.name, label: manifest.data.interface?.displayName ?? manifest.data.name, url: repository.url, revision };
+    if (requestId) await savePrivate(sourceIntentPath, { requestId, command, source });
     const existing = saved.find(item => item.name === source.name);
     if (existing?.url === source.url && existing.revision === source.revision) {
       await verifyMarket(existing, markets.find(item => item.name === source.name));
@@ -283,13 +296,13 @@ export async function createCodexPluginHost(input: CodexPluginHostSettings) {
     return { target: expectedTarget, entries, sources };
   });
   app.post('/sources', async (request, reply) => {
-    const input = z.object({ target: targetSchema, command: pluginSourceCommand }).strict().safeParse(request.body);
+    const input = z.object({ target: targetSchema, command: pluginSourceCommand, requestId: z.uuid().optional() }).strict().safeParse(request.body);
     if (!input.success) return reply.code(400).send({ error: 'invalid_plugin_source' });
     const expectedTarget = await target();
     if (input.data.target !== expectedTarget || busy) return reply.code(409).send({ error: 'plugin_source_conflict' });
     busy = true;
     try {
-      await updateSource(input.data.command);
+      await updateSource(input.data.command, input.data.requestId);
       if (await target() !== expectedTarget) throw new Error('plugin_host_target_changed');
       return { target: expectedTarget };
     } catch (error) {
@@ -320,6 +333,44 @@ export async function createCodexPluginHost(input: CodexPluginHostSettings) {
     }
     if (await target() !== expectedTarget) throw new Error('plugin_host_target_changed');
     return { target: expectedTarget, entry: entry ? { ...entry, skills } : null };
+  });
+  app.post('/recover-source', async (request, reply) => {
+    const input = z.object({ target: targetSchema, command: pluginSourceCommand, requestId: z.uuid().optional() }).strict().safeParse(request.body);
+    if (!input.success) return reply.code(400).send({ error: 'invalid_request' });
+    const expectedTarget = await target();
+    if (input.data.target !== expectedTarget) return reply.code(409).send({ error: 'plugin_host_target_mismatch' });
+    if (busy) return { target: expectedTarget, status: 'unknown' };
+    busy = true;
+    try {
+      const command = input.data.command; const saved = await managed(); const markets = await nativeMarkets();
+      const intent = input.data.requestId ? await readSourceIntent() : undefined;
+      const matching = intent?.requestId === input.data.requestId && JSON.stringify(intent?.command) === JSON.stringify(command);
+      let applied = false;
+      if (command.action === 'remove') {
+        if (!markets.some(item => item.name === command.id)) {
+          if (matching && saved.some(item => item.name === command.id)) await saveManaged(saved.filter(item => item.name !== command.id));
+          applied = matching || !saved.some(item => item.name === command.id);
+        }
+      } else {
+        const url = githubRepository(command.source).url;
+        const existing = saved.find(item => item.url === url);
+        const expected = matching ? intent?.source : undefined;
+        const source = expected ?? existing;
+        if (source && (!existing || existing.name === source.name && existing.revision === source.revision) &&
+          (expected || !command.ref || /^[a-f0-9]{40}$/.test(command.ref) && command.ref === source.revision) &&
+          await verifyMarket(source, markets.find(item => item.name === source.name)).catch(() => undefined)) {
+          // A crash can occur after native registration but before publishing our
+          // source metadata. Rebuild only that metadata from the durable intent
+          // and exact existing Git checkout; never invoke native add again.
+          if (!existing) {
+            if (saved.length + settings.markets.length >= 8 || saved.some(item => item.name === source.name) || settings.markets.some(item => item.name === source.name)) return { target: expectedTarget, status: 'unknown' };
+            await saveManaged([...saved, source]);
+          }
+          applied = true;
+        }
+      }
+      return { target: expectedTarget, status: await target() === expectedTarget && applied ? 'applied' : 'unknown' };
+    } finally { busy = false; }
   });
   app.post('/change', async (request, reply) => {
     const input = inputSchema.safeParse(request.body);

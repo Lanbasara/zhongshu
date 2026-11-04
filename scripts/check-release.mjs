@@ -1,6 +1,7 @@
 import { readFileSync, readdirSync, existsSync, writeFileSync } from 'node:fs';
 import { resolve, relative } from 'node:path';
 import { createHash } from 'node:crypto';
+import { gunzipSync, brotliDecompressSync } from 'node:zlib';
 const root = process.cwd();
 const dist = resolve(root, 'dist');
 function walk(directory) {
@@ -13,6 +14,14 @@ function walk(directory) {
 const digest = path => createHash('sha256').update(readFileSync(path)).digest('hex');
 if (process.argv.includes('--seal')) {
   const web = JSON.parse(readFileSync(resolve(dist, 'web-inventory.json'), 'utf8'));
+  for (const name of Object.keys(web)) {
+    if (!/\.(gz|br)$/.test(name)) continue;
+    const original = name.replace(/\.(gz|br)$/, '');
+    if (!/^public\/assets\/[^/]+\.(js|css)$/.test(original) || !web[original]) throw new Error(`Release boundary: encoding lacks original ${name}`);
+    const compressed = readFileSync(resolve(dist, name));
+    const bytes = name.endsWith('.gz') ? gunzipSync(compressed) : brotliDecompressSync(compressed);
+    if (createHash('sha256').update(bytes).digest('hex') !== web[original]) throw new Error(`Release boundary: encoding differs from original ${name}`);
+  }
   const sourceFiles = ['server', 'harness', 'shared'].flatMap(name => walk(resolve(root, 'src', name))).filter(path => path.endsWith('.ts') && !path.endsWith('.d.ts'));
   const allowed = new Set(['version.json', 'web-inventory.json', ...Object.keys(web), ...sourceFiles.map(path => relative(resolve(root, 'src'), path).replace(/\.ts$/, '.js'))]);
   const inventory = {};

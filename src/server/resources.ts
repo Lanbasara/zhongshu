@@ -25,33 +25,54 @@ export function decodeImage(value: string, limit = MAX_IMAGE_BYTES): Buffer {
   if (data.length > limit || data.toString('base64') !== value) throw new ResourceError('invalid_image_data');
   imageType(data); return data;
 }
-export function createResourceStore(db: DatabaseSync) {
+export function createResourceStore(db: DatabaseSync, assertCapacity?: (kind: 'admission' | 'archive', additionalBytes: number) => void) {
+  function retainArchive(id: string) {
+    // Archive bytes can arrive before their item transaction. A crash between
+    // put and pin must not turn accepted output into an expiring draft upload.
+    db.prepare('INSERT OR IGNORE INTO workbench_resource_refs(resource_id,owner_id) SELECT ?,? WHERE NOT EXISTS(SELECT 1 FROM workbench_resource_refs WHERE resource_id=?)')
+      .run(id, 'archive-stage:' + id, id);
+  }
+  const indexedGc = Boolean(db.prepare("SELECT 1 FROM sqlite_schema WHERE name='workbench_resource_gc'").get());
+  function maintenance(): boolean {
+    if (!indexedGc) return false;
+    let bytes = 0; let removed = 0;
+    for (const row of db.prepare('SELECT id,bytes FROM workbench_resource_gc WHERE created_at<? ORDER BY created_at,id LIMIT 4').all(Date.now() - 7 * 86400_000)) {
+      if (removed && bytes + Number(row.bytes) > 8 * 1024 * 1024) break;
+      bytes += Number(row.bytes);
+      removed += Number(db.prepare('DELETE FROM workbench_resources WHERE id=? AND NOT EXISTS(SELECT 1 FROM workbench_resource_refs WHERE resource_id=?)').run(String(row.id), String(row.id)).changes);
+    }
+    return removed > 0;
+  }
   function get(conversationId: string, id: string) {
     const row = db.prepare('SELECT * FROM workbench_resources WHERE conversation_id=? AND id=?').get(z.uuid().parse(conversationId), z.uuid().parse(id));
     if (!row) throw new ResourceError('image_unavailable', 404);
     return { id: String(row.id), name: String(row.name), mediaType: imageSchema.shape.mediaType.parse(row.media_type), data: Buffer.from(row.data as Uint8Array) };
   }
   return {
-    get,
+    get, maintenance,
     owned(conversationId: string, owner: string) {
       const row = db.prepare('SELECT r.id FROM workbench_resources r JOIN workbench_resource_refs f ON f.resource_id=r.id WHERE r.conversation_id=? AND f.owner_id=? LIMIT 1').get(conversationId, owner);
       return row ? get(conversationId, String(row.id)) : undefined;
     },
-    put(conversationId: string, name: string, data: Buffer) {
+    put(conversationId: string, name: string, data: Buffer, purpose: 'admission' | 'archive' = 'admission') {
       z.uuid().parse(conversationId); z.string().min(1).max(120).parse(name);
+      z.enum(['admission', 'archive']).parse(purpose);
       const mediaType = imageType(data); const digest = createHash('sha256').update(data).digest('hex');
       const old = db.prepare('SELECT id FROM workbench_resources WHERE conversation_id=? AND digest=?').get(conversationId, digest);
-      if (old) { const resource = get(conversationId, String(old.id)); return { id: resource.id, name: resource.name, mediaType: resource.mediaType }; }
+      if (old) { const resource = get(conversationId, String(old.id)); if (purpose === 'archive') retainArchive(resource.id); return { id: resource.id, name: resource.name, mediaType: resource.mediaType }; }
       // Only unattached uploads expire. Pending operations and history pin resources durably.
-      db.prepare('DELETE FROM workbench_resources WHERE created_at<? AND NOT EXISTS(SELECT 1 FROM workbench_resource_refs WHERE resource_id=workbench_resources.id)').run(Date.now() - 7 * 86400_000);
-      if (Number(db.prepare('SELECT COALESCE(SUM(length(data)),0) n FROM workbench_resources').get()!.n) + data.length > 512 * 1024 * 1024) throw new ResourceError('image_storage_full', 409);
+      maintenance();
+      if (assertCapacity) assertCapacity(purpose, data.length + 4096);
+      else if (Number(db.prepare('SELECT COALESCE(SUM(length(data)),0) n FROM workbench_resources').get()!.n) + data.length > 512 * 1024 * 1024) throw new ResourceError('image_storage_full', 409);
       const id = randomUUID();
       db.prepare('INSERT INTO workbench_resources(id,conversation_id,name,media_type,data,digest,created_at) VALUES(?,?,?,?,?,?,?)').run(id, conversationId, name, mediaType, data, digest, Date.now());
+      if (purpose === 'archive') retainArchive(id);
       return { id, name, mediaType };
     },
     pin(conversationId: string, id: string, owner: string) {
       get(conversationId, id);
       db.prepare('INSERT OR IGNORE INTO workbench_resource_refs(resource_id,owner_id) VALUES(?,?)').run(id, owner);
+      if (owner !== 'archive-stage:' + id) db.prepare('DELETE FROM workbench_resource_refs WHERE resource_id=? AND owner_id=?').run(id, 'archive-stage:' + id);
     },
     remove(conversationId: string, id: string) {
       get(conversationId, id);

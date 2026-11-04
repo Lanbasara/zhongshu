@@ -1,10 +1,12 @@
 import { z } from 'zod';
-import { contentFields, inputFields, recordedFilePath, toolSchema, validSkillSpans, type InputContent } from './content.ts';
+import { bodyReferencesSchema, contentFields, inputFields, recordedFilePath, toolSchema, validSkillSpans, type InputContent } from './content.ts';
 
 const utf8 = new TextEncoder();
 const boundedText = (bytes: number) => z.string().max(bytes).refine(value => utf8.encode(value).byteLength <= bytes);
 export const identifierSchema = boundedText(1024).min(1).refine(value => !value.includes('\0'));
 export const revisionSchema = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
+export const archiveProgressSchema = z.object({ complete: z.boolean(), error: z.string().max(256).nullable(), lastSuccessAt: revisionSchema.nullable(), pages: revisionSchema }).strict();
+export const storageCapacitySchema = z.object({ status: z.enum(['ok', 'warning', 'full', 'unknown']), usedBytes: revisionSchema, freeBytes: revisionSchema, quotaBytes: revisionSchema, reserveBytes: revisionSchema, stagedBytes: revisionSchema.optional(), stagedReservedBytes: revisionSchema.optional(), stagedLimitBytes: revisionSchema.optional() }).strict();
 export const usageSchema = z.object({
   total: revisionSchema.optional(),
   context: z.object({ used: revisionSchema, capacity: revisionSchema.min(1), estimated: z.boolean() }).strict().optional(),
@@ -20,6 +22,9 @@ export const stateSchema = z.object({
 export const itemSchema = z.object({
   id: identifierSchema, kind: z.enum(['user', 'assistant', 'tool', 'notice']),
   text: boundedText(1_048_576), status: z.enum(['running', 'completed', 'failed']),
+  bodies: bodyReferencesSchema.optional(),
+  previewOnly: z.literal(true).optional(),
+  mediaPending: z.literal(true).optional(),
   runId: identifierSchema.optional(), operationId: identifierSchema.optional(),
   ...contentFields, tool: toolSchema.optional(),
 }).strict();
@@ -50,9 +55,14 @@ export const workspaceManagementSchema = z.discriminatedUnion('action', [
 export const workspaceDirectoryListSchema = z.object({
   currentDirectory: boundedText(4096).min(1), names: z.array(folderName).max(200), limited: z.boolean(),
 }).strict();
+export const workspaceSummarySchema = z.object({ id: identifierSchema, label: boundedText(400), directoryName: boundedText(1024).optional(), pinned: z.boolean().optional() }).strict();
+export const workspacePageSchema = z.object({ workspaces: z.array(workspaceSummarySchema).max(50), nextCursor: z.string().max(4096).nullable(), scanned: z.number().int().min(0).max(256).optional(), scanLimited: z.boolean().optional() }).strict();
+export const workspaceLookupSchema = z.object({ workspace: workspaceSummarySchema.extend({ removed: z.boolean() }) }).strict();
 export const workbenchConfigurationSchema = z.object({
   harnesses: z.array(catalogSchema).max(2),
-  workspaces: z.array(z.object({ id: identifierSchema, label: boundedText(400), directoryName: boundedText(1024).optional(), pinned: z.boolean().optional() }).strict()).max(workspaceLimit),
+  workspaces: z.array(workspaceSummarySchema).max(workspaceLimit),
+  workspaceCursor: z.string().max(4096).nullable().optional(),
+  removedWorkspaceCursor: z.string().max(4096).nullable().optional(),
   removedWorkspaces: z.array(z.object({ id: identifierSchema, label: boundedText(400) }).strict()).max(workspaceLimit).optional(),
   workspaceRoots: z.array(z.object({ id: workspaceIdSchema, label: workspaceLabelSchema }).strict()).max(16).optional(),
 }).strict();
@@ -103,6 +113,12 @@ export function skillRequiresNextTurn(mode: QueueDelivery['mode'] | null, conten
   return mode === 'current' && !!content.skills?.length;
 }
 export type QueueView = z.infer<typeof queueViewSchema>;
+export const queueSummaryEntrySchema = queueEntrySchema.omit({ content: true }).extend({
+  preview: z.object({ text: boundedText(1024), images: z.number().int().min(0).max(4),
+    references: z.number().int().min(0).max(8), skills: z.number().int().min(0).max(8) }).strict(),
+});
+export const queueSummarySchema = queueViewSchema.extend({ entries: z.array(queueSummaryEntrySchema).max(queueLimit) });
+export type QueueSummary = z.infer<typeof queueSummarySchema>;
 export type QueuePause = z.infer<typeof queuePauseSchema>;
 const stopPayload = z.object({ runId: identifierSchema }).strict();
 export const enqueueOperationSchema = z.discriminatedUnion('type', [
@@ -115,17 +131,25 @@ const operationFields = {
 };
 export const operationSchema = z.object({ ...operationFields, type: z.enum(['message', 'stop']), delivery: queueDeliverySchema.optional() }).strict();
 export const conversationListSchema = z.object({
-  conversations: z.array(conversationSchema).max(100), olderBeforeId: z.uuid().nullable(), revision: revisionSchema,
+  workspaceLabels: z.array(z.object({ id: identifierSchema, label: boundedText(400) }).strict()).max(50).optional(),
+  conversations: z.array(conversationSchema).max(100), olderBeforeId: z.uuid().nullable(), revision: revisionSchema, scanned: z.number().int().min(0).max(200).optional(), scanLimited: z.boolean().optional(),
 }).strict();
 export const conversationResponseSchema = z.object({ conversation: conversationSchema }).strict();
 export const operationResponseSchema = z.object({ operation: operationSchema }).strict();
 export const turnFileLimit = 500;
-const turnFilesSchema = z.object({ runId: identifierSchema, paths: z.array(recordedFilePath).max(turnFileLimit), limited: z.boolean() }).strict();
+const turnFilesSchema = z.object({ runId: identifierSchema, paths: z.array(recordedFilePath).max(turnFileLimit), limited: z.boolean(), count: z.number().int().min(0).max(turnFileLimit).optional() }).strict();
 export type TurnFileSummary = z.infer<typeof turnFilesSchema>;
+export const turnFilePageSchema = turnFilesSchema.extend({ paths: z.array(recordedFilePath).max(50), afterPath: recordedFilePath.nullable() });
+export type TurnFilePage = z.infer<typeof turnFilePageSchema>;
+export const operationStateSchema = z.object({ unresolved: z.boolean(),
+  latestAcceptedMessage: z.object({ id: z.uuid(), runId: identifierSchema.nullable() }).strict().nullable(),
+}).strict();
 export const snapshotSchema = z.object({
   conversation: conversationSchema,
+  operationState: operationStateSchema.optional(),
+  archive: z.object({ latest: archiveProgressSchema.nullable(), backfill: archiveProgressSchema.nullable() }).strict().optional(),
   history: z.object({ items: z.array(itemSchema).max(100), liveItems: z.array(itemSchema).max(100), liveItemsLimited: z.boolean(), olderBeforeItemId: identifierSchema.nullable(), hasOlder: z.boolean(), loaded: z.boolean() }).strict(),
-  operations: z.array(operationSchema).max(100), queue: queueViewSchema.optional(), turnFiles: z.array(turnFilesSchema).max(200).optional(), usage: usageSchema.optional(), revision: revisionSchema,
+  operations: z.array(operationSchema).max(100), queue: queueSummarySchema.optional(), turnFiles: z.array(turnFilesSchema).max(200).optional(), usage: usageSchema.optional(), revision: revisionSchema,
 }).strict();
 export const changeEventSchema = z.object({ type: z.literal('change'), revision: revisionSchema, conversationId: z.uuid(), item: itemSchema.optional() }).strict();
 export const resetEventSchema = z.object({ type: z.literal('reset'), revision: revisionSchema }).strict();

@@ -4,7 +4,7 @@
 
 ## 已确认演进的入口
 
-多年使用方案已经进入正式决策，当前代码尚未完成该重构。目标模块图和数据归属唯一维护在 [ADR 0012](adr/0012-bounded-data-paths.md#目标架构与数据所有权)；永久阅读存档、覆盖与容量承诺见 [ADR 0010](adr/0010-durable-reading-archive.md)，统一执行入口和编辑窗口见 [ADR 0011](adr/0011-managed-workspace-execution.md)。五类问题的交付与验收由[上线前联合规格](spec/long-term-performance.md)统筹，全部属于上线前范围。
+多年使用方案的模块与数据归属见 [ADR 0012](adr/0012-bounded-data-paths.md#目标架构与数据所有权)；永久阅读存档、覆盖与容量承诺见 [ADR 0010](adr/0010-durable-reading-archive.md)，统一执行入口和编辑窗口见 [ADR 0011](adr/0011-managed-workspace-execution.md)。五类问题的交付与联合验收由[上线前联合规格](spec/long-term-performance.md)统筹，全部属于上线前范围。下述代码已接入这些机制；规模、故障、原生链路和独立验收分别取证，不由文档替代上线结论。
 
 下文保留实际模块、调用链及尚存耦合。每个实现切片完成后更新对应现状和 feature map，不因 ADR 已接受就把目标写成已实现，也不提前改写操作者当前连接方式。
 
@@ -15,9 +15,11 @@
 ```text
 React 浏览器 ──同源 HTTP / SSE──→ Fastify 应用
                                   ├─ 身份、来源与 CSRF 检查
-                                  └─ Workbench ──→ SQLite
-                                       ├─ Codex adapter ──→ App Server
-                                       └─ DSH adapter ──→ Web Host
+                                  └─ Workbench
+                                       ├─ StorageClient ──→ 单一 storage worker ──→ SQLite
+                                       ├─ 持久存档任务 ──→ 原生物理读取 worker / 正文分块
+                                       ├─ 目录清单 ──→ 独立 directory worker / 可重建索引
+                                       └─ 执行登记与门禁 ──→ 受管 gateway ──→ Codex / DSH Host
 
 管理员终端 ──→ 初始化 / 重置 / 一致备份 / 恢复
 
@@ -30,7 +32,7 @@ React 浏览器 ──同源 HTTP / SSE──→ Fastify 应用
 | --- | --- | --- |
 | 页面与服务 | [React 页面](../src/web/main.tsx) / [HTTP 应用](../src/server/app.ts) | 同源接口，私有路由统一认证、来源与 CSRF 检查 |
 | 身份 | [auth.ts](../src/server/auth.ts) / [管理员命令](../src/server/admin.ts) / [ADR 0006](adr/0006-auth-session-data.md) | 单管理员、服务端会话、私有数据目录边界 |
-| 持久数据 | [database.ts](../src/server/database.ts) / [产品迁移](../src/server/migrations.ts) / [ADR 0003](adr/0003-local-persistence.md) | WAL/FULL、显式迁移、在线备份与新目录恢复；数据不在镜像内 |
+| 持久数据 | [StorageClient](../src/server/storage-client.ts) / [worker](../src/server/storage-worker.ts) / [产品迁移](../src/server/migrations.ts) / [ADR 0003](adr/0003-local-persistence.md) | 生产请求的 SQLite 在单一 worker；有界队列、方法白名单、明确结果未知；WAL/FULL、显式迁移、一致备份与新目录恢复 |
 | 对话与操作 | [Workbench](../src/server/workbench.ts) / [存储](../src/server/workbench-store.ts) | 派发前落库、未知回执核对、历史身份和原生生命周期统一管理 |
 | 原生能力 | [共同语义](../src/harness/types.ts) / [Codex](../src/harness/codex/index.ts) / [DSH](../src/harness/dsh/index.ts) / [ADR 0001](adr/0001-native-harness-boundary.md) | 原生字段与版本差异留在各 adapter；不自行实现 Agent loop |
 | 消息与资源 | [内容契约](../src/shared/content.ts) / [资源存储与路径](../src/server/resources.ts) / [正文](../src/web/conversation-content.tsx) / [输入](../src/web/composer.tsx) | 原生解释图片和工具，应用保存授权资源与消息元数据；前端不执行原始 HTML |
@@ -44,23 +46,23 @@ React 浏览器 ──同源 HTTP / SSE──→ Fastify 应用
 
 Codex adapter 在已建立连接丢失时报告内部 `unavailable` 事件，由 Workbench 立即持久化“待核实”并撤销配置/终态证明，保留绑定、历史、操作及最后已知运行信息。离线连接尝试失败不重复发失联事件；旧连接事件和旧代次读取不能覆盖后来的状态。重新连接后按原绑定核实配置和原生状态，不自动重发未知操作。公开 HTTP/SSE 仍使用既有状态契约。
 
-Web manifest 提供独立窗口入口。界面以 Streamdown 渲染 Markdown/GFM/代码，用按轮折叠的工具组展示原生命令、输出和状态。运行中输入的路径见[执行功能地图](features/execution.md)。原始 HTML 不执行，链接协议受限。审批与提问仍由原生界面处理。
+Web manifest 提供独立窗口入口。有限且已完成的 Markdown 预览按需加载 Streamdown；流式或复杂正文使用原文预览，用按轮折叠的工具组展示原生命令、输出和状态。运行中输入的路径见[执行功能地图](features/execution.md)。原始 HTML 不执行，链接协议受限。审批与提问仍由原生界面处理。
 
 ## 当前数据路径与演进边界
 
 | 当前路径 | 实际职责与耦合 | 已确认目标的维护位置 |
 | --- | --- | --- |
 | 用户提交 → 操作落库 → adapter 派发 | Workbench 持有派发、排队、观察与恢复；观察连接的寿命不等于原生运行寿命 | [执行登记与门禁](adr/0011-managed-workspace-execution.md#持久未决登记与代次) |
-| 原生变更 → Workbench 同步 → 存储 → SSE 提示重取 | 同步同时读取原生状态和历史；历史读取失败可使整次同步走待核实，正文与执行证明尚未完全分离 | [三种事实独立](adr/0010-durable-reading-archive.md#三种事实独立) |
-| 历史读取 → 累积页面 → 合并正文 | 当前追赶在单次任务内累积页；旧页主要由翻阅触发，尚无独立的全量后台存档任务及逐页持久进度 | [可恢复同步](adr/0010-durable-reading-archive.md#可恢复同步) |
-| 存储 → 对话 HTTP 页 → 浏览器正文窗口 | 已有条数分页和浏览器正文预算；接口仍携带条目正文，缺少摘要与分块全文的独立读取路径 | [查询、正文和渲染](adr/0012-bounded-data-paths.md#查询正文和渲染) |
-| 历史合并 → SQLite | 同步驱动在应用进程执行；一般新增也读取该对话全部已有 ID/位置，累计容量常量仍存在 | [存储与调度](adr/0012-bounded-data-paths.md#存储与调度) |
-| 文件编辑资格 → 相关对话核对 → 条件保存 | 普通路径依赖观察 runtime 和同步；DSH 维护路径独立查原生状态，但仍遍历关联历史对话 | [编辑窗口协议](adr/0011-managed-workspace-execution.md#编辑窗口协议) |
-| 文件选择 → 目录遍历 → 截断后排序 | 当前无完整目录代次和继续游标；工作区与各文件选择入口也有各自容量限制 | [目录清单](adr/0012-bounded-data-paths.md#目录清单) |
+| 原生变更 → Workbench → 存储 → SSE 提示重取 | 执行状态、正文覆盖独立持久化；快照读取不重启已有观察或同步循环，存档失败不撤销已证实的执行状态 | [三种事实独立](adr/0010-durable-reading-archive.md#三种事实独立) |
+| 原生物理历史 → 持久任务 → 逐页提交 | 每个绑定有 latest/backfill 任务，不依赖页面访问或观察 runtime；页、游标、源代次与覆盖一起提交；全局两个槽，正文每 1 MiB 让出任务 | [可恢复同步](adr/0010-durable-reading-archive.md#可恢复同步) |
+| 存储 → 摘要页 / 独立正文 → 浏览器窗口 | 对话快照合计至多 50 个条目、256 KiB；单条文本/工具/引用合用 8 KiB 预览；正文按不可变摘要和 64 KiB 字节块读取；队列编辑和本轮文件另读 | [查询、正文和渲染](adr/0012-bounded-data-paths.md#查询正文和渲染) |
+| 历史合并 → storage worker | 按稳定 ID 和索引位置增量合并；局部重排有界，大范围重建在另一套位置列分批推进后原子发布；移除累计对话/历史/操作条数上限 | [存储与调度](adr/0012-bounded-data-paths.md#存储与调度) |
+| 文件编辑资格 → 持久运行组 → 独占写者 | 一次旧绑定基线后只跟踪未决受理；冲突闭包一起封门、排空、进程收束，再条件写入；未知副作用保留门禁 | [编辑窗口协议](adr/0011-managed-workspace-execution.md#编辑窗口协议) |
+| 文件选择 → 代次清单 → keyset 页 | 目录 worker 分批扫描、发布代次，游标绑定目录身份/代次；后台刷新和旧页继续可区分，工作区本身也分页搜索 | [目录清单](adr/0012-bounded-data-paths.md#目录清单) |
 
-当前状态、历史和传输游标的具体入口在 [Workbench](../src/server/workbench.ts)、[存储](../src/server/workbench-store.ts)、[HTTP](../src/server/workbench-http.ts) 与 [浏览器工作台](../src/web/workbench.tsx)。这些已有模块是改造入口，不是未来模块名已经落地的声明。
+状态、历史和传输游标入口在 [Workbench](../src/server/workbench.ts)、[存储](../src/server/workbench-store.ts)、[HTTP](../src/server/workbench-http.ts) 与 [浏览器工作台](../src/web/workbench.tsx)。正文身份、暂存、分块、所有权和校验归 [body-store](../src/server/body-store.ts)；历史位置重建归 [history-order](../src/server/history-order.ts)。旧源游标失效会保留存档并重新锚定，同时标记连续性未确认；源缺口不会因一次新扫描成功而消失。运行中的实时前缀标记 `previewOnly`，不冒充可下载的完整正文；物理记录的可比较修订和终态负责完成它。
 
-Codex adapter 的状态核对包含加载原生线程、当前轮/队列及指定运行证明；历史读取也经过线程加载。DSH adapter 通过 follow 快照核实状态，快照中使用完整轮次 outline，读旧页时还会获取快照。两者的当前实现均不能仅凭外层分页就宣称内部工作量有界。目标接入契约见 [ADR 0012 的原生边界](adr/0012-bounded-data-paths.md#原生接入也是预算边界)，现有原生行为及验证仍归 [execution](features/execution.md) 与 [continuity](features/continuity.md)。
+有界接入的 Codex reader 读取校验过身份和版本的持久 rollout，DSH reader 读取原生日志并建立稳定条目/工具锚点；巨型标量流式提取，缓存配额和正文租约由各 reader 管理。DSH 专用 Host plugin 缩减状态和 watch 投影。原生 state/watch/reconcile 仍可能加载或激活会话，必须走受控执行许可；物理 history/readItems/body 路径不恢复执行。原生模型运行时的内存成本独立于中书的分页预算，不能据此宣称原生 Agent loop 为常量空间。固定版本和复验归 [execution](features/execution.md) 与 [continuity](features/continuity.md)。
 
 ## 界面与设计系统
 
@@ -82,19 +84,21 @@ Codex adapter 的状态核对包含加载原生线程、当前轮/队列及指�
 
 发布边界在 [design-boundaries](../scripts/design-boundaries.ts) 与 [check-release](../scripts/check-release.mjs)：源码 AST 拒绝产品到开发目录的依赖、展示层到功能的依赖与直接网络调用；Vite 检查实际模块图、输出名称和静态资源清单；最终 dist 记录文件及 SHA-256，容器校验清单且不得安装 Storybook。源码检查是防误用护栏，不是恶意源码沙箱。公共静态资源变化由 [product-assets](../scripts/product-assets.json) 显式登记，检查会识别改名混入的原型。构建与 Docker 的输入只含产品和必要构建工具，不含 reference/stories/Storybook 输出；验证反例见 [interface](features/interface.md)。
 
+消息行按视口挂载，离屏使用测量高度占位；历史窗口换页保留位置。完整阅读器每次只解码一块及 UTF-8 边界，全文复制由明确手势触发，下载走有背压的响应流。工作区阅读器和富文本渲染分包。构建为已核验 JS/CSS 生成 Brotli/gzip；产物封存校验压缩版本解压后与原文件一致。只有内容寻址的公开静态资源可长期缓存，HTML 和私人接口保持 no-store。
+
 本次使用官方 npm 源固定 Radix UI 1.8.1、Motion 14.9.0；开发工作台使用 Storybook / React Vite 10.6.5，边界 AST 使用 Babel parser 8.1.0。准确依赖树由 lockfile 维护；新增依赖随版本变化重新审查。库负责通用交互机制，产品的视觉语义与组件契约由上述本地模块拥有。
 
 ## 消息与资源
 
 共享 schema 约束图片元数据、工具字段与引用；旧文本条目缺少这些字段时仍可读取。原文件引用只保留工作区相对路径，选择、发送及派发校验当前文件；Agent 读取时使用原文件。消息选段保存来源条目与选中文字。Workbench 不重写原操作编号；恢复中的输入仍为同一提交。
 
-图片字节作为 BLOB 与消息元数据同存 SQLite，沿用现有在线备份/恢复；不会新增个人路径或挂载。资源属于指定对话，读写均经过私有认证，写入另查来源/CSRF；公开契约只暴露资源 ID，不暴露原生路径。上传只接 PNG/JPEG/WebP，服务端核验魔数和字节：每张输入最多 2 MiB、每消息最多 4 张且合计 4 MiB；原生输出/工作区图片最多 6 MiB。库内图片总额上限 512 MiB，满额明确拒绝，不删历史腾空间。未关联上传在后续新资源写入时回收超过 7 天的项；pending 操作与历史关联的资源持续保留，移除不会删除已关联资源。
+图片字节作为 BLOB 与消息元数据同存 SQLite，沿用现有一致备份/恢复。资源属于指定对话，读写均经过私有认证，写入另查来源/CSRF；公开契约只暴露资源 ID，不暴露原生路径。上传只接 PNG/JPEG/WebP，服务端核验魔数和字节：每张输入最多 2 MiB、每消息最多 4 张且合计 4 MiB；原生输出/工作区图片最多 6 MiB。生产 Workbench 使用统一容量准入，不再用累计图片 512 MiB 作为年限上限。未关联上传在候选索引中分批清理超过 7 天的项；pending 操作与历史关联的资源持续保留，移除不会删除已关联资源。
 
 Codex 以原生 image input、DSH 以原生 image content 接图片，无需新增 Host 挂载。生成结果仅采集原生返回的图片字节或原生文件读取结果；失败显式显示。Markdown 工作区图片先验证消息来源、相对路径与非符号链接边界，再通过对应 Host 文件接口读取，按消息/来源保存首次可读快照；原文件之后移走仍能回看。它不是任意宿主文件代理。HTTPS 图片在浏览器直接请求并禁用 referrer；HTML、SVG 与可执行 URL 不通过本地资源通道。
 
 输入草稿的文本/已上传资源/引用沿用 sessionStorage；失败或中断的上传文件单独在 IndexedDB 暂存，重新加载后需明确重试。发送前必须先持久化操作编号及原提交内容；上传未完成或暂存失败不会悄悄只发文本。退出清理浏览器草稿与暂存。两端文件读取与生成能力的具体差异留在 adapter，验证入口统一归 [对话基本可用性](features/conversation-usability.md)。
 
-上述资源大小与额度仍是当前实现限制。统一容量准入、正文分块与全文阅读器尚未替代它们；已确认的范围与退出条件分别在[容量规格](spec/storage-longevity.md)和[有界阅读规格](spec/bounded-conversation-reading.md)，不能把输入上传限制直接解释为永久阅读存档上限。
+单次输入限制与永久存档容量是不同边界。[storage-capacity](../src/server/storage-capacity.ts) 实时计量主库/WAL、分批计量数据目录其他文件并检查文件系统余量。容量不足暂停新工作/上传及不能完成的回填，保留旧档和已受理任务；扩容后按余量与回差重新开放。暂存有独立预算，已发布正文版本不会因临时缓存清理而消失。Host 和独占文件写者的效果账本独立保留，不能随产品数据库回滚。承诺与退出条件见[容量规格](spec/storage-longevity.md)。
 
 技能目录从当前对话绑定的 Harness 读取。私有接口给浏览器显示信息和不透明 ID，草稿与操作保存已选技能的 ID 及文本位置。派发时 adapter 按原生清单核对并转换为本端输入。用量由 adapter 从原生事件或当前投影读取，Workbench 保存每段对话最近一次已确认的用量快照，通过原有变更流提示页面重取。复验见[技能引用](features/conversation-usability.md#u12-技能引用)与[对话用量](features/conversation-usability.md#u13-对话用量)。
 
@@ -106,17 +110,19 @@ Codex 以原生 image input、DSH 以原生 image content 接图片，无需新�
 
 Harness Adapter 提供可归因的编辑目标。工作台在写入历史或实时条目时记录对话、原生轮和工作区相对路径，转发当前历史页所涉及的清单。清单与文件内容分开读取，打开时仍走原工作区阅读器。
 
-可写工作区由操作者声明写入边界。保存期间工作台阻止相交目录的新建与原生派发，并检查相关对话的原生状态和待处理请求。文件版本由内容和文件身份共同决定，只有旧版本匹配才替换。应用协调范围之外的写入者属于实例前提，详见[文件功能地图](features/workspace-files.md)。
+可写工作区由操作者声明写入边界。[execution-store](../src/server/execution-store.ts) 持有受理、冲突组、固定冻结集合、原生基线检查点和保存许可，与工作台入队、领取同事务登记。[execution-coordinator](../src/server/execution-coordinator.ts) 驱动 online → draining → editable → resuming；[execution-workspaces](../src/server/execution-workspaces.ts) 将持久协议接入工作区。首次旧绑定检查按 keyset 分批，此后编辑只追踪未决工作。相交可写挂载的组一起冻结，原生激活入口必须经过可信许可与 gateway，包括可能恢复原生会话的状态读取。
 
-DSH 原地保存要求专用 Host 和操作者提供的维护控制器。工作台协调暂停、写入和恢复，控制器负责证明进程树已退出并保留暂停状态。恢复后工作台重新核对原生状态与绑定，再开放派发。
+两个 Harness 的原地保存要求受管专用 Host。固定受理集合排空后，控制器证明 Host 及其写者退出，才开放编辑。保存或关闭页面不解除窗口，必须显式恢复。控制意图在外部动作之前持久化，代次与 epoch 拒绝旧结果；未知状态关闭门禁，不自动取消或重发任务。
 
-当前并未实现两个 Harness 共用的持久运行组登记与编辑窗口协议。该边界的扩展由 [ADR 0011](adr/0011-managed-workspace-execution.md) 决定，[受管编辑规格](spec/managed-workspace-editing.md)覆盖规模、交错与恢复；当前部署不能仅通过打开一个配置开关就取得目标能力。
+[workspace-writer](../src/server/workspace-writer.ts) 的独立子进程是唯一受管文件写者，以单独 SQLite owner 事务持有操作系统锁，保存 intent 与结果另存持久日志。版本由文件内容和身份共同决定；替换与目录同步后才确认成功。主库未决保存跨重启恢复时，新 owner 先取得同一锁，再以旧版本和新摘要判断成功、未写入或未知，不重复不确定副作用。操作者配置稳定的独立写者目录，Host 配置摘要绑定该目录；产品库备份恢复不得回滚或替换这些 owner/Host 日志。边界取舍见 [ADR 0011](adr/0011-managed-workspace-execution.md)，当前行为和复验归[文件功能地图](features/workspace-files.md)。
+
+标题及工作区名称搜索保留任意子串语义。存储 worker 先按排序索引和 keyset 游标读取固定原始候选批次，再做匹配；`conversation-search` 与工作区 `page` 的游标指向已扫描位置，而非只指向最后命中。空批次保留 continuation，前端只持有当前结果页和有限游标。全库稀疏搜索仍是线性总工作量，但单个请求不会持有 worker 遍历终身记录；预算与复跑见[对话管理](features/conversation-management.md)和[工作区管理](features/workspace-management.md)。
 
 ## 工作区登记
 
 操作者配置可登记的目录根和原生连接。工作区登记、显示名、置顶与移除状态由 SQLite 持久化。旧配置中的登记首次导入时沿用 ID，后续启动保留已保存的状态。工作台在文件访问和原生派发前核对登记和目录身份。移除期间检查关联对话的原生状态，停用登记与操作受理互斥。恢复沿用原登记，旧对话重新验证原生绑定后接续。操作入口和复验见[工作区管理](features/workspace-management.md)。
 
-大量工作区的分页导航及稳定目录索引是[目录与导航规格](spec/workspace-directory-index.md)的目标；当前登记和真实文件身份仍是授权依据，未来可重建清单不改变这一归属。
+工作区导航、添加目录及文件选择共用服务端分页；选中但不在当前页的工作区按 ID 单独读取。[directory-index](../src/server/directory-index.ts) 和 worker 提供代次、继续游标、刷新进度与全局缓存预算；清单可重建，登记和真实文件身份仍是授权依据。规模与目录变动复验见[目录与导航规格](spec/workspace-directory-index.md)。
 
 ## 实例级插件管理
 

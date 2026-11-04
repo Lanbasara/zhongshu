@@ -1,5 +1,5 @@
 /** Product-facing semantics. Native protocol types stay inside each adapter. */
-import type { ImageAttachment, InputContent, SkillOption } from '../shared/content.ts';
+import type { BodyReferences, ImageAttachment, InputContent, SkillOption } from '../shared/content.ts';
 import type { ConversationUsage, QueueDelivery } from '../shared/workbench.ts';
 export type HarnessId = 'codex' | 'dsh';
 export type Configuration = { modelId: string; permissionId: string };
@@ -17,10 +17,21 @@ export type Binding = {
   /** Adapter-owned, JSON-serializable configuration; never credentials. */
   details: Record<string, unknown>;
 };
+/** Transient importer-owned immutable bodies; never persist or expose these tokens. */
+export type NativeBodySource = { token: string; version: string; bytes: number };
+export type NativeBodyChunk = { version: string; bytes: number; offset: number; data: Uint8Array; nextOffset: number | null };
 export type NativeItem = {
+  /** An incomplete live projection; never publish its prefix as an immutable complete body. */
+  previewOnly?: true;
+  /** Native media still needs materialization; the immutable text body remains authoritative. */
+  mediaPending?: true;
+  sourceRevision?: { generation: string; sequence: number };
   id: string;
   kind: 'user' | 'assistant' | 'tool' | 'notice';
   text: string;
+  /** Server-published immutable bodies for fields shown as bounded previews. */
+  bodies?: BodyReferences;
+  bodySources?: Partial<Record<'text' | 'input' | 'output', NativeBodySource>>;
   status: 'running' | 'completed' | 'failed';
   runId?: string;
   operationId?: string;
@@ -29,8 +40,9 @@ export type NativeItem = {
   tool?: { name: string; exitCode?: number; input?: string; output?: string };
   /** Confirmed edit targets, relative to this binding's workspace. */
   fileEdits?: string[];
+  fileEditsLimited?: true;
   /** Transient native image sources: materialized before persistence or HTTP. */
-  imageSources?: { data?: string; path?: string; mediaType?: string }[];
+  imageSources?: { data?: string; path?: string; mediaType?: string; releaseToken?: string }[];
 };
 export type NativeState = {
   status: 'idle' | 'running' | 'waiting' | 'interrupted' | 'failed' | 'unknown';
@@ -68,7 +80,7 @@ export interface HarnessAdapter {
   catalog(): Promise<Catalog>;
   skills?(binding: Binding): Promise<SkillOption[]>;
   /** Persist the identity immediately, before later model/permission setup can fail. */
-  create(input: { cwd: string; configuration: Configuration; title?: string }, onBound: (binding: Binding) => void): Promise<Binding>;
+  create(input: { cwd: string; configuration: Configuration; title?: string }, onBound: (binding: Binding) => void | Promise<void>): Promise<Binding>;
   /** A target may precede the current/latest run (for example a later native notification turn). Never infer its terminal result from that ordering. */
   state(binding: Binding, targetRunId?: string): Promise<NativeState>;
   history(binding: Binding, olderCursor?: string, limit?: number): Promise<HistoryPage>;
@@ -78,6 +90,9 @@ export interface HarnessAdapter {
   /** Wake a previously admitted item parked by a native interruption. This never submits input. */
   wakeQueued?(binding: Binding, operationId: string): Promise<void>;
   readImage?(binding: Binding, path: string): Promise<string>;
+  readBodyChunk?(binding: Binding, token: string, offset: number, maxBytes: number): Promise<NativeBodyChunk>;
+  readItems?(binding: Binding, itemIds: string[]): Promise<NativeItem[]>;
+  releaseBodySource?(binding: Binding, token: string): Promise<void>;
   reconcile(binding: Binding, operationId: string): Promise<Receipt>;
   stop(binding: Binding, runId: string): Promise<Receipt>;
   /** Changes are hints/live items; history and state are re-read on reconnect. */

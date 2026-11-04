@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
+import { gzipSync } from 'node:zlib';
 import { checkSources, checkPublic } from '../scripts/design-boundaries.ts';
 
 function fixture() {
@@ -68,4 +69,25 @@ test('release seal rejects injected files and verification detects post-build mo
     mkdirSync(join(root,'node_modules/storybook'),{recursive:true});
     assert.notEqual(run('--image').status,0);
   } finally { rmSync(root,{recursive:true,force:true}); }
+});
+
+test('release seal verifies compressed variants against the checked original bytes', () => {
+  const root = fixture(); const checker = resolve('scripts/check-release.mjs');
+  const run = () => spawnSync(process.execPath, [checker, '--seal'], { cwd: root, encoding: 'utf8' });
+  const hash = (value: string | Buffer) => createHash('sha256').update(value).digest('hex');
+  try {
+    mkdirSync(join(root, 'dist/public/assets'));
+    const source = '/* synthetic checked source */'; const compressed = gzipSync(source);
+    writeFileSync(join(root, 'dist/public/assets/index-test.js'), source);
+    writeFileSync(join(root, 'dist/public/assets/index-test.js.gz'), compressed);
+    writeFileSync(join(root, 'dist/version.json'), '{}');
+    const web: Record<string, string> = { 'public/assets/index-test.js': hash(source), 'public/assets/index-test.js.gz': hash(compressed) };
+    writeFileSync(join(root, 'dist/web-inventory.json'), JSON.stringify(web));
+    assert.equal(run().status, 0);
+    const injected = gzipSync('/* different unchecked payload */');
+    writeFileSync(join(root, 'dist/public/assets/index-test.js.gz'), injected);
+    web['public/assets/index-test.js.gz'] = hash(injected);
+    writeFileSync(join(root, 'dist/web-inventory.json'), JSON.stringify(web));
+    assert.notEqual(run().status, 0);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

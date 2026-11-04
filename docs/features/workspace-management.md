@@ -2,7 +2,7 @@
 
 ## Sub-features
 
-W01 选择已有目录或新建空目录并添加。W02 改显示名、置顶、取消置顶与工作区搜索。W03 移除及历史回看。W04 恢复原登记和原对话。
+W01 选择已有目录或新建空目录并添加。W02 改显示名、置顶、取消置顶与工作区搜索。W03 移除及历史回看。W04 恢复原登记和原对话。W05 大量工作区及目录分页。
 
 ## How to get to it (user POV)
 
@@ -18,6 +18,7 @@ W01 选择已有目录或新建空目录并添加。W02 改显示名、置顶、
 | W02 | 搜索空工作区的目录名，改显示名并验证两个词都能找到它。置顶后检查排序，另一独立浏览器上下文重新打开后核对，取消置顶后再查。使用旧配置和数据库启动两次时检查登记数量及原对话归属。 |
 | W03 | 创建对话并发送，运行期间尝试移除，应保留入口。待回复结束并可发送后，从管理对话框确认移除工作区，检查常用列表、新对话和文件选择器。展开已移除工作区，打开原对话并回看已保存的消息和附件。重启应用，读回磁盘合成文件并再次回看。以已登录、持有有效 CSRF 的旧页直接请求旧对话发送和原文件入口，应拒绝且没有新派发。在两个页面交错发送与移除，核对已受理的任务仍可处理。fixture 可按[执行地图](execution.md)制造未知回执。 |
 | W04 | 从「已移除的工作区」恢复，打开同一对话并继续一轮。真实 Codex、DSH 分别核对 Harness 原生身份和文件结果。另在自有合成目录移除后移走原目录，尝试恢复，再在同路径新建目录并重试，两次均应给出失败提示，旧会话仍可回看。 |
+| W05 | 用 [R07 规模 fixture](continuity.md#r07完整正文与复杂内容)准备 300 个工作区和 10,000 个文件。侧栏翻过第一页，搜索尚未翻到的 `Performance 0299`；观察空批次自动推进、已检查数量和暂停/继续，直至找到目标或游标结束，从“新对话”和“工作区文件”选择器分别选择该工作区，核对所属 ID。回到 Fixture A，在文件选择与阅读器中从首项分页到末项，独立核对所有预生成文件名且无重复。目录正在扫描、刷新、跨页后被增删或替换、旧游标失效各记录实际提示，不将扫描未结束的空页当完整目录。窄视口重跑选择、翻页、打开和返回。 |
 
 直接请求的反例在已登录页面同源执行。以下路径均以 `/api/private/workbench` 为前缀，POST 使用 JSON，并从当前 `/api/session` 响应取 `csrfToken` 放入 `X-CSRF-Token`，证据只保留状态码和错误码。W01 对 `/workspace-directories` 和 `/workspaces` 提交 `{rootId: 'fixture-root', path: ['..']}`，应返回 400。把路径改成指向自有根目录外的合成符号链接，应返回 409。W03 在移除前记录工作区 ID 和对话地址中的 ID。移除后 GET `/workspaces/<workspaceId>/file?path=notes.md`，再 POST `/conversations/<conversationId>/operations`，提交 `{id: crypto.randomUUID(), type: 'message', payload: {text: '移除后不得派发'}}`。两项应返回 409 和 `workspace_removed`。
 
@@ -26,7 +27,10 @@ W01 选择已有目录或新建空目录并添加。W02 改显示名、置顶、
 - 浏览器选择的是当前实例目录。文件系统必须提供稳定的目录身份，两个原生 Host 需要看到同一个实际目录。
 - 移除期间继续保留磁盘文件与已保存历史。历史里的原文件链接和已经保存的附件有不同的可用性。
 - 已移除的登记不作为 Harness 的文件系统隔离边界。原目录身份的核对与原生绑定核对分别进行。
+- 目录页属于明确清单代次。刷新完成前旧代次可继续读，过期游标要求重开第一页；清单不是文件系统快照，真正打开或保存仍重新核对路径与文件身份。
 
 ## Implementation and regression
 
-[登记与目录边界](../../src/server/workspace-registry.ts)、[工作台状态和派发](../../src/server/workbench.ts)、[浏览器管理入口](../../src/web/workspace-management.tsx)。定向回归入口为 `node --test test/workbench-http.test.ts`。
+[登记与目录边界](../../src/server/workspace-registry.ts)、[目录索引](../../src/server/directory-index.ts)、[工作台状态和派发](../../src/server/workbench.ts)、[浏览器管理入口](../../src/web/workspace-management.tsx)、[工作区分页](../../src/web/workspace-selection.tsx)。定向回归入口为 `node --test test/workbench-http.test.ts test/directory-index.test.ts`。
+
+工作区名称任意子串搜索每次先按置顶、名称和 ID 索引读最多 256 条原始登记（另取 1 条判断后续），再做 SQLite LIKE 字面匹配。每页仍最多显示 50 个工作区，零命中且 `nextCursor` 非空代表尚未查完；管理页、新对话和文件工作区选择器自动继续空批次，显示已检查数量；可暂停并从已确认位置继续。更换搜索词会取消旧请求，结果始终只保留一页。改名、置顶和移除仍使旧代次游标失效。10k/100k 元数据实验与 SQLite 实际匹配次数复跑见[对话管理](conversation-management.md)，文件目录的清单分页另见[工作区文件](workspace-files.md)。

@@ -19,7 +19,7 @@ export function directoryIdentity(info: BigIntStats): string | null {
 }
 
 // On Linux each lookup is relative to an open directory, even if an Agent renames it.
-async function withWorkspaceDirectory<T>(root: string, parts: string[], action: (directory: string) => Promise<T>, identity?: string): Promise<T> {
+export async function withWorkspaceDirectory<T>(root: string, parts: string[], action: (directory: string) => Promise<T>, identity?: string): Promise<T> {
   async function walk(path: string, index: number): Promise<T> {
     const handle = await open(path, directoryFlags);
     try {
@@ -136,12 +136,18 @@ export function listWorkspaceDocuments(root: string, path: string, identity?: st
     let scanned = 0;
     for await (const entry of await opendir(directory)) {
       if (++scanned > 2000 || entries.length >= 200) break;
-      if (entry.name.startsWith('.') || (!entry.isDirectory() && !entry.isFile())) continue;
-      const relative = path ? path + '/' + entry.name : entry.name;
-      if (!workspaceDocumentPath.safeParse(relative).success) continue;
-      entries.push({ name: entry.name, path: relative, directory: entry.isDirectory(),
-        supported: entry.isDirectory() || formats.has(extname(entry.name).toLowerCase()) });
+      const document = workspaceDocumentEntry(path, entry.name, { directory: entry.isDirectory(), file: entry.isFile() });
+      if (document) entries.push(document);
     }
     return entries.sort((a, b) => Number(b.directory) - Number(a.directory) || a.name.localeCompare(b.name));
   }, identity);
+}
+
+/** Shared visibility policy; discovery never grants permission to open or save. */
+export function workspaceDocumentEntry(path: string, name: string, type: { directory: boolean; file: boolean }) {
+  if (name.startsWith('.') || (!type.directory && !type.file)) return null;
+  const relative = path ? path + '/' + name : name;
+  if (!workspaceDocumentPath.safeParse(relative).success) return null;
+  return { name, path: relative, directory: type.directory,
+    supported: type.directory || formats.has(extname(name).toLowerCase()) };
 }

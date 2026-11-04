@@ -13,7 +13,10 @@ WORKDIR /app
 ARG REVISION=development
 LABEL org.opencontainers.image.revision=$REVISION
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund && mkdir /data && chown 10001:10001 /data && chmod 700 /data
+# The gateway requires util-linux's regular, root-owned flock executable.
+# Alpine's default BusyBox symlink deliberately fails the ownership boundary.
+RUN apk add --no-cache flock=2.42.3-r1 && test -f /usr/bin/flock && test ! -L /usr/bin/flock \
+    && npm ci --omit=dev --ignore-scripts --no-audit --no-fund && mkdir /data && chown 10001:10001 /data && chmod 700 /data
 COPY --from=build /app/dist ./dist
 RUN --mount=from=build,source=/app/scripts/check-release.mjs,target=/tmp/check-release.mjs,ro node /tmp/check-release.mjs --image
 ENV NODE_ENV=production HOST=0.0.0.0 PORT=3000 ZHONGSHU_DATA_DIR=/data ZHONGSHU_ORIGIN=https://localhost

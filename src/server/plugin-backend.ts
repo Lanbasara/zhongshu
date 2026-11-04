@@ -14,7 +14,8 @@ export interface PluginBackend {
   catalog?(): Promise<{ entries: PluginEntry[]; sources: PluginSource[] }>;
   detail?(id: string): Promise<PluginEntry | null>;
   sources?(): Promise<PluginSource[]>;
-  updateSource?(command: PluginSourceCommand): Promise<void>;
+  updateSource?(command: PluginSourceCommand, requestId?: string): Promise<void>;
+  recoverSource?(command: PluginSourceCommand, requestId: string): Promise<'applied' | 'failed' | 'unknown'>;
   close?(): Promise<void>;
 }
 

@@ -1,9 +1,15 @@
 import { createHash } from 'node:crypto';
 import type { DatabaseSync, StatementSync } from 'node:sqlite';
 import { z } from 'zod';
+import { conversationPageInput, scanConversationIds, type ConversationSearch } from './conversation-search.ts';
+import { createExecutionAdmissionHooks } from './execution-store.ts';
 import { conversationTitleSchema, identifierSchema, messagePayload, queueCommandSchema, queueDeliverySchema, queueLimit, queuePauseSchema, skillRequiresNextTurn, stateSchema, turnFileLimit, usageSchema, workspaceLimit } from '../shared/workbench.ts';
-import type { ConversationUsage, QueueCommand, QueueDelivery, QueuePause, QueueView, TurnFileSummary } from '../shared/workbench.ts';
-import { contentFields, inputFields, recordedFilePath, toolSchema, validSkillSpans, type InputContent } from '../shared/content.ts';
+import type { ConversationUsage, QueueCommand, QueueDelivery, QueuePause, QueueView, QueueSummary, TurnFileSummary, TurnFilePage, WorkbenchOperation } from '../shared/workbench.ts';
+import { bodyReferencesSchema, contentFields, inputFields, recordedFilePath, toolSchema, validSkillSpans, type InputContent } from '../shared/content.ts';
+import { createBodyStore, projectBodyPreview } from './body-store.ts';
+import { createCapacityGuard, type CapacityOptions, type StorageCapacity } from './storage-capacity.ts';
+import { createOperationPayloadStore } from './operation-payload-store.ts';
+import { activeHistoryOrder, advanceHistoryRebuild, allocateHistoryPositions, requestHistoryRebuild } from './history-order.ts';
 import { createResourceStore } from './resources.ts';
 import type { Binding, Configuration, HarnessId, NativeItem, NativeState, Receipt } from '../harness/types.ts';
 
@@ -34,9 +40,15 @@ export type HistorySnapshot = {
   historyLoaded: boolean; nativeOlderCursor: string | null; nativeOlderBeforeItemId: string | null;
 };
 export type ListOperations = { conversationId?: string; status?: OperationStatus; type?: 'message' | 'stop'; order?: 'asc' | 'desc'; afterId?: string; limit?: number };
+export type ArchiveJob = {
+  conversationId: string; kind: 'latest' | 'backfill'; bindingId: string; epoch: number;
+  cursor: string | null; anchorId: string | null; pages: number; complete: boolean;
+  nextAt: number; lastSuccessAt: number | null; error: string | null; failures: number;
+  scanGeneration: number; targetId: string | null; targetSeen: boolean; coverageError: string | null;
+  refreshAfter: string | null; working: boolean;
+};
 type ConversationList = {
   beforeId?: string; limit?: number; workspaceId?: string; archived?: boolean;
-  title?: string; excludeWorkspaces?: string[];
 };
 type StoredQueue = Omit<QueueView, 'mode'> & { afterRunId: string | null };
 export interface WorkbenchStore {
@@ -44,8 +56,10 @@ export interface WorkbenchStore {
   createConversation(input: CreateConversation): { conversation: Conversation; created: boolean };
   getConversation(id: string): Conversation | null;
   listConversations(options?: ConversationList): Conversation[];
+  searchConversations(options?: ConversationSearch): { entries: Conversation[]; beforeId: string | null; scanned: number; scanLimited: boolean };
   renameConversation(id: string, title: string): Conversation;
   setArchived(id: string, archived: boolean, canArchive: (conversation: Conversation) => boolean): Conversation;
+  setArchivedChecked(id: string, archived: boolean, expected: Pick<Conversation, 'state' | 'readiness' | 'binding'>): Conversation;
   saveBinding(id: string, binding: Binding): Conversation;
   setConversationState(id: string, change: { readiness?: Readiness; state?: NativeState; error?: string | null }): Conversation;
   setUsage(id: string, value: ConversationUsage): void;
@@ -53,10 +67,14 @@ export interface WorkbenchStore {
   enqueueOperation(input: OperationInput): { operation: Operation; created: boolean };
   getOperation(id: string): Operation | null;
   listOperations(options?: ListOperations): Operation[];
+  readOperationViews(conversationId: string): WorkbenchOperation[];
+  operationState(conversationId: string): { unresolved: boolean; latestAcceptedMessage: { id: string; runId: string | null } | null };
   claimOperation(id: string): Operation | null;
   settleOperation(id: string, receipt: Receipt): Operation;
   recoverDispatching(): number;
   readQueue(id: string): StoredQueue;
+  readQueueSummary(id: string): Omit<QueueSummary, 'mode'>;
+  readQueueEntry(id: string, entryId: string, version: number): QueueView['entries'][number];
   queuedConversations(after: string): string[];
   queueAdmissionExists(id: string, entryId: string, content: InputContent): boolean;
   changeQueue(id: string, command: Exclude<QueueCommand, { action: 'send' }>): void;
@@ -70,7 +88,26 @@ export interface WorkbenchStore {
   hasHistoryItem(conversationId: string, itemId: string): boolean;
   operationRunId(conversationId: string, operationId: string): string | null;
   readHistory(conversationId: string, options?: { beforeItemId?: string; limit?: number }): HistorySnapshot;
-  readTurnFiles(conversationId: string, runIds: readonly string[]): TurnFileSummary[];
+  readTurnFiles(conversationId: string, runIds: readonly string[], summaryOnly?: boolean): TurnFileSummary[];
+  readTurnFilesPage(conversationId: string, runId: string, afterPath?: string): TurnFilePage;
+  archiveJobs(conversationId: string): ArchiveJob[];
+  dueArchiveJobs(limit?: number): ArchiveJob[];
+  claimArchiveJob(conversationId: string, kind: ArchiveJob['kind'], force?: boolean): ArchiveJob | null;
+  commitArchivePage(job: ArchiveJob, items: NativeItem[], olderCursor: string | null): boolean;
+  failArchiveJob(job: ArchiveJob, reason: string): void;
+  yieldArchiveJob(job: ArchiveJob): void;
+  restartArchiveJob(job: ArchiveJob, reason: string): void;
+  advanceArchiveMaintenance(): boolean;
+  advanceStorageMaintenance(): boolean;
+  pendingArchiveItems(conversationId: string, after: string | null): string[];
+  refreshArchiveItems(job: ArchiveJob, items: NativeItem[], requested: string[]): void;
+  readBody: ReturnType<typeof createBodyStore>['read'];
+  beginBodyStage: ReturnType<typeof createBodyStore>['begin'];
+  stageBodyChunk: ReturnType<typeof createBodyStore>['append'];
+  finishBodyStage: ReturnType<typeof createBodyStore>['finish'];
+  validateBodyStage: ReturnType<typeof createBodyStore>['validate'];
+  capacity(): StorageCapacity;
+  advanceHistoryIndex(): boolean;
 }
 
 export class StoreError extends Error {
@@ -79,11 +116,8 @@ export class StoreError extends Error {
   constructor(code: string, statusCode = 500) { super(code); this.name = 'StoreError'; this.code = code; this.statusCode = statusCode; }
 }
 
-const MAX_ITEMS = 50_000;
 const MAX_LIVE_ITEMS = 100;
 const MAX_TEXT_BYTES = 1_048_576;
-const POSITION_STEP = 1024;
-const POSITION_BOUND = Math.floor(Number.MAX_SAFE_INTEGER / 2);
 const boundedText = (bytes: number) => z.string().max(bytes).refine(value => Buffer.byteLength(value, 'utf8') <= bytes);
 const identifier = boundedText(1024).min(1).refine(value => !value.includes('\0'));
 const uuid = z.uuid();
@@ -92,9 +126,13 @@ const nativeStateSchema = stateSchema;
 const itemSchema = z.object({
   id: identifier, kind: z.enum(['user', 'assistant', 'tool', 'notice']), text: boundedText(MAX_TEXT_BYTES),
   status: z.enum(['running', 'completed', 'failed']), runId: identifier.optional(), operationId: identifier.optional(),
+  bodies: bodyReferencesSchema.optional(),
+  previewOnly: z.literal(true).optional(),
+  mediaPending: z.literal(true).optional(),
+  sourceRevision: z.object({ generation: boundedText(256).min(1), sequence: z.number().int().nonnegative().safe() }).strict().optional(),
   ...contentFields, tool: toolSchema.optional(),
 }).strict();
-const nativeItemSchema = itemSchema.extend({ fileEdits: z.array(recordedFilePath).max(400).optional() });
+const nativeItemSchema = itemSchema.extend({ text: boundedText(64 * 1024 * 1024), fileEdits: z.array(recordedFilePath).max(400).optional(), fileEditsLimited: z.literal(true).optional() });
 const bindingSchema = z.object({
   id: identifier, cwd: boundedText(4096).min(1), configuration: configurationSchema, details: z.record(z.string(), z.unknown()),
 }).strict();
@@ -115,7 +153,6 @@ const receiptSchema = z.discriminatedUnion('outcome', [
 ]);
 
 type Row = Record<string, string | number | bigint | Uint8Array | null>;
-type PositionedId = { id: string; position: number };
 function parse<T>(schema: z.ZodType<T>, input: unknown, code = 'invalid_workbench_input'): T {
   const parsed = schema.safeParse(input);
   if (!parsed.success) throw new StoreError(code, 400);
@@ -164,6 +201,24 @@ function itemFromRow(row: Row): NativeItem {
     ...(row.run_id === null ? {} : { runId: row.run_id }), ...(row.operation_id === null ? {} : { operationId: row.operation_id }),
   }, 'corrupt_workbench_data');
 }
+/** Native sequence comparisons are valid only within the same immutable source.
+ * A tool result may be encountered before its call during reverse pagination;
+ * older immutable input can fill a missing field without reverting the result.
+ */
+function mergeNativeRevision(previous: NativeItem | null, incoming: NativeItem): NativeItem {
+  if (!previous?.sourceRevision) return incoming;
+  if (previous.status === 'running' && incoming.previewOnly && !incoming.sourceRevision) return incoming;
+  if (!incoming.sourceRevision || previous.sourceRevision.generation !== incoming.sourceRevision.generation) return previous;
+  const mediaRepair = previous.sourceRevision.sequence === incoming.sourceRevision.sequence && previous.mediaPending && !incoming.mediaPending;
+  const newer = previous.sourceRevision.sequence >= incoming.sourceRevision.sequence && !mediaRepair ? previous : incoming;
+  const older = newer === previous ? incoming : previous;
+  if (!newer.tool || !older.tool) return newer;
+  const needsInput = newer.tool.input === undefined && !newer.bodies?.input;
+  return { ...newer, tool: { ...newer.tool,
+    ...(newer.tool.name === '工具执行' ? { name: older.tool.name } : {}),
+    ...(needsInput && older.tool.input !== undefined ? { input: older.tool.input } : {}),
+  }, ...(needsInput && older.bodies?.input ? { bodies: { ...newer.bodies, input: older.bodies.input } } : {}) };
+}
 function conversationFromRow(row: Row): Conversation {
   return {
     id: String(row.id), harnessId: parse(z.enum(['codex', 'dsh']), row.harness_id, 'corrupt_workbench_data'),
@@ -176,8 +231,8 @@ function conversationFromRow(row: Row): Conversation {
     nativeOlderBeforeItemId: row.native_older_before_item_id === null ? null : String(row.native_older_before_item_id),
   };
 }
-function operationFromRow(row: Row): Operation {
-  const payload = parseJson(z.unknown(), row.payload_json);
+function operationFromRow(row: Row, payloadJson: string): Operation {
+  const payload = parseJson(z.unknown(), payloadJson);
   const stored = z.object({ queueRecord: z.literal(true), content: z.unknown(), queuedInput: z.unknown() }).strict().safeParse(payload);
   const input = parse(operationInputSchema, { id: row.id, conversationId: row.conversation_id, type: row.type,
     ...(stored.success ? { payload: stored.data.content, queuedInput: stored.data.queuedInput } : { payload }) }, 'corrupt_workbench_data');
@@ -186,18 +241,33 @@ function operationFromRow(row: Row): Operation {
     createdAt: Number(row.created_at), updatedAt: Number(row.updated_at) };
 }
 
+function archiveJobFromRow(row: Row): ArchiveJob {
+  return { conversationId: String(row.conversation_id), kind: row.kind as ArchiveJob['kind'], bindingId: String(row.binding_id),
+    epoch: Number(row.epoch), cursor: row.cursor === null ? null : String(row.cursor), anchorId: row.anchor_id === null ? null : String(row.anchor_id),
+    pages: Number(row.pages), complete: row.complete === 1, nextAt: Number(row.next_at), lastSuccessAt: row.last_success_at === null ? null : Number(row.last_success_at),
+    error: row.error === null ? null : String(row.error), failures: Number(row.failures),
+    scanGeneration: Number(row.scan_generation), targetId: row.target_id === null ? null : String(row.target_id),
+    targetSeen: row.target_seen === 1, coverageError: row.coverage_error === null ? null : String(row.coverage_error), refreshAfter: row.refresh_after == null ? null : String(row.refresh_after), working: row.working === 1 };
+}
+
 /** Local durable facts; this module never calls a native Harness or retries an operation. */
-export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => number; onChange?: (event: WorkbenchChange) => void } = {}): WorkbenchStore {
+export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => number; onChange?: (event: WorkbenchChange) => void; capacity?: CapacityOptions } = {}): WorkbenchStore {
   const now = options.now ?? Date.now;
+  const capacity = createCapacityGuard(db, options.capacity);
+  const execution = db.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='execution_groups'").get() ? createExecutionAdmissionHooks(db) : undefined;
   const version = (): number => Number(db.prepare('SELECT COALESCE(MAX(sequence),0) AS version FROM workbench_changes').get()!.version);
+  let nestedChange: ((conversationId: string, itemId?: string) => void) | undefined;
   const mutate = <T>(action: (changed: (conversationId: string, itemId?: string) => void) => T): T => {
+    if (nestedChange) return action(nestedChange);
     const events: WorkbenchChange[] = [];
     const value = transaction(db, () => {
       const changed = new Map<string, string | undefined>();
-      const result = action((id, itemId) => {
+      nestedChange = (id, itemId) => {
         if (!changed.has(id)) changed.set(id, itemId);
         else if (changed.get(id) !== itemId) changed.set(id, undefined);
-      });
+      };
+      let result: T;
+      try { result = action(nestedChange); } finally { nestedChange = undefined; }
       const insert = db.prepare('INSERT INTO workbench_changes(conversation_id,item_id,created_at) VALUES(?,?,?)');
       for (const [conversationId, itemId] of changed) {
         const row = insert.run(conversationId, itemId ?? null, now());
@@ -210,6 +280,10 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
     return value;
   };
   const conversationRow = (id: string) => db.prepare('SELECT * FROM workbench_conversations WHERE id = ?').get(id);
+  const hasArchiveTables = Boolean(db.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='workbench_archive_jobs'").get());
+  const bodies = db.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='workbench_bodies'").get() ? createBodyStore(db, { transientBytes: options.capacity?.transientBytes }) : undefined;
+  const operationPayloads = createOperationPayloadStore(db);
+  const readOperation = (row: Row) => operationFromRow(row, operationPayloads.read(String(row.id), String(row.payload_json)));
   const removedWorkspace = db.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='workbench_workspaces'").get() ?
     db.prepare('SELECT 1 FROM workbench_workspaces WHERE id=? AND removed=1') : undefined;
   const assertWorkspaceActive = (id: string) => {
@@ -220,7 +294,7 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
   };
   const operationRow = (id: string) => db.prepare('SELECT * FROM workbench_operations WHERE id = ?').get(id);
   const requireOperation = (id: string): Operation => {
-    const row = operationRow(id); if (!row) throw new StoreError('operation_not_found', 404); return operationFromRow(row);
+    const row = operationRow(id); if (!row) throw new StoreError('operation_not_found', 404); return readOperation(row);
   };
   const upsertItem = db.prepare(`INSERT INTO workbench_items(conversation_id,id,position,kind,text,status,run_id,operation_id,metadata_json)
     VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(conversation_id,id) DO UPDATE SET kind=excluded.kind,text=excluded.text,
@@ -232,20 +306,24 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
   let insertTurnFile: StatementSync | undefined;
   let countTurnFiles: StatementSync | undefined;
   let selectTurnFiles: StatementSync | undefined;
+  const limitedTurnFiles = db.prepare("SELECT 1 FROM sqlite_schema WHERE name='workbench_turn_files_limited'").get()
+    ? db.prepare('SELECT 1 FROM workbench_turn_files_limited WHERE conversation_id=? AND run_id=?') : undefined;
   function recordTurnFiles(conversationId: string, item: NativeItem): boolean {
-    if (item.kind !== 'tool' || item.status !== 'completed' || !item.runId || !item.fileEdits?.length) return false;
+    if (item.kind !== 'tool' || item.status !== 'completed' || !item.runId || !item.fileEdits?.length && !item.fileEditsLimited) return false;
+    const marked = item.fileEditsLimited && limitedTurnFiles
+      ? Number(db.prepare('INSERT OR IGNORE INTO workbench_turn_files_limited VALUES(?,?)').run(conversationId, item.runId).changes) : 0;
     insertTurnFile ??= db.prepare('INSERT OR IGNORE INTO workbench_turn_files(conversation_id,run_id,path) VALUES(?,?,?)');
     countTurnFiles ??= db.prepare('SELECT COUNT(*) AS count FROM workbench_turn_files WHERE conversation_id=? AND run_id=?');
     // Keep one extra distinct target to signal truncation, without growing the per-turn index further.
     let count = Number(countTurnFiles.get(conversationId, item.runId)!.count);
     const before = count;
-    for (const path of item.fileEdits) {
+    for (const path of item.fileEdits ?? []) {
       if (count > turnFileLimit) break;
       count += Number(insertTurnFile.run(conversationId, item.runId, path).changes);
     }
-    return count !== before;
+    return count !== before || marked > 0;
   }
-  const resources = createResourceStore(db);
+  const resources = createResourceStore(db, capacity.assertWritable);
   const queueRow = (id: string) => db.prepare('SELECT * FROM workbench_queues WHERE conversation_id=?').get(id);
   const hasQueue = (id: string) => !!db.prepare('SELECT 1 FROM workbench_queue_entries WHERE conversation_id=? AND content_json IS NOT NULL LIMIT 1').get(id);
   const bumpQueue = (id: string) => db.prepare('UPDATE workbench_queues SET version=version+1 WHERE conversation_id=?').run(id);
@@ -276,9 +354,37 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
       throw new StoreError('queue_entry_changed', 409);
     return row;
   };
-  const metadata = (item: NativeItem) => JSON.stringify({ ...(item.images?.length ? { images: item.images } : {}), ...(item.references?.length ? { references: item.references } : {}), ...(item.tool ? { tool: item.tool } : {}) });
+  const metadata = (item: NativeItem) => JSON.stringify({ ...(item.images?.length ? { images: item.images } : {}), ...(item.references?.length ? { references: item.references } : {}), ...(item.tool ? { tool: item.tool } : {}), ...(item.bodies ? { bodies: item.bodies } : {}), ...(item.previewOnly ? { previewOnly: true } : {}), ...(item.mediaPending ? { mediaPending: true } : {}), ...(item.sourceRevision ? { sourceRevision: item.sourceRevision } : {}) });
+  const preserveLegacy = (conversationId: string, itemId: string) => {
+    if (!bodies) return;
+    const canonical = db.prepare('SELECT * FROM workbench_items WHERE conversation_id=? AND id=?').get(conversationId, itemId);
+    const live = db.prepare('SELECT * FROM workbench_live_items WHERE conversation_id=? AND id=?').get(conversationId, itemId);
+    for (const [row, statement] of [[canonical, 'UPDATE workbench_items SET text=?,metadata_json=? WHERE conversation_id=? AND id=?'],
+      [live, 'UPDATE workbench_live_items SET text=?,metadata_json=? WHERE conversation_id=? AND id=?']] as const) {
+      if (!row) continue;
+      const raw = itemFromRow(row);
+      const projected = projectBodyPreview(raw);
+      if (raw.text === projected.text && raw.tool?.input === projected.tool?.input && raw.tool?.output === projected.tool?.output && raw.references === projected.references) continue;
+      capacity.assertWritable('archive', Buffer.byteLength(raw.text) + 4096);
+      const preview = bodies.publish(conversationId, raw);
+      bodies.confirmPublication(conversationId, preview);
+      db.prepare(statement).run(preview.text, metadata(preview), conversationId, itemId);
+    }
+  };
   const store: WorkbenchStore = {
     resources,
+    capacity: capacity.status,
+    advanceStorageMaintenance() {
+      // Collection releases space and must remain available after the admission
+      // fence closes. Each command has independent row/byte bounds.
+      capacity.status();
+      return transaction(db, () => {
+        const body = bodies?.maintenance() ?? false;
+        const resource = resources.maintenance();
+        const operation = operationPayloads.maintenance();
+        return body || resource || operation || capacity.pending();
+      });
+    },
     createConversation(value) {
       const input = parse(createConversationSchema, value);
       const creationDigest = digest([input.harnessId, input.workspaceId, input.cwd, input.configuration.modelId, input.configuration.permissionId]);
@@ -289,8 +395,8 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
           return { conversation: conversationFromRow(existing), created: false };
         }
         assertWorkspaceActive(input.workspaceId);
-        const count = Number(db.prepare('SELECT COUNT(*) AS count FROM workbench_conversations').get()!.count);
-        if (count >= 10_000) throw new StoreError('conversation_capacity_reached', 409);
+        execution?.assertWorkspaceAdmission(input.workspaceId);
+        capacity.assertWritable('admission', 8192);
         const initial: NativeState = { status: 'unknown', pendingInputs: 0, configurationVerified: false };
         db.prepare(`INSERT INTO workbench_conversations(id,harness_id,workspace_id,cwd,title,configuration_json,creation_digest,
           readiness,state_json,created_at) VALUES(?,?,?,?,?,?,?,'preparing',?,?)`).run(input.id, input.harnessId, input.workspaceId,
@@ -304,37 +410,18 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
       const input = parse(z.object({
         beforeId: uuid.optional(), limit: z.number().int().min(1).max(1000).default(100),
         workspaceId: identifierSchema.optional(), archived: z.boolean().optional(),
-        title: z.string().max(200).optional(), excludeWorkspaces: z.array(identifierSchema).max(workspaceLimit).optional(),
       }).strict(), value);
       return storage(() => {
         const before = input.beforeId ? requireConversation(input.beforeId) : null;
-        const cursor = [before?.createdAt ?? 9223372036854775807n, before?.id ?? ''] as const;
-        const title = input.title ?? '';
-        const exclusions = JSON.stringify(input.excludeWorkspaces ?? []);
-        const rows = input.workspaceId !== undefined && input.archived !== undefined
-          ? db.prepare(`
-              SELECT * FROM workbench_conversations
-              WHERE workspace_id = ? AND archived = ? AND (created_at,id) < (?,?)
-                AND workspace_id NOT IN (SELECT value FROM json_each(?))
-                AND instr(lower(title), lower(?)) > 0
-              ORDER BY created_at DESC,id DESC LIMIT ?
-            `).all(input.workspaceId, Number(input.archived), ...cursor, exclusions, title, input.limit)
-          : input.archived !== undefined && input.workspaceId === undefined
-            ? db.prepare(`
-                SELECT * FROM workbench_conversations
-                WHERE archived = ? AND (created_at,id) < (?,?)
-                  AND workspace_id NOT IN (SELECT value FROM json_each(?))
-                  AND instr(lower(title), lower(?)) > 0
-                ORDER BY created_at DESC,id DESC LIMIT ?
-              `).all(Number(input.archived), ...cursor, exclusions, title, input.limit)
-            : db.prepare(`
-                SELECT * FROM workbench_conversations
-                WHERE (created_at,id) < (?,?) AND (? IS NULL OR workspace_id = ?)
-                  AND workspace_id NOT IN (SELECT value FROM json_each(?))
-                  AND instr(lower(title), lower(?)) > 0
-                ORDER BY created_at DESC,id DESC LIMIT ?
-              `).all(...cursor, input.workspaceId ?? null, input.workspaceId ?? null, exclusions, title, input.limit);
-        return rows.map(conversationFromRow);
+        return scanConversationIds(db, input, before, input.limit).ids.map(requireConversation);
+      });
+    },
+    searchConversations(value = {}) {
+      const input = parse(conversationPageInput, value);
+      return storage(() => {
+        const before = input.beforeId ? requireConversation(input.beforeId) : null;
+        const { ids, ...page } = scanConversationIds(db, input, before);
+        return { ...page, entries: ids.map(requireConversation) };
       });
     },
     renameConversation(id, value) {
@@ -360,6 +447,17 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
         return requireConversation(id);
       });
     },
+    setArchivedChecked(id, archived, expected) {
+      return store.setArchived(id, archived, current => {
+        if (current.readiness !== expected.readiness || JSON.stringify(current.state) !== JSON.stringify(expected.state) ||
+          JSON.stringify(current.binding) !== JSON.stringify(expected.binding)) return false;
+        if (!current.binding) return current.readiness === 'blocked' && current.state.pendingInputs === 0 && !['running', 'waiting'].includes(current.state.status);
+        if (current.readiness !== 'ready' || !current.state.configurationVerified || current.state.pendingInputs ||
+          !['idle', 'interrupted', 'failed'].includes(current.state.status) || hasQueue(id) || unsettledOperation(id)) return false;
+        const previous = store.listOperations({ conversationId: id, status: 'accepted', type: 'message', order: 'desc', limit: 1 })[0];
+        return !previous || previous.runId !== null && (previous.runId === current.state.runId || previous.runId === current.state.terminalRunId);
+      });
+    },
     saveBinding(id, value) {
       parse(uuid, id); const binding = parse(bindingSchema, value); const json = bindingJson(binding);
       return mutate(changed => {
@@ -369,6 +467,7 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
         if (conversation.binding && conversation.binding.id !== binding.id) throw new StoreError('native_binding_conflict', 409);
         if (conversation.binding && bindingJson(conversation.binding) === json) return conversation;
         db.prepare('UPDATE workbench_conversations SET binding_json = ? WHERE id = ?').run(json, id);
+        if (hasArchiveTables) for (const kind of ['latest', 'backfill']) db.prepare('INSERT OR IGNORE INTO workbench_archive_jobs(conversation_id,kind,binding_id) VALUES(?,?,?)').run(id, kind, binding.id);
         changed(id);
         return requireConversation(id);
       });
@@ -424,24 +523,24 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
       return mutate(changed => {
         const existing = operationRow(input.id);
         if (existing) {
-          if (existing.digest !== contentDigest) throw new StoreError('operation_id_conflict', 409);
-          return { operation: operationFromRow(existing), created: false };
+          if (existing.digest !== contentDigest || JSON.stringify(readOperation(existing).payload) !== JSON.stringify(input.payload)) throw new StoreError('operation_id_conflict', 409);
+          return { operation: readOperation(existing), created: false };
         }
         const conversation = requireConversation(input.conversationId);
         assertWorkspaceActive(conversation.workspaceId);
         if (conversation.archived) throw new StoreError('conversation_archived', 409);
-        const count = Number(db.prepare('SELECT COUNT(*) AS count FROM workbench_operations WHERE conversation_id=?').get(input.conversationId)!.count);
-        if (count >= 50_000) throw new StoreError('operation_capacity_reached', 409);
+        if (input.type === 'message') capacity.assertWritable('admission', Buffer.byteLength(JSON.stringify(input)) + 8192);
         if (input.type === 'message') for (const image of input.payload.images ?? []) resources.pin(input.conversationId, image.id, input.id);
         const at = now();
         db.prepare(`INSERT INTO workbench_operations(id,conversation_id,type,payload_json,digest,status,created_at,updated_at)
           VALUES(?,?,?,?,?,'queued',?,?)`).run(input.id, input.conversationId, input.type, JSON.stringify(input.payload), contentDigest, at, at);
+        execution?.admitOperation(input.id);
         if (input.type === 'stop' && hasQueue(input.conversationId)) setPause(input.conversationId, 'stopped');
         changed(input.conversationId);
         return { operation: requireOperation(input.id), created: true };
       });
     },
-    getOperation(id) { parse(uuid, id); return storage(() => { const row = operationRow(id); return row ? operationFromRow(row) : null; }); },
+    getOperation(id) { parse(uuid, id); return storage(() => { const row = operationRow(id); return row ? readOperation(row) : null; }); },
     listOperations(value = {}) {
       const input = parse(z.object({ conversationId: uuid.optional(), status: statusSchema.optional(), type: z.enum(['message', 'stop']).optional(),
         order: z.enum(['asc', 'desc']).default('asc'), afterId: uuid.optional(), limit: z.number().int().min(1).max(1000).default(100) }).strict(), value);
@@ -466,15 +565,15 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
               : input.status
                 ? db.prepare('SELECT * FROM workbench_operations WHERE status=? AND (? IS NULL OR type=?) AND sequence>? ORDER BY sequence LIMIT ?').all(input.status, type, type, sequence, input.limit)
                 : db.prepare('SELECT * FROM workbench_operations WHERE (? IS NULL OR type=?) AND sequence>? ORDER BY sequence LIMIT ?').all(type, type, sequence, input.limit);
-        return rows.map(operationFromRow);
+        return rows.map(readOperation);
       });
     },
     claimOperation(id) {
       parse(uuid, id);
       return mutate(changed => {
         const row = db.prepare("UPDATE workbench_operations SET status='dispatching',updated_at=? WHERE id=? AND status='queued' RETURNING *").get(now(), id);
-        if (row) changed(String(row.conversation_id));
-        return row ? operationFromRow(row) : null;
+        if (row) { execution?.claimOperation(id); changed(String(row.conversation_id)); }
+        return row ? readOperation(row) : null;
       });
     },
     settleOperation(id, value) {
@@ -490,6 +589,7 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
         if (operation.status === receipt.outcome && operation.runId === runId && operation.reason === reason) return operation;
         changed(operation.conversationId);
         db.prepare('UPDATE workbench_operations SET status=?,run_id=?,reason=?,updated_at=? WHERE id=?').run(receipt.outcome, runId, reason, now(), id);
+        execution?.settleReceipt(id, receipt.outcome);
         if (operation.type === 'message' && operation.queuedInput) {
           const entryId = operation.queuedInput.entryId;
           if (receipt.outcome === 'accepted' && runId) {
@@ -514,6 +614,28 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
         return count;
       });
     },
+    readOperationViews(conversationId) {
+      parse(uuid, conversationId);
+      return storage(() => {
+        const rows = db.prepare(`SELECT id,type,status,run_id,substr(reason,1,256) AS reason,created_at,updated_at,
+          CASE WHEN type='message' AND json_extract(payload_json,'$.queueRecord')=1 THEN json_extract(payload_json,'$.queuedInput.delivery') END AS delivery
+          FROM workbench_operations WHERE conversation_id=? ORDER BY sequence DESC LIMIT 100`).iterate(conversationId);
+        const result: WorkbenchOperation[] = [];
+        for (const row of rows) result.push({ id: String(row.id), conversationId, type: row.type as 'message' | 'stop', status: row.status as OperationStatus,
+          runId: row.run_id === null ? null : String(row.run_id), reason: row.reason === null ? null : String(row.reason),
+          createdAt: Number(row.created_at), updatedAt: Number(row.updated_at),
+          ...(row.delivery ? { delivery: parseJson(queueDeliverySchema, row.delivery) } : {}) });
+        return result;
+      });
+    },
+    operationState(conversationId) {
+      parse(uuid, conversationId);
+      return storage(() => {
+        const unresolved = !!db.prepare("SELECT 1 FROM workbench_operations WHERE conversation_id=? AND status IN ('queued','dispatching','unknown') LIMIT 1").get(conversationId);
+        const row = db.prepare("SELECT id,run_id FROM workbench_operations WHERE conversation_id=? AND type='message' AND status='accepted' ORDER BY sequence DESC LIMIT 1").get(conversationId);
+        return { unresolved, latestAcceptedMessage: row ? { id: String(row.id), runId: row.run_id === null ? null : String(row.run_id) } : null };
+      });
+    },
     readQueue(id) {
       parse(uuid, id);
       return storage(() => {
@@ -532,6 +654,26 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
           afterRunId: state?.after_run_id == null ? null : String(state.after_run_id),
           version: Number(state?.version ?? 0),
         };
+      });
+    },
+    readQueueSummary(id) {
+      const { entries, pause, version } = store.readQueue(id);
+      return { pause, version, entries: entries.map(({ content, ...entry }) => ({ ...entry, preview: {
+        text: [...content.text.slice(0, 400)].slice(0, 200).join(''), images: content.images?.length ?? 0,
+        references: content.references?.length ?? 0, skills: content.skills?.length ?? 0,
+      } })) };
+    },
+    readQueueEntry(id, entryId, version) {
+      parse(uuid, id); parse(uuid, entryId); parse(z.number().int().nonnegative().safe(), version);
+      return storage(() => {
+        const row = db.prepare(`SELECT e.*,o.status AS operation_status FROM workbench_queue_entries e LEFT JOIN workbench_operations o ON o.id=e.operation_id
+          WHERE e.conversation_id=? AND e.id=? AND e.content_json IS NOT NULL`).get(id, entryId);
+        if (!row) throw new StoreError('queue_entry_not_found', 404);
+        if (Number(row.version) !== version) throw new StoreError('queue_version_conflict', 409);
+        return { entryId, version, content: parseJson(messagePayload, row.content_json),
+          ...(row.skill_unavailable === 1 ? { skillUnavailable: true as const } : {}),
+          status: row.operation_status === null ? (row.held ? 'held' as const : 'waiting' as const)
+            : parse(z.enum(['dispatching', 'accepted', 'unknown']), row.operation_status, 'corrupt_workbench_data') };
       });
     },
     queuedConversations(after) {
@@ -554,8 +696,9 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
         const conversation = checkQueueConversation(id);
         if (command.action === 'add') {
           if (existingAdmission(id, command.entryId, command.content)) return;
-          const count = db.prepare('SELECT COUNT(*) AS total, COUNT(content_json) AS active FROM workbench_queue_entries WHERE conversation_id=?').get(id)!;
-          if (Number(count.active) >= queueLimit || Number(count.total) >= 50_000) throw new StoreError('queue_full', 409);
+          capacity.assertWritable('admission', Buffer.byteLength(JSON.stringify(command.content)) + 8192);
+          const count = db.prepare('SELECT COUNT(*) AS active FROM workbench_queue_entries WHERE conversation_id=? AND content_json IS NOT NULL').get(id)!;
+          if (Number(count.active) >= queueLimit) throw new StoreError('queue_full', 409);
           if (!count.active) {
             const pause = conversation.state.status === 'failed' ? 'failed' : conversation.state.status === 'interrupted' ? 'stopped' : null;
             db.prepare(`INSERT INTO workbench_queues(conversation_id,after_run_id,pause) VALUES(?,?,?)
@@ -565,6 +708,7 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
           setQueuePins(id, command.entryId, command.content);
           db.prepare('INSERT INTO workbench_queue_entries(id,conversation_id,content_json,admission_digest) VALUES(?,?,?,?)')
             .run(command.entryId, id, JSON.stringify(command.content), digest([id, command.content]));
+          execution?.admitQueue(command.entryId);
         } else if (command.action === 'resume') {
           const state = queueRow(id);
           if (!state?.pause || state.version !== command.version) throw new StoreError('queue_entry_changed', 409);
@@ -579,6 +723,7 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
           if (content) setQueuePins(id, command.entryId, content); else clearQueuePins(command.entryId);
           db.prepare('UPDATE workbench_queue_entries SET content_json=?,version=version+1,skill_unavailable=0 WHERE id=? AND conversation_id=?')
             .run(content ? JSON.stringify(content) : null, command.entryId, id);
+          execution?.changeQueue(command.entryId, command.action);
         }
         bumpQueue(id);
         changed(id);
@@ -597,8 +742,6 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
           const head = db.prepare('SELECT id FROM workbench_queue_entries WHERE conversation_id=? AND content_json IS NOT NULL ORDER BY sequence LIMIT 1').get(id);
           if (queueRow(id)?.pause || entry.held || head?.id !== entryId) throw new StoreError('queue_entry_changed', 409);
         }
-        const count = db.prepare('SELECT COUNT(*) AS n FROM workbench_operations WHERE conversation_id=?').get(id)!;
-        if (Number(count.n) >= 50_000) throw new StoreError('operation_capacity_reached', 409);
         const content = parseJson(messagePayload, entry.content_json);
         if (skillRequiresNextTurn(delivery.mode, content)) throw new StoreError('queue_skill_requires_next_turn', 409);
         const queuedInput = { entryId, version, delivery };
@@ -608,6 +751,8 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
           VALUES(?,?,'message',?,?,'dispatching',?,?)`).run(operationId, id,
             JSON.stringify({ queueRecord: true, content, queuedInput }), digest([id, content, queuedInput]), at, at);
         db.prepare('UPDATE workbench_queue_entries SET operation_id=?,held=0,skill_unavailable=0 WHERE id=? AND conversation_id=?').run(operationId, entryId, id);
+        execution?.admitOperation(operationId, entryId);
+        execution?.claimOperation(operationId);
         bumpQueue(id);
         changed(id);
         return requireOperation(operationId);
@@ -636,77 +781,36 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
       const items = parse(z.array(nativeItemSchema).max(1000), value);
       // Duplicate native IDs carry the final body in the page, retaining their first order.
       const incoming = new Map(items.map(item => [item.id, item]));
-      return mutate(changed => {
+      try { return mutate(changed => {
         requireConversation(conversationId);
-        const find = db.prepare('SELECT id,position FROM workbench_items WHERE conversation_id=? AND id=?');
-        const anchor = beforeItemId === undefined ? null : find.get(conversationId, beforeItemId) as PositionedId | undefined;
-        if (beforeItemId !== undefined && !anchor) throw new StoreError('history_anchor_not_found', 409);
-        const known = new Map<string, number>();
-        for (const id of incoming.keys()) { const row = find.get(conversationId, id) as PositionedId | undefined; if (row) known.set(id, row.position); }
-        const newCount = incoming.size - known.size;
-        const positions = new Map(known);
-        if (newCount > 0) {
-          // Reordering reads at most the bounded ID index, never historical message bodies.
-          const current = db.prepare('SELECT id,position FROM workbench_items WHERE conversation_id=? ORDER BY position LIMIT ?').all(conversationId, MAX_ITEMS + 1) as PositionedId[];
-          if (current.length + newCount > MAX_ITEMS) throw new StoreError('history_capacity_reached', 409);
-          let lastPosition = -Infinity;
-          for (const id of incoming.keys()) {
-            const position = known.get(id);
-            if (position !== undefined) {
-              if (position < lastPosition || (anchor && position > anchor.position)) throw new StoreError('history_order_conflict', 409);
-              lastPosition = position;
-            }
-          }
-          const before = new Map<string | null, string[]>();
-          let pending: string[] = [];
-          for (const id of incoming.keys()) {
-            if (known.has(id)) { if (pending.length) { before.set(id, pending); pending = []; } }
-            else pending.push(id);
-          }
-          if (pending.length) {
-            const boundary = beforeItemId ?? null;
-            if (boundary !== null && incoming.has(boundary)) throw new StoreError('history_order_conflict', 409);
-            before.set(boundary, [...(before.get(boundary) ?? []), ...pending]);
-          }
-          const ordered: string[] = [];
-          for (const row of current) { ordered.push(...(before.get(row.id) ?? []), row.id); positions.set(row.id, row.position); }
-          ordered.push(...(before.get(null) ?? []));
-          let compact = false;
-          for (let start = 0; start < ordered.length;) {
-            if (positions.has(ordered[start]!)) { start++; continue; }
-            let end = start;
-            while (end < ordered.length && !positions.has(ordered[end]!)) end++;
-            const left = start === 0 ? undefined : positions.get(ordered[start - 1]!);
-            const right = end === ordered.length ? undefined : positions.get(ordered[end]!);
-            const count = end - start;
-            const step = left === undefined || right === undefined ? POSITION_STEP : Math.floor((right - left) / (count + 1));
-            const first = left === undefined ? (right === undefined ? 0 : right - step * count) : left + step;
-            if (step < 1 || Math.abs(first) > POSITION_BOUND || Math.abs(first + step * (count - 1)) > POSITION_BOUND) { compact = true; break; }
-            for (let offset = 0; offset < count; offset++) positions.set(ordered[start + offset]!, first + step * offset);
-            start = end;
-          }
-          if (compact) {
-            const finalPositions = new Map(ordered.map((id, index) => [id, index * POSITION_STEP]));
-            const reordered = current.filter(row => row.position !== finalPositions.get(row.id));
-            const move = db.prepare('UPDATE workbench_items SET position=? WHERE conversation_id=? AND id=?');
-            // Temporary reserved negative positions avoid UNIQUE collisions during the atomic compaction.
-            for (let index = 0; index < reordered.length; index++) move.run(Number.MIN_SAFE_INTEGER + index, conversationId, reordered[index]!.id);
-            for (const row of reordered) move.run(finalPositions.get(row.id)!, conversationId, row.id);
-            for (const [id, position] of finalPositions) positions.set(id, position);
-          }
-        }
-        for (const item of incoming.values()) {
+        capacity.assertWritable('archive', items.reduce((bytes, item) => bytes + Buffer.byteLength(item.text) + 4096, 0));
+        const added = [...incoming.keys()].some(id => !store.hasHistoryItem(conversationId, id));
+        const positions = allocateHistoryPositions(db, conversationId, [...incoming.keys()], beforeItemId);
+        if (added) changed(conversationId);
+        for (const raw of incoming.values()) {
+          preserveLegacy(conversationId, raw.id);
+          const accepted = mergeNativeRevision(store.getItem(conversationId, raw.id), raw);
+          const item = bodies?.publish(conversationId, accepted) ?? accepted;
+          bodies?.confirmPublication(conversationId, item);
           const written = upsertItem.run(conversationId, item.id, positions.get(item.id)!, item.kind, item.text, item.status, item.runId ?? null, item.operationId ?? null, metadata(item));
           const removed = deleteLive.run(conversationId, item.id);
           const recorded = recordTurnFiles(conversationId, item);
           if (recorded || Number(written.changes) + Number(removed.changes) > 0) changed(conversationId);
         }
-      });
+      }); } catch (error) {
+        if (error instanceof StoreError && error.code === 'history_index_rebuild_required') requestHistoryRebuild(db, conversationId);
+        throw error;
+      }
     },
     saveLiveItem(conversationId, value) {
-      parse(uuid, conversationId); const item = parse(nativeItemSchema, value);
+      parse(uuid, conversationId); const raw = parse(nativeItemSchema, value);
       return mutate(changed => {
         requireConversation(conversationId);
+        capacity.assertWritable('archive', Buffer.byteLength(raw.text) + 4096);
+        preserveLegacy(conversationId, raw.id);
+        const accepted = mergeNativeRevision(store.getItem(conversationId, raw.id), raw);
+        const item = bodies?.publish(conversationId, accepted) ?? accepted;
+        bodies?.confirmPublication(conversationId, item);
         if (recordTurnFiles(conversationId, item)) changed(conversationId);
         const canonical = db.prepare('SELECT position FROM workbench_items WHERE conversation_id=? AND id=?').get(conversationId, item.id);
         if (canonical) {
@@ -748,19 +852,26 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
         const row = db.prepare(`SELECT id,kind,text,status,run_id,operation_id,metadata_json FROM workbench_live_items WHERE conversation_id=? AND id=?
           UNION ALL SELECT id,kind,text,status,run_id,operation_id,metadata_json FROM workbench_items WHERE conversation_id=? AND id=? LIMIT 1`)
           .get(conversationId, itemId, conversationId, itemId);
-        return row ? itemFromRow(row) : null;
+        return row ? projectBodyPreview(itemFromRow(row)) : null;
       });
     },
-    readTurnFiles(conversationId, runIds) {
+    readTurnFiles(conversationId, runIds, summaryOnly = false) {
+      parse(uuid, conversationId); parse(z.array(identifier).max(200), runIds);
       if (!runIds.length) return [];
       return storage(() => {
         selectTurnFiles ??= db.prepare('SELECT path FROM workbench_turn_files WHERE conversation_id=? AND run_id=? ORDER BY path LIMIT ?');
         const summaries: TurnFileSummary[] = [];
         let remaining = 2 * 1024 * 1024;
         for (const runId of runIds) {
+          const sourceLimited = !!limitedTurnFiles?.get(conversationId, runId);
+          if (summaryOnly) {
+            const count = Number(db.prepare('SELECT COUNT(*) AS n FROM workbench_turn_files WHERE conversation_id=? AND run_id=?').get(conversationId, runId)!.n);
+            if (count || sourceLimited) summaries.push({ runId, paths: [], count: Math.min(count, turnFileLimit), limited: sourceLimited || count > turnFileLimit });
+            continue;
+          }
           const rows = selectTurnFiles.all(conversationId, runId, turnFileLimit + 1);
-          if (!rows.length) continue;
-          const summary = { runId, paths: rows.slice(0, turnFileLimit).map(row => String(row.path)), limited: rows.length > turnFileLimit };
+          if (!rows.length && !sourceLimited) continue;
+          const summary = { runId, paths: rows.slice(0, turnFileLimit).map(row => String(row.path)), limited: sourceLimited || rows.length > turnFileLimit };
           remaining -= Buffer.byteLength(JSON.stringify(summary)) + 1;
           if (remaining < 0) break;
           summaries.push(summary);
@@ -768,29 +879,209 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
         return summaries;
       });
     },
+    readTurnFilesPage(conversationId, runId, afterPath) {
+      parse(uuid, conversationId); parse(identifier, runId); if (afterPath !== undefined) parse(recordedFilePath, afterPath);
+      return storage(() => {
+        const count = Number(db.prepare('SELECT COUNT(*) AS n FROM workbench_turn_files WHERE conversation_id=? AND run_id=?').get(conversationId, runId)!.n);
+        // The existing per-turn record retains 500 paths plus one truncation sentinel.
+        const last = db.prepare('SELECT path FROM workbench_turn_files WHERE conversation_id=? AND run_id=? ORDER BY path LIMIT 1 OFFSET ?').get(conversationId, runId, turnFileLimit - 1)?.path;
+        const rows = last === undefined
+          ? db.prepare('SELECT path FROM workbench_turn_files WHERE conversation_id=? AND run_id=? AND path>? ORDER BY path LIMIT 51').all(conversationId, runId, afterPath ?? '')
+          : db.prepare('SELECT path FROM workbench_turn_files WHERE conversation_id=? AND run_id=? AND path>? AND path<=? ORDER BY path LIMIT 51').all(conversationId, runId, afterPath ?? '', last);
+        const paths: string[] = []; let bytes = 0;
+        for (const row of rows.slice(0, 50)) { const path = String(row.path); const size = Buffer.byteLength(JSON.stringify(path)) + 1; if (bytes + size > 48 * 1024) break; paths.push(path); bytes += size; }
+        return { runId, paths, count: Math.min(count, turnFileLimit), limited: !!limitedTurnFiles?.get(conversationId, runId) || count > turnFileLimit,
+          afterPath: paths.length < rows.length ? paths.at(-1) ?? null : null };
+      });
+    },
+    advanceHistoryIndex() {
+      capacity.assertWritable('archive', 65536);
+      return storage(() => advanceHistoryRebuild(db));
+    },
+    readBody(...args) {
+      if (!bodies) throw new StoreError('body_not_found', 404);
+      return storage(() => bodies.read(...args));
+    },
+    beginBodyStage(...args) {
+      if (!bodies) throw new StoreError('body_not_found', 404);
+      capacity.assertWritable('archive', 4096);
+      return transaction(db, () => bodies.begin(...args));
+    },
+    stageBodyChunk(...args) {
+      if (!bodies) throw new StoreError('body_not_found', 404);
+      capacity.assertWritable('archive', args[2].byteLength + 4096);
+      return transaction(db, () => bodies.append(...args));
+    },
+    finishBodyStage(...args) {
+      if (!bodies) throw new StoreError('body_not_found', 404);
+      return storage(() => bodies.finish(...args));
+    },
+    validateBodyStage(...args) {
+      if (!bodies) throw new StoreError('body_not_found', 404);
+      return storage(() => bodies.validate(...args));
+    },
+    archiveJobs(conversationId) {
+      parse(uuid, conversationId);
+      return storage(() => {
+        const pending = db.prepare("SELECT id FROM workbench_items WHERE conversation_id=? AND (status='running' OR json_extract(metadata_json,'$.previewOnly')=1 OR json_extract(metadata_json,'$.mediaPending')=1) LIMIT 1").get(conversationId)
+          ?? db.prepare("SELECT id FROM workbench_live_items WHERE conversation_id=? AND (status='running' OR json_extract(metadata_json,'$.previewOnly')=1 OR json_extract(metadata_json,'$.mediaPending')=1) LIMIT 1").get(conversationId);
+        return db.prepare('SELECT * FROM workbench_archive_jobs WHERE conversation_id=? ORDER BY kind').all(conversationId).map(row => {
+          const job = archiveJobFromRow(row);
+          return pending && !job.error ? { ...job, error: 'archive_items_pending' } : job;
+        });
+      });
+    },
+    pendingArchiveItems(conversationId, after) {
+      parse(uuid, conversationId); if (after !== null) parse(identifier, after);
+      return storage(() => {
+        const canonical = db.prepare(`SELECT id FROM workbench_items WHERE conversation_id=? AND (status='running' OR json_extract(metadata_json,'$.previewOnly')=1 OR json_extract(metadata_json,'$.mediaPending')=1) AND id>? ORDER BY id LIMIT 16`).all(conversationId, after ?? '');
+        const live = db.prepare(`SELECT id FROM workbench_live_items WHERE conversation_id=? AND (status='running' OR json_extract(metadata_json,'$.previewOnly')=1 OR json_extract(metadata_json,'$.mediaPending')=1) AND id>? ORDER BY id LIMIT 16`).all(conversationId, after ?? '');
+        return [...new Set([...canonical, ...live].map(row => String(row.id)))].sort().slice(0, 16);
+      });
+    },
+    refreshArchiveItems(job, values, requested) {
+      const items = parse(z.array(nativeItemSchema).max(16), values);
+      parse(z.array(identifier).max(16), requested);
+      if (new Set(items.map(item => item.id)).size !== items.length || items.some(item => !requested.includes(item.id))) throw new StoreError('native_item_identity_changed', 502);
+      mutate(changed => {
+        const row = db.prepare('SELECT epoch,binding_id FROM workbench_archive_jobs WHERE conversation_id=? AND kind=?').get(job.conversationId, job.kind);
+        if (!row || Number(row.epoch) !== job.epoch || row.binding_id !== job.bindingId || requireConversation(job.conversationId).binding?.id !== job.bindingId) return;
+        for (const item of items) {
+          if (!store.getItem(job.conversationId, item.id)) throw new StoreError('archive_item_not_found', 409);
+          if (store.hasHistoryItem(job.conversationId, item.id)) store.mergeHistory(job.conversationId, [item]);
+          else store.saveLiveItem(job.conversationId, item);
+        }
+        db.prepare('UPDATE workbench_archive_jobs SET refresh_after=?,error=? WHERE conversation_id=? AND kind=? AND epoch=?')
+          .run(requested.at(-1) ?? null, items.length < requested.length ? 'archive_item_unavailable' : null, job.conversationId, job.kind, job.epoch);
+        changed(job.conversationId);
+      });
+    },
+    dueArchiveJobs(limit = 8) {
+      parse(z.number().int().min(1).max(64), limit);
+      return storage(() => db.prepare('SELECT * FROM workbench_archive_jobs WHERE complete=0 AND next_at<=? ORDER BY next_at,conversation_id,kind LIMIT ?').all(now(), limit).map(archiveJobFromRow));
+    },
+    claimArchiveJob(conversationId, kind, force = false) {
+      parse(uuid, conversationId); parse(z.enum(['latest', 'backfill']), kind);
+      return transaction(db, () => {
+        const row = db.prepare('SELECT * FROM workbench_archive_jobs WHERE conversation_id=? AND kind=?').get(conversationId, kind);
+        if (!row || row.complete === 1 || (!force && Number(row.next_at) > now())) return null;
+        if (row.cursor === null) {
+          const active = activeHistoryOrder(db, conversationId);
+          const head = db.prepare(active === 0 ? 'SELECT id FROM workbench_items WHERE conversation_id=? ORDER BY position DESC LIMIT 1' : 'SELECT id FROM workbench_items WHERE conversation_id=? AND alternate_position IS NOT NULL ORDER BY alternate_position DESC LIMIT 1').get(conversationId);
+          db.prepare('UPDATE workbench_archive_jobs SET target_id=?,target_seen=0 WHERE conversation_id=? AND kind=?').run(head ? String(head.id) : null, conversationId, kind);
+        }
+        db.prepare('UPDATE workbench_archive_jobs SET epoch=epoch+1,working=1,next_at=? WHERE conversation_id=? AND kind=?').run(now() + 30_000, conversationId, kind);
+        return archiveJobFromRow(db.prepare('SELECT * FROM workbench_archive_jobs WHERE conversation_id=? AND kind=?').get(conversationId, kind)!);
+      });
+    },
+    commitArchivePage(job, values, olderCursor) {
+      parse(uuid, job.conversationId); parse(z.enum(['latest', 'backfill']), job.kind);
+      if (olderCursor !== null) parse(boundedText(65_536).min(1), olderCursor);
+      const items = parse(z.array(nativeItemSchema).max(100), values);
+      try { return mutate(changed => {
+        const row = db.prepare('SELECT * FROM workbench_archive_jobs WHERE conversation_id=? AND kind=?').get(job.conversationId, job.kind);
+        if (!row || Number(row.epoch) !== job.epoch || String(row.binding_id) !== job.bindingId || requireConversation(job.conversationId).binding?.id !== job.bindingId) return false;
+        if (olderCursor && (olderCursor === job.cursor || db.prepare('SELECT 1 FROM workbench_archive_scan_cursors WHERE conversation_id=? AND kind=? AND generation=? AND digest=?')
+          .get(job.conversationId, job.kind, job.scanGeneration, digest(olderCursor)))) throw new StoreError('history_no_progress', 502);
+        const known = items.some(item => store.hasHistoryItem(job.conversationId, item.id) && !db.prepare('SELECT 1 FROM workbench_archive_scan_items WHERE conversation_id=? AND kind=? AND generation=? AND id=?')
+          .get(job.conversationId, job.kind, job.scanGeneration, item.id));
+        // A historical page may overlap a more recent head read. Its older body
+        // is never allowed to replace an already published version.
+        let coverageError = job.coverageError;
+        const incoming = items.map(item => {
+          const previous = store.getItem(job.conversationId, item.id);
+          if (previous?.sourceRevision && item.sourceRevision && previous.sourceRevision.generation !== item.sourceRevision.generation) coverageError = 'archive_source_gap';
+          if (previous?.sourceRevision) return mergeNativeRevision(previous, item);
+          return job.cursor !== null || job.kind === 'backfill' ? previous ?? item : item;
+        });
+        store.mergeHistory(job.conversationId, incoming, job.anchorId ?? undefined);
+        const targetSeen = !job.targetId || job.targetSeen || items.some(item => item.id === job.targetId);
+        const done = !olderCursor || (job.kind === 'latest' && known && targetSeen);
+        const nextCursor = done ? null : olderCursor;
+        const nextAnchor = nextCursor ? items[0]?.id ?? job.anchorId : null;
+        if (done) {
+          db.prepare('INSERT INTO workbench_archive_gc VALUES(?,?,?) ON CONFLICT(conversation_id,kind) DO UPDATE SET through_generation=MAX(through_generation,excluded.through_generation)').run(job.conversationId, job.kind, job.scanGeneration);
+        } else {
+          for (const item of items) db.prepare('INSERT OR IGNORE INTO workbench_archive_scan_items VALUES(?,?,?,?)').run(job.conversationId, job.kind, job.scanGeneration, item.id);
+          db.prepare('INSERT INTO workbench_archive_scan_cursors VALUES(?,?,?,?)').run(job.conversationId, job.kind, job.scanGeneration, digest(olderCursor));
+        }
+        db.prepare(`UPDATE workbench_archive_jobs SET cursor=?,anchor_id=?,pages=pages+1,complete=?,next_at=?,last_success_at=?,error=NULL,failures=0,scan_generation=?,target_seen=?,coverage_error=?,working=?
+          WHERE conversation_id=? AND kind=? AND epoch=?`).run(nextCursor, nextAnchor, Number(done && job.kind === 'backfill'),
+          now() + (done && job.kind === 'latest' ? 15_000 : 1), now(), job.scanGeneration + Number(done), Number(targetSeen),
+          !olderCursor && !targetSeen ? 'archive_source_gap' : coverageError, Number(!done), job.conversationId, job.kind, job.epoch);
+        if (job.kind === 'backfill') store.setHistoryCursor(job.conversationId, { loaded: true, olderCursor: nextCursor, beforeItemId: nextAnchor });
+        else if (!requireConversation(job.conversationId).historyLoaded) store.setHistoryCursor(job.conversationId, { loaded: true, olderCursor, beforeItemId: olderCursor ? items[0]?.id ?? null : null });
+        changed(job.conversationId);
+        return true;
+      }); } catch (error) {
+        if (error instanceof StoreError && error.code === 'history_index_rebuild_required') requestHistoryRebuild(db, job.conversationId);
+        throw error;
+      }
+    },
+    yieldArchiveJob(job) {
+      parse(uuid, job.conversationId); parse(z.enum(['latest', 'backfill']), job.kind);
+      mutate(changed => {
+        const result = db.prepare('UPDATE workbench_archive_jobs SET working=1,next_at=?,error=NULL WHERE conversation_id=? AND kind=? AND epoch=?').run(now() + 1, job.conversationId, job.kind, job.epoch);
+        if (Number(result.changes)) changed(job.conversationId);
+      });
+    },
+    failArchiveJob(job, reason) {
+      parse(uuid, job.conversationId); parse(z.enum(['latest', 'backfill']), job.kind); parse(boundedText(256), reason);
+      mutate(changed => {
+        const result = db.prepare('UPDATE workbench_archive_jobs SET error=?,failures=failures+1,next_at=? WHERE conversation_id=? AND kind=? AND epoch=?')
+          .run(reason, now() + Math.min(60_000, 1000 * 2 ** Math.min(job.failures, 6)), job.conversationId, job.kind, job.epoch);
+        if (Number(result.changes)) changed(job.conversationId);
+      });
+    },
+    restartArchiveJob(job, reason) {
+      parse(uuid, job.conversationId); parse(z.enum(['latest', 'backfill']), job.kind); parse(boundedText(256), reason);
+      mutate(changed => {
+        const result = db.prepare(`UPDATE workbench_archive_jobs SET epoch=epoch+1,scan_generation=scan_generation+1,
+          cursor=NULL,anchor_id=NULL,complete=0,target_seen=0,coverage_error='archive_continuity_unverified',error=?,failures=failures+1,next_at=?
+          WHERE conversation_id=? AND kind=? AND epoch=?`).run(reason, now() + 1000, job.conversationId, job.kind, job.epoch);
+        if (!Number(result.changes)) return;
+        db.prepare('INSERT INTO workbench_archive_gc VALUES(?,?,?) ON CONFLICT(conversation_id,kind) DO UPDATE SET through_generation=MAX(through_generation,excluded.through_generation)').run(job.conversationId, job.kind, job.scanGeneration);
+        changed(job.conversationId);
+      });
+    },
+    advanceArchiveMaintenance() {
+      return transaction(db, () => {
+        const job = db.prepare('SELECT * FROM workbench_archive_gc ORDER BY conversation_id,kind LIMIT 1').get();
+        if (!job) return false;
+        const args = [String(job.conversation_id), String(job.kind), Number(job.through_generation)];
+        const items = db.prepare(`DELETE FROM workbench_archive_scan_items WHERE (conversation_id,kind,generation,id) IN
+          (SELECT conversation_id,kind,generation,id FROM workbench_archive_scan_items WHERE conversation_id=? AND kind=? AND generation<=? LIMIT 512)`).run(...args);
+        const cursors = db.prepare(`DELETE FROM workbench_archive_scan_cursors WHERE (conversation_id,kind,generation,digest) IN
+          (SELECT conversation_id,kind,generation,digest FROM workbench_archive_scan_cursors WHERE conversation_id=? AND kind=? AND generation<=? LIMIT 512)`).run(...args);
+        if (Number(items.changes) < 512 && Number(cursors.changes) < 512) db.prepare('DELETE FROM workbench_archive_gc WHERE conversation_id=? AND kind=?').run(args[0]!, args[1]!);
+        return true;
+      });
+    },
     readHistory(conversationId, value = {}) {
       parse(uuid, conversationId);
       const input = parse(z.object({ beforeItemId: identifier.optional(), limit: z.number().int().min(1).max(100).default(100) }).strict(), value);
       return transaction(db, () => {
         const conversation = requireConversation(conversationId);
-        const before = input.beforeItemId === undefined ? null : db.prepare('SELECT position FROM workbench_items WHERE conversation_id=? AND id=?').get(conversationId, input.beforeItemId);
+        const active = activeHistoryOrder(db, conversationId);
+        const before = input.beforeItemId === undefined ? null : db.prepare(active === 0 ? 'SELECT position FROM workbench_items WHERE conversation_id=? AND id=?' : 'SELECT alternate_position AS position FROM workbench_items WHERE conversation_id=? AND id=?').get(conversationId, input.beforeItemId);
         if (input.beforeItemId !== undefined && !before) throw new StoreError('history_anchor_not_found', 404);
-        // Iterate rows so a valid page of many maximum-size bodies cannot allocate them all
-        // before the HTTP layer applies its wire budget. Every returned body remains complete.
+        // Iterate legacy rows one at a time. Only finite previews and immutable
+        // full-body references cross the storage worker boundary.
         const rows = before
-          ? db.prepare('SELECT * FROM workbench_items WHERE conversation_id=? AND position<? ORDER BY position DESC LIMIT ?').iterate(conversationId, Number(before.position), input.limit + 1)
-          : db.prepare('SELECT * FROM workbench_items WHERE conversation_id=? ORDER BY position DESC LIMIT ?').iterate(conversationId, input.limit + 1);
+          ? db.prepare(active === 0 ? 'SELECT * FROM workbench_items WHERE conversation_id=? AND position<? ORDER BY position DESC LIMIT ?' : 'SELECT * FROM workbench_items WHERE conversation_id=? AND alternate_position<? ORDER BY alternate_position DESC LIMIT ?').iterate(conversationId, Number(before.position), input.limit + 1)
+          : db.prepare(active === 0 ? 'SELECT * FROM workbench_items WHERE conversation_id=? ORDER BY position DESC LIMIT ?' : 'SELECT * FROM workbench_items WHERE conversation_id=? AND alternate_position IS NOT NULL ORDER BY alternate_position DESC LIMIT ?').iterate(conversationId, input.limit + 1);
         const items: NativeItem[] = []; let bytes = 0; let hasOlder = false;
         for (const row of rows) {
-          const item = itemFromRow(row); bytes += Buffer.byteLength(item.text) + 2048;
-          if (items.length >= input.limit || bytes > 8 * 1024 * 1024) { hasOlder = true; break; }
+          const item = projectBodyPreview(itemFromRow(row)); bytes += Buffer.byteLength(JSON.stringify(item)) + 1;
+          if (!items.length && bytes > 192 * 1024) throw new StoreError('history_preview_budget_exceeded', 503);
+          if (items.length >= input.limit || bytes > 192 * 1024) { hasOlder = true; break; }
           items.push(item);
         }
         items.reverse();
         const liveItems: NativeItem[] = []; let liveBytes = 0; let liveItemsLimited = false;
         for (const row of db.prepare('SELECT * FROM workbench_live_items WHERE conversation_id=? ORDER BY updated_at DESC,id DESC LIMIT ?').iterate(conversationId, MAX_LIVE_ITEMS)) {
-          const item = itemFromRow(row); liveBytes += Buffer.byteLength(item.text) + 2048;
-          if (liveBytes > 4 * 1024 * 1024) { liveItemsLimited = true; break; }
+          const item = projectBodyPreview(itemFromRow(row)); liveBytes += Buffer.byteLength(JSON.stringify(item)) + 1;
+          if (liveBytes > 48 * 1024) { liveItemsLimited = true; break; }
           liveItems.push(item);
         }
         liveItems.reverse();

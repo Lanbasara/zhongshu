@@ -21,6 +21,9 @@ export const pluginSourceCommand = z.discriminatedUnion('action', [
   z.object({ action: z.literal('remove'), id: z.string().min(1).max(512) }).strict(),
 ]);
 export type PluginSourceCommand = z.infer<typeof pluginSourceCommand>;
+export const pluginSourceRequest = z.object({ requestId: z.uuid(), command: pluginSourceCommand }).strict();
+export const pluginSourceOperation = pluginSourceRequest.extend({ status: z.enum(['applying', 'unknown', 'applied', 'failed']) }).strict();
+export type PluginSourceOperation = z.infer<typeof pluginSourceOperation>;
 
 export const pluginRelease = z.object({
   version: z.string().min(1).max(128),
@@ -65,5 +68,6 @@ export const pluginView = z.object({
   entries: z.array(pluginEntry).max(1000),
   sources: z.array(pluginSource).max(40).optional(),
   operation: pluginOperation.nullable(),
+  sourceOperation: pluginSourceOperation.nullable().optional(),
 }).strict();
 export type PluginView = z.infer<typeof pluginView>;

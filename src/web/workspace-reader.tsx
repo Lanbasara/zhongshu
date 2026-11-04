@@ -5,12 +5,14 @@ import { z } from 'zod';
 import { referenceSchema } from '../shared/content.ts';
 import { RequestError, request } from './workbench-client.ts';
 import { WorkspaceReport } from './workspace-report.tsx';
+import { directoryFilesSchema, directoryProgress, useDirectoryPage } from './directory-client.ts';
+import { DirectoryControls } from './directory-controls.tsx';
+import { WorkspaceSelect } from './workspace-selection.tsx';
 
-const listing = z.object({ files: z.array(z.object({ name: z.string(), path: z.string(), directory: z.boolean(), supported: z.boolean() })) });
 const fileSchema = z.object({ kind: z.enum(['markdown', 'text', 'html', 'source']), text: z.string(), version: z.string() });
-const statusSchema = z.object({ editable: z.boolean(), reason: z.string().nullable(), canPause: z.boolean().optional(), maintenance: z.enum(['online', 'paused', 'unknown', 'transition']).optional() });
+const statusSchema = z.object({ editable: z.boolean(), reason: z.string().nullable(), canPause: z.boolean().optional(), maintenance: z.enum(['online', 'paused', 'unknown', 'transition']).optional(),
+  phase: z.enum(['online', 'draining', 'editable', 'resuming', 'unknown', 'initializing']).optional(), windowId: z.string().optional(), affectedGroups: z.array(z.string()).max(32).optional(), initialized: z.boolean().optional() });
 type File = z.infer<typeof fileSchema>;
-type Entry = z.infer<typeof listing>['files'][number];
 type OpenFile = { path: string; file: File; position: number };
 type FileTarget = { workspaceId: string; path: string };
 
@@ -23,6 +25,21 @@ const errors = new Map([
   ['workspace_maintenance_busy', '工作区正在保存或切换状态，请稍后重试。'],
   ['workspace_maintenance_unavailable', '未能确认 DSH 已暂停或恢复。请重试恢复。'],
   ['workspace_save_in_progress', '此工作区正在保存文件，请稍后重试。'],
+  ['execution_online', '进入编辑会暂停下列运行组的新任务，等待已受理任务完成。'],
+  ['execution_draining', '正在等待已受理任务完成；任务不会因编辑而取消。'],
+  ['execution_resuming', '正在恢复 Agent，确认完成后才接受新任务。'],
+  ['execution_unknown', '运行状态尚待核实，修改已保留。'],
+  ['execution_baseline_incomplete', '正在后台核验已有会话和任务，完成后可进入编辑。'],
+  ['execution_scope_registration_pending', '正在核对工作区的运行范围，请稍后重试。'],
+  ['execution_controller_unknown', '尚未确认运行组门禁，暂时无法保存或派发。'],
+  ['execution_reconciliation_unknown', '尚未核实原生任务状态，请保留修改并稍后重试。'],
+  ['execution_native_state_unknown', '尚未核实原生会话状态，初始化仍在继续。'],
+  ['execution_restore_requires_reconciliation', '恢复的运行记录需要操作者核对，现有存档仍可阅读。'],
+  ['execution_save_in_progress', '另一个保存请求仍在处理，请稍后重试。'],
+  ['execution_save_unresolved', '保存结果尚待核实，修改已保留；请勿重复提交或恢复 Agent。'],
+  ['execution_save_already_resolved', '这次保存请求已处理，请重新打开文件核对结果。'],
+  ['execution_pending_unknown', '部分已受理任务仍待核实，暂时不能保存；其他已受理任务仍会继续完成。'],
+  ['file_writer_capacity_reached', '保存记录空间不足，文件尚未写入；修改已保留，扩容后可再次保存。'],
   ['file_version_changed', '远程文件已变化，当前修改已保留。'],
   ['file_reference_unavailable', '文件或目录不可用，可能已被移动或删除。'],
   ['file_reference_forbidden', '这个路径不在可读的工作区文件范围内。'],
@@ -86,8 +103,9 @@ function reportTarget(path: string, href: string): string {
   return target;
 }
 
-export function WorkspaceReader({ workspaces, initialWorkspace, target, onTargetUnavailable, csrf, editStatusSignal, expanded, onExpand, onClose }: {
+export function WorkspaceReader({ workspaces, workspaceCursor, initialWorkspace, target, onTargetUnavailable, csrf, editStatusSignal, expanded, onExpand, onClose }: {
   workspaces: { id: string; label: string }[];
+  workspaceCursor?: string | null;
   initialWorkspace?: string;
   target?: FileTarget;
   onTargetUnavailable?(target: FileTarget): void;
@@ -97,12 +115,11 @@ export function WorkspaceReader({ workspaces, initialWorkspace, target, onTarget
   onExpand(value: boolean): void;
   onClose(): void;
 }) {
-  const [workspace, setWorkspace] = useState(() => target?.workspaceId ?? workspaces.find(w => w.id === initialWorkspace)?.id ?? workspaces[0]?.id ?? '');
+  const [workspace, setWorkspace] = useState(() => target?.workspaceId ?? initialWorkspace ?? workspaces[0]?.id ?? '');
   const [browsing, setBrowsing] = useState(false);
   const picker = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
   const [directory, setDirectory] = useState('');
-  const [files, setFiles] = useState<Entry[]>([]);
   const [opened, setOpened] = useState<OpenFile>();
   const [attemptedPath, setAttemptedPath] = useState<string>();
   const [back, setBack] = useState<OpenFile[]>([]);
@@ -117,6 +134,7 @@ export function WorkspaceReader({ workspaces, initialWorkspace, target, onTarget
   const [busy, setBusy] = useState(false);
   const refreshStatus = useRef<(() => void) | null>(null);
   const pending = useRef<AbortController>(null);
+  const saveRequest = useRef<{ workspace: string; path: string; version: string; text: string; id: string } | null>(null);
   const dialog = useRef<HTMLDialogElement>(null);
   const closeButton = useRef<HTMLButtonElement>(null);
   const largeMarkdown = useMemo(() => opened?.file.kind === 'markdown' &&
@@ -124,6 +142,12 @@ export function WorkspaceReader({ workspaces, initialWorkspace, target, onTarget
   const dirty = editing && opened?.file.text !== draft;
   const base = '/workspaces/' + encodeURIComponent(workspace);
   const fromTurn = target !== undefined;
+  const directoryPage = useDirectoryPage(base + ':' + directory, ({ cursor, refresh, signal }) => {
+    const query = new URLSearchParams({ directory, limit: '100', ...(cursor ? { cursor } : {}), ...(refresh ? { refresh: '1' } : {}) });
+    return request(base + '/files?' + query.toString(), directoryFilesSchema, { signal });
+  }, !!workspace && browsing);
+  const files = directoryPage.data?.files ?? [];
+  const listingProgress = directoryProgress(directoryPage.data);
 
   useLayoutEffect(() => {
     const panel = dialog.current;
@@ -143,16 +167,6 @@ export function WorkspaceReader({ workspaces, initialWorkspace, target, onTarget
   useEffect(() => {
     if (!workspace) return;
     const abort = new AbortController();
-    setFiles([]);
-    void request(base + '/files?directory=' + encodeURIComponent(directory), listing, { signal: abort.signal })
-      .then(value => { if (!abort.signal.aborted) setFiles(value.files); })
-      .catch(reason => { if (!abort.signal.aborted) setError(message(reason)); });
-    return () => abort.abort();
-  }, [base, directory, workspace]);
-
-  useEffect(() => {
-    if (!workspace) return;
-    const abort = new AbortController();
     let timer: ReturnType<typeof setTimeout>;
     let checking = false;
     let observedAt = 0;
@@ -160,7 +174,7 @@ export function WorkspaceReader({ workspaces, initialWorkspace, target, onTarget
     function publish(value: z.infer<typeof statusSchema>) {
       observedAt = Date.now();
       setStatus(previous => previous?.editable === value.editable && previous.reason === value.reason &&
-        previous.maintenance === value.maintenance && previous.canPause === value.canPause ? previous : value);
+        previous.maintenance === value.maintenance && previous.canPause === value.canPause && previous.windowId === value.windowId && previous.phase === value.phase ? previous : value);
     }
     if (channel) channel.onmessage = event => {
       const parsed = statusSchema.safeParse(event.data);
@@ -300,12 +314,15 @@ export function WorkspaceReader({ workspaces, initialWorkspace, target, onTarget
 
   async function save() {
     if (!opened || !status?.editable || busy || !dirty) return;
-    const resumeAfterSave = status.maintenance === 'paused';
+    const resumeAfterSave = !status.phase && status.maintenance === 'paused';
     setBusy(true);
     setError('');
     setNotice('');
     try {
-      const file = await request(base + '/file', fileSchema, { csrf, body: { path: opened.path, version: opened.file.version, text: draft } });
+      if (!saveRequest.current || saveRequest.current.workspace !== workspace || saveRequest.current.path !== opened.path || saveRequest.current.version !== opened.file.version || saveRequest.current.text !== draft)
+        saveRequest.current = { workspace, path: opened.path, version: opened.file.version, text: draft, id: crypto.randomUUID() };
+      const file = await request(base + '/file', fileSchema, { csrf, body: { path: opened.path, version: opened.file.version, text: draft, saveId: saveRequest.current.id } });
+      saveRequest.current = null;
       setOpened({ ...opened, file });
       setDraft(file.text);
       setNotice('已保存到工作区');
@@ -314,7 +331,13 @@ export function WorkspaceReader({ workspaces, initialWorkspace, target, onTarget
         setPreview(false);
         await maintenance('resume');
       }
-    } catch (reason) { setError(message(reason)); }
+    } catch (reason) {
+      // A confirmed rejection is a finished attempt; a later deliberate save
+      // needs a new identity. Transport loss and unresolved effects keep theirs.
+      if (reason instanceof RequestError && ['file_writer_capacity_reached', 'file_version_changed', 'file_read_only',
+        'file_reference_changed', 'file_reference_unavailable', 'file_write_not_applied', 'file_write_not_started', 'file_write_rejected'].includes(reason.code)) saveRequest.current = null;
+      setError(message(reason));
+    }
     finally { setBusy(false); }
   }
 
@@ -339,7 +362,7 @@ export function WorkspaceReader({ workspaces, initialWorkspace, target, onTarget
     try {
       let file = opened.file;
       if (!status.editable) {
-        if (!await maintenance('pause')) return;
+        if (!await maintenance('pause')) { setNotice('已申请编辑窗口。任务完成后可再次点击编辑。'); return; }
         setBusy(true);
         file = await request(base + '/file?path=' + encodeURIComponent(opened.path), fileSchema);
         setOpened({ ...opened, file });
@@ -362,7 +385,7 @@ export function WorkspaceReader({ workspaces, initialWorkspace, target, onTarget
       return;
     }
     if (!mayLeave()) return;
-    if ((status?.maintenance === 'paused' || status?.maintenance === 'unknown') && !await maintenance('resume')) return;
+    if ((!status?.phase || !close) && (status?.maintenance === 'paused' || status?.maintenance === 'unknown') && !await maintenance('resume')) return;
     resetEditor();
     if (close) onClose();
   }
@@ -403,18 +426,18 @@ export function WorkspaceReader({ workspaces, initialWorkspace, target, onTarget
         </button>
         {browsing && <div className="workspace-file-popover" id="workspace-file-list">
           <div className="reader-popover-title">
-            {workspaces.length > 1 ? <select aria-label="工作区" value={workspace} disabled={busy} onChange={event => {
+            {workspaces.length > 1 || workspaceCursor !== undefined ? <WorkspaceSelect label="工作区" value={workspace} initial={workspaces} cursor={workspaceCursor} disabled={busy} onChange={id => {
               if (!mayLeave()) return;
               resetEditor(); setOpened(undefined); setAttemptedPath(undefined); setBack([]); setStatus(undefined);
-              setDirectory(''); setWorkspace(event.target.value);
-            }}>{workspaces.map(w => <option key={w.id} value={w.id}>{w.label}</option>)}</select>
+              setDirectory(''); setWorkspace(id);
+            }}/>
               : <span>{workspaces[0]?.label}</span>}
             <span>文件</span>
           </div>
           {directory && <button className="reader-file-parent" disabled={busy} onClick={() => {
             setError(''); setDirectory(directory.split('/').slice(0, -1).join('/'));
           }}><ArrowLeft size={14}/><span>{directory}</span></button>}
-          <ul>{files.map(entry => <li key={entry.path}><button className="reader-file-row" disabled={busy || !entry.supported}
+          <ul aria-busy={directoryPage.pending}>{files.map(entry => <li key={entry.path}><button className="reader-file-row" disabled={busy || directoryPage.pending || !entry.supported}
             aria-current={opened?.path === entry.path ? 'true' : undefined} onClick={() => {
               if (entry.directory) { setError(''); setDirectory(entry.path); }
               else void open(entry.path);
@@ -423,8 +446,11 @@ export function WorkspaceReader({ workspaces, initialWorkspace, target, onTarget
             <span>{entry.name}{directory && <small>{entry.path}</small>}</span>
             {entry.directory && <ChevronRight size={15}/>}
           </button></li>)}</ul>
-          {!files.length && <p className="reader-popover-empty">此目录暂无可浏览的文件</p>}
-
+          {directoryPage.error && <p className="reader-popover-empty" role="alert">{directoryPage.error}</p>}
+          {directoryPage.notice && <p className="reader-popover-empty" role="status">{directoryPage.notice}</p>}
+          {!directoryPage.error && listingProgress && <p className="reader-popover-empty" role="status">{listingProgress}</p>}
+          {!directoryPage.pending && !directoryPage.error && directoryPage.data?.complete && !files.length && <p className="reader-popover-empty">此目录暂无可浏览的文件</p>}
+          <DirectoryControls {...directoryPage} label="工作区文件分页" className="reader-popover-title" />
         </div>}
       </div>
       <button className="reader-icon workspace-reader-expand" aria-label={expanded ? '并排阅读' : '展开阅读'}
@@ -443,12 +469,13 @@ export function WorkspaceReader({ workspaces, initialWorkspace, target, onTarget
       {editing ? <>
         {opened.file.kind === 'markdown' && <button onClick={() => setPreview(!preview)}>{preview ? '原文' : '预览'}</button>}
         <button className="reader-action reader-primary" disabled={!dirty || !status?.editable || busy} onClick={() => void save()}><Save size={14}/>保存</button>
-        <button disabled={busy} onClick={() => void leaveEditor(false)}>结束编辑</button>
+        <button disabled={busy} onClick={() => void leaveEditor(false)}>{status?.phase ? '恢复 Agent 并结束编辑' : '结束编辑'}</button>
         <button disabled={busy} onClick={() => void open(opened.path, undefined, true)}>重新打开</button>
       </> : <button disabled={busy || (!status?.editable && !status?.canPause)} className="reader-action" onClick={() => void beginEdit()}><Pencil size={14}/>编辑</button>}
       {!editing && largeMarkdown && <button onClick={() => setReadingPreview(!readingPreview)}>{readingPreview ? '查看原文' : '预览 Markdown'}</button>}
-      {!status?.editable && <span role="status">{status?.reason ? errors.get(status.reason) : '正在核对工作区状态…'}</span>}
+      {!status?.editable && <span role="status">{status?.reason ? errors.get(status.reason) ?? '运行状态尚待核实，请稍后重试。' : '正在核对工作区状态…'}</span>}
     </div>}
+    {!!status?.affectedGroups?.length && <div className="workspace-reader-tools">编辑影响范围：{status.affectedGroups.join('、')}。关闭页面会保留编辑窗口。</div>}
     {!editing && (status?.maintenance === 'paused' || status?.maintenance === 'unknown') &&
       <div className="workspace-reader-tools"><button disabled={busy} onClick={() => void leaveEditor(false)}>恢复 Agent</button></div>}
     {error && <p className="workspace-reader-feedback" role="alert">{error}</p>}

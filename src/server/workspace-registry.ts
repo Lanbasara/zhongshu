@@ -2,15 +2,13 @@ import { randomUUID } from 'node:crypto';
 import { closeSync, constants, fstatSync, mkdirSync, openSync, opendirSync, realpathSync } from 'node:fs';
 import { basename, join, relative, sep } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
-import { folderName, workspaceBrowseSchema, workspaceLimit, type workspaceAddSchema } from '../shared/workbench.ts';
+import { folderName, workspaceBrowseSchema, type workspaceAddSchema } from '../shared/workbench.ts';
 import type { z } from 'zod';
 import { contains, type Workspace, type WorkspaceRoot } from './harness-config.ts';
 import { StoreError } from './workbench-store.ts';
 import { directoryIdentity } from './workspace-documents.ts';
 
-type Registration = {
-  id: string; label: string; directory: string; identity: string; root_id: string | null; pinned: number; removed: number;
-};
+import { createWorkspaceStore, type WorkspaceStore, type AsyncWorkspaceStore, type Registration, type WorkspacePageQuery } from './workspace-store.ts';
 const directoryFlags = constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW;
 
 // Resolve below an operator root without following symlinks. Linux anchors each
@@ -40,24 +38,30 @@ function inDirectory<T>(root: string, parts: string[], action: (directory: strin
 
 export class WorkspaceRegistry {
   private readonly legacy: Map<string, Workspace>;
-  private readonly db: DatabaseSync;
+  private readonly store: WorkspaceStore | AsyncWorkspaceStore;
   private readonly roots: WorkspaceRoot[];
+  readonly ready: Promise<void>;
 
-  constructor(db: DatabaseSync, legacy: Workspace[], roots: WorkspaceRoot[]) {
-    this.db = db; this.roots = roots;
+  constructor(input: DatabaseSync | AsyncWorkspaceStore, legacy: Workspace[], roots: WorkspaceRoot[]) {
+    const store = 'prepare' in input ? createWorkspaceStore(input) : input;
+    this.store = store;
+    this.roots = roots;
     this.legacy = new Map(legacy.map(workspace => [workspace.id, workspace]));
-    const insert = db.prepare('INSERT OR IGNORE INTO workbench_workspaces(id,label,directory,identity) VALUES (?,?,?,?)');
-    for (const workspace of legacy) {
-      if (this.get(workspace.id)) continue;
-      let identity: string;
-      try { identity = inDirectory(workspace.directory, [], (_, value) => value); }
-      catch (error) {
-        if (!workspace.maintenance && error instanceof StoreError && error.code === 'workspace_directory_unavailable') continue;
-        throw error;
+    this.ready = (async () => {
+      const rows: Registration[] = [];
+      for (const workspace of legacy) {
+        if (await store.get(workspace.id)) continue;
+        let identity: string;
+        try { identity = inDirectory(workspace.directory, [], (_, value) => value); }
+        catch (error) {
+          if (!workspace.maintenance && error instanceof StoreError && error.code === 'workspace_directory_unavailable') continue;
+          throw error;
+        }
+        rows.push({ id: workspace.id, label: workspace.label, directory: workspace.directory, identity, root_id: null, pinned: 0, removed: 0 });
       }
-      this.checkCapacity();
-      insert.run(workspace.id, workspace.label, workspace.directory, identity);
-    }
+      if (rows.length) await store.registerLegacy(rows);
+    })();
+    void this.ready.catch(() => {});
   }
 
   private root(id: string): WorkspaceRoot {
@@ -65,43 +69,45 @@ export class WorkspaceRegistry {
     if (!root) throw new StoreError('workspace_root_not_found', 404);
     return root;
   }
-
-  private rows(): Registration[] {
-    return this.db.prepare('SELECT * FROM workbench_workspaces ORDER BY pinned DESC, label COLLATE NOCASE, id').all() as Registration[];
-  }
-
-  get(id: string): Registration | undefined {
-    return this.db.prepare('SELECT * FROM workbench_workspaces WHERE id=?').get(id) as Registration | undefined;
-  }
-
+  async get(id: string): Promise<Registration | undefined> { await this.ready; return await this.store.get(id); }
   private scope(row: Registration): { root: string; parts: string[] } | undefined {
-    if (row.root_id === null) {
-      return this.legacy.get(row.id)?.directory === row.directory ? { root: row.directory, parts: [] } : undefined;
-    }
+    if (row.root_id === null) return this.legacy.get(row.id)?.directory === row.directory ? { root: row.directory, parts: [] } : undefined;
     const root = this.roots.find(entry => entry.id === row.root_id);
     if (!root || !contains(root.directory, row.directory)) return undefined;
     const path = relative(root.directory, row.directory);
     const selected = workspaceBrowseSchema.safeParse({ rootId: root.id, path: path ? path.split(sep) : [] });
     return selected.success ? { root: root.directory, parts: selected.data.path } : undefined;
   }
-
-  active(): Workspace[] {
-    return this.rows().filter(row => !row.removed && this.scope(row)).map(row => ({
+  async configured(id: string, includeRemoved = false): Promise<Workspace | undefined> {
+    const row = await this.get(id);
+    if (!row || (!includeRemoved && row.removed) || !this.scope(row)) return;
+    return { ...(row.root_id === null ? this.legacy.get(row.id) : undefined), id: row.id, label: row.label, directory: row.directory };
+  }
+  private present(row: Registration) {
+    return { id: row.id, label: row.label, directoryName: basename(row.directory) || row.label, pinned: Boolean(row.pinned) };
+  }
+  async page(options: WorkspacePageQuery = {}) {
+    await this.ready;
+    const page = await this.store.page(options);
+    return { workspaces: page.entries.filter(row => this.scope(row)).map(row => this.present(row)), nextCursor: page.nextCursor, scanned: page.scanned, scanLimited: page.scanLimited };
+  }
+  async active(options: Omit<WorkspacePageQuery, 'removed'> = {}) {
+    await this.ready;
+    const page = await this.store.page({ ...options, removed: false });
+    return { workspaces: page.entries.filter(row => this.scope(row)).map(row => ({
       ...(row.root_id === null ? this.legacy.get(row.id) : undefined), id: row.id, label: row.label, directory: row.directory,
-    }));
+    })), nextCursor: page.nextCursor };
   }
-
-  view() {
-    const rows = this.rows();
-    return {
-      workspaces: rows.filter(row => !row.removed && this.scope(row)).map(row => ({
-        id: row.id, label: row.label, directoryName: basename(row.directory) || row.label, pinned: Boolean(row.pinned),
-      })),
-      removedWorkspaces: rows.filter(row => row.removed).map(({ id, label }) => ({ id, label })),
-      workspaceRoots: this.roots.map(({ id, label }) => ({ id, label })),
-    };
+  async view() {
+    const [active, removed] = await Promise.all([this.page(), this.page({ removed: true })]);
+    return { workspaces: active.workspaces, workspaceCursor: active.nextCursor, removedWorkspaces: removed.workspaces,
+      removedWorkspaceCursor: removed.nextCursor, workspaceRoots: this.roots.map(({ id, label }) => ({ id, label })) };
   }
-
+  async metadata(id: string) {
+    const row = await this.get(id);
+    if (!row || !this.scope(row)) throw new StoreError('workspace_not_found', 404);
+    return { ...this.present(row), removed: Boolean(row.removed) };
+  }
   verify(row: Registration): void {
     const scope = this.scope(row);
     if (!scope) throw new StoreError('workspace_directory_unavailable', 409);
@@ -109,80 +115,41 @@ export class WorkspaceRegistry {
       if (row.identity !== identity) throw new StoreError('workspace_directory_changed', 409);
     });
   }
-
   browse(rootId: string, path: string[]) {
     return inDirectory(this.root(rootId).directory, path, (directory, _, currentDirectory) => {
-      const names: string[] = [];
-      let scanned = 0;
-      let limited = false;
+      const names: string[] = []; let scanned = 0; let limited = false;
       const entries = opendirSync(directory);
-      try {
-        for (let entry = entries.readSync(); entry; entry = entries.readSync()) {
-          if (++scanned > 2000 || names.length >= 200) { limited = true; break; }
-          if (entry.isDirectory() && folderName.safeParse(entry.name).success) names.push(entry.name);
-        }
-      } finally { entries.closeSync(); }
+      try { for (let entry = entries.readSync(); entry; entry = entries.readSync()) {
+        if (++scanned > 2000 || names.length >= 200) { limited = true; break; }
+        if (entry.isDirectory() && folderName.safeParse(entry.name).success) names.push(entry.name);
+      } } finally { entries.closeSync(); }
       return { currentDirectory, names: names.sort((a, b) => a.localeCompare(b)), limited };
     });
   }
-
-  add({ rootId, path, name }: z.infer<typeof workspaceAddSchema>): string {
-    const root = this.root(rootId);
-    const parts = name === undefined ? path : [...path, name];
+  browseTarget(rootId: string, path: string[]) {
+    const parsed = workspaceBrowseSchema.safeParse({ rootId, path });
+    if (!parsed.success) throw new StoreError('invalid_workspace_path', 400);
+    return inDirectory(this.root(parsed.data.rootId).directory, parsed.data.path, (_directory, identity, currentDirectory) => ({ root: currentDirectory, path: '', identity, currentDirectory }));
+  }
+  async add({ rootId, path, name }: z.infer<typeof workspaceAddSchema>): Promise<string> {
+    await this.ready;
+    const root = this.root(rootId); const parts = name === undefined ? path : [...path, name];
     if (parts.length > 12) throw new StoreError('workspace_path_too_deep', 400);
     const directory = join(root.directory, ...parts);
     if (Buffer.byteLength(directory) > 4096) throw new StoreError('workspace_path_too_deep', 400);
     if (name !== undefined) {
-      this.checkCapacity(true);
+      await this.store.checkCapacity();
       inDirectory(root.directory, path, parent => { mkdirSync(join(parent, name), { mode: 0o700 }); });
     }
     const identity = inDirectory(root.directory, parts, (_, value) => value);
-    const matches = this.db.prepare('SELECT * FROM workbench_workspaces WHERE directory=? AND identity=? ORDER BY removed').all(directory, identity) as Registration[];
+    const matches = await this.store.matches(directory, identity);
     const existing = matches.find(row => this.scope(row));
     if (existing?.removed) throw new StoreError('workspace_removed', 409);
     if (existing) return existing.id;
-    this.checkCapacity(true);
-    const id = randomUUID();
-    const label = (parts.at(-1) ?? root.label).slice(0, 100);
-    this.db.prepare('INSERT INTO workbench_workspaces(id,label,directory,identity,root_id) VALUES (?,?,?,?,?)').run(id, label, directory, identity, root.id);
-    return id;
+    return await this.store.register({ id: randomUUID(), label: (parts.at(-1) ?? root.label).slice(0, 100), directory, identity, root_id: root.id, pinned: 0, removed: 0 });
   }
-
-  private checkCapacity(dynamic = false): void {
-    const count = this.db.prepare('SELECT count(*) AS total, count(root_id) AS dynamic FROM workbench_workspaces').get()!;
-    if (Number(count.total) >= workspaceLimit || (dynamic && Number(count.dynamic) >= workspaceLimit - 16))
-      throw new StoreError('workspace_limit', 409);
-  }
-
-  rename(id: string, label: string): void {
-    this.db.prepare('UPDATE workbench_workspaces SET label=? WHERE id=?').run(label, id);
-  }
-
-  pin(id: string, pinned: boolean): void {
-    this.db.prepare('UPDATE workbench_workspaces SET pinned=? WHERE id=?').run(Number(pinned), id);
-  }
-
-  remove(id: string): void {
-    const result = this.db.prepare(`UPDATE workbench_workspaces SET removed=1 WHERE id=? AND NOT EXISTS (
-      SELECT 1 FROM workbench_conversations c JOIN workbench_operations o ON o.conversation_id=c.id
-      WHERE c.workspace_id=? AND o.status IN ('queued','dispatching','unknown')
-    )`).run(id, id);
-    if (!result.changes) throw new StoreError('workspace_remove_busy', 409);
-  }
-
-  restore(row: Registration): void {
-    this.verify(row);
-    this.db.exec('BEGIN IMMEDIATE');
-    try {
-      // Each original binding must be verified again before its next submission.
-      this.db.prepare(`UPDATE workbench_conversations SET readiness='blocked', error='workspace_restore_pending',
-        state_json=json_set(state_json,'$.configurationVerified',json('false'))
-        WHERE workspace_id=? AND binding_json IS NOT NULL`).run(row.id);
-      this.db.prepare('UPDATE workbench_workspaces SET removed=0 WHERE id=?').run(row.id);
-      this.db.exec('COMMIT');
-    } catch (error) {
-      this.db.exec('ROLLBACK');
-      throw error;
-    }
-  }
+  async rename(id: string, label: string): Promise<void> { await this.ready; await this.store.rename(id, label); }
+  async pin(id: string, pinned: boolean): Promise<void> { await this.ready; await this.store.pin(id, pinned); }
+  async remove(id: string): Promise<void> { await this.ready; await this.store.remove(id); }
+  async restore(row: Registration): Promise<void> { this.verify(row); await this.ready; await this.store.restore(row.id, row.identity); }
 }

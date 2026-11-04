@@ -4,6 +4,7 @@ import staticFiles from '@fastify/static';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import { z } from 'zod';
+import type { AsyncAuthStore } from './auth-store.ts';
 import { createAuth } from './auth.ts';
 
 export type Metadata = { name: string; version: string; revision: string };
@@ -12,11 +13,13 @@ export type PrivateContext = {
   token(request: FastifyRequest): string;
 };
 export type AppOptions = {
-  db: DatabaseSync;
+  db?: DatabaseSync;
+  authStore?: AsyncAuthStore;
   origin: string;
   assetsDirectory?: string;
   metadata?: Metadata;
   logger?: boolean;
+  readiness?: () => boolean;
   privateRoutes?: (app: FastifyInstance, context: PrivateContext) => Promise<void>;
   onLogout?: (sessionId: string) => void;
 };
@@ -36,7 +39,9 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
     logController: new LogController({ disableRequestLogging: true }),
     logger: options.logger ? { level: 'info', redact: ['req.headers.cookie', 'req.headers.authorization', 'body'] } : false,
   });
-  const auth = createAuth(options.db, { audit: event => app.log.info(event) });
+  const repository = options.authStore ?? options.db;
+  if (!repository || (options.db && options.authStore)) throw new Error('invalid_auth_repository');
+  const auth = createAuth(repository, { audit: event => app.log.info(event) });
   const token = (request: FastifyRequest) => {
     const parsed = cookieToken.safeParse(request.cookies[cookieName]);
     return parsed.success ? parsed.data : '';
@@ -62,14 +67,18 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
     if (status === 500) app.log.error({ event: 'request_failed' });
     return reply.code(status).send({ error: status === 500 ? 'service_unavailable' : 'invalid_request' });
   });
-  app.get('/api/health', async () => ({ status: 'ok' }));
+  app.get('/api/health', async (_request, reply) => {
+    let ready = false;
+    try { ready = options.readiness?.() ?? true; } catch { /* fail closed without touching storage */ }
+    return ready ? { status: 'ok' } : reply.code(503).send({ status: 'unavailable' });
+  });
   app.get('/api/version', async () => options.metadata ?? { name: 'zhongshu', version: '0.1.0', revision: 'development' });
   app.get('/api/session', async (request) => {
     const raw = token(request);
-    const session = raw ? auth.authenticate(raw) : null;
+    const session = raw ? await auth.authenticate(raw) : null;
     return session
       ? { authenticated: true, csrfToken: csrfFor(raw), expiresAt: session.expiresAt }
-      : { authenticated: false, initialized: auth.initialized() };
+      : { authenticated: false, initialized: await auth.initialized() };
   });
   app.post('/api/login', async (request, reply) => {
     const input = passwordBody.safeParse(request.body);
@@ -88,7 +97,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
   await app.register(async (privateApp) => {
     privateApp.addHook('onRequest', async (request, reply) => {
       const raw = token(request);
-      if (!raw || !auth.authenticate(raw)) return reply.code(401).send({ error: 'unauthenticated' });
+      if (!raw || !await auth.authenticate(raw)) return reply.code(401).send({ error: 'unauthenticated' });
       if (!['GET', 'HEAD'].includes(request.method)) {
         const supplied = request.headers['x-csrf-token'];
         const expected = csrfFor(raw);
@@ -97,11 +106,12 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
         }
       }
     });
-    privateApp.get('/identity', async (request) => ({ name: '管理员', expiresAt: auth.authenticate(token(request))!.expiresAt }));
+    privateApp.get('/identity', async (request) => ({ name: '管理员', expiresAt: (await auth.authenticate(token(request)))!.expiresAt }));
     privateApp.post('/logout', async (request, reply) => {
       const raw = token(request);
-      const session = auth.authenticate(raw)!;
-      auth.logout(raw);
+      const session = await auth.authenticate(raw);
+      if (!session) return reply.code(401).send({ error: 'unauthenticated' });
+      await auth.logout(raw);
       options.onLogout?.(session.id);
       app.log.info({ event: 'session_removed' });
       reply.clearCookie(cookieName, cookieSettings);
@@ -110,7 +120,12 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
     await options.privateRoutes?.(privateApp, { auth, token });
   }, { prefix: '/api/private' });
   if (options.assetsDirectory) {
-    await app.register(staticFiles, { root: options.assetsDirectory, wildcard: false, index: ['index.html'], dotfiles: 'deny', cacheControl: false, etag: false });
+    await app.register(staticFiles, { root: options.assetsDirectory, wildcard: false, index: ['index.html'], dotfiles: 'deny', cacheControl: false, etag: false, preCompressed: true,
+      setHeaders(response, path) {
+        if (/[\\/]assets[\\/][A-Za-z0-9_.-]+-[A-Za-z0-9_-]+\.(?:js|css)(?:\.(?:gz|br))?$/.test(path))
+          response.header('Cache-Control', 'public, max-age=31536000, immutable');
+      },
+    });
   }
   app.setNotFoundHandler((_request, reply) => reply.code(404).send({ error: 'not_found' }));
   await app.ready();

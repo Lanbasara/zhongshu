@@ -9,6 +9,11 @@ export const referenceSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('file'), path: referencePath }).strict(),
 ]);
 export const contentFields = { images: z.array(imageSchema).max(4).optional(), references: z.array(referenceSchema).max(8).optional() };
+export const bodyFieldSchema = z.enum(['text', 'input', 'output', 'references']);
+export const bodyReferenceSchema = z.object({ version: z.string().regex(/^[a-f0-9]{64}$/), bytes: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER) }).strict();
+export const bodyReferencesSchema = z.object({ text: bodyReferenceSchema.optional(), input: bodyReferenceSchema.optional(), output: bodyReferenceSchema.optional(), references: bodyReferenceSchema.optional() }).strict();
+export type BodyReference = z.infer<typeof bodyReferenceSchema>;
+export type BodyReferences = z.infer<typeof bodyReferencesSchema>;
 export const skillLimit = 8;
 const skillId = z.string().regex(/^[a-f0-9]{64}$/);
 const skillLabel = z.string().min(1).max(120).regex(/^[^\s\u0000-\u001f\u007f][^\u0000-\u001f\u007f]*$/u);

@@ -2,6 +2,8 @@ import { memo, useEffect, useRef, useState, type CSSProperties } from 'react';
 import { conversationListSchema, conversationResponseSchema, conversationTitleSchema, type Conversation, type WorkbenchConfiguration } from '../shared/workbench.ts';
 import { RequestError, request } from './workbench-client.ts';
 import type { WorkspaceAction } from './workspace-management.tsx';
+import { progressiveSearch } from './progressive-search.ts';
+import { useWorkspacePage, WorkspacePages } from './workspace-selection.tsx';
 
 const widthKey = 'zhongshu:sidebar-width';
 const minWidth = 224;
@@ -41,6 +43,8 @@ export function useSidebarWidth() {
 type NavigationProps = {
   workspaces?: WorkbenchConfiguration['workspaces'];
   removedWorkspaces?: WorkbenchConfiguration['removedWorkspaces'];
+  workspaceCursor?: string | null;
+  removedWorkspaceCursor?: string | null;
   canAddWorkspace?: boolean;
   workspaceAction(action: WorkspaceAction): void;
   selected?: string;
@@ -68,9 +72,11 @@ function Results({ query, revision, csrf, report, rows, hideEmpty, workspaceLabe
   const [cursors, setCursors] = useState<string[]>([]);
   const beforeId = cursors.at(-1);
   const [results, setResults] = useState<Conversation[]>([]);
+  const [resultLabels, setResultLabels] = useState<Map<string, string>>(new Map());
   const [next, setNext] = useState<string | null>(null);
   const [loadingPage, setLoadingPage] = useState(true);
   const [loaded, setLoaded] = useState(false);
+  const [scanned, setScanned] = useState(0); const pauseSearch = useRef(() => {});
   const [failed, setFailed] = useState(false);
   const [retry, setRetry] = useState(0);
   const queryKey = JSON.stringify(query);
@@ -82,18 +88,19 @@ function Results({ query, revision, csrf, report, rows, hideEmpty, workspaceLabe
     if (!visible) return;
     const controller = new AbortController();
     let loading = false;
-    let refreshRequested = false;
+    let refreshRequested = false; let paused = false; pauseSearch.current = () => { paused = true; };
     const fetchPage = async () => {
-      loading = true;
+      loading = true; setLoadingPage(true); setScanned(0);
       try {
-        const result = await request('/conversation-search', conversationListSchema, {
-          csrf, signal: controller.signal, body: { ...JSON.parse(queryKey), beforeId },
+        await progressiveSearch({ cursor: beforeId, signal: controller.signal, continuous: !!query.title, paused: () => paused,
+          fetch: async current => {
+            const result = await request('/conversation-search', conversationListSchema, {
+              csrf, signal: controller.signal, body: { ...JSON.parse(queryKey), beforeId: current },
+            });
+            return { value: result, nextCursor: result.olderBeforeId, scanned: result.scanned ?? result.conversations.length, found: result.conversations.length > 0 };
+          },
+          progress: ({ value: result }, total) => { setResults(result.conversations); setResultLabels(new Map(result.workspaceLabels?.map(value => [value.id, value.label]))); setNext(result.olderBeforeId); setScanned(total); setLoaded(true); setFailed(false); },
         });
-        if (controller.signal.aborted) return;
-        setResults(result.conversations);
-        setNext(result.olderBeforeId);
-        setLoaded(true);
-        setFailed(false);
       } catch (reason) {
         if (controller.signal.aborted) return;
         setFailed(true);
@@ -108,7 +115,8 @@ function Results({ query, revision, csrf, report, rows, hideEmpty, workspaceLabe
       }
     };
     pendingRefresh.current = () => {
-      if (loading) refreshRequested = true;
+      if (query.title && paused) return;
+      if (loading) { if (!query.title) refreshRequested = true; }
       else void fetchPage();
     };
     void fetchPage();
@@ -123,15 +131,15 @@ function Results({ query, revision, csrf, report, rows, hideEmpty, workspaceLabe
   }, [revision, visible]);
 
   return <>
-    {visible && loadingPage && !failed && <p className="navigation-empty" role="status">正在加载…</p>}
+    {visible && loadingPage && !failed && <p className="navigation-empty" role="status">{query.title ? `正在查找，已检查 ${scanned} 条…` : '正在加载…'} {query.title && <button type="button" className="text-button" onClick={() => pauseSearch.current()}>暂停查找</button>}</p>}
     {label && results.length > 0 && <p className="nav-label">{label}</p>}
     {failed && <p className="navigation-empty">读取失败。<button className="text-button" onClick={() => setRetry(value => value + 1)}>重试</button></p>}
-    {loaded && !failed && !results.length && !hideEmpty && <p className="navigation-empty">暂无对话</p>}
+    {loaded && !loadingPage && !failed && !results.length && !hideEmpty && <p className="navigation-empty">{next ? '这批记录暂无匹配，还可以继续查找。' : '暂无对话'}</p>}
     {visible && results.map(conversation => <div className="conversation-row" key={conversation.id}>
       <button className={`conversation-link ${conversation.id === rows.selected ? 'selected' : ''}`}
         aria-current={conversation.id === rows.selected ? 'page' : undefined} onClick={() => rows.choose(conversation.id)}>
         <strong title={conversation.title}>{conversation.title}</strong>
-        <span>{conversation.harnessId === 'codex' ? 'Codex' : 'DSH'}<i title={workspaceLabel?.(conversation.workspaceId)}>{workspaceLabel?.(conversation.workspaceId) ?? rows.stateLabel(conversation)}</i></span>
+        <span>{conversation.harnessId === 'codex' ? 'Codex' : 'DSH'}<i title={workspaceLabel ? resultLabels.get(conversation.workspaceId) ?? workspaceLabel(conversation.workspaceId) : undefined}>{workspaceLabel ? resultLabels.get(conversation.workspaceId) ?? workspaceLabel(conversation.workspaceId) : rows.stateLabel(conversation)}</i></span>
       </button>
       <button className="icon-button conversation-options" aria-label={`管理对话：${conversation.title}`} onClick={() => rows.manage(conversation)}>⋯</button>
     </div>)}
@@ -142,8 +150,8 @@ function Results({ query, revision, csrf, report, rows, hideEmpty, workspaceLabe
       }}>较新对话</button>}
       {next && <button className="text-button" disabled={loadingPage} onClick={() => {
         setLoadingPage(true);
-        setCursors(current => [...current, next]);
-      }}>更早对话</button>}
+        setCursors(current => [...current.slice(-31), next]);
+      }}>{query.title ? '继续查找' : '更早对话'}</button>}
     </div>}
   </>;
 }
@@ -167,9 +175,10 @@ export const ConversationNavigation = memo(function ConversationNavigation(props
   const searchActive = !!search.trim();
   const workspaceLabel = (id: string) => props.workspaces?.find(workspace => workspace.id === id)?.label ??
     props.removedWorkspaces?.find(workspace => workspace.id === id)?.label ?? '未登记工作区';
-  const workspaceTerm = workspaceSearch.trim().toLocaleLowerCase();
-  const matchingWorkspaces = props.workspaces?.filter(workspace => !workspaceTerm ||
-    [workspace.label, workspace.directoryName].some(name => name?.toLocaleLowerCase().includes(workspaceTerm)));
+  const workspaceTerm = workspaceSearch.trim();
+  const workspacePage = useWorkspacePage(props.workspaces, props.workspaceCursor, workspaceTerm, false, !showRemoved);
+  const removedPage = useWorkspacePage(props.removedWorkspaces, props.removedWorkspaceCursor, '', true, showRemoved);
+  const matchingWorkspaces = workspacePage.entries;
   const rows = { ...props, manage: setManaging };
   const resultProps = { revision: props.revision, csrf: props.csrf, report: props.report, rows };
   const scroll = useRef<HTMLElement>(null);
@@ -220,11 +229,12 @@ export const ConversationNavigation = memo(function ConversationNavigation(props
           </section>;
         })}
         {workspaceTerm && !matchingWorkspaces?.length && <p className="navigation-empty">没有匹配的工作区</p>}
+        <WorkspacePages page={workspacePage}/>
         {props.workspaces && !workspaceTerm && <section className="workspace-group">
           <Results {...resultProps} visible={!alternate} query={{ unregistered: true }} hideEmpty label="未登记工作区" />
         </section>}
       </div>
-      {showRemoved && props.removedWorkspaces?.map(workspace => <section className="workspace-group" key={workspace.id}>
+      {showRemoved && removedPage.entries.map(workspace => <section className="workspace-group" key={workspace.id}>
         <header><button className="workspace-toggle" aria-expanded={removedGroup === workspace.id}
           onClick={() => setRemovedGroup(removedGroup === workspace.id ? undefined : workspace.id)}>{workspace.label}</button>
           <button className="text-button" aria-label={`恢复工作区：${workspace.label}`} onClick={() => props.workspaceAction({ kind: 'restore', workspace })}>恢复</button>
@@ -234,6 +244,7 @@ export const ConversationNavigation = memo(function ConversationNavigation(props
           <Results {...resultProps} query={{ workspaceId: workspace.id, archived: true }} hideEmpty label="已归档对话" />
         </>}
       </section>)}
+      {showRemoved && <WorkspacePages page={removedPage}/>}
       {alternate && !showRemoved && <section className="workspace-group">
         <p className="nav-label">{archived ? '已归档对话' : '搜索结果'}</p>
         {searchActive && term !== search.trim() ? <p className="navigation-empty">正在搜索…</p> :

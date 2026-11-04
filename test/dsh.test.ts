@@ -108,6 +108,16 @@ async function setup() {
   return { fixture, directory, file, adapter, create, async close() { await adapter.close(); await fixture.close(); await rm(directory, { recursive: true, force: true }); } };
 }
 
+test('Configured DSH bounded state fails closed when its fixed-version Host capability is absent', async t => {
+  const f = await setup(); t.after(f.close); const binding = await f.create();
+  const adapter = createDshAdapter({ launchFile: f.file, boundedState: true }); t.after(() => adapter.close());
+  const before = f.fixture.calls.length; const state = await adapter.state(binding);
+  assert.equal(state.status, 'unknown'); assert.equal(state.configurationVerified, false);
+  assert.equal((await adapter.submit(binding, { id: 'bounded-unsupported', text: 'do not send' })).outcome, 'rejected');
+  const calls = f.fixture.calls.slice(before); assert(calls.length > 0);
+  assert(calls.every(call => call.method === 'zhongshuBounded/state'));
+});
+
 function approvalContext() { return { id: randomUUID(), role: 'user', source: { kind: 'user-approval' }, content: [{ type: 'text', text: 'The approval policy has changed.' }] }; }
 
 test('DSH permission setup context permits the first message without clearing native input', async () => {
@@ -165,6 +175,21 @@ test('DSH persists the native binding before configuration failure and never cre
     const catalog = await context.adapter.catalog(); context.fixture.rejectModel(); let bound: Binding | undefined;
     await assert.rejects(context.adapter.create({ cwd: context.directory, configuration: { modelId: catalog.models[0]!.id, permissionId: 'workspace-write' } }, value => { bound = value; assert.equal(context.fixture.calls.at(-1)?.method, 'session/create'); }));
     assert.ok(bound); assert.equal(context.fixture.calls.filter(call => call.method === 'session/create').length, 1); assert.equal(context.fixture.calls.some(call => call.method === 'session/prompt'), false);
+  } finally { await context.close(); }
+});
+
+test('DSH awaits durable async binding before selecting a model and stops when persistence rejects', async () => {
+  const context = await setup();
+  try {
+    const catalog = await context.adapter.catalog(); const input = { cwd: context.directory, configuration: { modelId: catalog.models[0]!.id, permissionId: 'workspace-write' } };
+    let release!: () => void; let entered = false;
+    const barrier = new Promise<void>(resolve => { release = resolve; });
+    const creating = context.adapter.create(input, async () => { entered = true; await barrier; });
+    await until(() => entered); assert.equal(context.fixture.calls.some(call => call.method === 'session/selectModel'), false);
+    release(); await creating;
+    const before = context.fixture.calls.filter(call => call.method === 'session/selectModel').length;
+    await assert.rejects(context.adapter.create(input, async () => { throw new Error('synthetic persistence failure'); }));
+    assert.equal(context.fixture.calls.filter(call => call.method === 'session/selectModel').length, before);
   } finally { await context.close(); }
 });
 
@@ -428,4 +453,14 @@ test('DSH discards target proof if the Host history moves backwards during looku
     const result = await context.adapter.state(binding, `dsh:${binding.id}:turn:1`);
     assert.equal(result.status, 'unknown'); assert.equal(result.terminalRunId, undefined); assert.equal(result.configurationVerified, false);
   } finally { await context.close(); }
+});
+
+test('Managed DSH observation loss cannot reopen native follow without a new caller operation', async t => {
+  const f = await setup(); t.after(f.close); const binding = await f.create();
+  const adapter = createDshAdapter({ launchFile: f.file, managedExecution: true }); t.after(() => adapter.close());
+  const changes: NativeChange[] = []; const stop = await adapter.watch(binding, change => changes.push(change)); t.after(stop);
+  await until(() => changes.some(change => change.type === 'state'));
+  const count = f.fixture.calls.length; f.fixture.disconnect();
+  await until(() => changes.some(change => change.type === 'unavailable')); await delay(450);
+  assert.equal(f.fixture.calls.length, count);
 });

@@ -1,11 +1,10 @@
 import { FolderOpen, LogOut, Plus, RefreshCw, X, ChevronRight, Puzzle } from 'lucide-react';
 import { BrandMark, Button, IconButton } from './ui/controls.tsx';
 import { WorkbenchFrame } from './patterns/workbench-frame.tsx';
-import { WorkspaceReader } from './workspace-reader.tsx';
-import { useCallback, useEffect, useMemo, useLayoutEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useLayoutEffect, useRef, useState } from 'react';
 import {
-  workbenchConfigurationSchema, conversationResponseSchema, operationResponseSchema,
-  snapshotSchema, changeEventSchema, resetEventSchema, queueViewSchema,
+  workbenchConfigurationSchema, workspaceLookupSchema, conversationResponseSchema, operationResponseSchema,
+  snapshotSchema, changeEventSchema, resetEventSchema, queueViewSchema, queueEntrySchema,
   type WorkbenchConfiguration, type Conversation, type WorkbenchSnapshot, type WorkbenchItem, type QueueCommand, type TurnFileSummary,
 } from '../shared/workbench.ts';
 import { request, RequestError, readDraft, sameInput, saveDraft, type Draft } from './workbench-client.ts';
@@ -18,6 +17,10 @@ import type { MessageReference } from '../shared/content.ts';
 import { WorkspaceManagement, type WorkspaceAction } from './workspace-management.tsx';
 import { InputQueue } from './input-queue.tsx';
 import { PluginManagement } from './plugin-management.tsx';
+import { WorkspaceSelect } from './workspace-selection.tsx';
+import { StorageNotice } from './storage-notice.tsx';
+const emptyWorkspaces: WorkbenchConfiguration['workspaces'] = [];
+const WorkspaceReader = lazy(() => import('./workspace-reader.tsx').then(module => ({ default: module.WorkspaceReader })));
 
 const states = { idle: '就绪', running: '运行中', waiting: '等待处理', interrupted: '已中断', failed: '执行失败', unknown: '待核实' };
 const stateLabel = (c: Conversation) => c.readiness === 'preparing' ? '正在准备' : c.readiness === 'blocked' ? '准备未完成' : states[c.state.status];
@@ -65,8 +68,7 @@ const mergeItems = (older: PageItem[], newer: PageItem[]): PageItem[] => {
   return [...older.filter(item => !incoming.has(item.id)), ...newer];
 };
 // Bound both the number of DOM entries and retained UTF-16 text, including long replies.
-const itemWeight = (item: PageItem) => item.text.length * 2 + 2048 +
-  (item.turnFiles?.paths.reduce((bytes, path) => bytes + path.length * 2 + 16, 0) ?? 0);
+const itemWeight = (item: PageItem) => JSON.stringify(item).length * 2 + 1024;
 const fitsWindow = (items: PageItem[]) => items.length <= 500 && items.reduce((bytes, item) => bytes + itemWeight(item), 0) <= 8 * 1024 * 1024;
 const boundedPage = (items: WorkbenchItem[], turnFiles: TurnFileSummary[] = []): PageItem[] => {
   const summaries = new Map(turnFiles.map(summary => [summary.runId, summary]));
@@ -330,9 +332,14 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
     try {
       const result = await request(`/conversations/${id}/older?beforeItemId=${encodeURIComponent(before)}`, snapshotSchema, { signal: viewController.current?.signal });
       if (!alive.current || gen !== generation.current) return;
+      const pageItems = boundedPage(result.history.items, result.turnFiles);
+      if (!pageItems.length) {
+        setHasOlder(result.history.hasOlder);
+        setSnapshot(current => current ? { ...current, archive: result.archive } : current);
+        return;
+      }
       if (scroll.current) anchor.current = { height: scroll.current.scrollHeight, top: scroll.current.scrollTop };
       atBottom.current = false;
-      const pageItems = boundedPage(result.history.items, result.turnFiles);
       const trimmed = pageItems.length < result.history.items.length;
       setItems(current => { const merged = mergeItems(pageItems, current); if (!fitsWindow(merged)) { anchor.current = null; setWindowed(true); return pageItems; } return merged; });
       setBefore(trimmed ? pageItems[0]?.id ?? null : result.history.olderBeforeItemId ?? pageItems[0]?.id ?? null); setHasOlder(trimmed || result.history.hasOlder);
@@ -340,11 +347,24 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
     finally { if (alive.current) setLoadingOlder(false); }
   };
   const conversation = snapshot?.conversation;
-  const unresolved = snapshot?.operations.some(op => ['queued', 'dispatching', 'unknown'].includes(op.status));
-  const latestMessage = snapshot?.operations.find(op => op.type === 'message' && op.status === 'accepted');
+  const [selectedWorkspace, setSelectedWorkspace] = useState<(WorkbenchConfiguration['workspaces'][number] & { removed: boolean }) | null>(null);
+  useEffect(() => {
+    const id = conversation?.workspaceId;
+    setSelectedWorkspace(null);
+    if (!id) return;
+    const active = configuration?.workspaces.find(value => value.id === id);
+    const removed = configuration?.removedWorkspaces?.find(value => value.id === id);
+    if (active || removed) { setSelectedWorkspace({ ...(active ?? removed!), removed: !!removed }); return; }
+    const controller = new AbortController();
+    void request(`/workspaces/${encodeURIComponent(id)}`, workspaceLookupSchema, { signal: controller.signal })
+      .then(value => { if (!controller.signal.aborted) setSelectedWorkspace(value.workspace); }).catch(() => {});
+    return () => controller.abort();
+  }, [conversation?.workspaceId, configuration]);
+  const unresolved = snapshot?.operationState?.unresolved ?? snapshot?.operations.some(op => ['queued', 'dispatching', 'unknown'].includes(op.status));
+  const latestMessage = snapshot?.operationState ? snapshot.operationState.latestAcceptedMessage : snapshot?.operations.find(op => op.type === 'message' && op.status === 'accepted');
   const rejectedDraft = draft.pending && snapshot?.operations.find(op => op.id === draft.pending!.id)?.status === 'rejected';
   const previousMessageSettled = !latestMessage || (latestMessage.runId !== null && (latestMessage.runId === conversation?.state.runId || latestMessage.runId === conversation?.state.terminalRunId));
-  const removedWorkspace = configuration?.removedWorkspaces?.find(workspace => workspace.id === conversation?.workspaceId);
+  const removedWorkspace = configuration?.removedWorkspaces?.find(workspace => workspace.id === conversation?.workspaceId) ?? (selectedWorkspace?.removed ? selectedWorkspace : undefined);
   const workspaceRemoved = !!removedWorkspace || conversation?.error === 'workspace_removed';
   const running = !!conversation?.state.runId && ['running', 'waiting'].includes(conversation.state.status);
   const queue = snapshot?.queue;
@@ -391,23 +411,25 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
       <div className="workbench-brand"><BrandMark/><span>中书</span><IconButton className="mobile-only" label="关闭导航" onClick={() => setNavigation(false)}><X size={17}/></IconButton></div>
       <Button className="new-conversation" onClick={() => { setCreating(true); setNavigation(false); }}><Plus size={16}/>新对话</Button>
       <ConversationNavigation workspaces={configuration?.workspaces} removedWorkspaces={configuration?.removedWorkspaces}
+        workspaceCursor={configuration?.workspaceCursor} removedWorkspaceCursor={configuration?.removedWorkspaceCursor}
         canAddWorkspace={!!configuration?.workspaceRoots?.length} workspaceAction={setWorkspaceAction} selected={selected} revision={listRevision} csrf={csrf}
         choose={choose} create={createInWorkspace} stateLabel={stateLabel} report={report}
         changed={refreshNavigation} />
       {sidebarWidth.separator}
       <div className="sidebar-bottom">
+        <StorageNotice/>
         <button className="sidebar-files" aria-current={managingPlugins ? 'page' : undefined} onClick={() => { setManagingPlugins(true); setReader(false); setNavigation(false); }}><Puzzle size={16}/><span>插件管理</span><ChevronRight size={13}/></button>
         <button className="sidebar-files" aria-expanded={reader} disabled={!configuration?.workspaces.length} onClick={() => { setReader(true); setNavigation(false); }}><FolderOpen size={16}/><span>工作区文件</span><ChevronRight size={13}/></button>
         <div className="sidebar-account"><span className="network" role="status"><span className="network-dot"/>{connection}</span><IconButton label="退出登录" onClick={logout} disabled={busy}><LogOut size={15}/></IconButton></div>
       </div>
     </>}
-    header={managingPlugins ? <><div className="conversation-heading"><p>工作台 / 插件</p></div><Button variant="quiet" onClick={() => setManagingPlugins(false)}>返回工作台</Button></> : <><div className="conversation-heading"><h1>{conversation?.title ?? (selected ? '正在恢复对话…' : '从这里，接着做。')}</h1><p>{conversation ? `${conversation.harnessId === 'codex' ? 'Codex' : 'DSH'} · ${removedWorkspace?.label ?? configuration?.workspaces.find(w => w.id === conversation.workspaceId)?.label ?? '工作区'} · ${workspaceRemoved ? '工作区已移除' : stateLabel(conversation)}` : '一段对话，一个可以接续的工作现场'}</p></div><div className="header-actions"><IconButton label="打开工作区文件" disabled={!configuration?.workspaces.length} onClick={() => setReader(true)}><FolderOpen size={17}/></IconButton><IconButton label="重新连接" onClick={() => { scheduleRefresh(); refreshConfiguration(); }}><RefreshCw size={15}/></IconButton></div></>}
-    reader={!managingPlugins && reader && configuration && <WorkspaceReader workspaces={configuration.workspaces} initialWorkspace={conversation?.workspaceId}
+    header={managingPlugins ? <><div className="conversation-heading"><p>工作台 / 插件</p></div><Button variant="quiet" onClick={() => setManagingPlugins(false)}>返回工作台</Button></> : <><div className="conversation-heading"><h1>{conversation?.title ?? (selected ? '正在恢复对话…' : '从这里，接着做。')}</h1><p>{conversation ? `${conversation.harnessId === 'codex' ? 'Codex' : 'DSH'} · ${removedWorkspace?.label ?? selectedWorkspace?.label ?? configuration?.workspaces.find(w => w.id === conversation.workspaceId)?.label ?? '工作区'} · ${workspaceRemoved ? '工作区已移除' : stateLabel(conversation)}` : '一段对话，一个可以接续的工作现场'}</p></div><div className="header-actions"><IconButton label="打开工作区文件" disabled={!configuration?.workspaces.length} onClick={() => setReader(true)}><FolderOpen size={17}/></IconButton><IconButton label="重新连接" onClick={() => { scheduleRefresh(); refreshConfiguration(); }}><RefreshCw size={15}/></IconButton></div></>}
+    reader={!managingPlugins && reader && configuration && <Suspense fallback={<p role="status">正在打开文件…</p>}><WorkspaceReader workspaces={configuration.workspaces} workspaceCursor={configuration.workspaceCursor} initialWorkspace={conversation?.workspaceId}
       target={readerTarget} onTargetUnavailable={target => {
         if (target === readerTarget && readerTarget.conversationId === selectedRef.current)
           setUnavailableFiles(previous => new Set(previous).add(JSON.stringify([readerTarget.runId, target.path])));
       }}
-      csrf={csrf} editStatusSignal={JSON.stringify([conversation?.id, conversation?.state.status, conversation?.state.pendingInputs, unresolved])} expanded={readerExpanded} onExpand={setReaderExpanded} onClose={closeReader}/>}>
+      csrf={csrf} editStatusSignal={JSON.stringify([conversation?.id, conversation?.state.status, conversation?.state.pendingInputs, unresolved])} expanded={readerExpanded} onExpand={setReaderExpanded} onClose={closeReader}/></Suspense>}>
 
       {managingPlugins ? <PluginManagement csrf={csrf} report={report}/> : !selected ? <section className="empty-workbench"><p className="eyebrow">A PLACE TO CONTINUE</p><h2>把想法，往前推进一步。</h2><p>选择一个工作区和 Agent，开始一件具体的工作。<br />离开页面后，可以回来继续。</p><button onClick={() => setCreating(true)}>开始新对话 ↗</button>{configuration?.workspaces.length === 0 && <p className="quiet">工作区与原生服务尚未由管理员连接。</p>}</section> : <>
         <div className="message-scroll" ref={scroll} onScroll={() => { const node = scroll.current!; atBottom.current = node.scrollHeight - node.scrollTop - node.clientHeight < 80; if (atBottom.current) setMoreOutput(false); }}>
@@ -416,6 +438,12 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
             {windowed && <p className="history-note">正在阅读较早的一页。<button className="text-button" onClick={() => { if (selected) { atBottom.current = true; void load(selected, true); } }}>回到最新内容</button></p>}
             {!snapshot && <p role="status" className="quiet">正在核对远端状态与历史…</p>}
             {snapshot && visible.length === 0 && <p className="quiet conversation-start">{conversation?.readiness === 'ready' ? '对话已准备好。说说你希望完成什么。' : '正在准备原生会话…'}</p>}
+            {snapshot?.archive && <p className="history-note" role="status">{[snapshot.archive.latest?.error, snapshot.archive.backfill?.error].some(error => error === 'archive_source_gap' || error === 'archive_continuity_unverified')
+              ? '原生历史已变化，旧范围的连续性尚未确认。已保存正文仍可阅读，后台继续补齐当前可获取的内容。'
+              : snapshot.archive.latest?.error === 'archive_items_pending' || snapshot.archive.backfill?.error === 'archive_items_pending' ? '后台正在核对尚未完整存档的图文，已保存内容仍可阅读。'
+              : snapshot.archive.latest?.error || snapshot.archive.backfill?.error ? '历史存档暂时未能继续，已保存的正文仍可阅读。'
+              : snapshot.archive.backfill?.complete && snapshot.archive.latest?.complete ? '截至最近同步，已保存可获取的历史正文。' : '后台正在补齐历史正文，离开页面后仍会继续。'}
+              {snapshot.archive.latest?.lastSuccessAt && <span> 最近同步：<time dateTime={new Date(snapshot.archive.latest.lastSuccessAt).toISOString()}>{new Date(snapshot.archive.latest.lastSuccessAt).toLocaleString()}</time></span>}</p>}
             <Transcript items={visible} conversation={selected} onQuote={quote} turnFiles={turnFiles}
               activeRun={running ? conversation?.state.runId : undefined} activeFile={readerTarget?.conversationId === selected ? readerTarget : undefined}
               workspaceUnavailable={workspaceRemoved} unavailableFiles={unavailableFiles} onOpenFile={openTurnFile}/>
@@ -443,6 +471,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
             ready={ready} sending={sending} running={running} queueing={queueing}
             skillsEnabled={conversation?.id === selected && !!usable} usage={conversation?.id === selected ? snapshot?.usage : undefined}
             queue={queue && <InputQueue queue={queue} busy={sending}
+              onRead={(entryId, version, signal) => request(`/conversations/${selected}/queue/${entryId}?version=${version}`, queueEntrySchema, { signal })}
               target={running && usable && !unresolved ? conversation.state.runId : undefined} canResume={!!usable && !unresolved} onCommand={changeQueue}/>}
             permission={conversation?.state.configurationVerified ? permission?.label ?? '配置按对话固定' : '配置待核实'}
             configurationNote={conversation?.state.configurationVerified ? permission?.description ?? '配置在本对话中保持不变。' : '正在核实当前对话的原生配置，核实后可继续工作。'}
@@ -472,7 +501,7 @@ function CreateConversation({ configuration, initialWorkspace, csrf, onClose, on
     if (submission.current) return;
     setModel(current => catalog?.models.some(value => value.id === current) ? current : catalog?.models[0]?.id ?? '');
     setPermission(current => catalog?.permissions.some(value => value.id === current) ? current : catalog?.permissions[0]?.id ?? '');
-    setWorkspace(current => configuration?.workspaces.some(value => value.id === current) ? current : configuration?.workspaces[0]?.id ?? '');
+    setWorkspace(current => current || configuration?.workspaces[0]?.id || '');
   }, [catalog, configuration]);
   const create = async () => {
     if (busy) return; setBusy(true); setFailed(false);
@@ -482,7 +511,7 @@ function CreateConversation({ configuration, initialWorkspace, csrf, onClose, on
     finally { setBusy(false); }
   };
   return <dialog ref={dialog} className="create-dialog" onCancel={e => { e.preventDefault(); if (!busy) onClose(); }}><form onSubmit={e => { e.preventDefault(); void create(); }}><header><h2>开始一段新对话</h2><button type="button" className="icon-button" aria-label="关闭新对话" disabled={busy} onClick={onClose}>×</button></header><p className="quiet">选择工作现场，模型和权限会在这段对话中保持不变。</p>
-    <fieldset disabled={busy || !!submission.current}><label htmlFor="conversation-title">对话名称</label><input id="conversation-title" maxLength={60} placeholder="这次想完成什么？" value={title} onChange={e => setTitle(e.target.value)} /><label htmlFor="workspace">工作区</label><select id="workspace" value={workspace} onChange={e => setWorkspace(e.target.value)}>{configuration?.workspaces.map(w => <option key={w.id} value={w.id}>{w.label}</option>)}</select><label htmlFor="harness">Agent</label><select id="harness" value={harness} onChange={e => setHarness(e.target.value as 'codex' | 'dsh')}>{configuration?.harnesses.map(h => <option key={h.id} value={h.id} disabled={!h.available}>{h.id === 'codex' ? 'Codex' : 'DSH'}{!h.available ? ' · 未连接' : ''}</option>)}</select><label htmlFor="model">模型</label><select id="model" value={model} onChange={e => setModel(e.target.value)}>{catalog?.models.map(m => <option key={m.id} value={m.id}>{m.label}</option>)}</select><label htmlFor="permission">权限</label><select id="permission" value={permission} onChange={e => setPermission(e.target.value)}>{catalog?.permissions.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}</select><p className="quiet permission-note">{catalog?.permissions.find(p => p.id === permission)?.description ?? catalog?.reason}</p></fieldset>
+    <fieldset disabled={busy || !!submission.current}><label htmlFor="conversation-title">对话名称</label><input id="conversation-title" maxLength={60} placeholder="这次想完成什么？" value={title} onChange={e => setTitle(e.target.value)} /><label htmlFor="workspace">工作区</label><WorkspaceSelect id="workspace" value={workspace} onChange={setWorkspace} initial={configuration?.workspaces ?? emptyWorkspaces} cursor={configuration?.workspaceCursor}/><label htmlFor="harness">Agent</label><select id="harness" value={harness} onChange={e => setHarness(e.target.value as 'codex' | 'dsh')}>{configuration?.harnesses.map(h => <option key={h.id} value={h.id} disabled={!h.available}>{h.id === 'codex' ? 'Codex' : 'DSH'}{!h.available ? ' · 未连接' : ''}</option>)}</select><label htmlFor="model">模型</label><select id="model" value={model} onChange={e => setModel(e.target.value)}>{catalog?.models.map(m => <option key={m.id} value={m.id}>{m.label}</option>)}</select><label htmlFor="permission">权限</label><select id="permission" value={permission} onChange={e => setPermission(e.target.value)}>{catalog?.permissions.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}</select><p className="quiet permission-note">{catalog?.permissions.find(p => p.id === permission)?.description ?? catalog?.reason}</p></fieldset>
     {failed && <p role="status" className="state-notice">创建结果尚未确认。重试会核对同一个对话编号。</p>}
     <button className="primary" type="submit" disabled={busy || !workspace || !model || !permission || !catalog?.available}>{busy ? '正在创建…' : failed ? '核对创建结果' : '创建对话 ↗'}</button></form></dialog>;
 }

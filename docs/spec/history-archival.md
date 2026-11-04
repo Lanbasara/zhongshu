@@ -1,5 +1,5 @@
 ---
-status: draft
+status: active
 started: 2026-11-04
 exit: 已绑定对话的可获取正文在关页后仍能后台补齐，分页与大正文提交可中断续传，覆盖声明与独立原文核对一致
 evidence: none yet

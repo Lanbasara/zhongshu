@@ -43,6 +43,9 @@ SSE 观察在浏览器网络面板或自动化的 EventSource 事件记录中进
 - 登录会轮换当前 Cookie；另一个共享 Cookie 的标签页不是独立会话。
 - 退出清除当前标签页草稿；会话失效不会承诺跨端草稿同步。
 - 绝对过期、持久限速、备份恢复与恢复后会话吊销由下方回归覆盖；这里的普通刷新不是这些分支的证据。
+- 产品库恢复同时关闭受管执行门禁、保留原窗口与未知保存，并要求重新核实原生效果。独立 Host ledger 和文件写者 owner/journal 不随产品库回滚或换目录；备份里的旧 idle 不能证明当前 Host 已停止。文件写者重启恢复与复验归[工作区文件](workspace-files.md)。
+- 配额覆盖产品目录内数据库、WAL 与缓存，真实磁盘余量另设门禁；接近上限告警、满额拒绝新增工作和上传，已有存档保留，已受理任务不因此取消。正文导入先预约完整体积，既有阶段在预约内续传；未知阶段不按超时删除。只有同一原生来源的更晚版本成功发布后，才分批回收可比较的旧暂存。已经发布的任何正文版本都不在自动回收范围。扩容或释放空间后通过回差恢复准入。
+- 明确拒绝或已有执行终态证明的旧操作可无损压缩输入，操作编号、原摘要、回执和资源引用永久保留；同编号同内容仍读回原结果，改内容拒绝。未知或运行中的输入不压缩，短条和不能节省空间的输入保留原文。旧记录按一次性持久检查点扫描，新候选同业务事务登记；释放的 SQLite 页供后续复用，不承诺文件立即缩小。
 
 ## Implementation and regression
 
@@ -50,3 +53,6 @@ SSE 观察在浏览器网络面板或自动化的 EventSource 事件记录中进
 - 认证、到期与限速：[auth.ts](../../src/server/auth.ts)；可信 CLI：[admin.ts](../../src/server/admin.ts)；数据库：[database.ts](../../src/server/database.ts)。
 - `node --test test/auth.test.ts test/http.test.ts test/workbench-http.test.ts`：包含双端/重置/绝对过期、真实 HTTP/SSE 吊销。A05 需要上述页面时序，现有服务端测试不替代它。
 - 容器中的 CLI 备份/恢复、Cookie 与替换后身份：构建后按 [README](../../README.md#container) 使用 [check-container.mjs](../../scripts/check-container.mjs)，仅针对本次新建 Compose 项目。
+- `node --test test/execution-store.test.ts test/execution-workspaces.test.ts test/workspace-writer.test.ts` 覆盖超过 10,000 段未决对话的真实备份恢复、执行日志保留、真实文件写者强杀和重启核实；原生执行部分使用明确替身，真实 Host 收束另验。
+- `node --test test/storage-capacity.test.ts test/body-store.test.ts` 覆盖配额、缓存/WAL 计量、有界上传与正文回收、未知阶段保全、并发旧页和异源版本不能误退役、预约内续传及扩容恢复。Linux 实际磁盘耗尽入口为 `node test/support/storage-enospc.ts /space`；只接受不超过 128 MiB 的一次性 tmpfs，推荐隔离容器提供 32 MiB 挂载。它实际分配至 ENOSPC、固定 WAL 读者，并用耗尽前的样本模拟 statfs 与提交之间的抢盘竞态，核对未提交条目、旧正文、操作身份、释放空间和重开后的完整性；不证明浏览器或原生 Harness。
+- `node --test test/operation-payload-store.test.ts` 覆盖终态压缩资格、原样重试、摘要损坏关闭读取、队列摘要、单调检查点，以及 schema 10 备份迁移、压缩后再次备份恢复的正文/图片 SHA、原操作身份、原生绑定和会话吊销。

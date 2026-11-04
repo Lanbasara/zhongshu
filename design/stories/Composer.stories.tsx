@@ -40,7 +40,10 @@ function QueueExample({ initial }: { initial: QueueView }) {
     });
     return true;
   }
-  return <Example running={!queue.pause} queueing queue={<InputQueue queue={queue} target={queue.pause ? undefined : 'example-turn'} busy={false} canResume onCommand={command}/>}/>;
+  const summary = { ...queue, entries: queue.entries.map(({ content, ...entry }) => ({ ...entry,
+    preview: { text: content.text.slice(0, 200), images: content.images?.length ?? 0, references: content.references?.length ?? 0, skills: content.skills?.length ?? 0 } })) };
+  return <Example running={!queue.pause} queueing queue={<InputQueue queue={summary} target={queue.pause ? undefined : 'example-turn'} busy={false} canResume onCommand={command}
+    onRead={async (id, version) => { const entry = queue.entries.find(item => item.entryId === id && item.version === version); if (!entry) throw new Error('example_changed'); return entry; }}/>}/>;
 }
 export const Queueing: Story = { render: () => <QueueExample initial={{ entries: entries.slice(0, 1), mode: 'soon', pause: null, version: 0 }}/> };
 export const QueueMultiple: Story = { render: () => <QueueExample initial={{ entries, mode: 'current', pause: null, version: 0 }}/> };

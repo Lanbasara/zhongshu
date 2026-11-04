@@ -8,6 +8,8 @@ import { revisionSchema, skillRequiresNextTurn } from '../../shared/workbench.ts
 import type { QueueDelivery } from '../../shared/workbench.ts';
 import { configuredThread, cursor, itemsPage, mapItem, nativeId, nativeItem, record, threadStatus, turn } from './protocol.ts';
 import { nativeSkill, resolveSkillInput, skillOptions, type NativeSkill } from '../skills.ts';
+import { BoundedCodexReader, boundedCodexOptions, rolloutBinding } from './bounded-reader.ts';
+import type { BoundedCodexOptions, RolloutBinding } from './bounded-reader.ts';
 
 const configuration = z.object({ modelId: nativeId, permissionId: nativeId });
 const workspace = z.string().min(1).max(4096).refine(path => isAbsolute(path) && normalize(path) === path && !path.includes('\0'));
@@ -60,12 +62,17 @@ class CodexAdapter implements HarnessAdapter {
   private liveBytes = 0;
   private loading = new Map<string, { binding: Binding; promise: Promise<boolean> }>();
   private readers = new Map<string, number>();
+  private historyReads = 0;
   private releasing = new Map<string, Promise<void>>();
   private reconnectTimer: NodeJS.Timeout | undefined;
   private reconnectAttempts = 0;
   private closed = false;
+  private bounded?: BoundedCodexReader;
+  private managedExecution: boolean;
 
-  constructor(socketPath: string) {
+  constructor(socketPath: string, boundedHistory?: BoundedCodexOptions, managedExecution = false) {
+    this.managedExecution = managedExecution;
+    if (boundedHistory) this.bounded = new BoundedCodexReader(boundedHistory);
     this.rpc = new CodexRpc(socketPath, {
       notification: (method, params) => this.notification(method, params),
       unsupportedRequest: (_method, params) => {
@@ -77,9 +84,9 @@ class CodexAdapter implements HarnessAdapter {
       disconnected: () => {
         this.live.clear(); this.liveBytes = 0;
         for (const [id, watch] of this.watches) { watch.verified = false; this.emit(id, { type: 'unavailable', reason: 'codex_disconnected' }); }
-        this.scheduleReconnect();
+        if (!this.managedExecution) this.scheduleReconnect();
       },
-    });
+    }, boundedHistory ? ['item/started', 'item/completed', 'turn/started', 'turn/completed', 'rawResponseItem/completed', 'rawResponse/completed', 'turn/diff/updated', 'turn/plan/updated', 'item/fileChange/patchUpdated', 'item/fileChange/outputDelta', 'item/commandExecution/outputDelta', 'item/reasoning/textDelta', 'item/reasoning/summaryTextDelta'] : []);
   }
 
   private async load(binding: Binding): Promise<boolean> {
@@ -133,8 +140,8 @@ class CodexAdapter implements HarnessAdapter {
 
   async catalog(): Promise<Catalog> {
     try {
-      const account = parse(z.object({ account: z.object({ type: z.string().max(100) }).nullable() }), await this.rpc.request('account/read', { refreshToken: false }));
-      if (!account.account) return { id: this.id, available: false, reason: 'codex_login_required', models: [], permissions: [] };
+      const account = parse(z.object({ account: z.object({ type: z.string().max(100) }).nullable(), requiresOpenaiAuth: z.boolean().optional() }), await this.rpc.request('account/read', { refreshToken: false }));
+      if (!account.account && account.requiresOpenaiAuth !== false) return { id: this.id, available: false, reason: 'codex_login_required', models: [], permissions: [] };
       const models: Catalog['models'] = []; const permissions: Catalog['permissions'] = [];
       let next: string | undefined;
       for (let page = 0; page < 10; page++) {
@@ -155,7 +162,7 @@ class CodexAdapter implements HarnessAdapter {
     } catch (error) { return { id: this.id, available: false, reason: reason(error), models: [], permissions: [] }; }
   }
 
-  async create(input: { cwd: string; configuration: Configuration; title?: string }, onBound: (binding: Binding) => void): Promise<Binding> {
+  async create(input: { cwd: string; configuration: Configuration; title?: string }, onBound: (binding: Binding) => void | Promise<void>): Promise<Binding> {
     const selected = parse(z.object({ cwd: workspace, configuration, title: titleSchema.optional() }), input);
     const response = await this.rpc.request('thread/start', { cwd: selected.cwd, model: selected.configuration.modelId, permissions: selected.configuration.permissionId, approvalPolicy: 'never', historyMode: 'paginated', ephemeral: false });
     // Persist only identity and requested configuration before examining the remaining native response.
@@ -163,7 +170,7 @@ class CodexAdapter implements HarnessAdapter {
     const binding: Binding = { id: identity.thread.id, cwd: selected.cwd, configuration: selected.configuration, details: { version: 1, approvalPolicy: 'never', ...(selected.title ? { title: selected.title } : {}) } };
     let retained = false;
     try {
-      try { onBound(binding); } catch { throw new HarnessError('codex_binding_persistence_failed'); }
+      try { await onBound(binding); } catch { throw new HarnessError('codex_binding_persistence_failed'); }
       this.retain(binding.id); retained = true;
       if (!matches(binding, parse(configuredThread, response))) throw new HarnessError('codex_configuration_mismatch');
       // Naming the user's new conversation also materializes its native rollout before the first turn.
@@ -224,9 +231,14 @@ class CodexAdapter implements HarnessAdapter {
     const binding = parse(bindingSchema, input);
     const size = parse(z.number().int().min(1).max(100), limit);
     const after = olderCursor === undefined ? undefined : parse(cursor, olderCursor);
-    this.retain(binding.id);
+    if (this.historyReads >= 64) throw new HarnessError('codex_read_limit');
+    this.historyReads++;
     try {
-      await this.load(binding);
+      if (this.bounded) return await this.bounded.history(await this.rollout(binding), olderCursor, size);
+      // Reading stored history does not activate or subscribe to a thread. In
+      // particular, notLoaded metadata is neither an idle nor a configuration proof.
+      const native = parse(z.object({ thread: z.object({ id: nativeId }) }), await this.rpc.request('thread/read', { threadId: binding.id, includeTurns: false }));
+      if (native.thread.id !== binding.id) throw new HarnessError('codex_native_identity_mismatch');
       // Native pages include image bytes. Keep transport reads small while combining
       // ordinary text entries into the existing public history page.
       const entries: z.infer<typeof itemsPage>['data'] = [];
@@ -241,10 +253,33 @@ class CodexAdapter implements HarnessAdapter {
         if (next) seen.add(next);
       } while (next && entries.length < size && bytes < 8 * 1024 * 1024);
       return { items: entries.reverse().map(entry => mapItem(entry.item, entry.turnId, binding.cwd, entry.completedAtMs === null && entry.item.type !== 'userMessage')), olderCursor: next ?? null };
-    } finally { await this.release(binding.id); }
+    } finally { this.historyReads--; }
   }
 
-  async readImage(_binding: Binding, path: string): Promise<string> {
+  private async rollout(binding: Binding): Promise<RolloutBinding> {
+    const metadata = parse(z.object({ thread: z.object({ id: nativeId, path: workspace, cliVersion: z.literal('0.166.0-alpha.5.1') }) }), await this.rpc.request('thread/read', { threadId: binding.id, includeTurns: false }));
+    if (metadata.thread.id !== binding.id) throw new HarnessError('history_source_changed');
+    return rolloutBinding.parse({ ...metadata.thread, cwd: binding.cwd });
+  }
+  async readItems(input: Binding, ids: string[]): Promise<NativeItem[]> {
+    const binding = parse(bindingSchema, input);
+    if (!this.bounded) throw new HarnessError('codex_bounded_history_required');
+    return this.bounded.readItems(await this.rollout(binding), ids);
+  }
+  async readBodyChunk(binding: Binding, token: string, offset: number, maxBytes: number) {
+    if (!this.bounded) throw new HarnessError('codex_bounded_history_required');
+    return this.bounded.readBodyChunk(parse(bindingSchema, binding), token, offset, maxBytes);
+  }
+  async releaseBodySource(binding: Binding, token: string) {
+    if (!this.bounded) throw new HarnessError('codex_bounded_history_required');
+    return this.bounded.releaseBodySource(parse(bindingSchema, binding), token);
+  }
+
+  async readImage(binding: Binding, path: string): Promise<string> {
+    if (path.startsWith('codex-image:')) {
+      if (!this.bounded) throw new HarnessError('codex_bounded_history_required');
+      return this.bounded.readImage(parse(bindingSchema, binding), path.slice('codex-image:'.length));
+    }
     const response = z.object({ dataBase64: z.string().max(8 * 1024 * 1024) }).parse(await this.rpc.request('fs/readFile', { path }));
     return response.dataBase64;
   }
@@ -348,6 +383,10 @@ class CodexAdapter implements HarnessAdapter {
       const queued = parse(z.object({ data: z.array(z.object({ clientUserMessageId: nativeId.optional() })).max(100) }),
         await this.rpc.request('thread/queue/list', { threadId: binding.id, limit: 100 }));
       const queuedMatch = queued.data.some(item => item.clientUserMessageId === operationId);
+      if (this.bounded) {
+        const found = await this.bounded.reconcile(await this.rollout(binding), operationId);
+        return found.outcome === 'accepted' ? found : queuedMatch && found.reason === 'codex_receipt_not_found' ? { outcome: 'accepted' } : found;
+      }
       let next: string | undefined; let match: string | undefined;
       for (let page = 0; page < 10; page++) {
         const result = parse(itemsPage, await this.rpc.request('thread/items/list', { threadId: binding.id, limit: 100, sortDirection: 'desc', ...(next ? { cursor: next } : {}) }));
@@ -430,7 +469,9 @@ class CodexAdapter implements HarnessAdapter {
     }
     if (method === 'item/started' || method === 'item/completed') {
       const item = parse(nativeItem, params.item); const runId = parse(nativeId, params.turnId);
-      const normalized = mapItem(item, runId, watch.binding.cwd, method === 'item/started'); const key = JSON.stringify([threadId, item.id]);
+      const normalized = mapItem(item, runId, watch.binding.cwd, method === 'item/started');
+      if (method === 'item/started') normalized.previewOnly = true;
+      const key = JSON.stringify([threadId, item.id]);
       this.removeLive(key);
       if (method === 'item/started' && item.type === 'agentMessage' && Buffer.byteLength(normalized.text) <= 256 * 1024 && this.live.size < 128 && this.liveBytes + Buffer.byteLength(normalized.text) <= 2 * 1024 * 1024) {
         this.live.set(key, { threadId, item: normalized, overflow: false }); this.liveBytes += Buffer.byteLength(normalized.text);
@@ -440,8 +481,12 @@ class CodexAdapter implements HarnessAdapter {
     }
     if (method === 'item/agentMessage/delta') {
       const itemId = parse(nativeId, params.itemId); const delta = parse(z.string().max(256 * 1024), params.delta);
-      const key = JSON.stringify([threadId, itemId]); const live = this.live.get(key);
-      if (!live || live.overflow) { this.emit(threadId, { type: 'invalidate' }); return; }
+      const key = JSON.stringify([threadId, itemId]); let live = this.live.get(key);
+      if (!live && this.bounded && this.live.size < 128 && this.liveBytes < 2 * 1024 * 1024) {
+        live = { threadId, item: { id: itemId, runId: parse(nativeId, params.turnId), kind: 'assistant', status: 'running', text: '', previewOnly: true }, overflow: false }; this.live.set(key, live);
+      }
+      if (!live) { this.emit(threadId, { type: 'invalidate' }); return; }
+      if (live.overflow) return;
       const bytes = Buffer.byteLength(delta);
       if (Buffer.byteLength(live.item.text) + bytes > 256 * 1024 || this.liveBytes + bytes > 2 * 1024 * 1024) {
         live.overflow = true; this.emit(threadId, { type: 'invalidate' }); return;
@@ -449,12 +494,15 @@ class CodexAdapter implements HarnessAdapter {
       live.item = { ...live.item, text: live.item.text + delta }; this.liveBytes += bytes;
       this.emit(threadId, { type: 'item', item: live.item }); return;
     }
-    if (method === 'thread/status/changed') parse(threadStatus, params.status);
+    if (method === 'thread/status/changed') {
+      const status = parse(threadStatus, params.status);
+      if (this.bounded && status.type !== 'active') for (const [key, value] of this.live) if (value.threadId === threadId) this.removeLive(key);
+    }
     this.emit(threadId, { type: 'invalidate' });
   }
 
   private scheduleReconnect(): void {
-    if (this.closed || !this.watches.size || this.reconnectTimer || this.reconnectAttempts >= 6) return;
+    if (this.managedExecution || this.closed || !this.watches.size || this.reconnectTimer || this.reconnectAttempts >= 6) return;
     const wait = Math.min(500 * 2 ** this.reconnectAttempts++, 10_000);
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = undefined;
@@ -478,9 +526,11 @@ class CodexAdapter implements HarnessAdapter {
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.watches.clear(); this.live.clear(); this.liveBytes = 0;
     await this.rpc.close();
+    await this.bounded?.close();
   }
 }
 
-export function createCodexAdapter(options: { socketPath: string }): HarnessAdapter {
-  return new CodexAdapter(parse(z.object({ socketPath: z.string() }), options).socketPath);
+export function createCodexAdapter(options: { socketPath: string; boundedHistory?: BoundedCodexOptions; managedExecution?: boolean }): HarnessAdapter {
+  const parsed = parse(z.object({ socketPath: z.string(), boundedHistory: boundedCodexOptions.optional(), managedExecution: z.boolean().optional() }), options);
+  return new CodexAdapter(parsed.socketPath, parsed.boundedHistory, parsed.managedExecution);
 }

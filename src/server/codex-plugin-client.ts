@@ -17,8 +17,8 @@ const outcome = z.object({ target: z.string(), status: pluginStatus.exclude(['ap
 const sourceError = z.object({ error: z.enum(['invalid_plugin_source', 'plugin_source_conflict', 'plugin_source_in_use']) });
 
 export function codexPluginClient(socketPath: string, nativeSocket: string): PluginBackend {
-  async function call<T extends { target: string }>(path: '/catalog' | '/change' | '/recover' | '/sources' | '/detail',
-    schema: z.ZodType<T>, input?: { command: PluginCommand | PluginSourceCommand } | { id: string }): Promise<T> {
+  async function call<T extends { target: string }>(path: '/catalog' | '/change' | '/recover' | '/sources' | '/detail' | '/recover-source',
+    schema: z.ZodType<T>, input?: { command: PluginCommand | PluginSourceCommand; requestId?: string } | { id: string }): Promise<T> {
     const target = await socketIdentity(nativeSocket);
     await socketIdentity(socketPath);
     const body = input && JSON.stringify({ target, ...input });
@@ -60,6 +60,7 @@ export function codexPluginClient(socketPath: string, nativeSocket: string): Plu
     detail: async id => (await call('/detail', details, { id })).entry,
     change: async command => (await call('/change', outcome, { command })).status,
     recover: async command => (await call('/recover', outcome, { command })).status,
-    updateSource: async command => { await call('/sources', targetOnly, { command }); },
+    recoverSource: async (command, requestId) => { const result = (await call('/recover-source', outcome, { command, requestId })).status; return result === 'applied' || result === 'failed' ? result : 'unknown'; },
+    updateSource: async (command, requestId) => { await call('/sources', targetOnly, { command, requestId }); },
   };
 }

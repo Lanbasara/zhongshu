@@ -1,12 +1,36 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { gzipSync, gunzipSync, brotliCompressSync, brotliDecompressSync } from 'node:zlib';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDatabase } from '../src/server/database.ts';
 import { createAuth } from '../src/server/auth.ts';
 import { buildApp } from '../src/server/app.ts';
 import { validOrigin, loadConfig } from '../src/server/config.ts';
+
+test('sealed static encodings preserve bytes and only hashed assets receive immutable caching', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'zhongshu-assets-'));
+  await mkdir(join(root, 'public/assets'), { recursive: true });
+  const code = Buffer.from('/* synthetic public bundle */\n'.repeat(1000));
+  await writeFile(join(root, 'public/index.html'), '<!doctype html><title>synthetic</title>');
+  await writeFile(join(root, 'public/assets/index-fixture123.js'), code);
+  await writeFile(join(root, 'public/assets/index-fixture123.js.gz'), gzipSync(code));
+  await writeFile(join(root, 'public/assets/index-fixture123.js.br'), brotliCompressSync(code));
+  const db = openDatabase(join(root, 'data'));
+  const app = await buildApp({ db, origin: 'http://127.0.0.1:4391', assetsDirectory: join(root, 'public') });
+  t.after(async () => { await app.close(); db.close(); await rm(root, { recursive: true }); });
+  for (const encoding of ['gzip', 'br']) {
+    const response = await app.inject({ url: '/assets/index-fixture123.js', headers: { 'accept-encoding': encoding } });
+    assert.equal(response.statusCode, 200); assert.equal(response.headers['content-encoding'], encoding);
+    assert.equal(response.headers['cache-control'], 'public, max-age=31536000, immutable');
+    assert.match(String(response.headers.vary), /accept-encoding/i);
+    assert.deepEqual(encoding === 'gzip' ? gunzipSync(response.rawPayload) : brotliDecompressSync(response.rawPayload), code);
+  }
+  assert.equal((await app.inject('/')).headers['cache-control'], 'no-store');
+  const session = await app.inject({ url: '/api/session', headers: { 'accept-encoding': 'gzip, br' } });
+  assert.equal(session.headers['cache-control'], 'no-store'); assert.equal(session.headers['content-encoding'], undefined);
+});
 
 test('private HTTP lifecycle: origin, CSRF, two sessions, logout and reset', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'zhongshu-http-'));

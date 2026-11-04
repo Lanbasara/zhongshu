@@ -116,11 +116,11 @@ test('Codex transport loss immediately persists unknown, preserves facts, and re
   const changes: NativeChange[] = [];
   const release = await adapter.watch(binding, change => changes.push(change));
   p.cleanup(async () => { release(); });
-  const before = service.snapshot(id);
+  const before = (await service.snapshot(id));
   assert.equal(before.conversation.state.pendingInputs, 3);
   await p.stop();
   await until(() => store.getConversation(id)?.state.status === 'unknown');
-  const lost = service.snapshot(id);
+  const lost = (await service.snapshot(id));
   assert.equal(lost.conversation.state.configurationVerified, false);
   assert.equal(lost.conversation.state.runId, 'run-1');
   assert.equal(lost.conversation.state.pendingInputs, 3);
@@ -135,7 +135,7 @@ test('Codex transport loss immediately persists unknown, preserves facts, and re
   assert.equal(changes.filter(change => change.type === 'unavailable').length, 1, 'all observers see the same single loss, not each failed retry');
   p.interrupt(); await p.start(); await service.reconcile(id);
   await until(() => store.getConversation(id)?.state.status === 'interrupted');
-  const recovered = service.snapshot(id);
+  const recovered = (await service.snapshot(id));
   assert.equal(recovered.conversation.state.configurationVerified, true);
   assert.equal(recovered.conversation.state.runId, 'run-1');
   assert.deepEqual(recovered.conversation.binding, binding);

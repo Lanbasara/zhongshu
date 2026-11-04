@@ -27,6 +27,7 @@ type PluginView = {
   availability: 'available' | 'unconfigured' | 'offline';
   entries: PluginEntry[];
   sources?: { id: string; name: string; url: string; removable: boolean; unavailable?: boolean }[];
+  sourceOperation?: { status: 'applying' | 'unknown' | 'applied' | 'failed' } | null;
   operation: { pluginId: string; action: PluginAction; status: keyof typeof nativeResult } | null;
 };
 type PluginSourceCommand = { action: 'add'; source: string; ref?: string } | { action: 'remove'; id: string };
@@ -45,6 +46,7 @@ type Props = {
   onSource(command: PluginSourceCommand): Promise<boolean>;
   onAction(entry: PluginEntry, action: PluginAction, version?: string): void;
   onReconcile(): void;
+  onReconcileSource?(): void;
   onRetry(): void;
 };
 
@@ -79,7 +81,7 @@ function EntryRow({ entry, open }: { entry: PluginEntry; open(): void }) {
   </button></li>;
 }
 
-export function PluginLibrary({ harness, onHarness, view, error, sourceError, busy, uncertain, detail, onRefresh, onDetail, onSource, onAction, onReconcile, onRetry }: Props) {
+export function PluginLibrary({ harness, onHarness, view, error, sourceError, busy, uncertain, detail, onRefresh, onDetail, onSource, onAction, onReconcile, onReconcileSource, onRetry }: Props) {
   const [tab, setTab] = useState<'discover' | 'installed'>('discover');
   const [source, setSource] = useState('');
   const [query, setQuery] = useState('');
@@ -95,7 +97,8 @@ export function PluginLibrary({ harness, onHarness, view, error, sourceError, bu
   const sources = view?.sources ?? [];
   const operation = view?.operation;
   const waiting = operation && ['applying', 'unknown', 'restart-required'].includes(operation.status);
-  const locked = !!(busy || waiting || uncertain);
+  const sourceWaiting = view?.sourceOperation && ['applying', 'unknown'].includes(view.sourceOperation.status);
+  const locked = !!(busy || waiting || sourceWaiting || uncertain);
   const active = selected ? (detail?.id === selected ? detail : view?.entries.find(entry => entry.id === selected)) : undefined;
   const needle = query.trim().toLocaleLowerCase();
   const entries = (view?.entries ?? []).filter(entry => (tab === 'installed' ? entry.installed : !entry.system && !!entry.sourceId) &&
@@ -139,6 +142,8 @@ export function PluginLibrary({ harness, onHarness, view, error, sourceError, bu
         </nav>
       </div>
       {error && <p className="pl-notice" role="alert">{error}</p>}
+      {view?.sourceOperation && view.sourceOperation.status !== 'applied' && <div className="pl-notice" role="status"><span>市场来源 · {nativeResult[view.sourceOperation.status]}</span>
+        {view.sourceOperation.status === 'unknown' && <Button variant="quiet" disabled={busy} onClick={onReconcileSource}>核对来源结果</Button>}</div>}
       {showStatus && <div className="pl-notice" role="status"><span>{pluginActionName[operation.action]} · {nativeResult[operation.status]}</span>
         {['unknown', 'restart-required'].includes(operation.status) && <Button variant="quiet" disabled={busy} onClick={onReconcile}>核对原生结果</Button>}</div>}
       {uncertain && <div className="pl-notice"><Button variant="quiet" disabled={busy} onClick={onRetry}>核对同一操作</Button></div>}

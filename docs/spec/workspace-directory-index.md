@@ -1,5 +1,5 @@
 ---
-status: draft
+status: active
 started: 2026-11-04
 exit: 稳定大目录与大量工作区可完整分页查找，扫描、刷新和游标失效明确可见，文件打开与保存仍核对真实身份
 evidence: none yet

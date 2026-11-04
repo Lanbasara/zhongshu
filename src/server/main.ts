@@ -1,13 +1,14 @@
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { z } from 'zod';
 import { loadConfig } from './config.ts';
-import { openDatabase } from './database.ts';
 import { buildApp } from './app.ts';
-import { productMigrations } from './migrations.ts';
 import { loadHarnesses } from './harness-config.ts';
-import { createWorkbenchStore, type WorkbenchChange } from './workbench-store.ts';
+import { startManagedHarnesses } from './managed-harness-config.ts';
+import { createStorageClient, type StorageClient } from './storage-client.ts';
+import { DirectoryIndex } from './directory-index.ts';
+import { WorkspaceFileWriter } from './workspace-writer.ts';
 import { Workbench } from './workbench.ts';
 import { createWorkbenchHttp } from './workbench-http.ts';
 import { WorkspaceRegistry } from './workspace-registry.ts';
@@ -20,19 +21,27 @@ async function main() {
   let metadata;
   try { metadata = metadataSchema.parse(JSON.parse(await readFile(new URL('../version.json', import.meta.url), 'utf8'))); }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error('invalid_build_metadata'); }
-  const db = openDatabase(config.dataDirectory, productMigrations);
   let workbench: Workbench | undefined;
   let transport: ReturnType<typeof createWorkbenchHttp> | undefined;
   let plugins: ReturnType<typeof createPluginManagement> | undefined;
   let app: Awaited<ReturnType<typeof buildApp>> | undefined;
+  let storage: StorageClient | undefined;
+  let directories: DirectoryIndex | undefined;
+  let managed: Awaited<ReturnType<typeof startManagedHarnesses>> | undefined;
   try {
+    storage = createStorageClient({ dataDirectory: config.dataDirectory, capacity: config.storageCapacity, onChange: change => transport?.changed(change), onReset: () => transport?.invalidate() });
+    await storage.ready;
     const harnesses = await loadHarnesses(process.env.ZHONGSHU_HARNESS_CONFIG, config.dataDirectory);
-    plugins = createPluginManagement(db, harnesses.plugins);
-    const store = createWorkbenchStore(db, { onChange: (change: WorkbenchChange) => transport?.changed(change) });
-    const registry = new WorkspaceRegistry(db, harnesses.workspaces, harnesses.workspaceRoots);
-    workbench = new Workbench(store, harnesses.workspaces, harnesses.adapters, registry);
+    plugins = createPluginManagement(storage.plugins, harnesses.plugins);
+    await plugins.ready;
+    directories = new DirectoryIndex(join(config.dataDirectory, 'directory-index'));
+    const registry = new WorkspaceRegistry(storage.workspaces, harnesses.workspaces, harnesses.workspaceRoots);
+    await registry.ready;
+    managed = await startManagedHarnesses({ configurations: harnesses.managedHosts, storage, registry, adapters: harnesses.adapters, plugins: harnesses.plugins, dataDirectory: config.dataDirectory, workspaceWriterDirectory: harnesses.workspaceWriterDirectory });
+    workbench = new Workbench(storage.store, harnesses.workspaces, harnesses.adapters, registry, directories, { ...managed, ...(harnesses.workspaceWriterDirectory ? { writer: new WorkspaceFileWriter({ dataDirectory: harnesses.workspaceWriterDirectory, capacity: config.workspaceWriterCapacity }) } : {}) });
     transport = createWorkbenchHttp(workbench);
-    app = await buildApp({ db, origin: config.origin, metadata, assetsDirectory: import.meta.url.endsWith('.ts') ? undefined : fileURLToPath(new URL('../public/', import.meta.url)), logger: true,
+    app = await buildApp({ authStore: storage.auth, origin: config.origin, metadata, assetsDirectory: import.meta.url.endsWith('.ts') ? undefined : fileURLToPath(new URL('../public/', import.meta.url)), logger: true,
+      readiness: () => storage!.diagnostics().phase === 'ready',
       privateRoutes: async (scope, context) => {
         await transport!.routes(scope, context);
         await scope.register(plugins!.routes, { prefix: '/workbench' });
@@ -42,14 +51,14 @@ async function main() {
       if (closing) return;
       closing = true;
       const timeout = setTimeout(() => process.exit(1), 10_000).unref();
-      try { transport!.close(); await plugins!.close(); await workbench!.close(); await app!.close(); db.close(); clearTimeout(timeout); }
+      try { transport!.close(); await plugins!.close(); await workbench!.close(); await managed!.close(); await app!.close(); await storage!.close(); await directories!.close(); clearTimeout(timeout); }
       catch { process.exitCode = 1; }
     };
     process.once('SIGINT', () => { void stop(); });
     process.once('SIGTERM', () => { void stop(); });
     await workbench.start();
     await app.listen({ port: config.port, host: config.host });
-  } catch (error) { transport?.close(); await plugins?.close(); await workbench?.close(); await app?.close(); db.close(); throw error; }
+  } catch (error) { transport?.close(); await plugins?.close(); await workbench?.close(); await managed?.close(); await app?.close(); await storage?.close(); await directories?.close(); throw error; }
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

@@ -32,17 +32,19 @@ export class CodexRpc {
   private socket: WebSocket | undefined;
   private connecting: Promise<void> | undefined;
   private permanentlyClosed = false;
+  private optOutNotificationMethods: string[];
   private sequence = 0;
   private pending = new Map<number, { resolve(value: unknown): void; reject(error: Error): void; timer: NodeJS.Timeout }>();
   private heartbeat: NodeJS.Timeout | undefined;
   private awaitingPong = false;
   private home: string | undefined;
 
-  constructor(socketPath: string, hooks: Hooks) {
+  constructor(socketPath: string, hooks: Hooks, optOutNotificationMethods: string[] = []) {
     const parsed = z.string().min(1).max(4096).refine(path => isAbsolute(path) && normalize(path) === path && !path.includes('\0')).safeParse(socketPath);
     if (!parsed.success) throw new RpcError('codex_socket_invalid');
     this.socketPath = parsed.data;
     this.hooks = hooks;
+    this.optOutNotificationMethods = z.array(z.string().min(1).max(200)).max(100).parse(optOutNotificationMethods);
   }
 
   get connected(): boolean { return this.socket?.readyState === WebSocket.OPEN; }
@@ -112,7 +114,7 @@ export class CodexRpc {
         ws.once('close', () => reject(new RpcError('codex_disconnected')));
       });
       const initialization = z.object({ codexHome: z.string().max(4096) }).safeParse(
-        await this.send('initialize', { clientInfo: { name: 'zhongshu', version: '0.1.0' }, capabilities: { experimentalApi: true } }));
+        await this.send('initialize', { clientInfo: { name: 'zhongshu', version: '0.1.0' }, capabilities: { experimentalApi: true, ...(this.optOutNotificationMethods.length ? { optOutNotificationMethods: this.optOutNotificationMethods } : {}) } }));
       if (ws.readyState !== WebSocket.OPEN) throw new RpcError('codex_disconnected');
       this.home = initialization.data?.codexHome;
       ws.send(JSON.stringify({ method: 'initialized', params: {} }));

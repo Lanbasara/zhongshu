@@ -16,7 +16,7 @@ const saved: Binding = { id: 'thread-1', cwd: '/workspace/synthetic', configurat
 const nativeConfiguration = () => ({ thread: { id: saved.id, status: { type: 'idle' } }, cwd: saved.cwd, model: 'model-a', activePermissionProfile: { id: 'workspace' }, approvalPolicy: 'never' });
 function userItem(id: string, clientId = id) { return { turnId: 'run-1', item: { id, type: 'userMessage', clientId, content: [{ type: 'text', text: id }] }, completedAtMs: 1 }; }
 
-async function peer(t: TestContext, override?: (request: Request, socket: WebSocket) => unknown) {
+async function peer(t: TestContext, override?: (request: Request, socket: WebSocket) => unknown, managedExecution = false) {
   const dir = await mkdtemp(join(tmpdir(), 'zh codex test '));
   const socketPath = join(dir, 'rpc.sock');
   const http = createServer(); const sockets = new Set<WebSocket>(); const calls: Request[] = []; const clientResponses: unknown[] = [];
@@ -52,7 +52,7 @@ async function peer(t: TestContext, override?: (request: Request, socket: WebSoc
     });
   });
   await new Promise<void>(resolve => http.listen(socketPath, resolve));
-  const adapter = createCodexAdapter({ socketPath });
+  const adapter = createCodexAdapter({ socketPath, managedExecution });
   t.after(async () => {
     await adapter.close();
     for (const socket of sockets) socket.terminate();
@@ -143,6 +143,17 @@ test('Codex binds before naming, then names a new conversation before releasing 
   assert.equal(p.calls.some(call => call.method === 'turn/start'), false);
 });
 
+test('Codex awaits durable async binding before naming and rejects a failed persistence promise', async t => {
+  const p = await peer(t); let release!: () => void; let entered = false;
+  const barrier = new Promise<void>(resolve => { release = resolve; });
+  const creating = p.adapter.create({ cwd: saved.cwd, configuration: saved.configuration, title: 'Durable binding' }, async () => { entered = true; await barrier; });
+  await until(() => entered); assert.equal(p.calls.some(call => call.method === 'thread/name/set'), false);
+  release(); await creating; assert.equal(p.calls.some(call => call.method === 'thread/name/set'), true);
+  const before = p.calls.filter(call => call.method === 'thread/name/set').length;
+  await assert.rejects(p.adapter.create({ cwd: saved.cwd, configuration: saved.configuration, title: 'Failed binding' }, async () => { throw new Error('synthetic persistence failure'); }), { message: 'codex_binding_persistence_failed' });
+  assert.equal(p.calls.filter(call => call.method === 'thread/name/set').length, before);
+});
+
 test('A failed native name acknowledgement preserves the bound identity and never creates a replacement', async t => {
   let bound: Binding | undefined;
   const p = await peer(t, (request, socket) => {
@@ -187,7 +198,12 @@ test('An unrelated native invalid request does not trigger naming or resume retr
 });
 
 test('Codex history requests latest native page and preserves stable older cursor and operation identities', async t => {
-  const p = await peer(t, request => request.method === 'thread/items/list' ? request.params.cursor ? { data: [userItem('old')], nextCursor: null } : { data: [userItem('new', 'op-new'), userItem('middle')], nextCursor: 'opaque-native-older' } : undefined);
+  const p = await peer(t, request => {
+    if (request.method === 'thread/read') return { thread: { id: saved.id, status: { type: 'notLoaded' } } };
+    if (request.method === 'thread/resume') return NO_RESPONSE;
+    if (request.method === 'thread/items/list') return request.params.cursor ? { data: [userItem('old')], nextCursor: null } : { data: [userItem('new', 'op-new'), userItem('middle')], nextCursor: 'opaque-native-older' };
+    return undefined;
+  });
   const latest = await p.adapter.history(saved, undefined, 2);
   assert.deepEqual(latest.items.map(item => item.id), ['middle', 'new']);
   assert.equal(latest.items[1]?.operationId, 'op-new');
@@ -197,21 +213,31 @@ test('Codex history requests latest native page and preserves stable older curso
   const reads = p.calls.filter(call => call.method === 'thread/items/list');
   assert.deepEqual(reads.map(call => call.params.sortDirection), ['desc', 'desc']);
   assert.equal(reads[1]?.params.cursor, 'opaque-native-older');
+  assert.deepEqual(p.calls.filter(call => call.method === 'thread/read').map(call => call.params), [
+    { threadId: saved.id, includeTurns: false }, { threadId: saved.id, includeTurns: false },
+  ]);
+  assert.equal(p.calls.some(call => call.method === 'thread/resume' || call.method === 'thread/unsubscribe'), false);
 });
 
-test('Concurrent state and history share resume and neither unsubscribes while the other is reading', async t => {
+test('Codex history refuses a different native thread identity before reading any body', async t => {
+  const p = await peer(t, request => request.method === 'thread/read' ? { thread: { id: 'another-thread' } } : undefined);
+  await assert.rejects(p.adapter.history(saved), { message: 'codex_native_identity_mismatch' });
+  assert.equal(p.calls.some(call => call.method === 'thread/items/list' || call.method === 'thread/resume' || call.method === 'thread/unsubscribe'), false);
+});
+
+test('History completes independently while concurrent execution verification waits for resume', async t => {
   const p = await peer(t, request => ['thread/resume', 'thread/items/list'].includes(request.method) ? NO_RESPONSE : undefined);
   const state = p.adapter.state(saved); const history = p.adapter.history(saved);
   await until(() => p.calls.some(call => call.method === 'thread/resume'));
   assert.equal(p.calls.filter(call => call.method === 'thread/resume').length, 1);
-  const resume = p.calls.find(call => call.method === 'thread/resume')!;
-  for (const socket of p.sockets) socket.send(JSON.stringify({ id: resume.id, result: nativeConfiguration() }));
   await until(() => p.calls.some(call => call.method === 'thread/items/list'));
-  assert.equal((await state).status, 'idle');
-  assert.equal(p.calls.filter(call => call.method === 'thread/unsubscribe').length, 0);
   const items = p.calls.find(call => call.method === 'thread/items/list')!;
   for (const socket of p.sockets) socket.send(JSON.stringify({ id: items.id, result: { data: [], nextCursor: null } }));
   assert.deepEqual(await history, { items: [], olderCursor: null });
+  assert.equal(p.calls.filter(call => call.method === 'thread/unsubscribe').length, 0);
+  const resume = p.calls.find(call => call.method === 'thread/resume')!;
+  for (const socket of p.sockets) socket.send(JSON.stringify({ id: resume.id, result: nativeConfiguration() }));
+  assert.equal((await state).status, 'idle');
   assert.equal(p.calls.filter(call => call.method === 'thread/unsubscribe').length, 1);
 });
 
@@ -221,14 +247,14 @@ test('A new observer waits for an earlier unsubscribe before resuming the same n
     if (request.method === 'thread/unsubscribe' && firstUnsubscribe) { firstUnsubscribe = false; return NO_RESPONSE; }
     return undefined;
   });
-  const history = p.adapter.history(saved);
+  const state = p.adapter.state(saved);
   await until(() => p.calls.some(call => call.method === 'thread/unsubscribe'));
   const observed = p.adapter.watch(saved, () => {});
   await delay(20);
   assert.equal(p.calls.filter(call => call.method === 'thread/resume').length, 1);
   const releaseRequest = p.calls.find(call => call.method === 'thread/unsubscribe')!;
   for (const socket of p.sockets) socket.send(JSON.stringify({ id: releaseRequest.id, result: { status: 'unsubscribed' } }));
-  await history; const release = await observed;
+  await state; const release = await observed;
   assert.equal(p.calls.filter(call => call.method === 'thread/resume').length, 2);
   release();
   await until(() => p.calls.filter(call => call.method === 'thread/unsubscribe').length === 2);
@@ -364,15 +390,16 @@ test('Oversized live accumulation falls back to invalidation instead of growing 
 });
 
 test('Concurrent calls share one bounded connection and close rejects outstanding requests promptly', async t => {
-  const p = await peer(t, request => request.method === 'thread/resume' ? NO_RESPONSE : undefined);
+  const p = await peer(t, request => request.method === 'thread/read' ? NO_RESPONSE : undefined);
   const pending = Promise.allSettled(Array.from({ length: 70 }, (_, index) => p.adapter.history({ ...saved, id: `thread-${index}` })));
-  await until(() => p.calls.filter(call => call.method === 'thread/resume').length === 64);
+  await until(() => p.calls.filter(call => call.method === 'thread/read').length === 64);
   assert.equal(p.calls.filter(call => call.method === 'initialize').length, 1);
   await p.adapter.close();
   const settled = await pending;
   assert.equal(settled.length, 70);
   assert.equal(settled.every(result => result.status === 'rejected'), true);
-  assert.equal(p.calls.filter(call => call.method === 'thread/resume').length, 64);
+  assert.equal(p.calls.filter(call => call.method === 'thread/read').length, 64);
+  assert.equal(p.calls.some(call => call.method === 'thread/resume' || call.method === 'thread/unsubscribe'), false);
 });
 
 test('Invalid native frames revoke observation without exposing the malformed payload', async t => {
@@ -383,4 +410,24 @@ test('Invalid native frames revoke observation without exposing the malformed pa
   await until(() => changes.filter(change => change.type === 'unavailable').length > before);
   assert.equal(JSON.stringify(changes).includes('synthetic-private'), false);
   release();
+});
+
+test('Managed Codex observation loss cannot activate a reconnect without a new caller operation', async t => {
+  const f = await peer(t, undefined, true), changes: NativeChange[] = [];
+  const stop = await f.adapter.watch(saved, change => changes.push(change)); t.after(stop);
+  const count = f.calls.filter(call => call.method === 'thread/resume').length;
+  for (const socket of f.sockets) socket.terminate();
+  await until(() => changes.some(change => change.type === 'unavailable'));
+  await delay(650);
+  assert.equal(f.calls.filter(call => call.method === 'thread/resume').length, count);
+  await f.adapter.state(saved);
+  assert.equal(f.calls.filter(call => call.method === 'thread/resume').length, count + 1);
+});
+
+test('Codex custom providers may explicitly require no OpenAI account; missing auth proof still blocks', async t => {
+  for (const requiresOpenaiAuth of [false, true, undefined]) {
+    const f = await peer(t, request => request.method === 'account/read' ? { account: null, ...(requiresOpenaiAuth === undefined ? {} : { requiresOpenaiAuth }) } : undefined);
+    const catalog = await f.adapter.catalog(); assert.equal(catalog.available, requiresOpenaiAuth === false);
+    if (requiresOpenaiAuth !== false) assert.equal(catalog.reason, 'codex_login_required');
+  }
 });

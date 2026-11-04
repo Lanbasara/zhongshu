@@ -209,6 +209,14 @@ export function dshPlugins(launchFile: string, sources: z.infer<typeof dshPlugin
   return {
     sources: markets,
     updateSource,
+    recoverSource: async command => {
+      const url = command.action === 'add' ? githubIndex(command.source) : command.id;
+      const found = (await indexes()).some(source => source.url === url);
+      if (command.action === 'remove') return found ? 'unknown' : 'applied';
+      if (!found || command.ref) return 'unknown';
+      marketPage.parse(await connection.call('pluginMarket/search', { url, query: { offset: 0, limit: 1, sort: { kind: 'index' } } }, 30_000));
+      return 'applied';
+    },
     list: async () => (await snapshot()).map(item => item.entry),
     change: async command => {
       const target = (await snapshot()).find(item => item.entry.id === command.pluginId);

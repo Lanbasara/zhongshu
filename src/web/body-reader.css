@@ -1,0 +1,14 @@
+.body-reader { position:fixed; inset:0; margin:auto; width:min(880px,calc(100% - 32px)); height:min(800px,calc(100dvh - 40px)); padding:24px; color:var(--zs-text); background:var(--zs-surface); border:1px solid var(--zs-border); border-radius:var(--zs-radius-surface); box-shadow:var(--zs-shadow-overlay); }
+.body-reader[open] { display:flex; flex-direction:column; gap:16px; }
+.body-reader::backdrop { background:var(--zs-scrim); }
+.body-reader header,.body-reader nav,.body-reader-actions { display:flex; align-items:center; gap:12px; }
+.body-reader header,.body-reader nav { justify-content:space-between; }
+.body-reader h2 { margin:0; font-size:var(--zs-type-section); }
+.body-reader pre { flex:1; min-height:0; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; line-height:1.7; margin:0; }
+.body-reader [role=alert] { color:var(--zs-danger); }
+.body-reader-actions a { text-decoration:none; }
+.body-preview-link { margin-top:8px; }
+.message-raw-preview { white-space:pre-wrap; overflow-wrap:anywhere; font-family:inherit; margin:0; line-height:inherit; }
+.transcript-row { display:flow-root; overflow-anchor:auto; }
+.workspace-selection { display:grid; gap:6px; min-width:0; width:100%; }
+.workspace-selection input,.workspace-selection select { width:100%; min-width:0; }

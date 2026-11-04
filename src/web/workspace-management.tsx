@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import { ChevronLeft, ChevronRight, Folder, FolderPlus, X } from 'lucide-react';
 import { z } from 'zod';
-import { folderName, workspaceDirectoryListSchema, workspaceLabelSchema, workspaceManagementSchema, type WorkbenchConfiguration } from '../shared/workbench.ts';
+import { folderName, workspaceLabelSchema, workspaceManagementSchema, type WorkbenchConfiguration } from '../shared/workbench.ts';
 import { RequestError, request } from './workbench-client.ts';
+import { directoryMetadataSchema, directoryProgress, useDirectoryPage } from './directory-client.ts';
+import { DirectoryControls } from './directory-controls.tsx';
 
 export type WorkspaceAction = { kind: 'add' } |
   { kind: 'manage'; workspace: WorkbenchConfiguration['workspaces'][number] } |
@@ -20,6 +22,7 @@ const errors: Record<string, string> = {
 };
 type Roots = NonNullable<WorkbenchConfiguration['workspaceRoots']>;
 type FolderSelection = { rootId: string; path: string[]; name?: string };
+const workspaceFoldersSchema = directoryMetadataSchema.extend({ currentDirectory: z.string().min(1).max(4096), names: z.array(folderName).max(100) });
 
 function WorkspaceDirectoryPicker({ roots, csrf, busy, error, clearError, submit, report }: {
   roots: Roots; csrf: string; busy: boolean; error: string;
@@ -27,29 +30,18 @@ function WorkspaceDirectoryPicker({ roots, csrf, busy, error, clearError, submit
 }) {
   const [rootId, setRootId] = useState(roots[0]?.id ?? '');
   const [path, setPath] = useState<string[]>([]);
-  const [directory, setDirectory] = useState<z.infer<typeof workspaceDirectoryListSchema>>();
-  const [browseError, setBrowseError] = useState('');
-  const [browseRetry, retryBrowse] = useState(0);
   const [creating, setCreating] = useState(false);
   const [folder, setFolder] = useState('');
   const createButton = useRef<HTMLButtonElement>(null);
   const folderInput = useRef<HTMLInputElement>(null);
   const restoreFocus = useRef(false);
+  const directoryPage = useDirectoryPage(JSON.stringify([rootId, path]), ({ cursor, refresh, signal }) =>
+    request('/workspace-directories', workspaceFoldersSchema, { csrf, body: { rootId, path, limit: 100, ...(cursor ? { cursor } : {}), refresh }, signal }),
+  !!rootId && !creating, reason => { if (reason instanceof RequestError && reason.status === 401) report(reason); });
+  const directory = directoryPage.data;
+  const browseError = directoryPage.error;
+  const progress = directoryProgress(directory);
 
-  useEffect(() => {
-    if (!rootId) return;
-    const controller = new AbortController();
-    setDirectory(undefined);
-    setBrowseError('');
-    void request('/workspace-directories', workspaceDirectoryListSchema, { csrf, body: { rootId, path }, signal: controller.signal })
-      .then(value => { if (!controller.signal.aborted) setDirectory(value); })
-      .catch(reason => {
-        if (controller.signal.aborted) return;
-        if (reason instanceof RequestError && reason.status === 401) report(reason);
-        setBrowseError(reason instanceof RequestError ? errors[reason.code] ?? '暂时无法读取文件夹。' : '暂时无法读取文件夹。');
-      });
-    return () => controller.abort();
-  }, [rootId, path, csrf, report, browseRetry]);
   useEffect(() => {
     if (creating) folderInput.current?.focus();
     else if (restoreFocus.current) {
@@ -58,7 +50,7 @@ function WorkspaceDirectoryPicker({ roots, csrf, busy, error, clearError, submit
     }
   }, [creating]);
 
-  const visit = (next: string[]) => { setDirectory(undefined); setPath(next); clearError(); };
+  const visit = (next: string[]) => { setPath(next); clearError(); };
   const rootLabel = roots.find(root => root.id === rootId)?.label ?? '工作区目录';
   const currentFolder = path.at(-1) ?? rootLabel;
   const parentTrail = [rootLabel, ...path.slice(0, -1)].join(' / ');
@@ -87,7 +79,7 @@ function WorkspaceDirectoryPicker({ roots, csrf, busy, error, clearError, submit
         <FolderPlus size={17} aria-hidden="true" />新建文件夹
       </button>}
     </div>
-    <div className="workspace-picker-content" aria-busy={!directory && !browseError}>
+    <div className="workspace-picker-content" aria-busy={directoryPage.pending}>
       {creating && <div className="workspace-picker-new">
         <label htmlFor="workspace-folder">文件夹名称</label>
         <input id="workspace-folder" ref={folderInput} value={folder} maxLength={255} placeholder="输入名称" disabled={busy}
@@ -101,14 +93,16 @@ function WorkspaceDirectoryPicker({ roots, csrf, busy, error, clearError, submit
         <code>{target}</code>
       </details>}
       {!creating && (browseError ? <div className="workspace-picker-empty" role="status">
-        <p>{browseError}</p><button type="button" className="workspace-picker-secondary" onClick={() => retryBrowse(value => value + 1)}>重试</button>
+        <p>{browseError}</p><button type="button" className="workspace-picker-secondary" onClick={directoryPage.refresh}>重试</button>
       </div> : !directory ? <p className="workspace-picker-empty" role="status">正在读取文件夹…</p> :
         directory.names.length ? <ul className="workspace-picker-list" aria-label="子文件夹">
-          {directory.names.map(name => <li key={name}><button type="button" onClick={() => visit([...path, name])} disabled={path.length >= 12 || busy}>
+          {directory.names.map(name => <li key={name}><button type="button" onClick={() => visit([...path, name])} disabled={path.length >= 12 || busy || directoryPage.pending}>
             <Folder size={18} aria-hidden="true" /><span>{name}</span><ChevronRight size={17} aria-hidden="true" />
           </button></li>)}
-        </ul> : <div className="workspace-picker-empty"><Folder size={24} aria-hidden="true" /><p>这里没有子文件夹</p></div>)}
-      {!creating && directory?.limited && <p className="workspace-picker-empty">仅显示部分子文件夹。</p>}
+        </ul> : directory.complete ? <div className="workspace-picker-empty"><Folder size={24} aria-hidden="true" /><p>{directory.nextCursor ? '本页没有可选择的子文件夹，请继续下一页。' : '这里没有子文件夹'}</p></div> : null)}
+      {!creating && directoryPage.notice && <p className="workspace-picker-empty" role="status">{directoryPage.notice}</p>}
+      {!creating && !browseError && directory && progress && <p className="workspace-picker-empty" role="status">{progress}</p>}
+      {!creating && <DirectoryControls {...directoryPage} label="子文件夹分页" className="workspace-picker-toolbar" buttonClassName="workspace-picker-secondary" />}
     </div>
     <div className="workspace-picker-footer">
       {error && <p className="workspace-picker-error" role="alert">{error}</p>}

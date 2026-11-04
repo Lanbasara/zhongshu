@@ -38,18 +38,18 @@ export function mapItem(input: z.infer<typeof nativeItem>, runId: string, cwd: s
     case 'commandExecution': return { ...base, kind: 'tool', text: [input.command ?? '执行命令', input.aggregatedOutput].filter(Boolean).join('\n'), tool: { name: '运行命令', input: input.command?.slice(0,32000), output: input.aggregatedOutput?.slice(0,128000) }, status };
     case 'fileChange': {
       const changes = input.changes ?? [];
-      const paths = new Set<string>();
+      const paths = new Set<string>(); let fileEditsLimited = false, pathBytes = 0;
+      const include = (path: string | undefined) => { if (!path || paths.has(path)) return; const bytes = Buffer.byteLength(JSON.stringify(path)) + 1; if (paths.size < 100 && pathBytes + bytes <= 32 * 1024) { paths.add(path); pathBytes += bytes; } else fileEditsLimited = true; };
       if (status === 'completed' && input.status === 'completed') {
         for (const change of changes) {
           const path = editPath(cwd, change.path);
           const destination = change.kind?.type === 'update' ? editPath(cwd, change.kind.move_path) : undefined;
-          if (path) paths.add(path);
-          if (destination) paths.add(destination);
+          include(path); include(destination);
         }
       }
       return { ...base, kind: 'tool', text: '修改工作区文件', tool: { name: '修改文件',
         output: changes.map(c => c.path + '\n' + (c.diff ?? '')).join('\n').slice(0,128000) }, status,
-        ...(paths.size ? { fileEdits: [...paths] } : {}) };
+        ...(paths.size ? { fileEdits: [...paths], ...(fileEditsLimited ? { fileEditsLimited: true } : {}) } : {}) };
     }
     case 'mcpToolCall': case 'dynamicToolCall': return { ...base, kind: 'tool', text: input.tool ?? input.name ?? '调用工具', tool: { name: input.tool ?? input.name ?? '调用工具' }, status };
     case 'imageGeneration': return { ...base, kind: 'assistant', text: status === 'failed' ? '图片生成未完成。' : status === 'completed' && !input.result && !input.savedPath ? '原生图片资源暂不可读取。' : '', status, ...((input.result || input.savedPath) ? { imageSources: [{ ...(input.result ? { data: input.result } : { path: input.savedPath }) }] } : {}) };
