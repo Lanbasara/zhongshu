@@ -27,7 +27,7 @@ type PluginView = {
   availability: 'available' | 'unconfigured' | 'offline';
   entries: PluginEntry[];
   sources?: { id: string; name: string; url: string; removable: boolean; unavailable?: boolean }[];
-  sourceOperation?: { status: 'applying' | 'unknown' | 'applied' | 'failed' } | null;
+  sourceOperation?: { status: 'applying' | 'unknown' | 'applied' | 'failed'; command?: PluginSourceCommand } | null;
   operation: { pluginId: string; action: PluginAction; status: keyof typeof nativeResult } | null;
 };
 type PluginSourceCommand = { action: 'add'; source: string; ref?: string } | { action: 'remove'; id: string };
@@ -98,6 +98,9 @@ export function PluginLibrary({ harness, onHarness, view, error, sourceError, bu
   const operation = view?.operation;
   const waiting = operation && ['applying', 'unknown', 'restart-required'].includes(operation.status);
   const sourceWaiting = view?.sourceOperation && ['applying', 'unknown'].includes(view.sourceOperation.status);
+  const sourceCommand = view?.sourceOperation?.command;
+  const sourceInUse = view?.sourceOperation?.status === 'failed' && sourceCommand?.action === 'remove' &&
+    view.entries.some(entry => entry.installed && entry.sourceId === sourceCommand.id);
   const locked = !!(busy || waiting || sourceWaiting || uncertain);
   const active = selected ? (detail?.id === selected ? detail : view?.entries.find(entry => entry.id === selected)) : undefined;
   const needle = query.trim().toLocaleLowerCase();
@@ -142,7 +145,7 @@ export function PluginLibrary({ harness, onHarness, view, error, sourceError, bu
         </nav>
       </div>
       {error && <p className="pl-notice" role="alert">{error}</p>}
-      {view?.sourceOperation && view.sourceOperation.status !== 'applied' && <div className="pl-notice" role="status"><span>市场来源 · {nativeResult[view.sourceOperation.status]}</span>
+      {view?.sourceOperation && view.sourceOperation.status !== 'applied' && <div className="pl-notice" role="status"><span>市场来源 · {sourceInUse ? '这个来源仍有已安装插件。卸载这些插件后即可移除来源。' : nativeResult[view.sourceOperation.status]}</span>
         {view.sourceOperation.status === 'unknown' && <Button variant="quiet" disabled={busy} onClick={onReconcileSource}>核对来源结果</Button>}</div>}
       {showStatus && <div className="pl-notice" role="status"><span>{pluginActionName[operation.action]} · {nativeResult[operation.status]}</span>
         {['unknown', 'restart-required'].includes(operation.status) && <Button variant="quiet" disabled={busy} onClick={onReconcile}>核对原生结果</Button>}</div>}
