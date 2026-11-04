@@ -46,38 +46,9 @@ Codex uses a Unix socket; the operator owns its directory and permissions. DSH's
 
 Current compatibility is Codex CLI `0.166.0-alpha.5.1` and DSH `0.2.1-rc.4`. Re-run the real integration path after upgrading either host; a passing schema check is not a compatibility proof.
 
+To enable instance plugin management, see the [native connection setup](docs/features/plugin-management.md#准备原生连接).
+
 For a production build, run `npm run build`, set `ZHONGSHU_ORIGIN` to the public HTTPS origin, then `npm start`.
-
-## Instance plugin management
-
-The workbench manages the configured native Codex and DSH instances separately. Use dedicated native data for each deployment. A browser only needs access to the Zhongshu instance. Administrators can add a public GitHub Codex marketplace or a public GitHub Raw DSH index from the workbench. The application reads the selected Harness's native catalog and applies changes to that instance. See the [plugin management map](docs/features/plugin-management.md).
-
-**Codex.** Run the Codex plugin manager beside the dedicated App Server using the same instance `HOME`, `CODEX_HOME` and pinned CLI version. Configure the native marketplace in that profile first and pin its checkout to the reviewed commit. In the dedicated native profile, run `codex plugin marketplace add --ref <commit> <https-git-url>` and use `codex plugin marketplace list --json` to read the registered name. Operator presets can use reviewed Git marketplaces and packages pinned to Git commits. Use an empty `markets` list to start with no presets. The manager stores user-added marketplace identities in `market-sources.json` beside its private socket. Keep that directory persistent and accessible to the manager account. OpenAI account catalogs are outside its write scope. Add `pluginManagerSocketPath` to the app's existing `codex` connection; `socketPath` must still identify the same App Server socket. Both processes must be able to identify that socket. Give the Zhongshu application access to the manager socket over a private mount; keep that socket and the manager configuration out of the agent's execution environment. Do not share a desktop or other deployment's Codex state directory.
-
-Save a private operator JSON file, for example:
-
-```json
-{
-  "socket": "/run/codex-plugin-manager/manage.sock",
-  "nativeSocket": "/run/private-codex/app.sock",
-  "executable": "/opt/codex/bin/codex",
-  "gitExecutable": "/usr/bin/git",
-  "home": "/srv/instance-codex/home",
-  "codexHome": "/srv/instance-codex/state",
-  "version": "0.166.0-alpha.5.1",
-  "markets": [
-    { "name": "approved-market", "url": "https://github.com/example/market.git", "revision": "0123456789012345678901234567890123456789" }
-  ]
-}
-```
-
-Use real paths without symlinks. The socket directory, home and Codex state must be owned by the manager process user and mode `0700`; keep the config at `0600`. Start the manager using the product build and production dependencies:
-
-```sh
-ZHONGSHU_CODEX_PLUGIN_CONFIG=/run/operator/codex-plugin-manager.json node dist/server/codex-plugin-host.js
-```
-
-**DSH.** Use Web Host `0.2.1-rc.5` for this plugin management path. Enable `@deepseek-ai/dsh-experimental-plugin-market-bundle` in the Web profile and install the package manager required by the native Host (for example pnpm). In the dedicated profile, set the approved HTTPS index through the native market UI or the Web Host method `pluginMarket/setIndexes` with `{ "urls": ["https://example.com/immutable-index.json"] }`. Keep the Host's global data specific to this deployment. In the app config add `pluginSources` under the existing `dsh` entry, for example `[{ "label": "Approved market", "url": "https://example.com/immutable-index.json" }]`. A preset URL must match the native index. Set `pluginSources` to `[]` to enable management without presets. The DSH Web Host saves user-added indexes in its profile. The workbench accepts compatible GitHub packages pinned to a commit from user-added indexes. A native response that calls for a restart is shown as pending until the operator restarts the target Host and the workbench verifies its new state.
 
 ## UI development
 
