@@ -81,6 +81,7 @@ export function createDockerExecutionHost(input: DockerHostConfiguration, groupI
     });
   }
   const inspectSchema = z.object({ Id: z.string().regex(/^[a-f0-9]{64}$/), Name: z.string(),
+    AppArmorProfile: z.string(),
     State: z.object({ Running: z.boolean(), Paused: z.boolean(), Restarting: z.boolean(), Dead: z.boolean(), Pid: z.number().int().nonnegative(), Status: z.string().max(30) }),
     Config: z.object({ Labels: z.record(z.string(), z.string()), User: z.string() }),
     HostConfig: z.object({ RestartPolicy: z.object({ Name: z.string() }), Privileged: z.boolean(), PidMode: z.string(),
@@ -93,6 +94,7 @@ export function createDockerExecutionHost(input: DockerHostConfiguration, groupI
     const container = row.data;
     if ((containerId && container.Id !== containerId) || container.Name !== '/' + name ||
       Object.entries(labels).some(([key, value]) => container.Config.Labels[key] !== value) ||
+      (sandboxPolicy === 'codex-bwrap-v1' && container.AppArmorProfile !== '') ||
       container.Config.User !== config.user || !container.HostConfig.ReadonlyRootfs ||
       (container.HostConfig.CapAdd?.length ?? 0) !== 0 || JSON.stringify(container.HostConfig.CapDrop) !== JSON.stringify(['ALL']) ||
       JSON.stringify([...(container.HostConfig.SecurityOpt ?? [])].sort()) !== JSON.stringify([...securityOptions].sort()) ||
@@ -111,28 +113,30 @@ export function createDockerExecutionHost(input: DockerHostConfiguration, groupI
       throw new ExecutionHostError('execution_group_container_conflict');
   }
   async function inspect(): Promise<ContainerProof> {
+    if (sandboxPolicy === 'codex-bwrap-v1') await validateSandboxEnvironment();
     await exclusiveContainer();
     const result = await call('GET', '/containers/' + encodeURIComponent(containerId ?? name) + '/json');
     if (result.status !== 200) throw new ExecutionHostError('execution_container_missing', 503);
     return proof(result.value);
   }
+  async function validateSandboxEnvironment() {
+    const version = await call('GET', '/version');
+    if (version.status !== 200 || !z.object({ Os: z.literal('linux') }).safeParse(version.value).success) throw new ExecutionHostError('execution_linux_docker_required');
+    if (sandboxPolicy !== 'codex-bwrap-v1') return;
+    if (!z.object({ Arch: z.enum(codexSandboxArchitectures) }).safeParse(version.value).success) throw new ExecutionHostError('execution_codex_sandbox_arch_unsupported');
+    const info = await call('GET', '/info');
+    const security = z.object({ SecurityOptions: z.array(z.string().max(1024)).max(128) }).safeParse(info.value);
+    if (info.status !== 200 || !security.success) throw new ExecutionHostError('execution_docker_security_unknown', 503);
+    if (!security.data.SecurityOptions.some(value => /^name=seccomp(?:,|$)/.test(value))) throw new ExecutionHostError('execution_seccomp_required');
+    // Docker's default AppArmor policy denies mount even when seccomp permits
+    // the native sandbox. Never silently disable an additional host policy.
+    if (security.data.SecurityOptions.some(value => /^name=(?:apparmor|selinux)(?:,|$)/.test(value))) throw new ExecutionHostError('execution_codex_lsm_policy_unsupported');
+    if (security.data.SecurityOptions.some(value => !/^name=(?:seccomp|rootless|cgroupns|no-new-privileges)(?:,|$)/.test(value))) throw new ExecutionHostError('execution_docker_security_unknown', 503);
+  }
   return {
     inspect,
     async prepare() {
-      const version = await call('GET', '/version');
-      if (version.status !== 200 || !z.object({ Os: z.literal('linux') }).safeParse(version.value).success) throw new ExecutionHostError('execution_linux_docker_required');
-      if (sandboxPolicy === 'codex-bwrap-v1' && !z.object({ Arch: z.enum(codexSandboxArchitectures) }).safeParse(version.value).success)
-        throw new ExecutionHostError('execution_codex_sandbox_arch_unsupported');
-      if (sandboxPolicy === 'codex-bwrap-v1') {
-        const info = await call('GET', '/info');
-        const security = z.object({ SecurityOptions: z.array(z.string().max(1024)).max(128) }).safeParse(info.value);
-        if (info.status !== 200 || !security.success) throw new ExecutionHostError('execution_docker_security_unknown', 503);
-        if (!security.data.SecurityOptions.some(value => /^name=seccomp(?:,|$)/.test(value))) throw new ExecutionHostError('execution_seccomp_required');
-        // Docker's default AppArmor policy denies mount even when seccomp permits
-        // the native sandbox. Never silently disable an additional host policy.
-        if (security.data.SecurityOptions.some(value => /^name=(?:apparmor|selinux)(?:,|$)/.test(value)))
-          throw new ExecutionHostError('execution_codex_lsm_policy_unsupported');
-      }
+      await validateSandboxEnvironment();
       await exclusiveContainer();
       const existing = await call('GET', '/containers/' + name + '/json');
       if (existing.status === 200) return proof(existing.value);

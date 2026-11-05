@@ -33,7 +33,7 @@ async function dockerPeer(t: TestContext, policy: DockerSandboxPolicy = 'codex-b
       }
       if (endpoint.pathname.endsWith('/json')) {
         if (!created) return send(404, {});
-        const value = { Id: 'a'.repeat(64), Name: '/' + name,
+        const value = { Id: 'a'.repeat(64), Name: '/' + name, AppArmorProfile: '',
           State: { Running: false, Paused: false, Restarting: false, Dead: false, Pid: 0, Status: 'created' },
           Config: { Labels: created.Labels, User: created.User },
           HostConfig: { ...created.HostConfig, PidMode: '', PortBindings: null, CapAdd: null },
@@ -62,6 +62,14 @@ test('managed Codex sends the fixed deny-by-default native sandbox policy and in
   const profile = JSON.parse(codexSeccompJson);
   assert.equal(profile.defaultAction, 'SCMP_ACT_ERRNO');
   assert.ok(profile.syscalls.some((rule: { names: string[]; action: string; errnoRet?: number }) => rule.names.includes('clone3') && rule.action === 'SCMP_ACT_ERRNO' && rule.errnoRet === 38));
+  const socketRules = profile.syscalls.filter((rule: { names: string[]; action: string }) => rule.names.includes('socket') && rule.action === 'SCMP_ACT_ALLOW');
+  for (const rule of socketRules) {
+    assert.equal(rule.args.length, 1); assert.equal(rule.args[0].index, 0);
+    assert.ok(rule.args[0].op === 'SCMP_CMP_EQ' || rule.args[0].op === 'SCMP_CMP_LT' && rule.args[0].value === 3);
+  }
+  for (const family of [3, 38, 40, 46]) assert.equal(socketRules.some((rule: { args: { op: string; value: number }[] }) => {
+    const argument = rule.args[0]!; return argument.op === 'SCMP_CMP_EQ' ? family === argument.value : family < argument.value;
+  }), false, 'retain the pinned AF_AX25/AF_ALG/AF_VSOCK and unknown-family restrictions');
 });
 
 test('container proof rejects a changed sandbox, root user, extra capability or writable root even with original identity labels', async t => {
@@ -86,7 +94,21 @@ test('unsupported namespace ABI, absent seccomp and unvalidated default LSM poli
     f.state.security = ['name=seccomp,profile=builtin', 'name=' + lsm];
     await assert.rejects(f.runtime.prepare(), { code: 'execution_codex_lsm_policy_unsupported' });
   }
+  f.state.security = ['name=seccomp,profile=builtin', 'name=future-lsm'];
+  await assert.rejects(f.runtime.prepare(), { code: 'execution_docker_security_unknown' });
   assert.equal(f.state.creates, 0);
+});
+
+test('restored and stopped Hosts recheck daemon sandbox capability before inspect or resume, not only first creation', async t => {
+  const f = await dockerPeer(t); await f.runtime.prepare();
+  f.state.security.push('name=apparmor');
+  await assert.rejects(f.runtime.start(), { code: 'execution_codex_lsm_policy_unsupported' });
+  await assert.rejects(f.runtime.inspect(), { code: 'execution_codex_lsm_policy_unsupported' });
+  f.state.security = ['name=seccomp,profile=builtin']; f.state.arch = 's390x';
+  await assert.rejects(f.runtime.start(), { code: 'execution_codex_sandbox_arch_unsupported' });
+  f.state.arch = 'arm64'; f.state.mutate = value => { value.AppArmorProfile = 'docker-default'; };
+  await assert.rejects(f.runtime.start(), { code: 'execution_container_identity_changed' });
+  assert.equal(f.state.requests.some(value => value.endsWith('/start')), false);
 });
 
 test('DSH retains Docker default policy and does not disable or reject its existing host LSM', async t => {
