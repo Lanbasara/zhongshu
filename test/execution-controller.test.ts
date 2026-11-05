@@ -236,7 +236,8 @@ test('a late inspect cannot overwrite a newer response in the same application c
   await f.mode({ waitForRelease: true });
   const old = controller.inspect('slow-inspection');
   // Wait for the synthetic controller to capture its epoch, not a timing guess.
-  for (let attempt = 0; attempt < 100; attempt++) {
+  const readyDeadline = performance.now() + 5000;
+  while (performance.now() < readyDeadline) {
     try {
       if (JSON.parse(await readFile(join(f.directory, 'ready.json'), 'utf8')).requestId === 'slow-inspection') break;
     } catch { /* the synthetic child has not opened stdin yet */ }

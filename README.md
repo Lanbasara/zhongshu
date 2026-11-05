@@ -40,6 +40,8 @@ Set `ZHONGSHU_HARNESS_CONFIG` to an absolute, operator-owned `0600` file. The wo
 
 Codex uses a private Unix socket. DSH's `launchFile` must be an operator-owned regular `0600` file in a private directory, without symlinks or a public address. Direct connections may configure `boundedHistory: { nativeRoot, cacheRoot, maxCacheBytes }`; DSH also needs `boundedState: true` and the matching compatibility plugin. Without those readers, the direct compatibility path does not meet the long-history performance profile.
 
+Codex 创建空对话时保存所选配置；配置了 `boundedHistory` 的接入还会通过有界物理读取确认原生记录，再完成创建。仅 Unix socket 的兼容接入不新增本地文件访问要求，但原生设置应答不代表进程崩溃后的持久性证明。恢复发现模型、权限或目录不一致时保留原绑定并拒绝发送，操作者须核对原生配置后再使用“查询原生结果”；不自动覆盖外部配置变化。
+
 ### Managed Host deployment
 
 受管编辑使用专用 Linux Docker Host。工作台之外的客户端也只能经过网关；原生 socket/launch URL、Docker socket 和管理凭据不得暴露给浏览器或其他原生客户端。操作者必须关闭未登记的原生计划任务及其他自动入口，不能另设 systemd、Compose 或 Docker 自动重启原生容器。原生进程、工具和后台子进程都在同一容器内；普通停止当前轮仍不等于整个 Host 退出。
@@ -108,9 +110,13 @@ DSH 的 `native` 改为 `{ id: "dsh", launchFile, boundedHistory: { nativeRoot, 
 
 操作者 `POST /control` 支持 `inspect`、`capacity`，以及带稳定 requestId、expected generation/epoch 的 `fence/quiesce/resume`；封门/收束还必须匹配 frozenSetId。正常编辑从工作台状态机发起。控制器只有独立验证整个容器退出、PID 为 0 且无自动重启后才给出 quiescent；恢复重开同一个容器和数据。直接调用未完成的控制操作同样可能留下未知意图，不能靠重启清除。
 
+原生直接子进程意外退出会使 Host 容器入口非零退出，清理最长五秒。标准受管接入只在持久在线、没有编辑窗口或未决控制意图时恢复同一容器；每组最多三次，计数先于启动写入独立 ledger，成功和网关重启均不清零。失败按 1/2/4 秒退避，单次原生就绪仍有 30 秒上限。耗尽后在工作区文件入口使用「恢复 Agent」明确重置；未核实任务保留原身份，不自动重发。外部启动脚本必须传递原生退出，不能吞掉子进程故障并伪装容器健康。
+
 产品归档的未发布正文暂存预算由 `ZHONGSHU_STORAGE_TRANSIENT_BYTES` 控制，默认 512 MiB；超额暂停该正文并可在扩容后续传，未知 stage 不按超时删除，已发布旧版本不属于暂存清理范围。产品容量还计入数据目录中的缓存；独立 Host/文件写者账本保持各自身份与恢复边界。
 
 每个 Host 的 `ledgerCapacity` 默认 2 GiB 配额、64 MiB 受理预留及 512 MiB 磁盘空闲线；字段为 `quotaBytes/reserveBytes/minimumFreeBytes`。统计包括数据库与 WAL，80% 时 warning，受理线处拒绝新派发；保留旧回执/未知记录和控制、停止、settle 的预留。`capacity` 返回无路径的计数和状态，操作者监控并扩容；不会自动删除幂等身份。真实 ENOSPC 仍可能使控制结果未知，此时保留门禁。已存档正文继续由产品存储读取；Host 停止期间未完成的原生回填显示暂停/错误并在恢复后重试，不会标记为已完整存档。
+
+同一绑定在持续未知期间复用未决观察登记，避免轮询不断扩大排空集合；每次观察的持久回执仍分别保留，已结算记录也会占用产品库和 Host 账本。它们的磁盘量随观察次数增长，不属于永久正文，也不是常量空间。规划容量需分别计量正文/图片、观察回执、索引/WAL、原生副本和备份，不能仅根据对话条数估算使用年限。
 
 独立文件写者同样默认 2 GiB 配额、64 MiB 预留、512 MiB 空闲线，可分别设置 `ZHONGSHU_WORKSPACE_WRITER_QUOTA_BYTES`、`ZHONGSHU_WORKSPACE_WRITER_RESERVE_BYTES`、`ZHONGSHU_WORKSPACE_WRITER_FREE_BYTES`。新保存达到受理线时被拒绝；已有 intent 的核实和旧回执读取仍可使用预留，不会按时间清理未知保存记录。
 
@@ -148,7 +154,9 @@ IMAGE=zhongshu:local docker compose --project-name zhongshu-local down
 
 `scripts/check-container.mjs` runs against a fresh temporary Compose project and verifies real login, production cookie attributes, session survival after container replacement, online backup, restore to a new directory, and old-session revocation. It is not for a real instance.
 
-`MEMORY_LIMIT` and `CPU_LIMIT` configure the application container. The Compose defaults are a small initial configuration, not the measured large-history profile. For scale acceptance, use the budgets in [performance-profile.ts](test/support/performance-profile.ts); budget the independent native Hosts separately and verify the target machine. An unhealthy gateway can require an explicit process restart; the current worker failure and operation-recovery behavior is described in the [architecture](docs/architecture.md#边界).
+`MEMORY_LIMIT` and `CPU_LIMIT` configure the application container. The Compose defaults are a small initial configuration, not the measured large-history profile. For scale acceptance, use the budgets in [performance-profile.ts](test/support/performance-profile.ts); budget the independent native Hosts separately and verify the target machine. Storage-owner failure now makes the gateway exit nonzero; ordinary queue pressure does not restart it. See the [architecture](docs/architecture.md#边界).
+
+Compose 对网关使用 `on-failure:3`，由 Docker 在异常退出后有限重启，恢复仍沿原数据和操作身份进行；耗尽后由操作者排查再明确启动。该策略不负责 Docker daemon/整机重启后的自动启动，开机启用由实例操作者配置。原生 Host 保持 `restart=no`，只能经过持久门禁恢复，不能套用网关策略。语义见 [Docker restart policy](https://docs.docker.com/engine/containers/start-containers-automatically/)。
 
 ## Checks
 

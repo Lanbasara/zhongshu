@@ -66,6 +66,8 @@ export const storageConfigurationSchema = limitsSchema.extend({ dataDirectory: z
 export type StorageClientOptions = z.input<typeof storageConfigurationSchema> & {
   onChange?: (event: WorkbenchChange) => void;
   onReset?: () => void;
+  /** Fatal owner failure only, never queue pressure or a rejected transaction. */
+  onFailure?: (code: string) => void;
 };
 export type StorageClient = {
   store: AsyncWorkbenchStore;
@@ -132,7 +134,7 @@ export function encodeStorageValue(value: unknown, maxBytes: number): Buffer {
  * Auth, plugin receipts and workspace metadata share the same writer connection.
  */
 export function createStorageClient(input: StorageClientOptions): StorageClient {
-  const { onChange, onReset, ...configuration } = input;
+  const { onChange, onReset, onFailure, ...configuration } = input;
   const options = storageConfigurationSchema.parse(configuration);
   const worker = new Worker(new URL(import.meta.url.endsWith('.ts') ? './storage-worker.ts' : './storage-worker.js', import.meta.url), {
     workerData: options, execArgv: [], resourceLimits: { maxOldGenerationSizeMb: options.workerMemoryMb },
@@ -175,6 +177,9 @@ export function createStorageClient(input: StorageClientOptions): StorageClient 
     closeResolve?.();
     stop ??= worker.terminate();
     void stop.catch(() => {});
+    // The process owner may exit for its supervisor to recover the same data.
+    // Never replace a worker here or retry a command whose outcome is unknown.
+    try { onFailure?.(code); } catch { /* failure remains latched */ }
   }
   function pump(): void {
     if (!started || failure || current) return;

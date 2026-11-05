@@ -101,13 +101,15 @@ test('failed transactions emit no change and callback-based archive checks never
 });
 
 test('queue count and aggregate bytes apply backpressure before unbounded worker messages accumulate', async t => {
-  const f = await fixture(t, { maxPending: 2 });
+  const failures: string[] = [];
+  const f = await fixture(t, { maxPending: 2, onFailure: code => failures.push(code) });
   const first = f.store.version();
   const second = f.store.version();
   await assert.rejects(f.store.version(), { code: 'storage_queue_full', outcome: 'not_started' });
   assert.equal(f.client.diagnostics().pending, 2);
   assert.equal(f.client.diagnostics().inFlight, true);
   await Promise.all([first, second]);
+  assert.deepEqual(failures, [], 'backpressure must not restart a healthy storage owner');
   const bytes = await fixture(t, { maxQueuedBytes: 1800 });
   const input = conversation();
   await bytes.store.createConversation(input);
@@ -144,7 +146,8 @@ test('request/result budgets reject oversized work and distinguish a committed m
 });
 
 test('a blocked SQLite writer leaves the main loop responsive and times out without retrying uncertain work', async t => {
-  const f = await fixture(t, { requestTimeoutMs: 100 });
+  const failures: string[] = [];
+  const f = await fixture(t, { requestTimeoutMs: 100, onFailure: code => failures.push(code) });
   const { buildApp } = await import('../src/server/app.ts');
   const app = await buildApp({ authStore: f.client.auth, origin: 'https://synthetic.example', readiness: () => f.client.diagnostics().phase === 'ready' });
   t.after(() => app.close());
@@ -176,6 +179,7 @@ test('a blocked SQLite writer leaves the main loop responsive and times out with
     await f.client.close();
   }
   assert.ok(Number(blocker.prepare('SELECT COUNT(*) AS n FROM workbench_conversations WHERE id=?').get(input.id)!.n) <= 1);
+  assert.deepEqual(failures, ['storage_request_timeout'], 'notify the owner exactly once, including later worker exit and close');
 });
 
 test('close drains accepted requests, rejects new work, and startup failures reject readiness and queued work', async t => {

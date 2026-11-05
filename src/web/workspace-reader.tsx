@@ -13,7 +13,7 @@ import { workspacePreviewPages } from './workspace-preview.ts';
 const WorkspaceTextEditor = lazy(() => import('./workspace-text-editor.tsx'));
 
 const fileSchema = z.object({ kind: z.enum(['markdown', 'text', 'html', 'source']), text: z.string(), version: z.string() });
-const statusSchema = z.object({ editable: z.boolean(), reason: z.string().nullable(), canPause: z.boolean().optional(), maintenance: z.enum(['online', 'paused', 'unknown', 'transition']).optional(),
+const statusSchema = z.object({ editable: z.boolean(), reason: z.string().nullable(), canPause: z.boolean().optional(), canRecover: z.boolean().optional(), maintenance: z.enum(['online', 'paused', 'unknown', 'transition']).optional(),
   phase: z.enum(['online', 'draining', 'editable', 'resuming', 'unknown', 'initializing']).optional(), windowId: z.string().optional(), affectedGroups: z.array(z.string()).max(32).optional(), initialized: z.boolean().optional() });
 type File = z.infer<typeof fileSchema>;
 type OpenFile = { path: string; file: File; position: number };
@@ -35,6 +35,9 @@ const errors = new Map([
   ['execution_baseline_incomplete', '正在后台核验已有会话和任务，完成后可进入编辑。'],
   ['execution_scope_registration_pending', '正在核对工作区的运行范围，请稍后重试。'],
   ['execution_controller_unknown', '尚未确认运行组门禁，暂时无法保存或派发。'],
+  ['execution_host_recovery_backoff', 'Agent 暂时不可用，正在等待下一次恢复；已有存档仍可阅读。'],
+  ['execution_host_recovery_exhausted', '自动恢复次数已用尽。排除运行环境问题后，可点击“恢复 Agent”再试。'],
+  ['execution_host_recovery_blocked', '当前门禁不允许重启 Agent，请先处理已有编辑或恢复状态。'],
   ['execution_reconciliation_unknown', '尚未核实原生任务状态，请保留修改并稍后重试。'],
   ['execution_native_state_unknown', '尚未核实原生会话状态，初始化仍在继续。'],
   ['execution_restore_requires_reconciliation', '恢复的运行记录需要操作者核对，现有存档仍可阅读。'],
@@ -164,7 +167,7 @@ export function WorkspaceReader({ workspaces, workspaceCursor, initialWorkspace,
     function publish(value: z.infer<typeof statusSchema>) {
       observedAt = Date.now();
       setStatus(previous => previous?.editable === value.editable && previous.reason === value.reason &&
-        previous.maintenance === value.maintenance && previous.canPause === value.canPause && previous.windowId === value.windowId && previous.phase === value.phase ? previous : value);
+        previous.maintenance === value.maintenance && previous.canPause === value.canPause && previous.canRecover === value.canRecover && previous.windowId === value.windowId && previous.phase === value.phase ? previous : value);
     }
     if (channel) channel.onmessage = event => {
       const parsed = statusSchema.safeParse(event.data);
@@ -467,7 +470,9 @@ export function WorkspaceReader({ workspaces, workspaceCursor, initialWorkspace,
     </div>}
     {!!status?.affectedGroups?.length && <div className="workspace-reader-tools">编辑影响范围：{status.affectedGroups.join('、')}。关闭页面会保留编辑窗口。</div>}
     {!editing && (status?.maintenance === 'paused' || status?.maintenance === 'unknown') &&
-      <div className="workspace-reader-tools"><button disabled={busy} onClick={() => void leaveEditor(false)}>恢复 Agent</button></div>}
+      <div className="workspace-reader-tools"><button disabled={busy} onClick={() => void leaveEditor(false)}>恢复 Agent</button>
+        {!opened && status?.canRecover && <span role="status">{status.reason ? errors.get(status.reason) ?? 'Agent 尚未恢复，已有存档仍可阅读。' : 'Agent 尚未恢复，已有存档仍可阅读。'}</span>}
+      </div>}
     {error && <p className="workspace-reader-feedback" role="alert">{error}</p>}
     {notice && <p className="workspace-reader-feedback" role="status">{notice}</p>}
     <div className="workspace-reader-content">

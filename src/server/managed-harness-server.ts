@@ -29,10 +29,24 @@ export async function readOperatorFile(path: string, maxBytes: number): Promise<
   if (!isAbsolute(path) || !info.isFile() || info.isSymbolicLink() || info.size > maxBytes || info.mode & 0o077 || process.getuid && info.uid !== process.getuid()) throw new Error('managed_operator_file_unsafe');
   const content = await readFile(path, 'utf8'); if (Buffer.byteLength(content) > maxBytes) throw new Error('managed_operator_file_too_large'); return content;
 }
+/** Unexpected native exit must terminate PID 1 even if an adapter close waits
+ * forever for the dead peer. Tests use real child processes and an exit sink. */
+export function superviseManagedNativeChild(child: ChildProcess, shutdown: () => Promise<void>, failed: () => void) {
+  let expected = false; let notified = false;
+  const exit = () => {
+    if (expected || notified) return; notified = true;
+    let finished = false;
+    const finish = () => { if (!finished) { finished = true; failed(); } };
+    const timer = setTimeout(finish, 5000);
+    void Promise.resolve().then(shutdown).catch(() => {}).finally(() => { clearTimeout(timer); finish(); });
+  };
+  child.once('error', exit); child.once('exit', exit);
+  return () => { expected = true; };
+}
 /** Container entry point. Only an operator-owned config chooses the executable,
  * argv/environment and native data roots. No shell or browser supplied command.
  * Run as the container's fixed non-root user, with restart policy disabled. */
-export async function startManagedNative(file: string) {
+export async function startManagedNative(file: string, onFailure = () => { process.exitCode = 1; }) {
   const config = managedNativeConfigurationSchema.parse(JSON.parse(await readOperatorFile(file, 32 * 1024)));
   const token = (await readOperatorFile(config.tokenFile, 128)).trim();
   if (!/^[A-Za-z0-9_-]{43}$/.test(token)) throw new Error('managed_native_token_invalid');
@@ -41,12 +55,18 @@ export async function startManagedNative(file: string) {
   let pluginHost: Awaited<ReturnType<typeof createCodexPluginHost>> | undefined;
   let plugins: PluginBackend | undefined;
   let closing = false;
+  let closingTask: Promise<void> | undefined;
+  let expectedExit: (() => void) | undefined;
   const adapter = config.native.id === 'codex' ? createCodexAdapter({ ...config.native, managedExecution: true }) : createDshAdapter({ ...config.native, managedExecution: true });
-  const close = async () => { if (closing) return; closing = true; await server?.close(); await plugins?.close?.(); await pluginHost?.close(); if (!server) await adapter.close(); child?.kill('SIGTERM'); };
+  const close = () => closingTask ??= (async () => {
+    closing = true; expectedExit?.(); child?.kill('SIGTERM');
+    await Promise.allSettled([server ? server.close() : adapter.close(), plugins?.close?.(), pluginHost?.close()]);
+  })();
   try {
     child = spawn(config.process.executable, config.process.args, { cwd: config.process.cwd,
       env: { ...config.process.environment }, shell: false, stdio: 'ignore' });
-    let failed = false; child.once('error', () => { failed = true; }); child.once('exit', () => { failed = true; if (server && !closing) void close().finally(() => { process.exitCode = 1; }); });
+    let failed = false; child.once('error', () => { failed = true; }); child.once('exit', () => { failed = true; });
+    expectedExit = superviseManagedNativeChild(child, close, onFailure);
     const deadline = Date.now() + 30_000;
     for (;;) {
       if (failed) throw new Error('managed_native_start_failed');
@@ -64,12 +84,16 @@ export async function startManagedNative(file: string) {
       plugins = codexPluginClient(settings.socket, settings.nativeSocket);
     } else if (config.native.id === 'dsh' && config.native.plugins) plugins = dshPlugins(config.native.launchFile, config.native.plugins.sources);
     server = await serveManagedHarness(adapter, { socketPath: config.socketPath, token }, plugins);
+    if (failed || closing) { await server.close(); throw new Error('managed_native_start_failed'); }
     return { close };
   } catch (error) { await close(); throw error; }
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const file = process.argv[2];
   if (!file || process.argv.length !== 3) { console.error('managed_native_configuration_required'); process.exitCode = 1; }
-  else startManagedNative(file).then(server => { process.once('SIGTERM', () => { void server.close(); }); process.once('SIGINT', () => { void server.close(); }); })
+  else startManagedNative(file, () => { process.exit(1); }).then(server => {
+    const stop = () => { const timer = setTimeout(() => process.exit(0), 5000); void server.close().finally(() => { clearTimeout(timer); process.exit(0); }); };
+    process.once('SIGTERM', stop); process.once('SIGINT', stop);
+  })
     .catch(() => { console.error('managed_native_start_failed'); process.exitCode = 1; });
 }

@@ -28,8 +28,16 @@ async function main() {
   let storage: StorageClient | undefined;
   let directories: DirectoryIndex | undefined;
   let managed: Awaited<ReturnType<typeof startManagedHarnesses>> | undefined;
+  let stop: (() => Promise<void>) | undefined;
   try {
-    storage = createStorageClient({ dataDirectory: config.dataDirectory, capacity: config.storageCapacity, onChange: change => transport?.changed(change), onReset: () => transport?.invalidate() });
+    storage = createStorageClient({ dataDirectory: config.dataDirectory, capacity: config.storageCapacity, onChange: change => transport?.changed(change), onReset: () => transport?.invalidate(),
+      onFailure: () => {
+        process.exitCode = 1;
+        console.error(JSON.stringify({ event: 'storage_owner_failed' }));
+        // Startup failures already unwind through catch. Once serving, close
+        // the whole owner so an external bounded restart can recover the journal.
+        if (stop) void stop();
+      } });
     await storage.ready;
     const harnesses = await loadHarnesses(process.env.ZHONGSHU_HARNESS_CONFIG, config.dataDirectory);
     plugins = createPluginManagement(storage.plugins, harnesses.plugins);
@@ -47,15 +55,15 @@ async function main() {
         await scope.register(plugins!.routes, { prefix: '/workbench' });
       }, onLogout: transport.logout });
     let closing = false;
-    const stop = async () => {
+    stop = async () => {
       if (closing) return;
       closing = true;
       const timeout = setTimeout(() => process.exit(1), 10_000).unref();
       try { transport!.close(); await plugins!.close(); await workbench!.close(); await managed!.close(); await app!.close(); await storage!.close(); await directories!.close(); clearTimeout(timeout); }
       catch { process.exitCode = 1; }
     };
-    process.once('SIGINT', () => { void stop(); });
-    process.once('SIGTERM', () => { void stop(); });
+    process.once('SIGINT', () => { void stop!(); });
+    process.once('SIGTERM', () => { void stop!(); });
     await workbench.start();
     await app.listen({ port: config.port, host: config.host });
   } catch (error) { transport?.close(); await plugins?.close(); await workbench?.close(); await managed?.close(); await app?.close(); await storage?.close(); await directories?.close(); throw error; }

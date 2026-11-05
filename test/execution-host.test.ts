@@ -4,11 +4,13 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { request } from 'node:http';
+import { setTimeout as delay } from 'node:timers/promises';
 import { serveExecutionGateway } from '../src/server/managed-harness-gateway.ts';
 import { test, type TestContext } from 'node:test';
 import { createExecutionHostLedger, type HostPermission } from '../src/server/execution-host-ledger.ts';
 import { acquireExecutionHostOwnership, ExecutionHost, type ExecutionGatewayAuthority, type NativeInvocation, type ManagedNativeInvoker } from '../src/server/execution-host.ts';
 import type { ContainerProof, ExecutionHostRuntime } from '../src/server/execution-host-docker.ts';
+import { createStorageClient } from '../src/server/storage-client.ts';
 
 const digest = (value: string) => createHash('sha256').update(value).digest('hex');
 const frozen = digest('synthetic frozen membership');
@@ -20,6 +22,8 @@ async function fixture(t: TestContext, capacity?: { quotaBytes: number; reserveB
   const generation = (await ledger.load()).state.generation;
   let physical: ContainerProof = { id: 'c'.repeat(64), groupId: options.groupId, generation, configurationDigest: options.configurationDigest, running: false, pid: 0, status: 'created' };
   let starts = 0; let stops = 0; let resolved = 0; let throwAfterStop = false; let drained = true; let forgedEpoch: number | undefined;
+  let recoveryAllowed = false;
+  let recoveryCheck = async () => recoveryAllowed;
   const runtime: ExecutionHostRuntime = {
     async prepare() { return { ...physical }; }, async inspect() { return { ...physical }; },
     async start() { starts++; physical = { ...physical, running: true, pid: 123, status: 'running' }; return { ...physical }; },
@@ -41,7 +45,7 @@ async function fixture(t: TestContext, capacity?: { quotaBytes: number; reserveB
   };
   let invoke: ManagedNativeInvoker['invoke'] = async invocation => { sent.push(invocation.requestId); return { outcome: 'accepted', runId: 'synthetic-run' }; };
   const native: ManagedNativeInvoker = { async ready() {}, invoke: (...args) => invoke(...args) };
-  let host = new ExecutionHost(ledger, runtime, native, authority, owner); await host.bootstrap();
+  let host = new ExecutionHost(ledger, runtime, native, authority, owner, () => recoveryCheck()); await host.bootstrap();
   function operation() {
     const operationId = randomUUID(); const conversationId = randomUUID();
     invocations.set(operationId, { requestId: operationId, operationId, conversationId, workspaceId: 'synthetic-workspace', harnessId: 'dsh', method: 'submit', args: [{ id: 'binding', cwd: '/synthetic' }, { id: operationId, text: 'synthetic input' }] }); allowed.add(operationId); return operationId;
@@ -50,10 +54,77 @@ async function fixture(t: TestContext, capacity?: { quotaBytes: number; reserveB
   return { root, options, generation, sent, bound, invocations, allowed, operation,
     get resolved() { return resolved; }, get host() { return host; }, get ledger() { return ledger; }, get starts() { return starts; }, get stops() { return stops; }, get owner() { return owner; },
     setInvoke(value: ManagedNativeInvoker['invoke']) { invoke = value; }, setDrained(value: boolean) { drained = value; }, forgeEpoch(value: number | undefined) { forgedEpoch = value; }, loseStopReceipt() { throwAfterStop = true; },
+    allowRecovery(value = true) { recoveryAllowed = value; }, crash() { physical = { ...physical, running: false, pid: 0, status: 'exited' }; },
+    setRecoveryCheck(value: () => Promise<boolean>) { recoveryCheck = value; },
     async restart() { const port = owner.port; await host.close(); owner = await acquireExecutionHostOwnership(port); ledger = createExecutionHostLedger(options); await ledger.ready;
-      host = new ExecutionHost(ledger, runtime, native, authority, owner); await host.bootstrap(); },
+      host = new ExecutionHost(ledger, runtime, native, authority, owner, () => recoveryCheck()); await host.bootstrap(); },
   };
 }
+
+test('managed crash recovery consumes durable bounded budget without resending an unknown operation', async t => {
+  const f = await fixture(t); f.allowRecovery(); const operationId = f.operation();
+  f.setInvoke(async invocation => { f.sent.push(invocation.requestId); throw new Error('native died after send'); });
+  assert.equal((await f.host.dispatch({ kind: 'operation', operationId })).status, 'unknown');
+  const recover = (requestId = randomUUID(), explicit = false) => f.host.controller.recover!({ requestId, explicit });
+  f.crash(); assert.equal((await recover()).status, 'known');
+  assert.equal(f.starts, 2); assert.equal((await f.ledger.load()).state.epoch, 0);
+  assert.equal((await f.host.dispatch({ kind: 'operation', operationId })).status, 'unknown'); assert.deepEqual(f.sent, [operationId]);
+  f.crash(); assert.deepEqual(await recover(), { status: 'unknown', reason: 'execution_host_recovery_backoff' });
+  await f.restart(); assert.equal((await f.ledger.load()).recovery.attempts, 1); assert.equal(f.starts, 2);
+  await delay(1050); assert.equal((await recover()).status, 'known'); f.crash();
+  await f.restart(); await delay(2050); assert.equal((await recover()).status, 'known'); f.crash();
+  assert.equal((await f.ledger.load()).recovery.attempts, 3);
+  await f.restart();
+  for (let index = 0; index < 30; index++) assert.deepEqual(await recover(), { status: 'unknown', reason: 'execution_host_recovery_exhausted' });
+  assert.equal(f.starts, 4, 'initial start plus exactly three automatic restarts');
+  const manual = randomUUID(); assert.equal((await recover(manual, true)).status, 'known');
+  assert.equal((await f.ledger.load()).recovery.attempts, 1);
+  f.crash(); await f.restart(); assert.equal((await recover(manual, true)).status, 'unknown'); assert.equal(f.starts, 5, 'same explicit request cannot reset the budget again');
+  assert.equal((await recover(randomUUID(), true)).status, 'known');
+  assert.deepEqual(f.sent, [operationId]);
+});
+
+test('managed recovery fails closed for product edit veto, fenced state and unresolved Host control across restart', async t => {
+  const f = await fixture(t); f.crash();
+  const recover = () => f.host.controller.recover!({ requestId: randomUUID(), explicit: true });
+  assert.deepEqual(await recover(), { status: 'unknown', reason: 'execution_host_recovery_blocked' });
+  assert.equal(f.starts, 1); assert.equal((await f.ledger.load()).recovery.attempts, 0);
+  f.allowRecovery(); assert.equal((await recover()).status, 'known');
+  const fence = f.host.controller.fence({ requestId: 'fence-before-recovery', expected: { generation: f.generation, epoch: 0 }, frozenSetId: frozen });
+  const raced = recover(); assert.equal((await fence).status, 'known'); assert.deepEqual(await raced, { status: 'unknown', reason: 'execution_host_recovery_blocked' });
+  await f.host.controller.quiesce({ requestId: 'close-before-restart', expected: { generation: f.generation, epoch: 1 }, frozenSetId: frozen });
+  await f.restart(); assert.deepEqual(await recover(), { status: 'unknown', reason: 'execution_host_recovery_blocked' }); assert.equal(f.starts, 2);
+  await f.host.controller.resume({ requestId: 'normal-edit-resume', expected: { generation: f.generation, epoch: 2 } });
+  f.crash();
+  assert.equal((await f.host.controller.fence({ requestId: 'lost-fence', expected: { generation: f.generation, epoch: 3 }, frozenSetId: frozen })).status, 'unknown');
+  await f.restart(); assert.ok((await f.ledger.load()).intent);
+  assert.deepEqual(await recover(), { status: 'unknown', reason: 'execution_host_recovery_blocked' }); assert.equal(f.starts, 3);
+});
+
+test('real product worker edit intent appearing after recovery budget commit prevents the container start', async t => {
+  const f = await fixture(t); const storage = createStorageClient({ dataDirectory: join(f.root, 'product') }); await storage.ready;
+  try {
+    const initial = await storage.execution.registerGroup((await f.ledger.load()).state);
+    await storage.execution.beginBaseline(initial.groupId);
+    for (const source of ['operations', 'queues'] as const) await storage.execution.seedLegacyAdmissions({ groupId: initial.groupId, source, after: 0, limit: 8, byteLimit: 32768 });
+    await storage.execution.commitBaselineBatch({ groupId: initial.groupId, expectedRevision: initial.revision, through: 0, limit: 8, byteLimit: 32768, observations: [], proof: digest('empty native baseline') });
+    let checks = 0;
+    f.setRecoveryCheck(async () => {
+      let row = (await storage.execution.load([initial.groupId]))[0]!;
+      if (++checks === 2) {
+        await storage.execution.freezeAdmissions({ windowId: randomUUID(), groups: [{ groupId: row.groupId, revision: row.revision }] });
+        row = (await storage.execution.load([initial.groupId]))[0]!;
+      }
+      return row.phase === 'online' && !row.windowId && !row.intent;
+    });
+    f.crash();
+    assert.deepEqual(await f.host.controller.recover!({ requestId: randomUUID(), explicit: false }), { status: 'unknown', reason: 'execution_host_recovery_blocked' });
+    assert.equal(f.starts, 1); assert.equal((await f.ledger.load()).recovery.attempts, 1);
+    await f.restart();
+    assert.deepEqual(await f.host.controller.recover!({ requestId: randomUUID(), explicit: true }), { status: 'unknown', reason: 'execution_host_recovery_blocked' });
+    assert.equal(f.starts, 1, 'manual recovery also respects product edit intent after gateway restart');
+  } finally { await storage.close(); }
+});
 
 test('gateway durably consumes an execution once and never resends an unknown result after restart', async t => {
   const f = await fixture(t); const operationId = f.operation();

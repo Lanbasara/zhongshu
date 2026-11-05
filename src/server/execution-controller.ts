@@ -40,7 +40,8 @@ export type ExecutionEpoch = z.infer<typeof epoch>;
 export type ExecutionGroupState = z.infer<typeof stateSchema>;
 export type ExecutionControllerMutation = z.infer<typeof mutation>;
 export type ExecutionControllerFailure = 'invalid_request' | 'unsafe_executable' | 'controller_failure' | 'timeout' |
-  'response_too_large' | 'invalid_response' | 'identity_mismatch' | 'epoch_mismatch' | 'stale_response' | 'controller_unknown';
+  'response_too_large' | 'invalid_response' | 'identity_mismatch' | 'epoch_mismatch' | 'stale_response' | 'controller_unknown' |
+  'execution_host_recovery_backoff' | 'execution_host_recovery_exhausted' | 'execution_host_recovery_blocked';
 export type ExecutionControllerResult = { status: 'known'; state: ExecutionGroupState } |
   { status: 'unknown'; reason: ExecutionControllerFailure };
 export type ExecutionController = {
@@ -48,6 +49,8 @@ export type ExecutionController = {
   fence(request: ExecutionControllerMutation): Promise<ExecutionControllerResult>;
   quiesce(request: ExecutionControllerMutation): Promise<ExecutionControllerResult>;
   resume(request: Omit<ExecutionControllerMutation, 'frozenSetId'>): Promise<ExecutionControllerResult>;
+  /** Trusted in-process managed controller only; not part of executable v1. */
+  recover?(request: { requestId: string; explicit: boolean }): Promise<ExecutionControllerResult>;
 };
 type Action = 'inspect' | 'fence' | 'quiesce' | 'resume';
 type Request = { protocol: typeof executionControllerProtocol; action: Action; groupId: string; requestId: string;

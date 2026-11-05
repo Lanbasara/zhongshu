@@ -3,7 +3,7 @@ import { createServer, type Server } from 'node:net';
 import { acquireExecutionFileLock } from './execution-host-lock.ts';
 import { z } from 'zod';
 import type { Binding, HarnessId, NativeChange } from '../harness/types.ts';
-import type { ExecutionController, ExecutionControllerResult, ExecutionEpoch } from './execution-controller.ts';
+import type { ExecutionController, ExecutionControllerResult, ExecutionEpoch, ExecutionGroupState } from './execution-controller.ts';
 import { encodeStorageValue } from './storage-client.ts';
 import { ExecutionHostError, type ExecutionHostRuntime } from './execution-host-docker.ts';
 import { hostIdentifier, hostPermissionSchema, type ExecutionHostLedger, type HostControl, type HostPermission } from './execution-host-ledger.ts';
@@ -93,15 +93,19 @@ export class ExecutionHost {
   private controls = 0;
   private resolving = 0;
   private closed = false;
-  constructor(ledger: ExecutionHostLedger, runtime: ExecutionHostRuntime, native: ManagedNativeInvoker, authority: ExecutionGatewayAuthority, ownership: ExecutionHostOwnership) {
+  private readonly recoveryAllowed?: (state: ExecutionGroupState) => Promise<boolean>;
+  constructor(ledger: ExecutionHostLedger, runtime: ExecutionHostRuntime, native: ManagedNativeInvoker, authority: ExecutionGatewayAuthority, ownership: ExecutionHostOwnership,
+    recoveryAllowed?: (state: ExecutionGroupState) => Promise<boolean>) {
     if (!heldOwnerships.has(ownership)) throw new ExecutionHostError('execution_host_ownership_required');
     ownership.assertOwned(); this.ownership = ownership;
     this.ledger = ledger; this.runtime = runtime; this.native = native; this.authority = authority;
+    this.recoveryAllowed = recoveryAllowed;
     this.controller = {
       inspect: (requestId, expected) => this.inspect(requestId, expected),
       fence: input => this.change({ ...input, action: 'fence' }),
       quiesce: input => this.change({ ...input, action: 'quiesce' }),
       resume: input => this.change({ ...input, action: 'resume' }),
+      ...(recoveryAllowed ? { recover: (input: { requestId: string; explicit: boolean }) => this.recover(input) } : {}),
     };
   }
   /** Explicit operator bootstrap only. Reopening an existing journal NEVER
@@ -128,6 +132,34 @@ export class ExecutionHost {
       const proof = await this.runtime.inspect();
       return { status: 'known', state: await this.ledger.confirm({ generation: state.generation, epoch: state.epoch }, proof) };
     } catch { return { status: 'unknown', reason: 'controller_unknown' }; }
+  }
+  private async recover(input: { requestId: string; explicit: boolean }): Promise<ExecutionControllerResult> {
+    if (this.closed || this.controls >= 16) return { status: 'unknown', reason: 'controller_unknown' };
+    this.controls++;
+    const task = this.controlTail.catch(() => {}).then(async (): Promise<ExecutionControllerResult> => {
+      try {
+        this.ownership.assertOwned(); hostIdentifier.parse(input.requestId);
+        if (this.closed || typeof input.explicit !== 'boolean') throw new ExecutionHostError('execution_host_closed');
+        const row = await this.ledger.load(); const state = row.state;
+        if (!row.initialized || row.intent || state.admission !== 'open' || state.writers !== 'running' || state.frozenSetId || !await this.recoveryAllowed?.(state))
+          return { status: 'unknown', reason: 'execution_host_recovery_blocked' };
+        const physical = await this.runtime.inspect();
+        const expected = { generation: state.generation, epoch: state.epoch };
+        if (physical.running) return { status: 'known', state: await this.ledger.confirm(expected, physical) };
+        await this.ledger.claimRecovery({ requestId: input.requestId, expected, explicit: input.explicit }, physical);
+        // Product edit intent is separate durable storage. Recheck immediately
+        // before the effect; the shared control tail orders all Host mutations.
+        if (this.closed || !await this.recoveryAllowed?.(state)) return { status: 'unknown', reason: 'execution_host_recovery_blocked' };
+        const running = await this.runtime.start(); await this.nativeReady();
+        return { status: 'known', state: await this.ledger.confirm(expected, running) };
+      } catch (error) {
+        const reason = error instanceof ExecutionHostError && ['execution_host_recovery_backoff', 'execution_host_recovery_exhausted', 'execution_host_recovery_blocked'].includes(error.code)
+          ? error.code as 'execution_host_recovery_backoff' | 'execution_host_recovery_exhausted' | 'execution_host_recovery_blocked' : 'controller_unknown';
+        return { status: 'unknown', reason };
+      }
+    });
+    this.controlTail = task;
+    try { return await task; } finally { this.controls--; }
   }
   private async change(input: HostControl): Promise<ExecutionControllerResult> {
     if (this.closed || this.controls >= 16) return { status: 'unknown', reason: 'controller_unknown' };

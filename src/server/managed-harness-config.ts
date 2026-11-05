@@ -54,7 +54,12 @@ export async function startManagedHarnesses(input: { configurations: ManagedHost
         await ledger.ready;
         const generation = (await ledger.load()).state.generation;
         const runtime = createDockerExecutionHost(config.docker, config.groupId, generation, [input.dataDirectory, canonical, input.workspaceWriterDirectory!], input.workspaceWriterDirectory, sandboxPolicy);
-        host = new ExecutionHost(ledger, runtime, client, createManagedHarnessAuthority({ groupId: config.groupId, harnessId: config.harnessId, store: input.storage.store, execution: input.storage.execution, registry: input.registry }), owner);
+        host = new ExecutionHost(ledger, runtime, client, createManagedHarnessAuthority({ groupId: config.groupId, harnessId: config.harnessId, store: input.storage.store, execution: input.storage.execution, registry: input.registry }), owner,
+          async state => {
+            const gate = (await input.storage.execution.load([config.groupId]))[0];
+            return !!gate && gate.phase === 'online' && !gate.windowId && !gate.intent && !gate.stage && !gate.frozenSetId &&
+              gate.controller.generation === state.generation && gate.controller.epoch === state.epoch && gate.controller.admission === 'open' && gate.controller.writers === 'running' && !gate.controller.frozenSetId;
+          });
         await host.bootstrap();
         const server = await serveExecutionGateway(host, { socketPath: config.gateway.socketPath, token: gatewayToken });
         opened.push({ host, client, server, config });

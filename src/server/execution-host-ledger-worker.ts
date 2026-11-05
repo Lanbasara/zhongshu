@@ -5,7 +5,7 @@ import { z } from 'zod';
 import { openDatabase } from './database.ts';
 import { createCapacityGuard } from './storage-capacity.ts';
 import { encodeStorageValue } from './storage-client.ts';
-import { hostControlSchema, hostEpochSchema, hostIdentifier, hostSha256, hostPermissionSchema, hostLedgerMethods, hostLedgerOptionsSchema,
+import { hostControlSchema, hostRecoverySchema, hostEpochSchema, hostIdentifier, hostSha256, hostPermissionSchema, hostLedgerMethods, hostLedgerOptionsSchema,
   type HostControl, type HostForward, type HostRecord } from './execution-host-ledger.ts';
 import { ExecutionHostError, type ContainerProof } from './execution-host-docker.ts';
 import type { ExecutionGroupState } from './execution-controller.ts';
@@ -20,6 +20,10 @@ try {
     CREATE TABLE execution_host_controls (request_id TEXT PRIMARY KEY, request_json TEXT NOT NULL, result_json TEXT) STRICT;
     CREATE TABLE execution_host_forwards (request_id TEXT PRIMARY KEY, admission_id TEXT NOT NULL, content_digest TEXT NOT NULL, wire_digest TEXT NOT NULL,
       purpose TEXT NOT NULL, groups_json TEXT NOT NULL, status TEXT NOT NULL, result_json TEXT, binding_json TEXT) STRICT;
+  ` }, { version: 3, sql: `
+    ALTER TABLE execution_host_identity ADD COLUMN recovery_attempts INTEGER NOT NULL DEFAULT 0 CHECK(recovery_attempts BETWEEN 0 AND 3);
+    ALTER TABLE execution_host_identity ADD COLUMN recovery_next_at INTEGER NOT NULL DEFAULT 0;
+    CREATE TABLE execution_host_recoveries (request_id TEXT PRIMARY KEY, request_json TEXT NOT NULL) STRICT;
   ` }]);
   const capacity = createCapacityGuard(db, options.capacity);
   const stateSchema = hostEpochSchema.extend({ groupId: hostIdentifier, admission: z.enum(['open', 'drain', 'closed']), writers: z.enum(['running', 'quiescent']), durable: z.literal(true), frozenSetId: hostSha256.optional() }).strict();
@@ -33,7 +37,8 @@ try {
     const state = stateSchema.parse(JSON.parse(String(row.state_json)));
     if (row.configuration_digest !== options.configurationDigest || state.groupId !== options.groupId) throw new ExecutionHostError('execution_host_configuration_changed');
     return { configurationDigest: options.configurationDigest, state, containerId: row.container_id === null ? null : String(row.container_id), initialized: row.initialized === 1,
-      intent: row.intent_json === null ? null : hostControlSchema.parse(JSON.parse(String(row.intent_json))), capacity: capacity.status() };
+      intent: row.intent_json === null ? null : hostControlSchema.parse(JSON.parse(String(row.intent_json))), capacity: capacity.status(),
+      recovery: { attempts: Number(row.recovery_attempts), nextAttemptAt: Number(row.recovery_next_at) } };
   }
   load();
   function transaction<T>(action: () => T): T {
@@ -104,6 +109,24 @@ try {
     confirm(expected: { generation: string; epoch: number }, input: ContainerProof) {
       return transaction(() => { const row = load(); current(row, hostEpochSchema.parse(expected));
         if (row.intent) throw new ExecutionHostError('execution_control_unresolved'); proof(input, row, row.state.admission !== 'closed'); return row.state;
+      });
+    },
+    claimRecovery(input: z.infer<typeof hostRecoverySchema>, physical: ContainerProof) {
+      transaction(() => {
+        const request = hostRecoverySchema.parse(input); const row = load(); current(row, request.expected);
+        if (row.intent || row.state.admission !== 'open' || row.state.writers !== 'running' || row.state.frozenSetId)
+          throw new ExecutionHostError('execution_host_recovery_blocked');
+        proof(physical, row, false);
+        const previous = db.prepare('SELECT request_json FROM execution_host_recoveries WHERE request_id=?').get(request.requestId);
+        if (previous) throw new ExecutionHostError(previous.request_json === encode(request) ? 'execution_host_recovery_unknown' : 'execution_control_identity_changed');
+        const now = Date.now(); const attempts = request.explicit ? 0 : row.recovery.attempts;
+        if (attempts >= 3) throw new ExecutionHostError('execution_host_recovery_exhausted');
+        if (!request.explicit && now < row.recovery.nextAttemptAt) throw new ExecutionHostError('execution_host_recovery_backoff');
+        capacity.assertWritable('archive', 16 * 1024);
+        // Commit the budget before Docker I/O. A lost start receipt consumes an
+        // attempt; reopening either application or ledger cannot grant more.
+        db.prepare('INSERT INTO execution_host_recoveries(request_id,request_json) VALUES(?,?)').run(request.requestId, encode(request));
+        db.prepare('UPDATE execution_host_identity SET recovery_attempts=?,recovery_next_at=? WHERE id=1').run(attempts + 1, now + 1000 * 2 ** attempts);
       });
     },
     claimForward(input: z.infer<typeof hostPermissionSchema>): HostForward {

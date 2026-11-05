@@ -13,7 +13,9 @@ export const hostEpochSchema = z.object({ generation: hostIdentifier, epoch: z.n
 export const hostGroupSchema = hostEpochSchema.extend({ groupId: hostIdentifier, frozenSetId: hostSha256.optional() }).strict();
 export const hostControlSchema = z.object({ action: z.enum(['fence', 'quiesce', 'resume']), requestId: hostIdentifier, expected: hostEpochSchema, frozenSetId: hostSha256.optional() }).strict();
 export type HostControl = z.infer<typeof hostControlSchema>;
-export type HostRecord = { configurationDigest: string; state: ExecutionGroupState; containerId: string | null; initialized: boolean; intent: HostControl | null; capacity: StorageCapacity };
+export type HostRecord = { configurationDigest: string; state: ExecutionGroupState; containerId: string | null; initialized: boolean; intent: HostControl | null; capacity: StorageCapacity;
+  recovery: { attempts: number; nextAttemptAt: number } };
+export const hostRecoverySchema = z.object({ requestId: hostIdentifier, expected: hostEpochSchema, explicit: z.boolean() }).strict();
 export type HostPermission = { requestId: string; admissionId: string; contentDigest: string; wireDigest: string;
   purpose: 'execute' | 'stop'; groups: z.infer<typeof hostGroupSchema>[] };
 export const hostPermissionSchema = z.object({ requestId: hostIdentifier, admissionId: hostIdentifier, contentDigest: hostSha256, wireDigest: hostSha256,
@@ -28,6 +30,7 @@ export interface ExecutionHostLedger {
   beginControl(input: HostControl): Promise<{ status: 'pending' } | { status: 'complete'; state: ExecutionGroupState }>;
   completeControl(requestId: string, proof: ContainerProof): Promise<ExecutionGroupState>;
   confirm(expected: ExecutionEpoch, proof: ContainerProof): Promise<ExecutionGroupState>;
+  claimRecovery(input: z.infer<typeof hostRecoverySchema>, proof: ContainerProof): Promise<void>;
   claimForward(permission: HostPermission): Promise<HostForward>;
   readForward(requestId: string, wireDigest: string): Promise<HostForward | null>;
   readCreatedBinding(conversationId: string): Promise<unknown | null>;
@@ -35,7 +38,7 @@ export interface ExecutionHostLedger {
   settleForward(requestId: string, result: unknown): Promise<void>;
   close(): Promise<void>;
 }
-export const hostLedgerMethods = ['load', 'attachContainer', 'initialize', 'beginControl', 'completeControl', 'confirm', 'claimForward', 'readForward', 'readCreatedBinding', 'recordBinding', 'settleForward'] as const;
+export const hostLedgerMethods = ['load', 'attachContainer', 'initialize', 'beginControl', 'completeControl', 'confirm', 'claimRecovery', 'claimForward', 'readForward', 'readCreatedBinding', 'recordBinding', 'settleForward'] as const;
 export const hostLedgerOptionsSchema = z.object({ directory: z.string().min(1).max(4096), groupId: hostIdentifier, configurationDigest: hostSha256,
   capacity: z.object({ quotaBytes: z.number().int().min(1024 ** 2).max(Number.MAX_SAFE_INTEGER).default(2 * 1024 ** 3),
     reserveBytes: z.number().int().nonnegative().safe().default(64 * 1024 ** 2), minimumFreeBytes: z.number().int().nonnegative().safe().default(512 * 1024 ** 2),

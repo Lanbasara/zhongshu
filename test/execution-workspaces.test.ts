@@ -64,7 +64,7 @@ async function fixture(t: TestContext, count: number) {
     await seed.store.setConversationState(id, { readiness: 'ready', state: states.get(bindingId)! });
   }
   await seed.close();
-  async function open() {
+  async function open(waitForInitialization = true) {
     const client = createStorageClient({ dataDirectory }); await client.ready;
     const registry = new WorkspaceRegistry(client.workspaces, workspaces, []); await registry.ready;
     const execution = new ManagedWorkspaceExecution({ port: client.execution, workspaces: client.workspaces, groups: [{ groupId: 'host', workspaceIds: ['workspace'], workspaceRootIds: [], controller }] });
@@ -81,13 +81,51 @@ async function fixture(t: TestContext, count: number) {
     const writer = new WorkspaceFileWriter({ dataDirectory: join(dataDirectory, 'workspace-writer') });
     const workbench = new Workbench(client.store, workspaces, new Map([['codex', raw]]), registry, undefined, { execution, managedAdapter: wrapper, writer });
     owned.push({ client, workbench }); await workbench.start();
-    await until(async () => execution.initialized, 30_000);
+    if (waitForInitialization) await until(async () => execution.initialized, 30_000);
     return { client, execution, workbench, writer };
   }
-  return { open, conversationIds, workspaceDirectory, writerDirectory: join(dataDirectory, 'workspace-writer'), controllerState: () => controllerState,
+  return { open, controller, conversationIds, workspaceDirectory, writerDirectory: join(dataDirectory, 'workspace-writer'), controllerState: () => controllerState,
     counts: () => ({ stateReads, watches, submits, stops }), runContinuously: () => { keepRunning = true; },
     finish: () => { keepRunning = false; for (const [id, state] of states) states.set(id, { ...state, status: 'idle', terminalRunId: state.runId, terminalStatus: state.runId ? 'completed' : undefined }); } };
 }
+
+test('online Host recovery is bounded per second and explicit recovery works before initialization after restart', async t => {
+  const f = await fixture(t, 1); const first = await f.open();
+  let unavailable = true; const calls: { requestId: string; explicit: boolean }[] = [];
+  f.controller.recover = async request => {
+    calls.push(request); if (request.explicit) unavailable = false;
+    return unavailable ? { status: 'unknown', reason: 'execution_host_recovery_exhausted' } : { status: 'known', state: f.controllerState() };
+  };
+  await assert.rejects(first.execution.step(), { code: 'execution_host_recovery_exhausted' });
+  for (let index = 0; index < 10; index++) await assert.rejects(first.execution.step(), { code: 'execution_host_recovery_exhausted' });
+  assert.equal(calls.length, 1); await assert.rejects(first.execution.assertAdmission('workspace'), { code: 'execution_admission_closed' });
+  const failed = await first.execution.status('workspace'); assert.equal(failed.canRecover, true); assert.equal(failed.editable, false);
+  await first.workbench.close(); await first.client.close();
+  const second = await f.open(false);
+  await until(async () => (await second.execution.status('workspace')).canRecover === true);
+  assert.equal(second.execution.initialized, false, 'failed bootstrap inspect does not hide the recovery entry');
+  assert.equal(calls.filter(call => call.explicit).length, 0);
+  await second.workbench.changeWorkspaceMaintenance('workspace', 'resume');
+  await until(async () => second.execution.initialized);
+  assert.equal(calls.filter(call => call.explicit).length, 1);
+  assert.equal(new Set(calls.map(call => call.requestId)).size, calls.length);
+  assert.equal((await second.execution.status('workspace')).maintenance, 'online');
+  await second.execution.assertAdmission('workspace');
+});
+
+test('persistent edit windows veto automatic and explicit crash recovery after application restart', async t => {
+  const f = await fixture(t, 1); const first = await f.open();
+  await first.workbench.changeWorkspaceMaintenance('workspace', 'pause');
+  const windowId = (await first.execution.status('workspace')).windowId;
+  let recoveryCalls = 0; f.controller.recover = async () => { recoveryCalls++; throw new Error('must not enter crash recovery for edit window'); };
+  await first.workbench.close(); await first.client.close();
+  const second = await f.open();
+  for (let index = 0; index < 10; index++) await second.execution.step();
+  assert.equal(recoveryCalls, 0); const status = await second.execution.status('workspace');
+  assert.equal(status.windowId, windowId); assert.equal(status.editable, true); assert.notEqual(status.canRecover, true);
+  await second.workbench.changeWorkspaceMaintenance('workspace', 'resume');
+  assert.equal(recoveryCalls, 0, 'normal resume retains the original edit coordinator path');
+});
 
 for (const count of [40, 1000]) test(`${count} historical conversations initialize once; editing and saving need no historical observations`, { timeout: 60_000 }, async t => {
   const seedStarted = performance.now(); const f = await fixture(t, count); const seedMs = performance.now() - seedStarted;

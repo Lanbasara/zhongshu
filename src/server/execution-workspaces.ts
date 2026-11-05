@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import type { ExecutionController } from './execution-controller.ts';
+import type { ExecutionController, ExecutionControllerResult } from './execution-controller.ts';
 import { ExecutionCoordinator, type BaselineBinding, type BaselineObservation, type ExecutionCursor, type ExecutionGate, type PendingExecution, type SaveWriteIdentity, type SavePermit } from './execution-coordinator.ts';
 import type { AsyncExecutionStore } from './execution-store.ts';
 import type { AsyncWorkspaceStore, Registration } from './workspace-store.ts';
@@ -13,7 +13,7 @@ export type ManagedExecutionCallbacks = {
 };
 export type ManagedEditStatus = { editable: boolean; reason: string | null; canPause: boolean;
   maintenance: 'online' | 'paused' | 'unknown' | 'transition'; phase: ExecutionGate['phase'] | 'initializing';
-  windowId?: string; affectedGroups: string[]; initialized: boolean };
+    windowId?: string; affectedGroups: string[]; initialized: boolean; canRecover?: boolean };
 const proof = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const sameController = (a: ExecutionGate['controller'], b: ExecutionGate['controller']) => a.groupId === b.groupId && a.generation === b.generation && a.epoch === b.epoch && a.admission === b.admission && a.writers === b.writers && a.frozenSetId === b.frozenSetId;
 
@@ -41,6 +41,7 @@ export class ManagedWorkspaceExecution {
   private readonly pendingCursors = new Map<string, ExecutionCursor>();
   private readonly newWorkspaces = new Set<string>();
   private error?: string;
+  private readonly hostChecks = new Map<string, { at: number; result: ExecutionControllerResult }>();
   initialized = false;
   constructor(input: { port: AsyncExecutionStore; workspaces: AsyncWorkspaceStore; groups: ManagedWorkspaceGroup[] }) {
     if (!input.groups.length || input.groups.length > 32 || new Set(input.groups.map(group => group.groupId)).size !== input.groups.length) throw new StoreError('execution_group_configuration_invalid', 400);
@@ -61,7 +62,7 @@ export class ManagedWorkspaceExecution {
     const mapped = await this.port.workspaceGroups(workspaceId);
     if (configured.some(group => !mapped.includes(group.groupId))) { await this.registerWorkspace(workspaceId); throw new StoreError('execution_scope_registration_pending', 409); }
     const gates = await this.port.load(mapped);
-    if (gates.some(gate => !gate.baselineComplete || gate.phase !== 'online' || gate.controller.admission !== 'open')) throw new StoreError('execution_admission_closed', 409);
+    if (gates.some(gate => !gate.baselineComplete || gate.phase !== 'online' || gate.controller.admission !== 'open' || this.hostChecks.get(gate.groupId)?.result.status === 'unknown')) throw new StoreError('execution_admission_closed', 409);
   }
   start(callbacks: ManagedExecutionCallbacks) { if (this.callbacks) return; this.callbacks = callbacks; this.schedule(0); }
   private schedule(delay = 100) {
@@ -78,12 +79,26 @@ export class ManagedWorkspaceExecution {
     clearTimeout(this.timer); this.timer = undefined; this.active = this.advance();
     try { await this.active; } finally { this.active = undefined; this.schedule(this.initialized ? 100 : 0); }
   }
+  private recoverable(row: ExecutionGate) {
+    return row.phase === 'online' && !row.windowId && !row.intent && !row.stage && !row.frozenSetId && row.controller.admission === 'open' && row.controller.writers === 'running' && !row.controller.frozenSetId;
+  }
+  private async checkHost(group: ManagedWorkspaceGroup, row: ExecutionGate, explicit = false): Promise<ExecutionControllerResult> {
+    if (!group.controller.recover || !this.recoverable(row)) return group.controller.inspect('inspect-' + randomUUID(), row.controller);
+    const prior = this.hostChecks.get(group.groupId);
+    if (!explicit && prior && Date.now() - prior.at < 1000) return prior.result;
+    const result = await group.controller.recover({ requestId: 'recover-' + randomUUID(), explicit });
+    const checked: ExecutionControllerResult = result.status === 'known' && !sameController(row.controller, result.state) ? { status: 'unknown', reason: 'epoch_mismatch' } : result;
+    this.hostChecks.set(group.groupId, { at: Date.now(), result: checked }); return checked;
+  }
   private async advance() {
     if (this.stopped || !this.callbacks) return;
     const missing = this.groups.find(group => !this.registered.has(group.groupId));
     if (missing) {
-      const inspected = await missing.controller.inspect('bootstrap-' + randomUUID());
-      if (inspected.status !== 'known') throw new StoreError('execution_controller_unknown', 503);
+      // An existing online gate is the only authority to recover during startup.
+      // Missing/incomplete baselines and durable edit windows never imply start.
+      const existing = await this.port.load([missing.groupId]).then(rows => rows[0]).catch(() => undefined);
+      const inspected = existing ? await this.checkHost(missing, existing) : await missing.controller.inspect('bootstrap-' + randomUUID());
+      if (inspected.status !== 'known') throw new StoreError(inspected.reason === 'controller_unknown' ? 'execution_controller_unknown' : inspected.reason, 503);
       const current = await this.port.registerGroup(inspected.state);
       if (!sameController(current.controller, inspected.state)) throw new StoreError('execution_controller_epoch_changed', 409);
       this.registered.add(missing.groupId); this.error = undefined; return;
@@ -154,6 +169,11 @@ export class ManagedWorkspaceExecution {
       if (row.phase === 'resuming' || row.stage === 'resume' || row.stage === 'opened') await this.coordinator.resume({ windowId: row.windowId, groupIds: row.windowGroups });
       else await this.coordinator.advance({ windowId: row.windowId, groupIds: row.windowGroups });
     } else if (row.phase === 'online') {
+      const group = this.groups.find(group => group.groupId === row.groupId)!;
+      if (group.controller.recover) {
+        const checked = await this.checkHost(group, row);
+        if (checked.status !== 'known') throw new StoreError(checked.reason === 'controller_unknown' ? 'execution_controller_unknown' : checked.reason, 503);
+      }
       const page = await this.port.unresolvedPage({ groupId: row.groupId, after: this.pendingCursors.get(row.groupId), limit: 8 });
       for (const pending of page.entries) await this.callbacks.resolvePending(pending);
       if (page.nextCursor) this.pendingCursors.set(row.groupId, page.nextCursor); else this.pendingCursors.delete(row.groupId);
@@ -164,10 +184,17 @@ export class ManagedWorkspaceExecution {
     const configured = await this.workspaces.get(workspaceId);
     const requested = configured ? this.configured(configured).map(group => group.groupId) : [];
     if (!requested.length) return { editable: false, reason: 'workspace_writes_unmanaged', canPause: false, maintenance: 'unknown', phase: 'unknown', affectedGroups: [], initialized: false };
-    if (!this.initialized) return { editable: false, reason: this.error ?? 'execution_baseline_incomplete', canPause: false, maintenance: 'unknown', phase: 'initializing', affectedGroups: requested, initialized: false };
+    if (!this.initialized) {
+      const rows = await this.port.load(requested).catch(() => []);
+      const canRecover = rows.length === requested.length && rows.every(row => this.recoverable(row) && !!this.groups.find(group => group.groupId === row.groupId)?.controller.recover) && requested.some(groupId => this.hostChecks.get(groupId)?.result.status === 'unknown');
+      return { editable: false, reason: this.error ?? 'execution_baseline_incomplete', canPause: false, maintenance: 'unknown', phase: 'initializing', affectedGroups: requested, initialized: false, canRecover };
+    }
     const groupIds = await this.port.workspaceGroups(workspaceId);
     if (!groupIds.length) { await this.registerWorkspace(workspaceId); return { editable: false, reason: 'execution_scope_registration_pending', canPause: false, maintenance: 'transition', phase: 'initializing', affectedGroups: requested, initialized: false }; }
     const rows = await this.port.load(groupIds);
+    const failed = rows.filter(row => this.recoverable(row)).map(row => this.hostChecks.get(row.groupId)?.result).find(result => result?.status === 'unknown');
+    if (failed?.status === 'unknown') return { editable: false, canPause: false, reason: failed.reason === 'controller_unknown' ? 'execution_controller_unknown' : failed.reason,
+      phase: 'unknown', maintenance: 'unknown', affectedGroups: groupIds, initialized: true, canRecover: rows.every(row => this.recoverable(row) && !!this.groups.find(group => group.groupId === row.groupId)?.controller.recover) };
     const phase = rows.some(row => row.phase === 'unknown') ? 'unknown' : rows.every(row => row.phase === 'online') ? 'online' : rows.every(row => row.phase === 'editable') ? 'editable' : rows.some(row => row.phase === 'resuming') ? 'resuming' : 'draining';
     const windowId = rows[0]?.windowId;
     const saving = !!windowId && await this.port.hasUnsettledSaves(windowId, groupIds);
@@ -177,6 +204,15 @@ export class ManagedWorkspaceExecution {
   }
   async change(workspaceId: string, action: 'pause' | 'resume') {
     const state = await this.status(workspaceId);
+    if (action === 'resume' && !state.windowId && state.canRecover) {
+      const rows = await this.port.load(state.affectedGroups);
+      for (const row of rows) {
+        if (!this.recoverable(row)) throw new StoreError('execution_admission_closed', 409);
+        const result = await this.checkHost(this.groups.find(group => group.groupId === row.groupId)!, row, true);
+        if (result.status !== 'known') throw new StoreError(result.reason === 'controller_unknown' ? 'execution_controller_unknown' : result.reason, 503);
+      }
+      this.error = undefined; this.schedule(0); return this.status(workspaceId);
+    }
     if (!state.initialized) throw new StoreError(state.reason ?? 'execution_baseline_incomplete', 409);
     const target = { windowId: state.windowId ?? randomUUID(), groupIds: state.affectedGroups };
     if (action === 'pause') {

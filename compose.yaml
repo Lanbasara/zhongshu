@@ -1,7 +1,7 @@
 services:
   app:
     image: ${IMAGE:?Set IMAGE to a versioned image or digest}
-    restart: unless-stopped
+    restart: "on-failure:3"
     ports:
       - "${BIND_ADDRESS:-127.0.0.1}:${PORT:-8787}:3000"
     read_only: true
