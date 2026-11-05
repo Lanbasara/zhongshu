@@ -42,3 +42,15 @@
 定向回归入口为 `node --test test/directory-index.test.ts test/execution-coordinator.test.ts test/execution-store.test.ts test/execution-workspaces.test.ts test/workspace-writer.test.ts test/resources.test.ts`。目录测试使用真实文件；执行 store 和 Workbench 测试使用真实 SQLite worker、文件和写者，但原生 Harness 与控制器使用明确替身，不能证明容器收束。文件写者测试使用真实子进程、操作系统锁及 SIGKILL。真实浏览器及两个原生 Host 按共同入口各自留证。
 
 `node --test --test-name-pattern="historical conversations" test/execution-workspaces.test.ts` 通过产品存储 API 登记 40 与 1,000 个真实持久绑定，记录首次基线读取数及编辑、连续两次保存的增量调用数和耗时；基线后历史 state/watch 增量均应为 0，文件必须独立读回。该入口的 SQLite worker、登记、协调器和文件写者为实际实现，Harness/controller 明确为替身，不能替代上面的真实原生进程退出证明。
+
+### 遗留窗口的浏览器升级路径
+
+仅在自己拥有的克隆、fixture 和浏览器中执行，不对实际工作实例造停机窗口。操作者提供一个仍有独占编辑流程的旧版本和本次候选版本。
+
+1. 在同一个独立克隆路径构建旧版本，按共同入口以 `--managed` 启动新 fixture root 并初始化登录。从正常页面创建对话，打开合成文件，点“编辑 / 开始编辑”，等待旧“恢复 Agent 并结束编辑”操作出现，保存原对话/工作区身份和窗口画面。
+2. 停止本次 fixture 应用，核对其端口无监听且健康请求连接被拒绝；保留原 root、原生替身库与密码。不能通过改产品数据库制造窗口。
+3. 在同一克隆路径切到候选并重新构建，再用相同 root、端口及 `--managed` 启动。fixture marker 绑定克隆路径，换路径不属于有效升级。新页面用原密码登录并打开原对话和文件。
+4. 应显示遗留窗口提示及“恢复 Agent”；通过该按钮恢复后，提示消失，普通“编辑”直接进入编辑器。保存合成内容并从磁盘独立读回，刷新后原绑定可继续工作。新编辑/结束编辑不再触发暂停或恢复。
+5. 另以两个独立浏览器上下文同时打开同一文件版本：先保存一份，再保存旧稿，旧稿须保留且磁盘仍为先保存的内容。结束后完成自己的合成任务并按共同入口清理。
+
+此 fixture 升级证明持久窗口与 UI 的接线，不证明 Docker Host 或真实原生进程迁移；真实连续性仍按本页原生分支执行。
