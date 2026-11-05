@@ -385,7 +385,7 @@ test('Permission labels translate known native profiles and retain custom names 
   const p = await peer(t, request => request.method === 'permissionProfile/list' ? { data: [':read-only', ':workspace', ':danger-full-access', 'custom-profile'].map(id => ({ id, allowed: true, description: 'Native permission definition.' })), nextCursor: null } : undefined);
   const catalog = await p.adapter.catalog();
   assert.deepEqual(catalog.permissions.map(profile => profile.label), ['只读', '工作区读写', '完全访问', 'custom-profile']);
-  assert.equal(catalog.permissions.every(profile => profile.description.includes('Native permission definition.') && profile.description.includes('不支持额外审批')), true);
+  assert.equal(catalog.permissions.every(profile => profile.description.includes('Native permission definition.') && profile.description.includes('中书暂不支持审批弹窗') && profile.description.includes('停止任务')), true);
 });
 
 test('A lost send receipt is unknown and reconciliation finds the same native operation without another send', async t => {

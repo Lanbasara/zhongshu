@@ -160,7 +160,7 @@ class CodexAdapter implements HarnessAdapter {
       if (next) throw new HarnessError('codex_catalog_limit');
       for (let page = 0; page < 10; page++) {
         const response = parse(z.object({ data: z.array(z.object({ id: nativeId, description: z.string().max(10_000).nullable(), allowed: z.boolean() })).max(200), nextCursor: cursor.nullable() }), await this.rpc.request('permissionProfile/list', { limit: 100, ...(next ? { cursor: next } : {}) }));
-        permissions.push(...response.data.filter(profile => profile.allowed).map(profile => ({ id: profile.id, label: permissionLabels[profile.id] ?? profile.id, description: `${profile.description ?? '实际权限由所选原生配置决定。'}\n此切片不支持额外审批请求；配置本身允许的权限仍按原生设置执行。` })));
+        permissions.push(...response.data.filter(profile => profile.allowed).map(profile => ({ id: profile.id, label: permissionLabels[profile.id] ?? profile.id, description: `${profile.description ?? '使用管理员为此权限配置的访问范围。'}\n中书暂不支持审批弹窗；需要额外授权时，请在 Codex 中处理或停止任务。` })));
         next = response.nextCursor ?? undefined;
         if (!next) break;
       }

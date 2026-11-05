@@ -104,7 +104,7 @@ function WorkspaceDirectoryPicker({ roots, csrf, busy, error, clearError, submit
         </ul> : directory.complete ? <div className="workspace-picker-empty"><Folder size={24} aria-hidden="true" /><p>{directory.nextCursor ? '正在查找子文件夹…' : '这里没有子文件夹'}</p></div> : null)}
       {!creating && directoryPage.notice && <p className="workspace-picker-empty" role="status">{directoryPage.notice}</p>}
       {!creating && !browseError && directory && progress && <p className="workspace-picker-empty" role="status">{progress}</p>}
-      {!creating && <DirectoryControls {...directoryPage} label="子文件夹" className="directory-continuation" buttonClassName="workspace-picker-secondary" />}
+      {!creating && <DirectoryControls {...directoryPage} refreshAvailable={false} label="子文件夹" className="directory-continuation" buttonClassName="workspace-picker-secondary" />}
     </div>
     <div className="workspace-picker-footer">
       {error && <p className="workspace-picker-error" role="alert">{error}</p>}

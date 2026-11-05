@@ -108,7 +108,7 @@ export function createDshAdapter(options: { launchFile: string; boundedHistory?:
       const signedIn = z.object({ status: z.enum(['signed-out', 'credential-stored']) }).parse(account).status === 'credential-stored';
       const groups = modelCatalog.parse(models).groups.filter(group => group.id !== 'deepseek-account' || signedIn);
       const result: Catalog = { id: 'dsh', available: groups.length > 0, models: [], permissions: permissionCatalog.parse(permissions).options.map(option => ({ id: option.value, label: permissionNames[option.value] ?? option.name,
-        description: `使用 DSH 原生 ${option.value} 权限；交互式审批尚不支持，遇到审批需在原生界面处理或停止。${option.description ? ` ${option.description}` : ''}` })) };
+        description: `${option.description ?? `使用管理员为“${permissionNames[option.value] ?? option.name}”配置的访问范围。`} 中书暂不支持审批弹窗；需要额外授权时，请在 DSH 中处理或停止任务。` })) };
       for (const group of groups) for (const model of group.models) {
         if (result.models.length >= 2048) throw new HarnessError('DSH_CATALOG_TOO_LARGE');
         const efforts = model.reasoning?.efforts;

@@ -16,7 +16,7 @@
 
 ## How to get to it (user POV)
 
-进入配置已核实的对话 →“给 Agent 的消息”→“发送消息”，或 ⌘/Ctrl + Enter。Enter 换行。支持排队的对话运行时，输入动作改为“加入队列”，旁边保留“停止当前轮”。消息队列贴在输入框上方，每行右侧的图标按钮对应“编辑”“删除”和该对话支持的“追加到本轮”或“尽快发送”。未知状态可见“查询原生结果”，未确认草稿可见“核对同一发送”。
+进入配置已核实的对话 →“给 Agent 的消息”→“发送消息”，或 ⌘/Ctrl + Enter。Enter 换行。支持排队的对话运行时，输入动作改为“加入队列”，旁边保留“停止当前轮”。消息队列贴在输入框上方，每行右侧的图标按钮对应“编辑”“删除”和该对话支持的“追加到本轮”或“尽快发送”。未知状态可见“查询状态”，未确认草稿可见“查询发送结果”。
 
 ## Driving it with Harness
 
@@ -25,15 +25,15 @@
 | 场景 | 初始条件与动作 | 判据和独立观察 |
 | --- | --- | --- |
 | E01 | 建“执行 A”，输入含本轮独有标记的两行文本；先按 Enter，再发送。CLI complete 后输入新文本再发送 | Enter 不派发；首次发送 inspect 的 submitCalls=1、正文有两行用户输入、出现停止按钮。complete 后出现 `FIXTURE COMPLETED <runId>`、恢复发送，再发后 submitCalls=2；两轮同原生身份、配置不变。运行中快捷键的排队行为见 E06 |
-| E02 | 建“未知回执”；先运行 unknown-receipt，再发送唯一文本。保存产品操作 ID、inspect 调用数；在“核对同一发送”重试两次；再运行 prove，点“查询原生结果” | 未发布证据前，操作 unknown、保留 pending 草稿，同编号重试不增加 submitCalls。发布后 accepted，草稿中的 pending 被清除；inspect 始终只调用一次，原生 operationIds 只有原 ID。最后 complete 收尾 |
-| E03 | 在已接受且 running 的 fixture 对话点“停止当前轮” | inspect 的 stopCalls 加一、目标 runId 等于被停止轮，产品操作 type=stop；页面变“已中断”，显示后台工具可能仍运行/改动不撤销的提示。发下一条能再次运行；fixture 不证明真实工具退出 |
+| E02 | 建“未知回执”；先运行 unknown-receipt，再发送唯一文本。保存产品操作 ID、inspect 调用数；在“查询发送结果”重试两次；再运行 prove，点“查询状态” | 未发布证据前，操作 unknown、保留 pending 草稿，同编号重试不增加 submitCalls。发布后 accepted，草稿中的 pending 被清除；inspect 始终只调用一次，原生 operationIds 只有原 ID。最后 complete 收尾 |
+| E03 | 在已接受且 running 的 fixture 对话点“停止当前轮” | inspect 的 stopCalls 加一、目标 runId 等于被停止轮，产品操作 type=stop；页面变“已停止”；展开“本轮已停止”详情，核对后台工具可能仍运行/改动不撤销的说明。发下一条能再次运行；fixture 不证明真实工具退出 |
 | E04 | 按下方五个独立分支，分别驱动存储失败、编码预算、HTTP 400、HTTP 413、原生 rejected | 每个分支都核对输入、pending、原操作编号、独立调用计数与编辑后再次发送；不能用其中一条代替其他分支 |
 | E05 | 按下面真实分支分别使用 Codex、DSH | 文件字节独立读回、原生身份/配置及正文共同符合预期；每个 Harness 单独结论 |
 
 ```sh
 node test/support/feature-fixture.ts complete --root "$zh_verify_root" --title '执行 A'
 node test/support/feature-fixture.ts unknown-receipt --root "$zh_verify_root" --title '未知回执'
-# 页面发送、核对同一发送后，再发布同一操作的原生历史证据：
+# 页面发送、查询发送结果后，再发布同一操作的原生历史证据：
 node test/support/feature-fixture.ts prove --root "$zh_verify_root" --title '未知回执'
 node test/support/feature-fixture.ts inspect --root "$zh_verify_root" --title '未知回执'
 ```
@@ -50,7 +50,7 @@ E04：每个分支新建一个名称唯一、已就绪的空 fixture 对话，�
 | --- | --- | --- |
 | E04-storage | `zhVerify.denyDraftStorage()`，输入并发送；观察后 `zhVerify.restore()` | 输入完整、可编辑；提示无法保留发送编号/尚未发送；submitCalls=0，产品无 message operation，不出现 pending 发送。恢复存储后可发送 |
 | E04-budget | 输入 11,000 个 U+0001 字符并发送（可用浏览器工具填入 `'\u0001'.repeat(11000)`） | 编码预算提示“本次尚未发送”；输入仍为11,000字符；submitCalls=0、产品无 message operation、无 pending。这是客户端拦截，不是 HTTP413 |
-| E04-400 | `zhVerify.rejectNextRequest('/api/private/workbench/conversations/' + id + '/operations', 400)`，再输入短文本并发送 | 浏览器实际收到服务端 JSON400；journal 保存原发送 ID，产品没有该 operation、submitCalls=0、原生历史为空；输入完整、可编辑，pending 已清除，未留下“核对同一发送” |
+| E04-400 | `zhVerify.rejectNextRequest('/api/private/workbench/conversations/' + id + '/operations', 400)`，再输入短文本并发送 | 浏览器实际收到服务端 JSON400；journal 保存原发送 ID，产品没有该 operation、submitCalls=0、原生历史为空；输入完整、可编辑，pending 已清除，未留下“查询发送结果” |
 | E04-413 | 同上，将400改为413，仍输入短文本并发送 | 实际收到服务端 JSON413，其余判据同400。工具在页面预算检查之后给请求增加70KiB字段，不能用预算提示代替收到HTTP413 |
 | E04-rejected | 下列 CLI 装载 `reject-next`，命令返回后直接输入短文本并发送 | 产品操作最终 rejected（首个HTTP202可先 queued），inspect submitCalls=1、rejectedOperationIds 只有原ID、operationIds为空、历史为空、原生状态仍idle；输入和 pending 原ID保留，出现“继续编辑”。再点一次“发送消息”只核对同ID，submitCalls仍1。随后点“继续编辑”，pending清除，输入完整且可编辑 |
 
@@ -84,17 +84,17 @@ Codex 的精确目标轮核实每次最多读取 10 页、每页 100 条 `itemsV
 ### E06 / E07 排队与提前发送
 
 1. 两端分别新建一个对话。fixture 发任意带标记的开场消息。真实 Host 按 E05 安排工作区 gate，在可信端核对工具已启动。逐条加入带唯一标记的 A、B、C，至少一条用 ⌘/Ctrl + Enter。刷新后队列应为 A、B、C。编辑 A，删除 C，再加入 D。检查未派发文字仍在队列，原生历史此时只有开场输入。
-2. 在当前轮仍活动时，点击 B 所在行的提前发送按钮，核对其余行仍按 A、D 排列。真实 Host 可在 gate 尚未释放时接收 B。先核对接收回执或 DSH `next-step` 中的请求编号，再 release gate。待 B 出现在原生历史，核对它只出现一次，且与开场消息属于同一轮。让本轮正常结束，再逐轮核对编辑后的 A 和 D 各自开启一轮，原 A 和 C 的标记未进入历史。fixture 使用 `complete`，真实 Host 对照原生历史及配置。另建一个队列，点停止，核对保留与暂停，再点“继续派发”核对新轮。
-3. 分别新建只有一个队列项的对话，浏览器拦截该对话的下一次 `POST /api/private/workbench/conversations/<id>/queue`，让按钮点击产生请求并暂存，核对它是该队列项的 `send`。在独立端结束原轮。为避免队首先被自动派发，先在第二个已登录页面点停止，使队列暂停，等待原生终态后才放行暂存的请求。Codex 应保留条目，原生历史没有该输入。DSH 应出现新轮和唯一输入，界面显示“提前发送的消息已送达后续轮”。保留点击时目标轮和实际历史轮的对应证据。正常结束与自动派发竞争由定向测试另测。
-4. fixture 中让原轮保持运行，排入一条消息后装载 `unknown-receipt`，点该条目的提前发送。核对队列显示“接收结果待核实”。刷新并点“查询原生结果”两次，原生 inspect 的提交计数不得增加。执行 `prove` 后核对用户条目恰好一次且属于正确轮。真实 Host 若只能丢弃浏览器 HTTP 响应，单独记录为浏览器重试证据，原生回执丢失仍需通过隔离的原生连接故障验证。
+2. 在当前轮仍活动时，点击 B 所在行的提前发送按钮，核对其余行仍按 A、D 排列。真实 Host 可在 gate 尚未释放时接收 B。先核对接收回执或 DSH `next-step` 中的请求编号，再 release gate。待 B 出现在原生历史，核对它只出现一次，且与开场消息属于同一轮。让本轮正常结束，再逐轮核对编辑后的 A 和 D 各自开启一轮，原 A 和 C 的标记未进入历史。fixture 使用 `complete`，真实 Host 对照原生历史及配置。另建一个队列，点停止，核对保留与暂停，再点“继续发送”核对新轮。
+3. 分别新建只有一个队列项的对话，浏览器拦截该对话的下一次 `POST /api/private/workbench/conversations/<id>/queue`，让按钮点击产生请求并暂存，核对它是该队列项的 `send`。在独立端结束原轮。为避免队首先被自动派发，先在第二个已登录页面点停止，使队列暂停，等待原生终态后才放行暂存的请求。Codex 应保留条目，原生历史没有该输入。DSH 应出现新轮和唯一输入，界面显示“消息已开始新的任务”。保留点击时目标轮和实际历史轮的对应证据。正常结束与自动派发竞争由定向测试另测。
+4. fixture 中让原轮保持运行，排入一条消息后装载 `unknown-receipt`，点该条目的提前发送。核对队列显示“发送结果待确认，不会重复发送”。刷新并点队列项的“查询发送结果”两次，原生 inspect 的提交计数不得增加。执行 `prove` 后核对用户条目恰好一次且属于正确轮。真实 Host 若只能丢弃浏览器 HTTP 响应，单独记录为浏览器重试证据，原生回执丢失仍需通过隔离的原生连接故障验证。
 
 ## Gotchas
 
 - `accepted` 是原生接收，操作记录不会为了表示工作结束而改成 completed；终态来自对话 state/原生历史。
-- 每个对话可保留 20 条排队消息，图片与引用沿用普通消息的归属和资源检查。未派发条目可编辑或删除。错过 Codex 目标轮、停止或失败后保留队列并暂停，用户可选择“继续派发”。DSH 的“尽快发送”允许后续轮接收，实际轮次以原生用户条目为准。
+- 每个对话可保留 20 条排队消息，图片与引用沿用普通消息的归属和资源检查。未派发条目可编辑或删除。错过 Codex 目标轮、停止或失败后保留队列并暂停，用户可选择“继续发送”。DSH 的“尽快发送”允许后续轮接收，实际轮次以原生用户条目为准。
 - 带显式技能的 Codex 消息保留在队列，等下一轮调用。两端技能随队列派发的原生证据见[技能引用 U12](conversation-usability.md#u12-技能引用)。
 - POST 202 可能先返回 `queued/dispatching` 且 runId 为空；保存操作 ID，随后等待回执核实。不能要求首个 HTTP 正文立即成为 unknown/accepted 或包含目标原生 runId。
-- 停止按钮针对当前 runId；“已中断”不承诺撤销文件副作用、清空待处理输入或终止全部后台进程。
+- 停止按钮针对当前 runId；“已停止”不承诺撤销文件副作用、清空待处理输入或终止全部后台进程。
 - 最终文件只有一份不能证明没有重复执行。E02 必须检查调用数和操作身份。
 - 一般输入上限为 16,000 字符，服务端另有 UTF-8 与请求体上限；中文和特殊字符的编码长度可先触发拒绝。不能靠截断输入掩盖失败。
 - fixture 的正文、权限和停止都是确定性边界数据，不证明真实模型、工具权限或原生通知行为。

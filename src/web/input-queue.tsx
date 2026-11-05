@@ -7,20 +7,21 @@ import type { InputContent } from '../shared/content.ts';
 import './input-queue.css';
 
 const labels = {
-  waiting: '等待派发', dispatching: '正在发送', accepted: '已接收，正在核对轮次',
-  unknown: '接收结果待核实', held: '等待你选择下一步',
+  waiting: '等待发送', dispatching: '正在发送…', accepted: '已接收，等待执行确认',
+  unknown: '发送结果待确认，不会重复发送', held: '等待你选择下一步',
 };
 const pauses = {
   stopped: '队列已暂停',
   failed: '当前轮执行失败，队列已暂停。',
-  missed: '目标轮已结束。消息留在队列中。',
-  rejected: '上次派发未被接收。消息留在队列中。',
+  missed: '当前任务已结束，这条消息仍在队列中。',
+  rejected: '消息未能发送，已保留在队列中。',
   restored: '队列来自恢复的备份，请核对后继续。',
 };
 
-export function InputQueue({ queue, target, busy, canResume, onCommand, onRead }: {
+export function InputQueue({ queue, target, busy, canResume, onCommand, onRead, onCheck }: {
   queue: QueueSummary; target?: string; busy: boolean; canResume: boolean;
   onCommand(command: QueueCommand): Promise<boolean>;
+  onCheck?(): void;
   onRead(entryId: string, version: number, signal: AbortSignal): Promise<QueueView['entries'][number]>;
 }) {
   const [edit, setEdit] = useState<{ id: string; version: number; content: InputContent }>();
@@ -46,7 +47,7 @@ export function InputQueue({ queue, target, busy, canResume, onCommand, onRead }
     {queue.pause ? <div className="input-queue-bar">
       <span role="status"><CirclePause size={14} aria-hidden="true"/>{pauses[queue.pause]}</span>
       <Button variant="quiet" className="input-queue-resume" disabled={busy || pending || !canResume}
-        onClick={() => void onCommand({ action: 'resume', version: queue.version })}>继续派发</Button>
+        onClick={() => void onCommand({ action: 'resume', version: queue.version })}>继续发送</Button>
     </div> : multiple && <div className="input-queue-bar">
       <span><ListOrdered size={14} aria-hidden="true"/>消息队列 <span className="input-queue-count">{queue.entries.length} 条</span></span>
     </div>}
@@ -74,11 +75,12 @@ export function InputQueue({ queue, target, busy, canResume, onCommand, onRead }
             {materials && entry.preview.text && <span className="input-queue-materials" title={materials}>
               <Paperclip size={13} aria-hidden="true"/><span className="sr-only">{materials}</span>
             </span>}
-            {entry.status === 'waiting' && !nextTurnSkill ? <span className="sr-only">{labels.waiting}</span> :
+            {entry.status === 'waiting' && !nextTurnSkill ? <small className="input-queue-status">{labels.waiting}</small> :
               <small className="input-queue-status" role="status">
                 {entry.status === 'dispatching' && <LoaderCircle size={12} className="spin" aria-hidden="true"/>}
                 {entry.skillUnavailable ? '技能已不可用，请编辑排队消息。' : nextTurnSkill && mutable ? '技能将在下一轮调用。' : labels[entry.status]}
               </small>}
+            {entry.status === 'unknown' && onCheck && <Button variant="quiet" disabled={busy} onClick={onCheck}>查询发送结果</Button>}
           </div>
           {mutable && <div className="input-queue-actions">
             <IconButton label={loading === entry.entryId ? '正在读取完整消息' : '编辑'} disabled={busy || !!loading}

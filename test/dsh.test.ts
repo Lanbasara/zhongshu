@@ -308,7 +308,8 @@ test('DSH empty public turn outline means blank only without contradictory execu
     blank.records.push({ type: 'event', event: { type: 'turn/start', seq: 5, time: 1, data: { turn: 1 } } });
     assert.equal(stateFrom(binding, blank).status, 'unknown');
     const permission = (await context.adapter.catalog()).permissions.find(item => item.id === 'workspace-write')!;
-    assert.equal(permission.label, '工作区读写'); assert.match(permission.description, /交互式审批尚不支持/);
+    assert.equal(permission.label, '工作区读写'); assert.match(permission.description, /中书暂不支持审批弹窗/);
+    assert.match(permission.description, /Fixture permission/); assert.match(permission.description, /停止任务/);
   } finally { await context.close(); }
 });
 

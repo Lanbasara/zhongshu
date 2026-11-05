@@ -51,6 +51,8 @@ type NavigationProps = {
   canAddWorkspace?: boolean;
   workspaceAction(action: WorkspaceAction): void;
   selected?: string;
+  restored?: Conversation;
+  restoreHandled?(): void;
   revision: number;
   updates: NavigationUpdates;
   csrf: string;
@@ -123,6 +125,15 @@ export const ConversationNavigation = memo(function ConversationNavigation(props
   const [removedGroup, setRemovedGroup] = useState<string>();
   const [managing, setManaging] = useState<Conversation>();
   const [notice, setNotice] = useState('');
+  useEffect(() => {
+    if (!props.restored) return;
+    setArchived(false); setShowRemoved(false); setWorkspaceSearch('');
+    // A bounded title search locates even an old conversation outside the first
+    // workspace batch, without loading the entire navigation tree.
+    setSearch(props.restored.title); setTerm(props.restored.title);
+    setNotice('已恢复，可以继续对话');
+    props.restoreHandled?.();
+  }, [props.restored]);
   useEffect(() => { if (!props.removedWorkspaces?.length) setShowRemoved(false); }, [props.removedWorkspaces?.length]);
   useEffect(() => {
     const timer = setTimeout(() => setTerm(search.trim()), 180);
@@ -217,12 +228,15 @@ export const ConversationNavigation = memo(function ConversationNavigation(props
           <Results key={JSON.stringify([archived, term])} {...resultProps} query={{ archived, title: searchActive ? term : undefined }} workspaceLabel={workspaceLabel} />}
       </section>}
     </nav>
-    {managing && <ManageDialog conversation={managing} csrf={props.csrf} close={() => setManaging(undefined)} changed={message => { setNotice(message); props.changed(managing.workspaceId); }} report={props.report} />}
+    {managing && <ManageDialog conversation={managing} csrf={props.csrf} close={() => setManaging(undefined)} changed={(message, restored) => {
+      setNotice(message); props.changed(managing.workspaceId);
+      if (restored) { setArchived(false); setShowRemoved(false); setSearch(managing.title); setTerm(managing.title); props.choose(managing.id); }
+    }} report={props.report} />}
   </>;
 });
 
 function ManageDialog({ conversation, csrf, close, changed, report }: {
-  conversation: Conversation; csrf: string; close(): void; changed(message: string): void; report(reason: unknown): void;
+  conversation: Conversation; csrf: string; close(): void; changed(message: string, restored: boolean): void; report(reason: unknown): void;
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const [title, setTitle] = useState(conversation.title);
@@ -240,7 +254,7 @@ function ManageDialog({ conversation, csrf, close, changed, report }: {
       await request(`/conversations/${conversation.id}/manage`, conversationResponseSchema, {
         csrf, body: action === 'rename' ? { action, title: title.trim() } : { action, archived: !conversation.archived },
       });
-      changed(action === 'rename' ? '名称已更新' : conversation.archived ? '已恢复到未归档' : '已移入归档');
+      changed(action === 'rename' ? '名称已更新' : conversation.archived ? '已恢复到未归档' : '已移入归档', action === 'archive' && conversation.archived);
       close();
     } catch (reason) {
       if (reason instanceof RequestError && reason.status === 401) report(reason);

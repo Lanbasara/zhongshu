@@ -21,11 +21,10 @@ import { PluginManagement } from './plugin-management.tsx';
 import { WorkspaceSelect } from './workspace-selection.tsx';
 import { StorageNotice } from './storage-notice.tsx';
 import { WorkspaceExecutionStatus, type WorkspaceEditStatus } from './workspace-execution-status.tsx';
+import { conversationFeedback, conversationStateLabel as stateLabel } from './conversation-feedback.ts';
 const emptyWorkspaces: WorkbenchConfiguration['workspaces'] = [];
 const WorkspaceReader = lazy(() => import('./workspace-reader.tsx').then(module => ({ default: module.WorkspaceReader })));
 
-const states = { idle: '就绪', running: '运行中', waiting: '等待处理', interrupted: '已中断', failed: '执行失败', unknown: '待核实' };
-const stateLabel = (c: Conversation) => c.readiness === 'preparing' ? '正在准备' : c.readiness === 'blocked' ? '准备未完成' : states[c.state.status];
 const failures: Record<string, string> = {
   conversation_archived: '这段对话已归档，请恢复后继续。',
   workspace_execution_blocked: '工作区暂未开放新任务。请等待执行环境核对，或先恢复 Agent；输入已保留。',
@@ -101,6 +100,9 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
   const [workspaceStatus, setWorkspaceStatus] = useState<{ id: string; value?: WorkspaceEditStatus }>();
   const [readerExpanded, setReaderExpanded] = useState(false);
   const [readerTarget, setReaderTarget] = useState<ReaderTarget>();
+  const [lastReadFile, setLastReadFile] = useState<{ workspaceId: string; path: string; position: number }>();
+  const [restoredConversation, setRestoredConversation] = useState<Conversation>();
+  const [restoring, setRestoring] = useState(false);
   const [unavailableFiles, setUnavailableFiles] = useState<ReadonlySet<string>>(new Set());
   const readerOrigin = useRef<{ button: HTMLButtonElement; row: HTMLLIElement | null }>(null);
   const [selected, setSelected] = useState<string | undefined>(() => /^#[0-9a-f-]{36}$/i.test(location.hash) ? location.hash.slice(1) : undefined);
@@ -370,14 +372,15 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
       .then(value => { if (!controller.signal.aborted) setSelectedWorkspace(value.workspace); }).catch(() => {});
     return () => controller.abort();
   }, [conversation?.workspaceId, configuration]);
-  const unresolved = snapshot?.operationState?.unresolved ?? snapshot?.operations.some(op => ['queued', 'dispatching', 'unknown'].includes(op.status));
-  const latestMessage = snapshot?.operationState ? snapshot.operationState.latestAcceptedMessage : snapshot?.operations.find(op => op.type === 'message' && op.status === 'accepted');
+  const feedback = conversationFeedback(snapshot);
+  const unresolved = feedback.unresolved;
   const rejectedDraft = draft.pending && snapshot?.operations.find(op => op.id === draft.pending!.id)?.status === 'rejected';
-  const previousMessageSettled = !latestMessage || (latestMessage.runId !== null && (latestMessage.runId === conversation?.state.runId || latestMessage.runId === conversation?.state.terminalRunId));
+  const previousMessageSettled = feedback.settled;
   const removedWorkspace = configuration?.removedWorkspaces?.find(workspace => workspace.id === conversation?.workspaceId) ?? (selectedWorkspace?.removed ? selectedWorkspace : undefined);
   const workspaceRemoved = !!removedWorkspace || conversation?.error === 'workspace_removed';
   const running = !!conversation?.state.runId && ['running', 'waiting'].includes(conversation.state.status);
   const queue = snapshot?.queue;
+  const queuePending = queue?.entries.some(entry => ['dispatching', 'accepted', 'unknown'].includes(entry.status));
   const queueing = !!(draft.pending ? draft.pending.queued : queue?.mode && (running || queue.entries.length));
   const usable = !workspaceRemoved && !conversation?.archived && conversation?.readiness === 'ready' && conversation.state.configurationVerified;
   const ready = usable && (queueing || (['idle', 'interrupted', 'failed'].includes(conversation.state.status) && !conversation.state.pendingInputs && !unresolved && previousMessageSettled));
@@ -416,6 +419,21 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
     updateDraft({ ...draft, references: [...(draft.references ?? []), reference].slice(0,8) });
   }, [draft, updateDraft]);
   const permission = configuration?.harnesses.find(h => h.id === conversation?.harnessId)?.permissions.find(p => p.id === conversation?.configuration.permissionId);
+  const displayState = workspaceRemoved ? '工作区已移除' : conversation?.archived ? '已归档'
+    : !running && draft.pending && sending ? draft.pending.queued ? '正在加入队列' : '正在发送' : feedback.label;
+  async function restoreConversation() {
+    if (!conversation || restoring) return;
+    const id = conversation.id;
+    setRestoring(true);
+    try {
+      const result = await request(`/conversations/${id}/manage`, conversationResponseSchema, { csrf, body: { action: 'archive', archived: false } });
+      if (selectedRef.current !== id) return;
+      setRestoredConversation(result.conversation);
+      refreshNavigation(result.conversation.workspaceId);
+      await load(id);
+    } catch (reason) { report(reason); }
+    finally { setRestoring(false); }
+  }
   return <><WorkbenchFrame style={sidebarWidth.style} navigationOpen={navigation} onNavigationChange={setNavigation}
     sidebar={<>
       <div className="workbench-brand"><BrandMark/><span>中书</span><IconButton className="mobile-only" label="关闭导航" onClick={() => setNavigation(false)}><X size={17}/></IconButton></div>
@@ -423,8 +441,8 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
       <ConversationNavigation workspaces={configuration?.workspaces} removedWorkspaces={configuration?.removedWorkspaces}
         workspaceCursor={configuration?.workspaceCursor} removedWorkspaceCursor={configuration?.removedWorkspaceCursor}
         canAddWorkspace={!!configuration?.workspaceRoots?.length} workspaceAction={action => { setNavigation(false); setWorkspaceAction(action); }} selected={selected} revision={listRevision} updates={navigationUpdates.current} csrf={csrf}
-        choose={choose} create={createInWorkspace} stateLabel={stateLabel} report={report}
-        changed={refreshNavigation} />
+        choose={choose} create={createInWorkspace} stateLabel={row => row.id === conversation?.id ? displayState : stateLabel(row)} report={report}
+        restored={restoredConversation} restoreHandled={() => setRestoredConversation(undefined)} changed={refreshNavigation} />
       {sidebarWidth.separator}
       <div className="sidebar-bottom">
         <StorageNotice/>
@@ -433,8 +451,9 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
         <div className="sidebar-account"><span className="network" role="status"><span className="network-dot"/>{connection}</span><IconButton label="退出登录" onClick={logout} disabled={busy}><LogOut size={15}/></IconButton></div>
       </div>
     </>}
-    header={managingPlugins ? <><div className="conversation-heading"><p>工作台 / 插件</p></div><Button variant="quiet" onClick={() => setManagingPlugins(false)}>返回工作台</Button></> : <><div className="conversation-heading"><h1>{conversation?.title ?? (selected ? '正在恢复对话…' : '从这里，接着做。')}</h1><p>{conversation ? `${conversation.harnessId === 'codex' ? 'Codex' : 'DSH'} · ${removedWorkspace?.label ?? selectedWorkspace?.label ?? configuration?.workspaces.find(w => w.id === conversation.workspaceId)?.label ?? '工作区'} · ${workspaceRemoved ? '工作区已移除' : stateLabel(conversation)}` : '一段对话，一个可以接续的工作现场'}</p></div><div className="header-actions"><IconButton label="打开工作区文件" disabled={!configuration?.workspaces.length} onClick={() => setReader(true)}><FolderOpen size={17}/></IconButton><IconButton label="重新连接" onClick={() => { scheduleRefresh(); refreshConfiguration(); }}><RefreshCw size={15}/></IconButton></div></>}
+    header={managingPlugins ? <><div className="conversation-heading"><p>工作台 / 插件</p></div><Button variant="quiet" onClick={() => setManagingPlugins(false)}>返回工作台</Button></> : <><div className="conversation-heading"><h1>{conversation?.title ?? (selected ? '正在恢复对话…' : '从这里，接着做。')}</h1><p>{conversation ? `${conversation.harnessId === 'codex' ? 'Codex' : 'DSH'} · ${removedWorkspace?.label ?? selectedWorkspace?.label ?? configuration?.workspaces.find(w => w.id === conversation.workspaceId)?.label ?? '工作区'} · ${displayState}` : '一段对话，一个可以接续的工作现场'}</p></div><div className="header-actions"><IconButton label="打开工作区文件" disabled={!configuration?.workspaces.length} onClick={() => setReader(true)}><FolderOpen size={17}/></IconButton><IconButton label="重新连接" onClick={() => { scheduleRefresh(); refreshConfiguration(); }}><RefreshCw size={15}/></IconButton></div></>}
     reader={!managingPlugins && reader && configuration && <Suspense fallback={<p role="status">正在打开文件…</p>}><WorkspaceReader workspaces={configuration.workspaces} workspaceCursor={configuration.workspaceCursor} initialWorkspace={conversation?.workspaceId}
+      initialFile={!readerTarget && lastReadFile?.workspaceId === conversation?.workspaceId ? lastReadFile : undefined} rememberFile={setLastReadFile}
       target={readerTarget} onTargetUnavailable={target => {
         if (target === readerTarget && readerTarget.conversationId === selectedRef.current)
           setUnavailableFiles(previous => {
@@ -459,12 +478,14 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
             {windowed && <p className="history-note">正在阅读较早的一页。<button className="text-button" onClick={() => { if (selected) { atBottom.current = true; void load(selected, true); } }}>回到最新内容</button></p>}
             {!snapshot && <p role="status" className="quiet">正在核对远端状态与历史…</p>}
             {snapshot && visible.length === 0 && <p className="quiet conversation-start">{conversation?.readiness === 'ready' ? '对话已准备好。说说你希望完成什么。' : '正在准备原生会话…'}</p>}
-            {snapshot?.archive && <p className="history-note" role="status">{[snapshot.archive.latest?.error, snapshot.archive.backfill?.error].some(error => error === 'archive_source_gap' || error === 'archive_continuity_unverified')
+            {snapshot?.archive && (visible.length > 0 || snapshot.archive.latest?.error || snapshot.archive.backfill?.error) && <details className="history-note archive-details">
+              <summary>{snapshot.archive.latest?.error || snapshot.archive.backfill?.error ? '历史同步需要留意' : snapshot.archive.backfill?.complete && snapshot.archive.latest?.complete ? '历史已保存' : '正在同步历史'}</summary>
+              <p>{[snapshot.archive.latest?.error, snapshot.archive.backfill?.error].some(error => error === 'archive_source_gap' || error === 'archive_continuity_unverified')
               ? '原生历史已变化，旧范围的连续性尚未确认。已保存正文仍可阅读，后台继续补齐当前可获取的内容。'
               : snapshot.archive.latest?.error === 'archive_items_pending' || snapshot.archive.backfill?.error === 'archive_items_pending' ? '后台正在核对尚未完整存档的图文，已保存内容仍可阅读。'
               : snapshot.archive.latest?.error || snapshot.archive.backfill?.error ? '历史存档暂时未能继续，已保存的正文仍可阅读。'
               : snapshot.archive.backfill?.complete && snapshot.archive.latest?.complete ? '截至最近同步，已保存可获取的历史正文。' : '后台正在补齐历史正文，离开页面后仍会继续。'}
-              {snapshot.archive.latest?.lastSuccessAt && <span> 最近同步：<time dateTime={new Date(snapshot.archive.latest.lastSuccessAt).toISOString()}>{new Date(snapshot.archive.latest.lastSuccessAt).toLocaleString()}</time></span>}</p>}
+              {snapshot.archive.latest?.lastSuccessAt && <span> 最近同步：<time dateTime={new Date(snapshot.archive.latest.lastSuccessAt).toISOString()}>{new Date(snapshot.archive.latest.lastSuccessAt).toLocaleString()}</time></span>}</p></details>}
             <Transcript items={visible} conversation={selected} onQuote={quote} turnFiles={turnFiles}
               activeRun={running ? conversation?.state.runId : undefined} activeFile={readerTarget?.conversationId === selected ? readerTarget : undefined}
               workspaceUnavailable={workspaceRemoved} unavailableFiles={unavailableFiles} onOpenFile={openTurnFile}/>
@@ -474,29 +495,29 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
           {!reader && conversation && !workspaceRemoved && <WorkspaceExecutionStatus key={conversation.workspaceId} workspace={conversation.workspaceId} csrf={csrf} observed={(id, value) => setWorkspaceStatus({ id, value })} changed={() => { scheduleRefresh(); }}/>}
           {moreOutput && <button className="new-output" onClick={() => { atBottom.current = true; if (scroll.current) scroll.current.scrollTop = scroll.current.scrollHeight; setMoreOutput(false); }}>↓ 有新内容</button>}
           {(conversation?.error || conversation?.state.reason) && !editingWorkspace && <p className="state-notice">{explain(conversation.error ?? conversation.state.reason!)}</p>}
-          {conversation?.state.status === 'interrupted' && <p className="state-notice">本轮已中断。此前启动的后台工具可能仍在运行，已经产生的改动不会撤销。</p>}
+          {conversation?.state.status === 'interrupted' && <details className="state-notice"><summary>本轮已停止{queue?.pause === 'stopped' ? '，后续消息已暂停发送' : ''}。</summary><p>此前启动的后台工具可能仍在运行，已经产生的改动不会撤销。</p></details>}
           {snapshot?.history.liveItemsLimited && <p className="state-notice">部分实时输出较长，将在完成后从历史中读取完整内容。</p>}
           {!!conversation?.state.pendingInputs && <p className="state-notice">原生服务仍保留 {conversation.state.pendingInputs} 项待处理输入。停止当前轮不会清空它们。</p>}
-          {!workspaceRemoved && !editingWorkspace && (unresolved || conversation?.state.status === 'unknown' || !previousMessageSettled) && <div className="state-notice">{!previousMessageSettled ? '正在核对上一条消息对应轮次的执行结果。' : '正在核对执行结果。'}<button className="text-button" onClick={() => void reconcile()}>查询原生结果</button></div>}
+          {!workspaceRemoved && !editingWorkspace && !draft.pending && !queuePending && (feedback.pending || feedback.uncertain) && <div className={feedback.uncertain ? 'state-notice' : 'submission-feedback'} role="status">{feedback.uncertain ? '暂时无法确认执行状态，消息不会自动重发。' : '消息已接收，正在确认执行状态…'}<button className="text-button" onClick={() => void reconcile()}>查询状态</button></div>}
           {removedWorkspace && <button className="text-button" onClick={() => setWorkspaceAction({ kind: 'restore', workspace: removedWorkspace })}>恢复工作区</button>}
-          {conversation?.archived && <p className="state-notice">这段对话已归档。可在侧栏恢复后继续。</p>}
-          {lastEarly?.delivery && lastEarly.delivery.mode !== 'next' && <div className="state-notice" role="status">
-            <span>{lastEarly.runId === lastEarly.delivery.target ? '提前发送的消息已送达目标轮。' : '提前发送的消息已送达后续轮。'}</span>
+          {conversation?.archived && <div className="state-notice archived-conversation"><span>这段对话已归档，历史仍可阅读。</span><Button disabled={restoring || workspaceRemoved} onClick={() => void restoreConversation()}>{restoring ? '正在恢复…' : '恢复并继续'}</Button></div>}
+          {lastEarly?.delivery && lastEarly.delivery.mode !== 'next' && running && lastEarly.runId === conversation?.state.runId && <div className="submission-feedback" role="status">
+            <span>{lastEarly.runId === lastEarly.delivery.target ? '消息已追加到当前任务。' : '消息已开始新的任务。'}</span>
             {visible.some(item => item.operationId === lastEarly.id) && <button type="button" className="text-button" onClick={() => {
               const item = visible.find(value => value.operationId === lastEarly.id);
               if (item) scroll.current?.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(item.id)}"]`)?.focus();
             }}>查看消息</button>}
           </div>}
-          {!workspaceRemoved && !conversation?.archived && draft.pending && <div className="state-notice">{rejectedDraft ? '上次发送未被接受，原始输入已保留。' : '上次发送尚未确认，原始输入已保留。'}<button className="text-button" disabled={sending} onClick={() => { if (rejectedDraft && selected) { const { pending: _pending, ...next } = draft; setDraft(next); saveDraft(selected, next); } else void send(); }}>{rejectedDraft ? '继续编辑' : '核对同一发送'}</button></div>}
+          {!workspaceRemoved && !conversation?.archived && draft.pending && <div className={sending ? 'submission-feedback' : 'state-notice'} role="status">{sending ? draft.pending.queued ? '正在加入队列…' : '正在发送…' : rejectedDraft ? '消息未能发送，输入已保留。' : '暂时无法确认是否已发送，输入已保留。'}{!sending && <button className="text-button" onClick={() => { if (rejectedDraft && selected) { const { pending: _pending, ...next } = draft; setDraft(next); saveDraft(selected, next); } else void send(); }}>{rejectedDraft ? '继续编辑' : '查询发送结果'}</button>}</div>}
           {!workspaceRemoved && !conversation?.archived && <Composer key={selected} conversation={selected} csrf={csrf} draft={draft} onChange={updateDraft}
             onSend={() => { if (ready || draft.pending) void send(); }} onStop={() => void stop()} onFiles={() => setPickingFile(true)}
             ready={ready} sending={sending} running={running} queueing={queueing}
             skillsEnabled={conversation?.id === selected && !!usable} usage={conversation?.id === selected ? snapshot?.usage : undefined}
-            queue={queue && <InputQueue queue={queue} busy={sending}
+            queue={queue && <InputQueue queue={queue} busy={sending} onCheck={() => void reconcile()}
               onRead={(entryId, version, signal) => request(`/conversations/${selected}/queue/${entryId}?version=${version}`, queueEntrySchema, { signal })}
               target={running && usable && !unresolved ? conversation.state.runId : undefined} canResume={!!usable && !unresolved} onCommand={changeQueue}/>}
             permission={conversation?.state.configurationVerified ? permission?.label ?? '配置按对话固定' : '配置待核实'}
-            configurationNote={conversation?.state.configurationVerified ? permission?.description ?? '配置在本对话中保持不变。' : '正在核实当前对话的原生配置，核实后可继续工作。'}
+            configurationNote={conversation?.state.configurationVerified ? permission?.description ?? '配置在本对话中保持不变。' : '正在确认模型与权限，确认后可继续。'}
             model={configuration?.harnesses.find(h => h.id === conversation?.harnessId)?.models.find(m => m.id === conversation?.configuration.modelId)?.label ?? '配置按对话固定'}/>}
         </div>
       </>}
