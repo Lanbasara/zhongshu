@@ -93,6 +93,8 @@ export function createManagedHarnessAuthority(input: { groupId: string; harnessI
         if (!admission || admission.conversationId !== invocation.conversationId || admission.bindingId !== (invocation.args[0] as Binding).id) throw new StoreError('execution_observation_identity_changed', 409);
         return toPermission(invocation, wireDigest, await execution.bindObservationRequest({ admissionId: context.admissionId, requestId: invocation.requestId, wireDigest }));
       }
+      if (invocation.observation) return toPermission(invocation, wireDigest, await execution.registerObservation({ requestId: invocation.requestId,
+        workspaceId: invocation.workspaceId, conversationId: invocation.conversationId, bindingId: (invocation.args[0] as Binding).id, wireDigest }));
       return toPermission(invocation, wireDigest, await execution.registerNative({ sourceKey: invocation.requestId, workspaceId: invocation.workspaceId, conversationId: invocation.conversationId,
         ...(invocation.method === 'create' ? {} : { bindingId: (invocation.args[0] as Binding).id }), purpose: invocation.method === 'create' ? 'create' : 'execute', wireDigest }));
     },
@@ -114,12 +116,17 @@ export function createManagedHarnessAuthority(input: { groupId: string; harnessI
       return received;
     },
     async onResult(invocation, result, permission) {
-      // Only this short observation's own admission can end here. Original
-      // operations and baseline checkpoints require their separate exact proofs.
-      if (invocation.method !== 'state' || invocation.observation?.context?.admissionId || invocation.observation?.context?.baseline) return;
+      // Finish a reused observation before the gateway releases its serialized
+      // activation slot. The pending reconciler may repeat this same proof after
+      // state() returns; it must not settle a later observation's new admission.
+      // Original operations, creates and baselines keep their separate proofs.
+      if (invocation.method !== 'state' || invocation.observation?.context?.baseline) return;
       const state = stateSchema.safeParse(result);
-      if (state.success && state.data.configurationVerified && state.data.status === 'idle' && state.data.pendingInputs === 0)
-        await execution.confirmTerminal({ admissionId: permission.admissionId, bindingId: (invocation.args[0] as Binding).id, operationId: null, proof: hash({ requestId: invocation.requestId, state: state.data }) });
+      if (!state.success || !state.data.configurationVerified || !['idle', 'interrupted', 'failed'].includes(state.data.status) || state.data.pendingInputs !== 0) return;
+      const admission = await execution.admission(permission.admissionId), bindingId = (invocation.args[0] as Binding).id;
+      if (!admission || admission.source !== 'native' || !admission.sourceKey.startsWith('observe:') || admission.currentOperation !== null || admission.bindingId !== bindingId) return;
+      await execution.confirmTerminal({ admissionId: admission.id, bindingId, operationId: null,
+        proof: hash([admission.id, null, bindingId, state.data]) });
     },
     async drained(targetGroupId, frozenSetId) {
       if (targetGroupId !== groupId) return false;

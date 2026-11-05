@@ -40,6 +40,8 @@ node test/support/feature-fixture.ts inspect --root "$zh_verify_root" --title '�
 
 E02 另外可用 browser-faults 的 `dropNext('/api/private/workbench/conversations/' + id + '/operations')` 丢一次浏览器 HTTP 回执。若服务端状态已自动核实，pending 提示可很快消失；这是有效恢复，不要求提示必定停留。核对同一 operation ID、次数与最终用户正文是否恰好一份，才是判据。
 
+受管 E02 另核对后台未知状态的长期工作量：用独立原生连接故障或配置核实失败，使同一绑定持续返回 unknown，保留一条原本已入库的排队消息，不再点击发送。分窗记录后台观察次数、`execution_pending` 中该绑定的原生观察准入及原 operation；新观察保留各自请求身份，但同绑定未知期间不能每次新增未决准入。重启应用后重复观察，未知事实和原消息须保留。恢复原生核实后，旧积累记录通过有界页逐项取得真实终态证明并收口，不能手删或用缓存 idle 清空；执行冻结期间，新绑定观察和新消息仍被拒绝。请求回执日志仍随独立观察次数增长，pending 有界不证明整个账本空间恒定。定向入口 [managed-observation](../../test/managed-observation.test.ts) 使用真实存储/Host 账本 worker 与 Unix RPC，覆盖并发、重启、旧记录、迟到确认和关闭队列；它的原生 peer 与容器证明为受控替身，真实未知状态仍按本分支另验。
+
 `unknown-receipt` 只设置下一次回执，不改变已观察到的原生状态；控制命令完成后直接按 E02 发送，不需要额外 GET 或等待来同步控制命令。
 
 E04：每个分支新建一个名称唯一、已就绪的空 fixture 对话，保存对话 ID、配置、初始快照和 inspect（submitCalls=0、operationIds/rejectedOperationIds 为空）。输入使用本轮独有的合成文本。按共同入口安装 [browser-faults.js](../../test/support/browser-faults.js)，HTTP 场景中的 `id` 必须来自该对话的实际 hash。所有动作仍使用页面输入框与按钮。

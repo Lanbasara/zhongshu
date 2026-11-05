@@ -45,7 +45,7 @@ export const storageAuthMethods = { administrator: 'read', initialized: 'read', 
 export const storageExecutionMethods = { load: 'read', save: 'write', registerGroup: 'write', registerScope: 'write', cancelScopeRegistration: 'write', registerConflicts: 'write', conflictGroups: 'read', workspaceGroups: 'read',
   registerHostGroup: 'write', hostAdmission: 'read', bindHostPluginRequest: 'write', settleHostPlugin: 'write',
   baselineStatus: 'read', beginBaseline: 'write', seedLegacyAdmissions: 'write', bindingsPage: 'read', registerBaselineObservation: 'write', commitBaselineBatch: 'write',
-  bindNativeRequest: 'write', bindAssociatedRequest: 'write', bindObservationRequest: 'write', permissionForStop: 'write', registerNative: 'write', permissionForNative: 'read', attachNativeBinding: 'write',
+  bindNativeRequest: 'write', bindAssociatedRequest: 'write', bindObservationRequest: 'write', registerObservation: 'write', permissionForStop: 'write', registerNative: 'write', permissionForNative: 'read', attachNativeBinding: 'write',
   freezeAdmissions: 'write', pendingPage: 'read', unresolvedPage: 'read', beginResume: 'write', hasUnsettledSaves: 'read', completeResume: 'write',
   acquireSave: 'write', settleSave: 'write', pendingSaves: 'read', admission: 'read', confirmTerminal: 'write',
 } as const satisfies Record<keyof ExecutionStore, 'read' | 'write'>;

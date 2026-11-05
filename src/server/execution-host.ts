@@ -88,6 +88,7 @@ export class ExecutionHost {
   private readonly native: ManagedNativeInvoker;
   private readonly authority: ExecutionGatewayAuthority;
   private readonly active = new Map<string, Promise<GatewayResult>>();
+  private readonly observations = new Map<string, Promise<GatewayResult>>();
   private controlTail: Promise<unknown> = Promise.resolve();
   private controls = 0;
   private resolving = 0;
@@ -150,6 +151,7 @@ export class ExecutionHost {
   async dispatch(input: GatewayRequest, listener?: (change: NativeChange) => void): Promise<GatewayResult> {
     this.ownership.assertOwned();
     if (this.closed || this.requests >= 32) throw new ExecutionHostError('execution_gateway_busy', 429);
+    const request = gatewayRequestSchema.parse(input);
     this.requests++;
     const large = input.kind === 'operation';
     // Queue opaque IDs before loading immutable image bytes. Four supported
@@ -159,7 +161,17 @@ export class ExecutionHost {
       if (this.payloadSlots >= 2) await new Promise<void>(resolve => this.payloadWaiters.push(resolve));
       else this.payloadSlots++;
     }
-    try { return await this.forward(input, listener); }
+    try {
+      if (request.kind !== 'observe') return await this.forward(request, listener);
+      // Even direct gateway callers must not overlap activation of one binding.
+      // Otherwise a later idle result could settle the shared admission while an
+      // earlier observation is still entering native work. The global request
+      // limit above also bounds these queues; each request keeps its own journal.
+      const task = (this.observations.get(request.conversationId) ?? Promise.resolve()).catch(() => {}).then(() => this.forward(request, listener));
+      this.observations.set(request.conversationId, task);
+      try { return await task; }
+      finally { if (this.observations.get(request.conversationId) === task) this.observations.delete(request.conversationId); }
+    }
     finally {
       if (large) { const next = this.payloadWaiters.shift(); if (next) next(); else this.payloadSlots--; }
       this.requests--;
@@ -215,7 +227,7 @@ export class ExecutionHost {
   releaseWatch(requestId: string) { this.native.releaseWatch?.(requestId); }
   async close(): Promise<void> {
     this.closed = true;
-    await Promise.allSettled([this.controlTail, ...this.active.values()]);
+    await Promise.allSettled([this.controlTail, ...this.active.values(), ...this.observations.values()]);
     await this.ledger.close(); await this.ownership.close();
   }
 }

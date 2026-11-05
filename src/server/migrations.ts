@@ -576,6 +576,9 @@ CREATE TABLE execution_baseline_sources (
     INSERT OR IGNORE INTO workbench_archive_updates(conversation_id,binding_id)
       VALUES(NEW.id,json_extract(NEW.binding_json,'$.id'));
   END;
+` }, { version: 31, sql: `
+  CREATE INDEX execution_native_observation_pending ON execution_admissions(conversation_id,binding_id,workspace_id,directory_identity,sequence,id)
+    WHERE source='native' AND source_key GLOB 'observe:*' AND kind<>'settled';
 ` }];
 
 /** Runs inside restoreDatabase's private staging transaction, before the database is published. */

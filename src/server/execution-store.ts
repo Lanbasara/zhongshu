@@ -149,6 +149,13 @@ function permission(db: DatabaseSync, value: Admission, operationId: string): Di
   }
   return { admissionId: value.id, operationId, contentDigest: value.contentDigest, groups: tokens };
 }
+function observationPermission(db: DatabaseSync, current: Admission, requestId: string, wireDigest: string): ObservationPermit {
+  const permit = permission(db, current, current.currentOperation ?? current.id);
+  const old = db.prepare('SELECT admission_id,wire_digest FROM execution_observation_requests WHERE request_id=?').get(requestId);
+  if (old && (old.admission_id !== current.id || old.wire_digest !== wireDigest)) return fail('execution_native_request_conflict');
+  db.prepare('INSERT OR IGNORE INTO execution_observation_requests(request_id,admission_id,wire_digest) VALUES(?,?,?)').run(requestId, current.id, wireDigest);
+  return { admissionId: current.id, requestId, contentDigest: wireDigest, groups: permit.groups, purpose: 'observe' };
+}
 function terminal(db: DatabaseSync, value: Admission, proof: string) {
   digestSchema.parse(proof);
   if (value.kind === 'settled') { if (value.terminalProof !== proof) fail('execution_terminal_conflict'); return; }
@@ -526,11 +533,38 @@ export function createExecutionStore(db: DatabaseSync) {
       const value = z.object({ admissionId: id, requestId: id, wireDigest: digestSchema }).strict().parse(input);
       return transaction(db, () => {
         const current = admission(db, value.admissionId); if (!current) return fail('execution_admission_unregistered');
-        const permit = permission(db, current, current.currentOperation ?? current.id);
-        const old = db.prepare('SELECT admission_id,wire_digest FROM execution_observation_requests WHERE request_id=?').get(value.requestId);
-        if (old && (old.admission_id !== value.admissionId || old.wire_digest !== value.wireDigest)) return fail('execution_native_request_conflict');
-        db.prepare('INSERT OR IGNORE INTO execution_observation_requests(request_id,admission_id,wire_digest) VALUES(?,?,?)').run(value.requestId, value.admissionId, value.wireDigest);
-        return { admissionId: current.id, requestId: value.requestId, contentDigest: value.wireDigest, groups: permit.groups, purpose: 'observe' };
+        return observationPermission(db, current, value.requestId, value.wireDigest);
+      });
+    },
+    registerObservation(input: { requestId: string; workspaceId: string; conversationId: string; bindingId: string; wireDigest: string }): ObservationPermit {
+      const value = z.object({ requestId: id,
+        workspaceId: id, conversationId: z.uuid(), bindingId: z.string().min(1).max(1024), wireDigest: digestSchema }).strict().parse(input);
+      return transaction(db, () => {
+        const source = scope(db, value.conversationId);
+        if (!source.groupIds.length || source.workspaceId !== value.workspaceId || source.bindingId !== value.bindingId) return fail('execution_native_scope_mismatch');
+        // An observation request has its own immutable once identity, but an
+        // unresolved binding needs only one admission. Reuse legacy pending
+        // observations too; never erase them or infer that unknown work ended.
+        const request = db.prepare('SELECT admission_id,wire_digest FROM execution_observation_requests WHERE request_id=?').get(value.requestId);
+        if (request && request.wire_digest !== value.wireDigest) return fail('execution_native_request_conflict');
+        const row = request ? undefined : db.prepare(`SELECT * FROM execution_admissions
+          WHERE source='native' AND source_key GLOB 'observe:*' AND kind<>'settled'
+            AND conversation_id=? AND binding_id=? AND workspace_id=? AND directory_identity=? ORDER BY sequence,id LIMIT 1`)
+          .get(value.conversationId, value.bindingId, value.workspaceId, source.directoryIdentity);
+        let current = request ? admission(db, String(request.admission_id)) : row ? admissionFromRow(row) : undefined;
+        if (current) {
+          if (current.source !== 'native' || !current.sourceKey.startsWith('observe:') || current.conversationId !== value.conversationId ||
+            current.bindingId !== value.bindingId || current.workspaceId !== value.workspaceId || current.directoryIdentity !== source.directoryIdentity ||
+            JSON.stringify(members(db, current.id)) !== JSON.stringify(source.groupIds)) return fail('execution_observation_identity_changed');
+        } else {
+          if (request) return fail('execution_admission_unregistered');
+          current = insertAdmission(db, { id: 'n:' + hash(['observe', value.requestId]), source: 'native', sourceKey: 'observe:' + hash(value.requestId), conversationId: value.conversationId,
+            queueId: null, workspaceId: value.workspaceId, directoryIdentity: source.directoryIdentity, bindingId: source.bindingId,
+            contentDigest: value.wireDigest, kind: 'receipt-unknown', currentOperation: null }, source.groupIds);
+        }
+        // permission() still checks the current epoch/frozen set. A new binding
+        // cannot enter a fence merely because this is an observation request.
+        return observationPermission(db, current, value.requestId, value.wireDigest);
       });
     },
     permissionForStop(input: { operationId: string; bindingId: string; runId: string; wireDigest: string }): StopPermit {
