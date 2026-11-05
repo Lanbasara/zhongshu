@@ -91,28 +91,24 @@ async function fixture(t: TestContext, count: number) {
     finish: () => { keepRunning = false; for (const [id, state] of states) states.set(id, { ...state, status: 'idle', terminalRunId: state.runId, terminalStatus: state.runId ? 'completed' : undefined }); } };
 }
 
-test('intentional editing stop preserves idle history and permits local archive without waking the Host', async t => {
+test('file editing never stops the Host and accepts conditional saves while a task runs', async t => {
   const f = await fixture(t, 1); const instance = await f.open(); const id = f.conversationIds[0]!;
-  await instance.workbench.open(id);
-  await until(async () => f.counts().watches > 0);
-  const original = await instance.client.store.getConversation(id);
-  assert.equal((await instance.workbench.changeWorkspaceMaintenance('workspace', 'pause')).editable, true);
-  const reads = f.counts().stateReads;
-  f.disconnect(); await delay(50);
-  const paused = await instance.workbench.open(id);
-  assert.equal(paused.conversation.state.status, 'idle');
-  assert.equal(paused.conversation.readiness, 'blocked', 'the display still blocks new work during editing');
-  assert.equal((await instance.client.store.getConversation(id))!.state.configurationVerified, true, 'verified idle history remains stored');
-  assert.equal((await instance.workbench.setArchived(id, true)).archived, true);
-  assert.equal(f.counts().stateReads, reads, 'archiving in a proven edit window never wakes or queries the stopped native');
-  assert.equal(f.controllerState().writers, 'quiescent');
-  assert.equal((await instance.workbench.setArchived(id, false)).archived, false);
-  await instance.workbench.changeWorkspaceMaintenance('workspace', 'resume');
+  f.runContinuously();
   const operation = randomUUID();
-  await instance.workbench.enqueue({ id: operation, conversationId: id, type: 'message', payload: { text: 'continue after editing' } });
+  await instance.workbench.enqueue({ id: operation, conversationId: id, type: 'message', payload: { text: 'keep working during editing' } });
   await until(async () => (await instance.client.store.getOperation(operation))?.status === 'accepted');
-  assert.equal(f.counts().submits, 1);
-  assert.deepEqual((await instance.client.store.getConversation(id))!.binding, original!.binding);
+  const before = f.controllerState();
+  const original = await instance.workbench.openWorkspaceFile('workspace', 'note.md');
+  assert.equal((await instance.workbench.changeWorkspaceMaintenance('workspace', 'pause')).editable, true, 'old clients cannot stop a Host by requesting editing');
+  const saved = await instance.workbench.saveWorkspaceFile('workspace', 'note.md', original.version, 'edited while running', randomUUID());
+  assert.equal(saved.text, 'edited while running');
+  assert.equal(await readFile(join(f.workspaceDirectory, 'note.md'), 'utf8'), saved.text);
+  assert.deepEqual(f.controllerState(), before);
+  assert.equal(f.counts().stops, 0);
+  assert.equal((await instance.workbench.open(id)).conversation.state.status, 'running');
+  await assert.rejects(instance.workbench.saveWorkspaceFile('workspace', 'note.md', original.version, 'stale draft', randomUUID()), { message: 'file_version_changed' });
+  assert.equal(await readFile(join(f.workspaceDirectory, 'note.md'), 'utf8'), saved.text);
+  f.finish();
 });
 
 test('online Host recovery is bounded per second and explicit recovery works before initialization after restart', async t => {
@@ -149,23 +145,23 @@ test('online Host recovery is bounded per second and explicit recovery works bef
 
 test('persistent edit windows veto automatic and explicit crash recovery after application restart', async t => {
   const f = await fixture(t, 1); const first = await f.open();
-  await first.workbench.changeWorkspaceMaintenance('workspace', 'pause');
+  await first.execution.change('workspace', 'pause');
   const windowId = (await first.execution.status('workspace')).windowId;
-  let recoveryCalls = 0; f.controller.recover = async () => { recoveryCalls++; throw new Error('must not enter crash recovery for edit window'); };
+  let recoveryCalls = 0; f.controller.recover = async () => { recoveryCalls++; return { status: 'known', state: f.controllerState() }; };
   await first.workbench.close(); await first.client.close();
   const second = await f.open();
   for (let index = 0; index < 10; index++) await second.execution.step();
   assert.equal(recoveryCalls, 0); const status = await second.execution.status('workspace');
-  assert.equal(status.windowId, windowId); assert.equal(status.editable, true); assert.notEqual(status.canRecover, true);
+  assert.equal(status.windowId, windowId); assert.equal(status.editable, false, 'legacy windows require explicit recovery before new saves'); assert.notEqual(status.canRecover, true);
   await second.workbench.changeWorkspaceMaintenance('workspace', 'resume');
-  assert.equal(recoveryCalls, 0, 'normal resume retains the original edit coordinator path');
+  assert.equal((await second.execution.status('workspace')).maintenance, 'online', 'explicit legacy resume completes before routine online health checks');
 });
 
 for (const count of [40, 1000]) test(`${count} historical conversations initialize once; editing and saving need no historical observations`, { timeout: 60_000 }, async t => {
   const seedStarted = performance.now(); const f = await fixture(t, count); const seedMs = performance.now() - seedStarted;
   const baselineStarted = performance.now(); const instance = await f.open(); const baselineMs = performance.now() - baselineStarted;
   const counts = f.counts(); assert.equal(counts.stateReads, count); assert.equal(counts.watches, 0);
-  const status = await instance.workbench.workspaceEditStatus('workspace'); assert.equal(status.canPause, true);
+  const status = await instance.workbench.workspaceEditStatus('workspace'); assert.equal(status.editable, true); assert.equal(status.canPause, false);
   const started = performance.now();
   assert.equal((await instance.workbench.changeWorkspaceMaintenance('workspace', 'pause')).editable, true);
   const opened = await instance.workbench.openWorkspaceFile('workspace', 'note.md');
@@ -173,23 +169,22 @@ for (const count of [40, 1000]) test(`${count} historical conversations initiali
   const second = await instance.workbench.saveWorkspaceFile('workspace', 'note.md', first.version, 'second save', randomUUID());
   assert.equal(second.text, 'second save'); assert.equal(await readFile(join(f.workspaceDirectory, 'note.md'), 'utf8'), 'second save');
   assert.equal((await instance.workbench.workspaceEditStatus('workspace')).editable, true);
-  assert.deepEqual(f.counts(), counts); assert.equal(f.controllerState().admission, 'closed');
+  assert.deepEqual(f.counts(), counts); assert.equal(f.controllerState().admission, 'open');
   t.diagnostic(JSON.stringify({ scenario: 'managed-edit-historical-bindings', actualConversations: count, seedMs, baselineMs, baselineStateReads: counts.stateReads, additionalStateReads: 0, watches: counts.watches, saves: 2, elapsedMs: performance.now() - started, native: 'synthetic', filesystemAndWorker: 'real' }));
 });
 
-test('a closed edit window survives Workbench and worker restart, rejects stale files, and opens only after explicit resume', async t => {
+test('an old exclusive edit window survives restart and must be explicitly resumed before online editing', async t => {
   const f = await fixture(t, 2); const first = await f.open();
-  await first.workbench.changeWorkspaceMaintenance('workspace', 'pause');
+  await first.execution.change('workspace', 'pause');
   const original = await first.workbench.openWorkspaceFile('workspace', 'note.md');
-  await first.workbench.saveWorkspaceFile('workspace', 'note.md', original.version, 'saved before restart', randomUUID());
   const beforeRestart = f.counts(); await first.workbench.close(); await first.client.close();
   assert.equal(f.controllerState().admission, 'closed');
-  const second = await f.open(); assert.equal((await second.workbench.workspaceEditStatus('workspace')).editable, true);
-  assert.equal(f.counts().stateReads, beforeRestart.stateReads, 'restart restores durable gates without auditing completed history again');
-  await assert.rejects(second.workbench.saveWorkspaceFile('workspace', 'note.md', original.version, 'stale browser draft', randomUUID()), { message: 'file_version_changed' });
-  const fresh = await second.workbench.openWorkspaceFile('workspace', 'note.md');
-  await second.workbench.saveWorkspaceFile('workspace', 'note.md', fresh.version, 'saved after restart', randomUUID());
+  const second = await f.open(); assert.equal((await second.workbench.workspaceEditStatus('workspace')).editable, false);
+  assert.equal(f.counts().stateReads, beforeRestart.stateReads);
+  await assert.rejects(second.workbench.saveWorkspaceFile('workspace', 'note.md', original.version, 'not yet', randomUUID()));
   assert.equal((await second.workbench.changeWorkspaceMaintenance('workspace', 'resume')).maintenance, 'online');
+  const saved = await second.workbench.saveWorkspaceFile('workspace', 'note.md', original.version, 'saved after recovery', randomUUID());
+  assert.equal(saved.text, 'saved after recovery');
   assert.equal(f.controllerState().admission, 'open');
 });
 
@@ -212,13 +207,12 @@ test('invalid UTF-8 save payloads are rejected before acquiring a save or starti
   }
   assert.equal((await instance.workbench.changeWorkspaceMaintenance('workspace', 'pause')).editable, true);
   assert.equal((await stat(f.writerDirectory)).isDirectory(), true, 'editable requires the writer to be ready');
-  assert.equal(f.controllerState().admission, 'closed');
+  assert.equal(f.controllerState().admission, 'open');
   const owner = await instance.writer.owner();
-  const windowId = (await instance.client.execution.load(['host']))[0]!.windowId!;
   for (const input of inputs) {
     await assert.rejects(instance.workbench.saveWorkspaceFile('workspace', 'note.md', original.version, input.text, randomUUID()),
       { message: input.code, statusCode: input.statusCode });
-    assert.equal((await instance.client.execution.pendingSaves({ windowId, limit: 16 })).entries.length, 0);
+    assert.equal((await instance.client.execution.pendingConcurrentSaves({ limit: 16 })).entries.length, 0);
     assert.equal(await instance.writer.owner(), owner);
     assert.equal((await instance.workbench.workspaceEditStatus('workspace')).editable, true);
     assert.equal(await readFile(join(f.workspaceDirectory, 'note.md'), 'utf8'), original.text);
@@ -228,7 +222,7 @@ test('invalid UTF-8 save payloads are rejected before acquiring a save or starti
   const persisted = await readFile(join(f.workspaceDirectory, 'note.md'));
   assert.equal(persisted.byteLength, 256 * 1024);
   assert.equal(createHash('sha256').update(persisted).digest('hex'), createHash('sha256').update(valid).digest('hex'));
-  assert.equal((await instance.client.execution.pendingSaves({ windowId, limit: 16 })).entries.length, 0);
+  assert.equal((await instance.client.execution.pendingConcurrentSaves({ limit: 16 })).entries.length, 0);
   assert.equal((await instance.workbench.workspaceEditStatus('workspace')).editable, true);
   assert.equal(await instance.writer.owner(), owner, 'first save reuses the prewarmed writer');
   assert.deepEqual(f.counts(), before);
@@ -237,58 +231,41 @@ test('invalid UTF-8 save payloads are rejected before acquiring a save or starti
   const escapedBytes = await readFile(join(f.workspaceDirectory, 'note.md'));
   assert.equal(escapedBytes.byteLength, 256 * 1024);
   assert.equal(createHash('sha256').update(escapedBytes).digest('hex'), createHash('sha256').update(escaped).digest('hex'));
-  assert.equal((await instance.client.execution.pendingSaves({ windowId, limit: 16 })).entries.length, 0);
+  assert.equal((await instance.client.execution.pendingConcurrentSaves({ limit: 16 })).entries.length, 0);
   assert.equal((await instance.workbench.workspaceEditStatus('workspace')).editable, true);
   assert.equal(await instance.writer.owner(), owner);
   assert.deepEqual(f.counts(), before);
 });
 
-test('a concurrent resume cannot return stale edit readiness while the writer starts', async t => {
+test('a legacy administrative freeze cannot overtake an online file save', async t => {
   const f = await fixture(t, 1); const instance = await f.open();
-  const originalOwner = instance.writer.owner.bind(instance.writer);
+  const original = await instance.workbench.openWorkspaceFile('workspace', 'note.md');
+  const actualWrite = instance.writer.write.bind(instance.writer);
   let entered!: () => void; let release!: () => void;
-  const starting = new Promise<void>(resolve => { entered = resolve; });
-  const allowed = new Promise<void>(resolve => { release = resolve; });
-  instance.writer.owner = async () => { entered(); await allowed; return originalOwner(); };
-  const pausing = instance.workbench.changeWorkspaceMaintenance('workspace', 'pause');
+  const started = new Promise<void>(done => { entered = done; });
+  const gate = new Promise<void>(done => { release = done; });
+  instance.writer.write = async input => { entered(); await gate; return actualWrite(input); };
+  const save = instance.workbench.saveWorkspaceFile('workspace', 'note.md', original.version, 'save before administration', randomUUID());
   try {
-    await starting;
-    assert.equal(f.controllerState().admission, 'closed');
-    assert.equal((await instance.workbench.changeWorkspaceMaintenance('workspace', 'resume')).maintenance, 'online');
+    await started;
+    const rows = await instance.client.execution.load(['host']);
+    await assert.rejects(instance.client.execution.freezeAdmissions({ windowId: randomUUID(), groups: rows.map(({ groupId, revision }) => ({ groupId, revision })) }), { code: 'execution_save_unresolved' });
+    assert.equal(f.controllerState().admission, 'open');
   } finally { release(); }
-  const status = await pausing;
-  assert.equal(status.editable, false);
-  assert.equal(status.maintenance, 'online');
-  assert.equal(f.controllerState().admission, 'open');
+  await save;
 });
 
-test('an edit request drains the original queued operation, blocks newcomers, and waits for its exact terminal result without cancelling it', async t => {
-  const f = await fixture(t, 1); const instance = await f.open(); f.runContinuously();
-  const original = { id: randomUUID(), conversationId: f.conversationIds[0]!, type: 'message' as const, payload: { text: 'accepted before the edit request' } };
-  await instance.client.store.enqueueOperation(original);
-  const requested = await instance.workbench.changeWorkspaceMaintenance('workspace', 'pause'); assert.equal(requested.maintenance, 'transition');
-  assert.equal(f.counts().submits, 1); assert.equal(f.counts().stops, 0);
-  await assert.rejects(instance.client.store.enqueueOperation({ ...original, id: randomUUID() }), { code: 'execution_admission_closed' });
-  const file = await instance.workbench.openWorkspaceFile('workspace', 'note.md');
-  await assert.rejects(instance.workbench.saveWorkspaceFile('workspace', 'note.md', file.version, 'not yet', randomUUID()));
-  f.finish();
-  await until(async () => (await instance.workbench.workspaceEditStatus('workspace')).editable);
-  assert.equal(f.counts().submits, 1); assert.equal(f.counts().stops, 0); assert.equal(f.controllerState().admission, 'closed');
-  assert.equal((await instance.workbench.open(original.conversationId)).conversation.state.status, 'idle');
-  assert.equal((await instance.workbench.setArchived(original.conversationId, true)).archived, true);
-});
-
-test('Workbench automatically reconciles a killed writer and settles its durable save before allowing explicit resume', async t => {
+test('Workbench automatically reconciles a killed online writer without stopping or restarting the Host', async t => {
   const f = await fixture(t, 1); const instance = await f.open();
   const oldWriter = await pausedWriter(t, f.writerDirectory, 'renamed');
   const unavailable = await instance.workbench.changeWorkspaceMaintenance('workspace', 'pause');
   assert.equal(unavailable.editable, false);
   assert.equal(unavailable.reason, 'file_writer_unavailable');
-  assert.equal(f.controllerState().admission, 'closed');
+  assert.equal(f.controllerState().admission, 'open');
   const registration = (await instance.client.workspaces.get('workspace'))!;
   const document = await instance.workbench.openWorkspaceFile('workspace', 'note.md');
   const gates = await instance.client.execution.load(['host']);
-  const admitted = await instance.client.execution.acquireSave({ saveId: randomUUID(), windowId: gates[0]!.windowId!, writerId: oldWriter.ownerId,
+  const admitted = await instance.client.execution.acquireSave({ mode: 'concurrent', saveId: randomUUID(), windowId: 'file-' + digest('workspace'), writerId: oldWriter.ownerId,
     write: { workspaceId: 'workspace', directoryIdentity: registration.identity, path: 'note.md', expectedVersion: document.version, contentDigest: createHash('sha256').update('recovered actual write').digest('hex') },
     groups: gates.map(({ groupId, revision }) => ({ groupId, revision })) });
   assert.equal(admitted.created, true); if (!admitted.created) return;
@@ -298,6 +275,44 @@ test('Workbench automatically reconciles a killed writer and settles its durable
   await until(async () => (await instance.workbench.workspaceEditStatus('workspace')).editable, 10_000);
   assert.equal((await instance.client.execution.pendingSaves({ windowId: admitted.permit.windowId, limit: 16 })).entries.length, 0);
   assert.equal(await readFile(join(f.workspaceDirectory, 'note.md'), 'utf8'), 'recovered actual write');
-  assert.equal(f.controllerState().admission, 'closed', 'recovery does not silently resume the Host');
+  assert.equal(f.controllerState().admission, 'open', 'recovery never changes native execution');
   assert.equal((await instance.workbench.changeWorkspaceMaintenance('workspace', 'resume')).maintenance, 'online');
+});
+
+test('online save receipts survive application restart and a repeated ID never overwrites later external work', async t => {
+  const f = await fixture(t, 1); const first = await f.open();
+  const original = await first.workbench.openWorkspaceFile('workspace', 'note.md'); const saveId = randomUUID();
+  await first.workbench.saveWorkspaceFile('workspace', 'note.md', original.version, 'committed once', saveId);
+  await first.workbench.close(); await first.client.close();
+  await writeFile(join(f.workspaceDirectory, 'note.md'), 'later external work');
+  const second = await f.open();
+  await assert.rejects(second.workbench.saveWorkspaceFile('workspace', 'note.md', original.version, 'committed once', saveId), { code: 'execution_save_already_resolved' });
+  assert.equal(await readFile(join(f.workspaceDirectory, 'note.md'), 'utf8'), 'later external work');
+  assert.equal(f.controllerState().admission, 'open');
+});
+
+test('an uncertain online write remains unresolved after restart when external content prevents proof', async t => {
+  const f = await fixture(t, 1); const first = await f.open();
+  const oldWriter = await pausedWriter(t, f.writerDirectory, 'renamed');
+  const registration = (await first.client.workspaces.get('workspace'))!;
+  const document = await first.workbench.openWorkspaceFile('workspace', 'note.md');
+  const gates = await first.client.execution.load(['host']);
+  const admitted = await first.client.execution.acquireSave({ mode: 'concurrent', saveId: randomUUID(), windowId: 'file-' + digest('workspace'), writerId: oldWriter.ownerId,
+    write: { workspaceId: 'workspace', directoryIdentity: registration.identity, path: 'note.md', expectedVersion: document.version, contentDigest: createHash('sha256').update('uncertain write').digest('hex') },
+    groups: gates.map(({ groupId, revision }) => ({ groupId, revision })) });
+  assert.equal(admitted.created, true); if (!admitted.created) return;
+  await oldWriter.write({ root: f.workspaceDirectory, permit: admitted.permit, text: 'uncertain write' });
+  await writeFile(join(f.workspaceDirectory, 'note.md'), 'external third content');
+  oldWriter.child.kill('SIGKILL'); await oldWriter.exited;
+  await first.workbench.close(); await first.client.close();
+  const second = await f.open();
+  // The real new writer owns the OS lock and independently inspects disk. The
+  // unknown receipt is not an invitation to apply the original write again.
+  const recovered = await second.writer.recover({ root: f.workspaceDirectory, permit: admitted.permit });
+  assert.equal(recovered.outcome, 'unknown');
+  assert.equal((await second.workbench.workspaceEditStatus('workspace')).editable, false);
+  assert.equal((await second.client.execution.pendingConcurrentSaves({ limit: 16 })).entries.length, 1);
+  await assert.rejects(second.workbench.saveWorkspaceFile('workspace', 'note.md', document.version, 'uncertain write', admitted.permit.saveId), { code: 'execution_save_unresolved' });
+  assert.equal(await readFile(join(f.workspaceDirectory, 'note.md'), 'utf8'), 'external third content');
+  assert.equal(f.controllerState().admission, 'open', 'unknown file effects do not cancel ongoing native work');
 });

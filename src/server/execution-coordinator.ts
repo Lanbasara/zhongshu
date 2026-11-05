@@ -40,7 +40,7 @@ const pendingPageSchema = z.object({ entries: z.array(pendingSchema).max(64), ne
 export type PendingExecutionPage = z.infer<typeof pendingPageSchema>;
 const writeIdentitySchema = z.object({ workspaceId: id, directoryIdentity: z.string().min(1).max(200), path: workspaceDocumentPath, expectedVersion: digest, contentDigest: digest }).strict();
 export type SaveWriteIdentity = z.infer<typeof writeIdentitySchema>;
-export type SavePermit = { saveId: string; windowId: string; write: SaveWriteIdentity; writerId?: string; groups: { groupId: string; controller: ExecutionEpoch }[] };
+export type SavePermit = { mode?: 'concurrent'; saveId: string; windowId: string; write: SaveWriteIdentity; writerId?: string; groups: { groupId: string; controller: ExecutionEpoch }[] };
 export type SaveAdmission = { created: true; permit: SavePermit } | { created: false; outcome: 'pending' | 'committed' | 'rejected' };
 
 export interface ExecutionCoordinatorPort {
@@ -65,12 +65,12 @@ export interface ExecutionCoordinatorPort {
   /** One transaction, only all-resumed/open matching epochs may reopen admission. */
   completeResume(input: { windowId: string; groups: GroupRevision[] }): Promise<ExecutionGate[]>;
   /**
-   * One transaction validates all matching editable windows/revisions and claims
+   * One transaction validates the online save scope or legacy editable window and claims
    * saveId exactly once, with immutable write identity for crash reconciliation.
    * Same ID with different content/window/scope is a conflict; a pending duplicate
    * must NEVER execute its effect again.
    */
-  acquireSave(input: { saveId: string; windowId: string; write: SaveWriteIdentity; writerId?: string; groups: GroupRevision[] }): Promise<SaveAdmission>;
+  acquireSave(input: { mode?: 'concurrent'; saveId: string; windowId: string; write: SaveWriteIdentity; writerId?: string; groups: GroupRevision[] }): Promise<SaveAdmission>;
   /** Persist verified outcome/proof; unknown effects retain their permit forever. */
   settleSave(saveId: string, outcome: 'committed' | 'rejected', proof: string): Promise<boolean>;
 }
@@ -293,22 +293,27 @@ export class ExecutionCoordinator {
     await this.port.completeResume({ windowId: target.windowId, groups: rows.map(({ groupId, revision }) => ({ groupId, revision })) });
     return this.view(await this.load(target.groupIds));
   }
-  async withSave<T>(input: WindowRequest & { saveId: string; write: SaveWriteIdentity; writerId?: string }, effect: (permit: SavePermit) => Promise<{ outcome: 'committed' | 'rejected'; proof: string; value: T }>): Promise<
+  async withSave<T>(input: WindowRequest & { mode?: 'concurrent'; saveId: string; write: SaveWriteIdentity; writerId?: string }, effect: (permit: SavePermit) => Promise<{ outcome: 'committed' | 'rejected'; proof: string; value: T }>): Promise<
     { status: 'committed' | 'rejected'; value: T } | { status: 'unknown'; saveId: string } | { status: 'duplicate'; outcome: 'pending' | 'committed' | 'rejected' }
   > {
     const target = this.target({ windowId: input.windowId, groupIds: input.groupIds }); const saveId = id.parse(input.saveId);
     const write = writeIdentitySchema.parse(input.write);
     return this.lock(target.groupIds, async () => {
-      const rows = await this.load(target.groupIds); this.requireWindow(rows, target);
+      const rows = await this.load(target.groupIds);
+      if (input.mode !== 'concurrent') this.requireWindow(rows, target);
       for (let index = 0; index < rows.length; index++) {
+        if (input.mode === 'concurrent') {
+          if (rows[index]!.phase !== 'online' || rows[index]!.windowId) throw new ExecutionCoordinatorError('execution_admission_closed');
+          continue;
+        }
         if (rows[index]!.phase !== 'editable') throw new ExecutionCoordinatorError('execution_window_not_editable');
         rows[index] = await this.verify(rows[index]!);
         if (rows[index]!.phase === 'unknown') throw new ExecutionCoordinatorError('execution_controller_unknown');
       }
-      const admission = await this.port.acquireSave({ saveId, windowId: target.windowId, write, writerId: input.writerId, groups: rows.map(({ groupId, revision }) => ({ groupId, revision })) });
+      const admission = await this.port.acquireSave({ ...(input.mode ? { mode: input.mode } : {}), saveId, windowId: target.windowId, write, writerId: input.writerId, groups: rows.map(({ groupId, revision }) => ({ groupId, revision })) });
       if (!admission.created) return { status: 'duplicate', outcome: admission.outcome };
-      const permit = z.object({ saveId: id, windowId: id, writerId: id.optional(), write: writeIdentitySchema, groups: z.array(z.object({ groupId: id, controller: epochSchema }).strict()).min(1).max(32) }).strict().parse(admission.permit);
-      if (permit.saveId !== saveId || permit.windowId !== target.windowId || permit.writerId !== input.writerId || fingerprint(permit.write) !== fingerprint(write) || permit.groups.length !== rows.length ||
+      const permit = z.object({ mode: z.literal('concurrent').optional(), saveId: id, windowId: id, writerId: id.optional(), write: writeIdentitySchema, groups: z.array(z.object({ groupId: id, controller: epochSchema }).strict()).min(1).max(32) }).strict().parse(admission.permit);
+      if (permit.mode !== input.mode || permit.saveId !== saveId || permit.windowId !== target.windowId || permit.writerId !== input.writerId || fingerprint(permit.write) !== fingerprint(write) || permit.groups.length !== rows.length ||
         permit.groups.some((group, index) => group.groupId !== rows[index]!.groupId || group.controller.generation !== rows[index]!.controller.generation || group.controller.epoch !== rows[index]!.controller.epoch)) throw new ExecutionCoordinatorError('execution_save_permit_invalid');
       try {
         const result = await effect(permit);

@@ -60,6 +60,7 @@ class CodexAdapter implements HarnessAdapter {
   readonly id = 'codex' as const;
   readonly earlyInput = 'current' as const;
   readonly historyReadOnly = true as const;
+  get observationReleaseSafe() { return this.managedExecution; }
   private rpc: CodexRpc;
   private watches = new Map<string, Watch>();
   private live = new Map<string, Live>();
@@ -137,9 +138,14 @@ class CodexAdapter implements HarnessAdapter {
   }
 
   private async releaseUnused(threadId: string): Promise<void> {
+    // In the dedicated Host, this adapter owns native execution independently
+    // of gateway/page listeners. Native unsubscribe can unload idle parents and
+    // terminate their background terminals. Do not infer tree completion from
+    // a turn status. Host resource reclamation needs a separate explicit policy.
+    if (this.managedExecution) return;
     if (!this.watches.has(threadId) && !this.readers.has(threadId) && !this.loading.has(threadId) && !this.closed && this.rpc.connected) {
       const existing = this.releasing.get(threadId); if (existing) return existing;
-      const pending = this.rpc.request('thread/unsubscribe', { threadId }).then(() => {}, () => { /* Observation cleanup never cancels or repeats native work. */ });
+      const pending = this.rpc.request('thread/unsubscribe', { threadId }).then(() => {}, () => { /* Native idle-unload policy applies after the last subscription. */ });
       this.releasing.set(threadId, pending);
       try { await pending; } finally { if (this.releasing.get(threadId) === pending) this.releasing.delete(threadId); }
     }

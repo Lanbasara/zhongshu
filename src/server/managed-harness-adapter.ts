@@ -65,7 +65,7 @@ export async function createManagedHarnessAdapter(host: ExecutionHost, client: M
   }
   async function read(method: ManagedNativeMethod, binding: Binding, args: unknown[] = []) { sameBinding(binding); return await client.read(method, [binding, ...args]); }
   return {
-    id: capabilities.id, ...(capabilities.earlyInput ? { earlyInput: capabilities.earlyInput } : {}),
+    id: capabilities.id, observationReleaseSafe: capabilities.observationReleaseSafe === true, ...(capabilities.earlyInput ? { earlyInput: capabilities.earlyInput } : {}),
     catalog: async () => await client.read('catalog', []) as Awaited<ReturnType<HarnessAdapter['catalog']>>,
     async create(_input, onBound) {
       const result = await host.dispatch({ kind: 'create', conversationId: conversation.id });

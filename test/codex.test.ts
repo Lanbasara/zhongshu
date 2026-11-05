@@ -751,3 +751,15 @@ test('Codex custom providers may explicitly require no OpenAI account; missing a
     if (requiresOpenaiAuth !== false) assert.equal(catalog.reason, 'codex_login_required');
   }
 });
+
+test('dedicated Host keeps native execution ownership after the final page listener releases', async t => {
+  const p = await peer(t, undefined, true);
+  assert.equal(p.adapter.observationReleaseSafe, true);
+  const release = await p.adapter.watch(saved, () => {});
+  release(); release();
+  await delay(20);
+  assert.equal(p.calls.filter(call => call.method === 'thread/unsubscribe').length, 0,
+    'unsubscribing an idle parent can terminate its background terminals');
+  const next = await p.adapter.watch(saved, () => {}); next();
+  assert.equal(p.calls.filter(call => call.method === 'turn/interrupt' || call.method === 'thread/backgroundTerminals/clean').length, 0);
+});

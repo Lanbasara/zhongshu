@@ -9,7 +9,7 @@ export type ManagedWorkspaceGroup = { groupId: string; harnessId?: 'codex' | 'ds
 export type ManagedExecutionCallbacks = {
   observeBaseline(binding: BaselineBinding, context: { groupId: string; through: number; after?: ExecutionCursor }): Promise<BaselineObservation>;
   resolvePending(pending: PendingExecution): Promise<'settled' | 'pending' | 'unknown'>;
-  recoverSaves?(windowId: string): Promise<void>;
+  recoverSaves?(windowId?: string): Promise<void>;
 };
 export type ManagedEditStatus = { editable: boolean; reason: string | null; canPause: boolean;
   maintenance: 'online' | 'paused' | 'unknown' | 'transition'; phase: ExecutionGate['phase'] | 'initializing';
@@ -41,6 +41,7 @@ export class ManagedWorkspaceExecution {
   private readonly pendingCursors = new Map<string, ExecutionCursor>();
   private readonly newWorkspaces = new Set<string>();
   private error?: string;
+  private saveRecoveryAt = 0;
   private readonly hostChecks = new Map<string, { at: number; result: ExecutionControllerResult }>();
   initialized = false;
   constructor(input: { port: AsyncExecutionStore; workspaces: AsyncWorkspaceStore; groups: ManagedWorkspaceGroup[] }) {
@@ -154,6 +155,10 @@ export class ManagedWorkspaceExecution {
       this.error = undefined; return;
     }
     this.initialized = true;
+    if (Date.now() >= this.saveRecoveryAt) {
+      this.saveRecoveryAt = Date.now() + 1000;
+      await this.callbacks.recoverSaves?.();
+    }
     const newId = this.newWorkspaces.values().next().value;
     if (newId) {
       const registration = await this.workspaces.get(newId);
@@ -198,9 +203,13 @@ export class ManagedWorkspaceExecution {
     const phase = rows.some(row => row.phase === 'unknown') ? 'unknown' : rows.every(row => row.phase === 'online') ? 'online' : rows.every(row => row.phase === 'editable') ? 'editable' : rows.some(row => row.phase === 'resuming') ? 'resuming' : 'draining';
     const windowId = rows[0]?.windowId;
     const saving = !!windowId && await this.port.hasUnsettledSaves(windowId, groupIds);
-    return { editable: phase === 'editable' && !saving, canPause: phase === 'online', reason: saving ? 'execution_save_unresolved' : phase === 'editable' ? null : rows.find(row => row.error)?.error ?? 'execution_' + phase,
+    const concurrent = phase === 'online' && !windowId;
+    const unresolved = concurrent && (await this.port.pendingConcurrentSaves({ workspaceId, limit: 1 })).entries.length > 0;
+    return { editable: concurrent && !unresolved, canPause: false,
+      reason: unresolved || saving ? 'execution_save_unresolved' : concurrent ? null : rows.find(row => row.error)?.error ?? 'execution_' + phase,
       phase, maintenance: phase === 'editable' ? 'paused' : phase === 'online' ? 'online' : phase === 'unknown' ? 'unknown' : 'transition',
       ...(windowId ? { windowId } : {}), affectedGroups: groupIds, initialized: true };
+
   }
   async change(workspaceId: string, action: 'pause' | 'resume') {
     const state = await this.status(workspaceId);
@@ -223,8 +232,8 @@ export class ManagedWorkspaceExecution {
   }
   async save<T>(workspaceId: string, saveId: string, write: SaveWriteIdentity, effect: (permit: SavePermit) => Promise<{ outcome: 'committed' | 'rejected'; proof: string; value: T }>, writerId?: string) {
     const state = await this.status(workspaceId);
-    if (!state.editable || !state.windowId) throw new StoreError(state.reason ?? 'execution_window_not_editable', 409);
-    return this.coordinator.withSave<T>({ windowId: state.windowId, groupIds: state.affectedGroups, saveId, write, writerId }, effect);
+    if (!state.editable || state.windowId) throw new StoreError(state.reason ?? 'execution_window_not_editable', 409);
+    return this.coordinator.withSave<T>({ mode: 'concurrent', windowId: 'file-' + proof(workspaceId), groupIds: state.affectedGroups, saveId, write, writerId }, effect);
   }
   stop() { this.stopped = true; clearTimeout(this.timer); this.timer = undefined; }
   async close() { this.stop(); await this.active; }

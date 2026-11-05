@@ -13,7 +13,7 @@ import { createCapacityGuard } from './storage-capacity.ts';
 const id = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/);
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
 const absolute = z.string().min(1).max(4096).refine(path => isAbsolute(path) && normalize(path) === path && !path.includes('\0'));
-export const writerPermitSchema = z.object({ saveId: id, windowId: id, writerId: id.optional(),
+export const writerPermitSchema = z.object({ mode: z.literal('concurrent').optional(), saveId: id, windowId: id, writerId: id.optional(),
   write: z.object({ workspaceId: id, directoryIdentity: z.string().min(1).max(200), path: workspaceDocumentPath, expectedVersion: digest, contentDigest: digest }).strict(),
   groups: z.array(z.object({ groupId: id, controller: z.object({ generation: id, epoch: z.number().int().nonnegative().safe() }).strict() }).strict()).min(1).max(32),
 }).strict();

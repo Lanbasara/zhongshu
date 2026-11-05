@@ -44,7 +44,7 @@ Codex 创建空对话时保存所选配置；配置了 `boundedHistory` 的接�
 
 ### Managed Host deployment
 
-受管编辑使用专用 Linux Docker Host。工作台之外的客户端也只能经过网关；原生 socket/launch URL、Docker socket 和管理凭据不得暴露给浏览器或其他原生客户端。操作者必须关闭未登记的原生计划任务及其他自动入口，不能另设 systemd、Compose 或 Docker 自动重启原生容器。原生进程、工具和后台子进程都在同一容器内；普通停止当前轮仍不等于整个 Host 退出。
+受管执行使用专用 Linux Docker Host；普通文件编辑使用在线条件保存，不停止 Host。旧独占编辑窗口仍可显式恢复，语义见 [ADR 0014](docs/adr/0014-observation-lifetime-and-concurrent-editing.md)。工作台之外的客户端也只能经过网关；原生 socket/launch URL、Docker socket 和管理凭据不得暴露给浏览器或其他原生客户端。操作者必须关闭未登记的原生计划任务及其他自动入口，不能另设 systemd、Compose 或 Docker 自动重启原生容器。原生进程、工具和后台子进程都在同一容器内；普通停止当前轮仍不等于整个 Host 退出。
 
 在上述配置中，用 `managedHosts` 替代相应的直接 `codex`/`dsh` 配置，同一 Harness 只能配置一个受管 Host。下面是路径结构示例，镜像摘要须替换为操作者核验的不可变镜像；镜像应包含 Node 24、产品 `dist`/生产依赖及固定版本的原生 Harness。
 

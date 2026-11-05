@@ -632,6 +632,11 @@ export function createExecutionStore(db: DatabaseSync) {
         }
         const rows = checked(db, input.groups);
         if (rows.some(row => !row.baselineComplete || row.phase !== 'online' || row.controller.admission !== 'open')) return fail('execution_admission_closed');
+        // A file effect already admitted while online must settle before any
+        // administrative freeze/removal starts changing the workspace owner.
+        for (const groupId of groupIds) {
+          if (db.prepare("SELECT s.id FROM execution_saves s,json_each(s.permit_json,'$.groups') g WHERE s.outcome='pending' AND json_extract(g.value,'$.groupId')=? LIMIT 1").get(groupId)) return fail('execution_save_unresolved');
+        }
         const through = Number(db.prepare('SELECT COALESCE(MAX(sequence),0) sequence FROM execution_admissions').get()!.sequence);
         const hostThrough = hosts.watermark();
         db.prepare("INSERT INTO execution_windows(id,groups_json,status,created_at) VALUES(?,?,'active',?)").run(input.windowId, JSON.stringify(groupIds), Date.now());
@@ -702,23 +707,30 @@ export function createExecutionStore(db: DatabaseSync) {
         db.prepare("UPDATE execution_windows SET status='completed' WHERE id=?").run(input.windowId); return load(groupIds);
       });
     },
-    acquireSave(input: { saveId: string; windowId: string; write: SaveWriteIdentity; writerId?: string; groups: GroupRevision[] }): SaveAdmission {
-      const value = z.object({ saveId: id, windowId: id, write: writeSchema, writerId: id.optional(), groups: revisionsSchema }).strict().parse(input);
+    acquireSave(input: { mode?: 'concurrent'; saveId: string; windowId: string; write: SaveWriteIdentity; writerId?: string; groups: GroupRevision[] }): SaveAdmission {
+      const value = z.object({ mode: z.literal('concurrent').optional(), saveId: id, windowId: id, write: writeSchema, writerId: id.optional(), groups: revisionsSchema }).strict().parse(input);
       return transaction(db, () => {
         const groupIds = value.groups.map(row => row.groupId).sort(compare);
-        const inputDigest = hash([value.windowId, groupIds, value.write]);
+        const inputDigest = hash(value.mode ? [value.mode, value.windowId, groupIds, value.write] : [value.windowId, groupIds, value.write]);
         const old = db.prepare('SELECT input_digest,outcome FROM execution_saves WHERE id=?').get(value.saveId);
         if (old) { if (old.input_digest !== inputDigest) return fail('execution_save_conflict'); return { created: false, outcome: old.outcome as 'pending' | 'committed' | 'rejected' }; }
         const rows = checked(db, value.groups);
         if (db.prepare('SELECT id FROM execution_scope_registration WHERE workspace_id=?').get(value.write.workspaceId)) return fail('execution_scope_registration_pending');
-        if (rows.some(row => row.phase !== 'editable' || row.stage !== 'closed' || row.controller.admission !== 'closed' || row.windowId !== value.windowId || JSON.stringify(row.windowGroups) !== JSON.stringify(groupIds))) return fail('execution_window_not_editable');
+        if (value.mode === 'concurrent') {
+          if (value.windowId !== 'file-' + hash(value.write.workspaceId)) return fail('execution_save_scope_mismatch');
+          if (rows.some(row => !row.baselineComplete || row.phase !== 'online' || row.windowId || row.controller.admission !== 'open')) return fail('execution_admission_closed');
+          // Compatibility scope for the existing receipt FK, not an edit gate.
+          // It is permanently completed and never assigned to a running group.
+          db.prepare("INSERT OR IGNORE INTO execution_windows(id,groups_json,status,created_at) VALUES(?,?,'completed',?)").run(value.windowId, JSON.stringify(groupIds), Date.now());
+          if (Number(db.prepare("SELECT count(*) n FROM execution_saves WHERE outcome='pending'").get()!.n) >= 32) return fail('execution_save_in_progress');
+        } else if (rows.some(row => row.phase !== 'editable' || row.stage !== 'closed' || row.controller.admission !== 'closed' || row.windowId !== value.windowId || JSON.stringify(row.windowGroups) !== JSON.stringify(groupIds))) return fail('execution_window_not_editable');
         // Serialize the filesystem compare-and-rename across application
         // processes too. Atomic rename alone does not provide a version CAS.
         if (db.prepare("SELECT id FROM execution_saves WHERE window_id=? AND outcome='pending' LIMIT 1").get(value.windowId)) return fail('execution_save_in_progress');
         if (JSON.stringify(workspaceGroups(db, value.write.workspaceId)) !== JSON.stringify(groupIds)) return fail('execution_save_scope_mismatch');
         const workspace = db.prepare('SELECT identity,removed FROM workbench_workspaces WHERE id=?').get(value.write.workspaceId);
         if (workspace?.identity !== value.write.directoryIdentity || workspace.removed !== 0) return fail('execution_directory_changed');
-        const permit: SavePermit = { saveId: value.saveId, windowId: value.windowId, write: value.write, ...(value.writerId ? { writerId: value.writerId } : {}), groups: rows.map(row => ({ groupId: row.groupId, controller: { generation: row.controller.generation, epoch: row.controller.epoch } })) };
+        const permit: SavePermit = { ...(value.mode ? { mode: value.mode } : {}), saveId: value.saveId, windowId: value.windowId, write: value.write, ...(value.writerId ? { writerId: value.writerId } : {}), groups: rows.map(row => ({ groupId: row.groupId, controller: { generation: row.controller.generation, epoch: row.controller.epoch } })) };
         db.prepare("INSERT INTO execution_saves(id,window_id,input_digest,permit_json,outcome,created_at) VALUES(?,?,?,?,'pending',?)").run(value.saveId, value.windowId, inputDigest, JSON.stringify(permit), Date.now());
         return { created: true, permit };
       });
@@ -734,6 +746,12 @@ export function createExecutionStore(db: DatabaseSync) {
     pendingSaves(input: { windowId: string; after?: string; limit: number }) {
       const value = z.object({ windowId: id, after: id.optional(), limit: z.number().int().min(1).max(16) }).strict().parse(input);
       const rows = db.prepare("SELECT id,permit_json FROM execution_saves WHERE window_id=? AND outcome='pending' AND id>? ORDER BY id LIMIT ?").all(value.windowId, value.after ?? '', value.limit + 1);
+      const entries = rows.slice(0, value.limit).map(row => JSON.parse(String(row.permit_json)) as SavePermit);
+      return { entries, nextCursor: rows.length > value.limit ? entries.at(-1)!.saveId : null };
+    },
+    pendingConcurrentSaves(input: { after?: string; workspaceId?: string; limit: number }) {
+      const value = z.object({ after: id.optional(), workspaceId: id.optional(), limit: z.number().int().min(1).max(16) }).strict().parse(input);
+      const rows = db.prepare("SELECT id,permit_json FROM execution_saves WHERE outcome='pending' AND id>? AND json_extract(permit_json,'$.mode')='concurrent' AND (? IS NULL OR json_extract(permit_json,'$.write.workspaceId')=?) ORDER BY id LIMIT ?").all(value.after ?? '', value.workspaceId ?? null, value.workspaceId ?? null, value.limit + 1);
       const entries = rows.slice(0, value.limit).map(row => JSON.parse(String(row.permit_json)) as SavePermit);
       return { entries, nextCursor: rows.length > value.limit ? entries.at(-1)!.saveId : null };
     },

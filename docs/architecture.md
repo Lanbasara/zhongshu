@@ -57,7 +57,7 @@ Web manifest 提供独立窗口入口。有限且已完成的 Markdown 预览按
 | 当前路径 | 实际职责与耦合 | 已确认目标的维护位置 |
 | --- | --- | --- |
 | 用户提交 → 操作落库 → adapter 派发 | Workbench 持有派发、排队、观察与恢复；观察连接的寿命不等于原生运行寿命 | [执行登记与门禁](adr/0011-managed-workspace-execution.md#持久未决登记与代次) |
-| 原生变更 → Workbench → 存储 → SSE 提示重取 | 执行状态、正文覆盖独立持久化；快照读取不重启已有观察或同步循环，存档失败不撤销已证实的执行状态 | [三种事实独立](adr/0010-durable-reading-archive.md#三种事实独立) |
+| 原生变更 → Workbench → 存储 → SSE 提示重取 | 执行状态、正文覆盖独立持久化；快照读取不激活原生会话，也不建立观察或同步循环，存档失败不撤销已证实的执行状态 | [三种事实独立](adr/0010-durable-reading-archive.md#三种事实独立) |
 | 原生物理历史 → 持久任务 → 逐页提交 | 每个绑定有 latest/backfill 任务和独立修订水位，不依赖页面访问或观察 runtime；历史页确立顺序，原生追加索引发现旧条目修订，正文与水位同事务提交；全局两个槽，正文每 1 MiB 让出任务 | [可恢复同步](adr/0010-durable-reading-archive.md#可恢复同步) |
 | 存储 → 摘要页 / 独立正文 → 浏览器窗口 | 对话快照合计至多 50 个条目、256 KiB；单条文本/工具/引用合用 8 KiB 预览；正文按不可变摘要和 64 KiB 字节块读取；队列编辑和本轮文件另读 | [查询、正文和渲染](adr/0012-bounded-data-paths.md#查询正文和渲染) |
 | 历史合并 → storage worker | 按稳定 ID 和索引位置增量合并；局部重排有界，大范围重建在另一套位置列分批推进后原子发布；移除累计对话/历史/操作条数上限 | [存储与调度](adr/0012-bounded-data-paths.md#存储与调度) |
@@ -65,6 +65,8 @@ Web manifest 提供独立窗口入口。有限且已完成的 Markdown 预览按
 | 文件选择 → 代次清单 → keyset 页 | 目录 worker 分批扫描、发布代次，游标绑定目录身份/代次；后台刷新和旧页继续可区分，工作区本身也分页搜索 | [目录清单](adr/0012-bounded-data-paths.md#目录清单) |
 
 状态、历史和传输游标入口在 [Workbench](../src/server/workbench.ts)、[存储](../src/server/workbench-store.ts)、[HTTP](../src/server/workbench-http.ts) 与 [浏览器工作台](../src/web/workbench.tsx)。正文身份、暂存、分块、所有权和校验归 [body-store](../src/server/body-store.ts)；历史位置重建归 [history-order](../src/server/history-order.ts)。旧源游标失效会保留存档并重新锚定，同时标记连续性未确认；源缺口不会因一次新扫描成功而消失。运行中的实时前缀标记 `previewOnly`，不冒充可下载的完整正文；物理记录的可比较修订和终态负责完成它。
+
+工作台启动只恢复未完成执行、未知操作和待处理队列；旧对话读取只走持久投影。最多 16 个工作观察 runtime，连接丢失使旧 watch 句柄失效并独立重订阅；容量压力不能覆盖原生状态。安全释放能力由 Host 协商，不能假定旧 Host 支持。没有待核对操作/队列的空闲观察在宽限后释放，其他兼容接入保留观察并降低空闲轮询频率。受管 Codex adapter 保留原生执行订阅，DSH 取消监听不 dispose Agent；这保护后台工作，不构成原生驻留上限或自动休眠策略。
 
 应用停止先关闭执行协调与已跟踪工作，再关闭 HTTP、存储与目录所有者。HTTP 关闭释放全部连接，未完成请求正文或慢读客户端不能阻止后续存储关闭；断开浏览器传输不等于向 Harness 发送停止任务。未送达回执仍按持久操作身份核对，不能重发换取确定结果。正常停止与未完成正文反例见 [R02](features/continuity.md#driving-it-with-harness)。
 
@@ -130,9 +132,9 @@ Codex 以原生 image input、DSH 以原生 image content 接图片，无需新�
 
 Harness Adapter 提供可归因的编辑目标。工作台在写入历史或实时条目时记录对话、原生轮和工作区相对路径，转发当前历史页所涉及的清单。清单与文件内容分开读取，打开时仍走原工作区阅读器。
 
-可写工作区由操作者声明写入边界。[execution-store](../src/server/execution-store.ts) 持有受理、冲突组、固定冻结集合、原生基线检查点和保存许可，与工作台入队、领取同事务登记。[execution-coordinator](../src/server/execution-coordinator.ts) 驱动 online → draining → editable → resuming；[execution-workspaces](../src/server/execution-workspaces.ts) 将持久协议接入工作区。首次旧绑定检查按 keyset 分批，此后编辑只追踪未决工作。相交可写挂载的组一起冻结，原生激活入口必须经过可信许可与 gateway，包括可能恢复原生会话的状态读取。
+可写工作区由操作者声明写入边界。[execution-store](../src/server/execution-store.ts) 持有受理、冲突组、固定冻结集合、原生基线检查点和保存许可，与工作台入队、领取同事务登记。[execution-coordinator](../src/server/execution-coordinator.ts) 驱动 online → draining → editable → resuming；[execution-workspaces](../src/server/execution-workspaces.ts) 将持久协议接入工作区。首次旧绑定检查按 keyset 分批，普通编辑已脱离该状态机；遗留窗口与管理操作仍使用它。管理冻结将相交可写挂载的组一起冻结，原生激活入口必须经过可信许可与 gateway，包括可能恢复原生会话的状态读取。
 
-两个 Harness 的原地保存要求受管专用 Host。固定受理集合排空后，控制器证明 Host 及其写者退出，才开放编辑。保存或关闭页面不解除窗口，必须显式恢复。控制意图在外部动作之前持久化，代次与 epoch 拒绝旧结果；未知状态关闭门禁，不自动取消或重发任务。
+普通编辑使用 online 条件保存，不关闭运行组或调用控制器停机。`concurrent` 保存许可与持久回执独立于 gate 的编辑窗口；writer 仍核验目录身份、文件版本和操作身份，检测冲突保留稿件。旧窗口通过显式恢复退出，新编辑不再建立窗口。未决文件保存阻止管理员冻结/移除，不能与文件写入交错改变目录归属。并发外部写者不受中书全局锁控制，取舍见 [ADR 0014](adr/0014-observation-lifetime-and-concurrent-editing.md)。
 
 [execution-sandbox-policy](../src/server/execution-sandbox-policy.ts) 为受管 Codex 提供固定原生版本的内层沙箱兼容规则；[Moby 默认清单](../src/server/moby-seccomp-default.ts)保留原规则与许可证，只增精确参数的 namespace/mount 调用，DSH 继续使用 Docker 默认策略。规则摘要进入 Host 持久身份；Docker 退出证明同时核对非 root 身份、只读根、capabilities 和实际安全选项，原标签不能掩盖这些配置漂移。支持的架构与宿主策略前提归 [README](../README.md#managed-host-deployment)，不因原生 catalog 宣称权限可用就省略真实工具验证。
 

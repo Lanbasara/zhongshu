@@ -228,6 +228,8 @@ test('workspace registration gates real HTTP and retains disk files, history and
   assert.equal((await manage({ action: 'restore' })).status, 200);
   assert.equal(f.store.getConversation(id)?.state.configurationVerified, false);
   await f.request(`/conversations/${id}`);
+  assert.equal(f.store.getConversation(id)?.state.configurationVerified, false, 'cold history is not an execution refresh');
+  await post(`/conversations/${id}/reconcile`, {});
   await eventually(() => f.store.getConversation(id)?.state.configurationVerified === true);
   assert.deepEqual(f.store.getConversation(id)?.binding, binding);
   assert.equal((await manage({ action: 'remove' })).status, 200);

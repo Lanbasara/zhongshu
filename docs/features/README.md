@@ -11,7 +11,7 @@
 | 选配置、创建、空对话恢复、核对创建结果 | [conversations](conversations.md)：C01–C05 | fixture；C05 需真实 DSH |
 | 工作区分组、侧栏调整、标题搜索、重命名与归档 | [conversation-management](conversation-management.md)：M01–M05 | fixture、真实 Harness 与手机分支 |
 | 发送、接续、停止、排队与提前发送 | [execution](execution.md)：E01–E07 | fixture；原生轮次与接收语义需真实 Harness |
-| 刷新/关页/应用中断后恢复、草稿、长历史与完整正文 | [continuity](continuity.md)：R01–R08 | fixture；原生恢复需另跑真实分支 |
+| 刷新/关页/应用中断后恢复、草稿、长历史与完整正文 | [continuity](continuity.md)：R01–R09 | fixture；原生恢复需另跑真实分支 |
 | 完整图文对话、工具阅读、输入与引用、本轮文件、技能、用量、恢复接续 | [conversation-usability](conversation-usability.md)：U01–U13 | 两个真实 Harness、合成图片及工作区文件 |
 | 工作区文件、只读 HTML 与条件保存 | [workspace-files](workspace-files.md) | 浏览器、合成报告与纯文本、两个真实 Harness |
 | 添加目录、管理、移除与恢复工作区登记 | [workspace-management](workspace-management.md) | fixture、两个真实 Harness、本地与 VPS 测试实例 |
@@ -37,7 +37,7 @@
 | `fixture` | React 构建产物、源代码 Fastify / Workbench / SQLite / HTTP / SSE、浏览器动作；只在 `HarnessAdapter` 边界接确定性替身 | Codex/DSH 协议、模型上下文、工具执行、原生权限、Host 崩溃恢复 |
 | `native` | 标准 `dist/server/main.js`、已配置的真实原生 Host、真实模型与合成工作区 | 未运行的另一 Harness、另一设备、代理链路、故障和性能分支 |
 
-fixture 的模型标签明确写“非真实模型”。控制命令只改替身自己的 `native.sqlite`，不写产品数据库或伪造浏览器响应正文。受管编辑界面分支在 `serve` 后加 `--managed`：使用真实执行协调器和文件写者，额外替换 Host/controller，仍不能证明容器隔离与真实 Harness 恢复；驱动与证明边界见[工作区文件](workspace-files.md)。
+fixture 的模型标签明确写“非真实模型”。控制命令只改替身自己的 `native.sqlite`，不写产品数据库或伪造浏览器响应正文。受管条件保存及遗留窗口恢复分支在 `serve` 后加 `--managed`：使用真实执行协调器和文件写者，额外替换 Host/controller，仍不能证明容器隔离与真实 Harness 恢复；驱动与证明边界见[工作区文件](workspace-files.md)。
 
 真实 Host 需要操作者提供隔离账号、受限执行身份和连接文件；缺少这些前提时记录 `BLOCKED`，仍可跑 fixture。
 

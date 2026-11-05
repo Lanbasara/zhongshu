@@ -76,7 +76,7 @@ test('reopening an initialized Host with plugin management offline preserves arc
   assert.equal(typeof adapters.get('codex')?.readBodyChunk, 'function');
 });
 
-test('trusted worker admission, Unix native RPC and durable Host gateway drain before file editing and resume the same binding', async t => {
+test('trusted worker and Unix gateway allow online file editing while preserving explicit administrative gates', async t => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'zh-managed-'))); const workspace = join(root, 'workspace'); await mkdir(workspace); await writeFile(join(workspace, 'note.md'), 'original');
   const storage = createStorageClient({ dataDirectory: join(root, 'product') }); await storage.ready;
   const workspaces = [{ id: 'synthetic', label: 'Synthetic', directory: workspace, managedWrites: true }];
@@ -111,20 +111,29 @@ test('trusted worker admission, Unix native RPC and durable Host gateway drain b
   const operationId = randomUUID();
   await service.enqueue({ id: operationId, conversationId: id, type: 'message', payload: { text: 'only the trusted persisted input is sent' } });
   await until(async () => (await storage.store.getOperation(operationId))?.status === 'accepted'); assert.equal(submitted, 1);
-  const paused = await service.changeWorkspaceMaintenance('synthetic', 'pause'); assert.equal(paused.editable, false); assert.equal(running, true);
+  const editable = await service.changeWorkspaceMaintenance('synthetic', 'pause');
+  assert.equal(editable.editable, true); assert.equal(running, true, 'compatibility edit requests never stop native execution');
+  const file = await service.openWorkspaceFile('synthetic', 'note.md');
+  await service.saveWorkspaceFile('synthetic', 'note.md', file.version, 'saved while native work runs', randomUUID());
+  assert.equal(await readFile(join(workspace, 'note.md'), 'utf8'), 'saved while native work runs');
+  // Existing task observers may query concurrently; their total call count is
+  // not attributable to this save. Assert the native work/Host stays running.
+  assert.equal(state.status, 'running'); assert.equal(running, true);
+
+  // Administrative operations still use a real durable fence; the ordinary
+  // file editor cannot request this transition anymore.
+  await execution.change('synthetic', 'pause');
   await assert.rejects(service.enqueue({ id: randomUUID(), conversationId: id, type: 'message', payload: { text: 'must not enter frozen set' } }));
   state = { ...state, status: 'idle', terminalRunId: state.runId, terminalStatus: 'completed' };
-  await until(async () => (await service.workspaceEditStatus('synthetic')).editable); assert.equal(running, false);
-  const activationCount = activated;
+  await until(async () => (await execution.status('synthetic')).phase === 'editable'); assert.equal(running, false);
   const pausedSnapshot = await service.snapshot(id);
   assert.equal(pausedSnapshot.conversation.state.configurationVerified, false);
   assert.equal(pausedSnapshot.conversation.error, 'workspace_execution_blocked');
   const admittedReplay = await service.enqueue({ id: operationId, conversationId: id, type: 'message', payload: { text: 'only the trusted persisted input is sent' } });
-  assert.equal(admittedReplay.status, 'accepted', 'a closed gate must still return the original durable receipt for an already admitted ID');
+  assert.equal(admittedReplay.status, 'accepted', 'a closed gate still returns the original durable receipt');
   assert.equal(submitted, 1);
-  const file = await service.openWorkspaceFile('synthetic', 'note.md');
-  await service.saveWorkspaceFile('synthetic', 'note.md', file.version, 'saved while whole host stopped', randomUUID());
-  assert.equal(await readFile(join(workspace, 'note.md'), 'utf8'), 'saved while whole host stopped'); assert.equal(activated, activationCount);
+  const current = await service.openWorkspaceFile('synthetic', 'note.md');
+  await assert.rejects(service.saveWorkspaceFile('synthetic', 'note.md', current.version, 'blocked by old administrative window', randomUUID()));
   assert.equal((await service.changeWorkspaceMaintenance('synthetic', 'resume')).maintenance, 'online'); assert.equal(running, true);
   await service.reconcile(id);
   assert.equal((await service.snapshot(id)).conversation.state.configurationVerified, true);

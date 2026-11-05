@@ -7,6 +7,8 @@ evidence: https://github.com/Lanbasara/zhongshu/pull/33
 
 # 受管工作区编辑
 
+本轮范围修订：普通文件编辑不再要求停机或独占运行组，以 [ADR 0014](../adr/0014-observation-lifetime-and-concurrent-editing.md) 为准；下文旧门禁要求仅适用于遗留窗口恢复及管理操作，不作为新编辑的验收目标。
+
 属于[上线前联合规格](long-term-performance.md)。沿用[工作区文件阅读与编辑](workspace-file-reading-editing.md)的格式、稿件及条件保存范围；执行协调和原生能力前提唯一归 [ADR 0011](../adr/0011-managed-workspace-execution.md)。本次将 Codex 与 DSH 纳入相同的编辑窗口语义，扩展既有 DSH 维护方式。
 
 ## 用户路径与行为

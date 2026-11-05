@@ -30,7 +30,7 @@ const HISTORY_MAX_BYTES = 16 * 1024 * 1024;
 type Runtime = {
   stop?: () => void; watching?: Promise<void>; syncing?: Promise<void>;
   timer?: NodeJS.Timeout; poll?: NodeJS.Timeout; flush?: NodeJS.Timeout;
-  live: Map<string, NativeItem>; generation: number; stateGeneration: number; dirty: boolean; state?: NativeState['status']; stateWrite?: Promise<unknown>;
+  live: Map<string, NativeItem>; generation: number; stateGeneration: number; dirty: boolean; state?: NativeState['status']; stateWrite?: Promise<unknown>; watchGeneration?: number; releaseSafe?: boolean; idleSince?: number; lastPoll?: number; retryDelay?: number;
 };
 type ArchiveReader = Pick<HarnessAdapter, 'history' | 'historyChanges' | 'readItems' | 'readBodyChunk' | 'releaseBodySource' | 'readImage'>;
 
@@ -61,6 +61,9 @@ export class Workbench {
   private catalogLoading?: Promise<Catalog[]>;
   private queueRecovery?: NodeJS.Timeout;
   private queueRecoveryCursor = '';
+  private executionRecoveryCursor = '';
+  private recoveringObservations = false;
+  private concurrentSaveCursor?: string;
   private archiveTimer?: NodeJS.Timeout;
   private archiveAdvancing = false;
   private readonly archiveInFlight = new Map<string, Promise<void>>();
@@ -132,7 +135,7 @@ export class Workbench {
       this.removing.add(id);
       try {
         const status = await this.execution.change(id, 'pause');
-        if (!status.editable) throw new StoreError('workspace_remove_busy', 409);
+        if (status.phase !== 'editable' || status.reason === 'execution_save_unresolved') throw new StoreError('workspace_remove_busy', 409);
         // Only the bounded live observation cache needs flushing; completed
         // historical conversations do not participate in removal permission.
         for (const [conversationId, runtime] of this.runtimes) {
@@ -276,7 +279,7 @@ export class Workbench {
     return [...this.savingDirectories].some(root => this.overlaps(root, directory));
   }
   private executionBlocked(directory: string): boolean {
-    return !!this.execution && !this.execution.initialized || this.saving(directory) || this.workspaces.some(workspace => workspace.maintenance &&
+    return !!this.execution && !this.execution.initialized || this.workspaces.some(workspace => workspace.maintenance &&
       this.overlaps(directory, workspace.directory) && this.maintenancePhases.get(workspace.id) !== 'online');
   }
   private async assertExecutionAdmission(workspaceId: string): Promise<void> {
@@ -291,43 +294,21 @@ export class Workbench {
     }
   }
   async changeWorkspaceMaintenance(id: string, action: 'pause' | 'resume') {
-    const workspace = (await this.workspace(id));
-    if (this.execution && await this.execution.managed(id)) return this.task(async () => this.readyEditStatus(id, await this.execution!.change(id, action)));
+    const workspace = await this.workspace(id);
+    // Old clients may still ask to enter an exclusive edit window. Editing no
+    // longer owns execution: acknowledge current status without stopping work.
+    if (action === 'pause') return this.workspaceEditStatus(id);
+    if (this.execution && await this.execution.managed(id)) return this.task(async () => this.readyEditStatus(id, await this.execution!.change(id, 'resume')));
     const controller = workspace.maintenance;
-    const { directory } = workspace;
     if (!controller) throw new StoreError('workspace_maintenance_unavailable', 409);
-    const previous = this.maintenancePhases.get(id);
-    if (previous === 'transition' || this.saving(directory)) throw new StoreError('workspace_maintenance_busy', 409);
-    if (action === 'pause' && previous === 'paused') return (await this.workspaceEditStatus(id));
-    if (action === 'pause' && previous !== 'online') throw new StoreError('workspace_maintenance_unavailable', 409);
+    if (this.saving(workspace.directory)) throw new StoreError('workspace_maintenance_busy', 409);
     this.maintenancePhases.set(id, 'transition');
     return this.task(async () => {
-      let next: HostPhase = 'unknown';
       try {
-        if (action === 'pause' && !await this.confirmWorkspaceIdle(directory)) {
-          next = 'online';
-          throw new StoreError('workspace_not_idle', 409);
-        }
-        const expected = action === 'pause' ? 'paused' : 'online';
-        if (await controller(action) !== expected || await controller('status') !== expected)
-          throw new StoreError('workspace_maintenance_unavailable', 409);
-        if (action === 'pause') {
-          for await (const conversation of this.workspaceConversations(directory)) {
-            const runtime = this.runtimes.get(conversation.id);
-            if (runtime) {
-              for (const item of runtime.live.values()) (await this.store.saveLiveItem(conversation.id, item));
-              this.disposeRuntime(conversation.id);
-            }
-          }
-        }
-        if (action === 'resume' && !await this.confirmWorkspaceIdle(directory, true) &&
-          !await this.confirmWorkspaceIdle(directory, true))
-          throw new StoreError('workspace_maintenance_unavailable', 409);
-        next = expected;
-      } finally {
-        this.maintenancePhases.set(id, next);
-      }
-      return (await this.workspaceEditStatus(id));
+        if (await controller('resume') !== 'online' || await controller('status') !== 'online') throw new StoreError('workspace_maintenance_unavailable', 409);
+        this.maintenancePhases.set(id, 'online');
+      } catch (error) { this.maintenancePhases.set(id, 'unknown'); throw error; }
+      return this.workspaceEditStatus(id);
     });
   }
   private async *workspaceConversations(directory: string, workspaceId?: string) {
@@ -479,8 +460,7 @@ export class Workbench {
   }
   private async readyEditStatus(id: string, status: ManagedEditStatus): Promise<ManagedEditStatus> {
     if (!status.editable) return status;
-    // An edit window includes a ready, exclusively owned file writer. Its cold
-    // startup belongs to entering the window, not the user's first save.
+    // File editing requires the isolated writer, never a stopped Harness.
     try {
       if (!this.writer) throw new StoreError('file_writer_unavailable', 503);
       await this.writer.owner();
@@ -490,33 +470,12 @@ export class Workbench {
   }
   async workspaceEditStatus(id: string) {
     if (this.execution && await this.execution.managed(id)) { await this.workspace(id); return this.readyEditStatus(id, await this.execution.status(id)); }
-    const { directory, managedWrites, maintenance } = (await this.workspace(id));
-    if (!managedWrites) return { editable: false, reason: 'workspace_writes_unmanaged' };
-    if (this.saving(directory)) return { editable: false, reason: 'workspace_save_in_progress' };
+    const { directory, managedWrites, maintenance } = await this.workspace(id);
+    if (!managedWrites) return { canPause: false, editable: false, reason: 'workspace_writes_unmanaged' };
+    if (this.saving(directory)) return { canPause: false, editable: false, reason: 'workspace_save_in_progress' };
     const phase = maintenance ? this.maintenancePhases.get(id) ?? 'unknown' : undefined;
-    if (phase && phase !== 'online') {
-      return { editable: phase === 'paused', reason: phase === 'paused' ? null : 'workspace_maintenance_' + phase, maintenance: phase };
-    }
-    let idle = true;
-    let restoring = 0;
-    for await (const conversation of this.workspaceConversations(directory)) {
-      if (phase === 'online') {
-        if (!(await this.configured(conversation)) || this.preparing.has(conversation.id) || this.busyConversations.has(conversation.id) ||
-          ['running', 'waiting', 'interrupted', 'failed'].includes(conversation.state.status) || conversation.state.pendingInputs) idle = false;
-        continue;
-      }
-      if ((await this.idleForEditing(conversation))) continue;
-      idle = false;
-      if (restoring < 4 && (await this.configured(conversation)) && conversation.binding &&
-        !this.runtimes.get(conversation.id)?.stop && !this.runtimes.get(conversation.id)?.watching) {
-        restoring++;
-        this.launch(this.restoreConversation(conversation.id));
-      }
-    }
-    if (phase === 'online') {
-      return { editable: false, reason: idle ? 'workspace_maintenance_online' : 'workspace_not_idle', maintenance: phase, canPause: idle };
-    }
-    return { editable: idle, reason: idle ? null : 'workspace_not_idle' };
+    if (phase && phase !== 'online') return { canPause: false, editable: false, reason: 'workspace_maintenance_' + phase, maintenance: phase };
+    return { canPause: false, editable: true, reason: null, ...(phase ? { maintenance: phase } : {}) };
   }
   async listWorkspaceFiles(id: string, directory: string, options: { cursor?: string; limit?: number; refresh?: boolean } = {}): Promise<DirectoryPage> {
     if (this.directoryIndex) {
@@ -537,7 +496,7 @@ export class Workbench {
     return result;
   }
   async saveWorkspaceFile(id: string, path: string, version: string, text: string, saveId: string = randomUUID()) {
-    const { directory, maintenance } = (await this.workspace(id));
+    const { directory } = (await this.workspace(id));
     // Reject invalid payloads before starting a writer or admitting a durable
     // save. Otherwise a transport/schema rejection could leave an unknown effect.
     validateWorkspaceText(text);
@@ -568,32 +527,9 @@ export class Workbench {
     this.savingDirectories.add(directory);
     return this.task(async () => {
       try {
-        if (maintenance) {
-          if (await maintenance('status') !== 'paused') {
-            this.maintenancePhases.set(id, 'unknown');
-            throw new StoreError('workspace_maintenance_unavailable', 409);
-          }
-          return await saveWorkspaceDocument(directory, path, version, text, () => {
-            this.assertOpen(); assertRegistration();
-          }, identity);
-        }
-        const guards: (() => boolean)[] = [];
-        for await (const conversation of this.workspaceConversations(directory)) {
-          await this.sync(conversation.id);
-          const current = await this.conversation(conversation.id);
-          const runtime = this.runtimes.get(current.id);
-          const generation = runtime?.stateGeneration;
-          if (!await this.idleForEditing(current) || runtime?.stateGeneration !== generation) throw new ResourceError('workspace_not_idle', 409);
-          guards.push(() => this.runtimes.get(current.id) === runtime && runtime?.stateGeneration === generation &&
-            runtime?.state === 'idle' && !runtime.dirty && !this.busyConversations.has(current.id) && !this.preparing.has(current.id));
-        }
-        const assertWritable = () => {
-          this.assertOpen();
-          assertRegistration();
-          if (!guards.every(check => check())) throw new ResourceError('workspace_not_idle', 409);
-        };
-        assertWritable();
-        return await saveWorkspaceDocument(directory, path, version, text, assertWritable, identity);
+        return await saveWorkspaceDocument(directory, path, version, text, () => {
+          this.assertOpen(); assertRegistration();
+        }, identity);
       } finally { this.savingDirectories.delete(directory); }
     });
   }
@@ -783,19 +719,15 @@ export class Workbench {
       this.archiveTimer ??= setInterval(() => this.launch(this.advanceArchives()), 50).unref();
       (await this.advanceArchives());
       (await this.restoreQueuedConversations());
-      this.queueRecovery ??= setInterval(() => this.launch(this.restoreQueuedConversations()), 5000).unref();
-      // The most recent bounded set restores eagerly. Other conversations restore when opened.
-      for (const conversation of (await this.store.listConversations({ limit: 16, archived: false }))) {
-        if ((await this.workspaceUnavailable(conversation.workspaceId))) continue;
-        if (!(await this.configured(conversation))) { try { (await this.adapter(conversation)); } catch { /* durable blocked state */ } continue; }
-        if (conversation.binding && !this.executionBlocked(conversation.cwd)) this.launch(this.restoreConversation(conversation.id));
-        else if (!conversation.binding && conversation.readiness === 'preparing') (await this.store.setConversationState(conversation.id, { readiness: 'blocked', error: 'native_creation_result_unknown' }));
-      }
+      this.queueRecovery ??= setInterval(() => { this.launch(this.restoreQueuedConversations()); this.launch(this.restoreExecutionConversations()); }, 5000).unref();
+      await this.restoreExecutionConversations();
+
     });
   }
-  private async recoverWorkspaceSaves(windowId: string) {
+  private async recoverWorkspaceSaves(windowId?: string) {
     if (!this.execution || !this.writer || this.closed) return;
-    const page = await this.execution.port.pendingSaves({ windowId, limit: 16 });
+    const page = windowId ? await this.execution.port.pendingSaves({ windowId, limit: 16 }) : await this.execution.port.pendingConcurrentSaves({ after: this.concurrentSaveCursor, limit: 16 });
+    if (!windowId) this.concurrentSaveCursor = page.nextCursor ?? undefined;
     for (const permit of page.entries) {
       const registration = await this.registry?.get(permit.write.workspaceId);
       if (!registration || registration.identity !== permit.write.directoryIdentity) continue;
@@ -816,21 +748,44 @@ export class Workbench {
       this.launch(this.restoreConversation(id));
     }
   }
+  private async restoreExecutionConversations() {
+    if (this.closed || this.recoveringObservations) return;
+    this.recoveringObservations = true;
+    try {
+      const pending = await this.store.recoveryConversations(this.executionRecoveryCursor);
+      this.executionRecoveryCursor = pending.length === 64 ? pending.at(-1)! : '';
+      for (const id of pending) {
+        if (this.runtimes.has(id)) continue;
+        const conversation = await this.conversation(id);
+        if (!conversation.binding) {
+          if (conversation.readiness === 'preparing') await this.store.setConversationState(id, { readiness: 'blocked', error: 'native_creation_result_unknown' });
+          continue;
+        }
+        if (!await this.configured(conversation) || await this.workspaceUnavailable(conversation.workspaceId) || this.executionBlocked(conversation.cwd)) continue;
+        try { this.runtime(id); } catch { break; } // Capacity is not a native execution failure.
+        this.launch(this.restoreConversation(id));
+      }
+    } finally { this.recoveringObservations = false; }
+  }
   private restoreConversation(id: string): Promise<void> {
     return this.task(async () => {
-      try { await this.observe(id); await this.sync(id); }
-      catch { if (!this.closed) (await this.unknown(id, 'native_observation_unavailable')); }
+      try { await this.observe(id); await this.sync(id); const runtime = this.runtimes.get(id); if (runtime) runtime.retryDelay = undefined; }
+      catch (error) {
+        if (!this.closed && !(error instanceof StoreError && error.code === 'active_conversation_limit')) {
+          await this.unknown(id, 'native_observation_unavailable');
+          const runtime = this.runtimes.get(id);
+          if (runtime) { runtime.retryDelay = Math.min(30_000, (runtime.retryDelay ?? 500) * 2); this.scheduleSync(id, false, runtime.retryDelay); }
+        }
+      }
     });
   }
   async open(id: string) {
-    this.assertOpen(); const conversation = (await this.conversation(id));
-    const runtime = this.runtimes.get(id);
-    // A snapshot is not a refresh command: restarting synchronization on every
-    // SSE-triggered GET creates a read → archive progress → SSE → read loop.
-    if (!runtime?.stop && !runtime?.watching && !runtime?.syncing && conversation.binding &&
-      !(await this.workspaceUnavailable(conversation.workspaceId)) && !this.executionBlocked(conversation.cwd)) this.launch(this.restoreConversation(id));
-    return (await this.snapshot(id));
+    this.assertOpen(); await this.conversation(id);
+    // Reading persisted history never resumes a native Agent or acquires an
+    // execution observation. Running work is recovered independently of viewers.
+    return await this.snapshot(id);
   }
+
   async skills(id: string) {
     this.assertOpen();
     const conversation = (await this.conversation(id));
@@ -1002,8 +957,7 @@ export class Workbench {
     if (input.type === 'message') await this.assertExecutionAdmission(workspaceId);
     if (this.removing.has(workspaceId)) throw new StoreError('workspace_remove_busy', 409);
     (await this.assertWorkspaceAvailable(workspaceId));
-    if (!this.saving(directory) && this.executionBlocked(directory)) throw new StoreError('workspace_execution_blocked', 409);
-    if (this.saving(directory)) throw new StoreError('workspace_save_in_progress', 409);
+    if (this.executionBlocked(directory)) throw new StoreError('workspace_execution_blocked', 409);
     if (input.type === 'message' && (this.runtimes.get(input.conversationId)?.dirty || this.runtimes.get(input.conversationId)?.syncing)) await this.sync(input.conversationId);
     const conversation = (await this.conversation(input.conversationId)); (await this.adapter(conversation));
     if (conversation.archived) throw new StoreError('conversation_archived', 409);
@@ -1015,7 +969,6 @@ export class Workbench {
     if (this.removing.has(workspaceId)) throw new StoreError('workspace_remove_busy', 409);
     (await this.assertWorkspaceAvailable(workspaceId));
     if (input.type === 'message' && !(await this.messageAllowed((await this.conversation(conversation.id))))) throw new StoreError('operation_needs_reconciliation', 409);
-    if (this.saving(conversation.cwd)) throw new StoreError('workspace_save_in_progress', 409);
     if (this.executionBlocked(conversation.cwd)) throw new StoreError('workspace_execution_blocked', 409);
     const result = (await this.store.enqueueOperation(input));
     if (result.created) this.launch(this.dispatch(result.operation.id));
@@ -1109,7 +1062,9 @@ export class Workbench {
       let conversation = (await this.conversation(id));
       if (!conversation.binding && this.recoverCreation) { await this.recoverCreation(conversation); conversation = await this.conversation(id); }
       const adapter = (await this.adapter(conversation)); if (!conversation.binding) return;
-      await this.observe(id); await this.sync(id); this.assertOpen(); conversation = (await this.conversation(id));
+      try { await this.observe(id); }
+      catch { await this.unknown(id, 'native_observation_unavailable'); this.scheduleSync(id, false, 1000); return; }
+      await this.sync(id); this.assertOpen(); conversation = (await this.conversation(id));
       for (const operation of (await this.store.listOperations({ conversationId: id, status: 'unknown', order: 'desc', limit: 100 }))) {
         this.assertOpen(); (await this.adapter((await this.conversation(id))));
         if (operation.type === 'message') {
@@ -1148,8 +1103,8 @@ export class Workbench {
     let runtime = this.runtimes.get(id);
     if (!runtime) {
       if (this.runtimes.size >= 16) {
-        const idle = [...this.runtimes].find(([key, value]) => !value.syncing && !value.watching && !this.preparing.has(key) && !this.busyConversations.has(key) &&
-          value.state !== undefined && !['running', 'waiting', 'unknown'].includes(value.state));
+        const idle = [...this.runtimes].find(([key, value]) => !value.syncing && !value.watching && !value.flush && !this.preparing.has(key) && !this.busyConversations.has(key) &&
+          value.releaseSafe && value.state !== undefined && !['running', 'waiting', 'unknown'].includes(value.state));
         if (!idle) throw new StoreError('active_conversation_limit', 429);
         this.disposeRuntime(idle[0]);
       }
@@ -1171,10 +1126,13 @@ export class Workbench {
     const adapter = (await this.adapter(conversation)); if (!conversation.binding) return Promise.resolve();
     const runtime = this.runtime(id);
     if (runtime.stop) return Promise.resolve(); if (runtime.watching) return runtime.watching;
+    const watchGeneration = runtime.watchGeneration = (runtime.watchGeneration ?? 0) + 1;
+    runtime.releaseSafe = adapter.observationReleaseSafe === true;
     runtime.watching = this.task(async () => {
       const stop = await adapter.watch(conversation.binding!, change => {
-        if (this.closed || this.runtimes.get(id) !== runtime) return;
+        if (this.closed || this.runtimes.get(id) !== runtime || runtime.watchGeneration !== watchGeneration) return;
         try {
+          runtime.idleSince = undefined;
           if (change.type === 'usage') { this.launch(this.store.setUsage(id, change.usage)); return; }
           runtime.generation++;
           if (change.type === 'item') {
@@ -1205,18 +1163,55 @@ export class Workbench {
             }
             // Transport loss is a fact, not a hint to wait for a successful read.
             // Keep saved history/identity while fencing reads from before loss.
-            if (change.type === 'unavailable') this.launch(this.unknown(id, change.reason));
+            if (change.type === 'unavailable') {
+              runtime.watchGeneration = watchGeneration + 1;
+              const release = runtime.stop; runtime.stop = undefined;
+              if (runtime.poll) clearInterval(runtime.poll); runtime.poll = undefined;
+              release?.();
+              this.launch(this.unknown(id, change.reason));
+              // Rebuild the event channel independently of an old state read.
+              // A stalled RPC must not prevent new-generation events arriving.
+              this.launch(this.task(async () => {
+                await runtime.watching?.catch(() => {});
+                if (!this.closed && this.runtimes.get(id) === runtime) await this.observe(id);
+              }).catch(() => { if (!this.closed) this.scheduleSync(id, false, 1000); }));
+            }
             this.scheduleSync(id);
           }
         } catch { this.launch(this.unknown(id, 'native_update_requires_sync')); this.scheduleSync(id); }
       });
-      if (this.closed || this.runtimes.get(id) !== runtime) stop();
-      else { runtime.stop = stop; runtime.poll = setInterval(() => this.scheduleSync(id, false), 5000); runtime.poll.unref(); }
+      if (this.closed || this.runtimes.get(id) !== runtime || runtime.watchGeneration !== watchGeneration) stop();
+      else {
+        runtime.stop = stop;
+        runtime.poll = setInterval(() => this.launch(this.pollObservation(id, runtime)), 5000).unref();
+      }
     });
     void runtime.watching.then(() => { runtime.watching = undefined; }, () => { runtime.watching = undefined; });
     return runtime.watching;
   }
-  private scheduleSync(id: string, invalidated = true): void {
+  private async pollObservation(id: string, runtime: Runtime) {
+    if (this.closed || this.runtimes.get(id) !== runtime || runtime.syncing || runtime.watching) return;
+    const generation = runtime.generation;
+    const idle = runtime.state !== undefined && TERMINAL.has(runtime.state) && !runtime.dirty;
+    if (idle && !this.preparing.has(id) && !this.busyConversations.has(id)) {
+      const queue = await this.store.readQueueSummary(id);
+      const operation = await this.store.operationState(id);
+      if (this.runtimes.get(id) !== runtime || runtime.generation !== generation || runtime.dirty) return;
+      if (!queue.entries.length && !operation.unresolved) {
+        runtime.idleSince ??= Date.now();
+        if (runtime.releaseSafe && Date.now() - runtime.idleSince >= 30_000) {
+          await this.flushLive(id, runtime);
+          if (this.runtimes.get(id) === runtime && runtime.generation === generation && !runtime.dirty && !runtime.syncing) this.disposeRuntime(id);
+          return;
+        }
+        // Compatibility adapters without a safe release contract retain their
+        // observer, but idle polling no longer runs at active-task frequency.
+        if (Date.now() - (runtime.lastPoll ?? 0) < 60_000) return;
+      }
+    } else runtime.idleSince = undefined;
+    runtime.lastPoll = Date.now(); this.scheduleSync(id, false);
+  }
+  private scheduleSync(id: string, invalidated = true, delayMs = 120): void {
     if (this.closed) return;
     const runtime = this.runtime(id);
     // A periodic refresh is not evidence that the verified native state changed.
@@ -1225,7 +1220,7 @@ export class Workbench {
     // dispatch always waits for a fresh state read before reaching the Harness.
     if (invalidated) runtime.dirty = true;
     if (runtime.syncing || runtime.timer) return;
-    runtime.timer = setTimeout(() => { runtime.timer = undefined; this.launch(this.sync(id)); }, 120); runtime.timer.unref();
+    runtime.timer = setTimeout(() => { runtime.timer = undefined; this.launch(this.restoreConversation(id)); }, delayMs); runtime.timer.unref();
   }
   private async advanceArchives(): Promise<void> {
     if (!this.closed && !this.indexSweepRunning && Date.now() >= this.indexSweepAt) {

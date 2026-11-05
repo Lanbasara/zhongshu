@@ -78,6 +78,7 @@ export interface WorkbenchStore {
   readQueueSummary(id: string): Omit<QueueSummary, 'mode'>;
   readQueueEntry(id: string, entryId: string, version: number): QueueView['entries'][number];
   queuedConversations(after: string): string[];
+  recoveryConversations(after: string): string[];
   queueAdmissionExists(id: string, entryId: string, content: InputContent): boolean;
   changeQueue(id: string, command: Exclude<QueueCommand, { action: 'send' }>): void;
   claimQueue(id: string, entryId: string, version: number, operationId: string, delivery: QueueDelivery): Operation;
@@ -690,6 +691,15 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
           status: row.operation_status === null ? (row.held ? 'held' as const : 'waiting' as const)
             : parse(z.enum(['dispatching', 'accepted', 'unknown']), row.operation_status, 'corrupt_workbench_data') };
       });
+    },
+    recoveryConversations(after) {
+      if (after) parse(uuid, after);
+      // The partial index contains only unfinished execution, never all history.
+      return storage(() => db.prepare(`SELECT id FROM workbench_conversations
+        WHERE id>? AND (readiness='preparing' OR json_extract(state_json,'$.status') IN ('running','waiting','unknown'))
+        UNION SELECT conversation_id AS id FROM workbench_operations
+        WHERE conversation_id>? AND status IN ('queued','dispatching','unknown')
+        ORDER BY id LIMIT 64`).all(after, after).map(row => String(row.id)));
     },
     queuedConversations(after) {
       if (after) parse(uuid, after);

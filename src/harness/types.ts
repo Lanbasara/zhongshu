@@ -84,11 +84,14 @@ export interface HarnessAdapter {
   readonly earlyInput?: 'current' | 'soon';
   /** History/body reads cannot activate or resume native execution. */
   readonly historyReadOnly?: true;
+  /** Releasing a watch cannot tear down native execution, descendants or terminals. */
+  readonly observationReleaseSafe?: boolean;
   catalog(): Promise<Catalog>;
   skills?(binding: Binding): Promise<SkillOption[]>;
   /** Persist the identity immediately, before later model/permission setup can fail. */
   create(input: { cwd: string; configuration: Configuration; title?: string }, onBound: (binding: Binding) => void | Promise<void>): Promise<Binding>;
-  /** A target may precede the current/latest run (for example a later native notification turn). Never infer its terminal result from that ordering. */
+  /** Execution-state verification may activate a native runtime; never call for history-only reads.
+   * A target may precede the current/latest run (for example a later native notification turn). Never infer its terminal result from that ordering. */
   state(binding: Binding, targetRunId?: string): Promise<NativeState>;
   history(binding: Binding, olderCursor?: string, limit?: number): Promise<HistoryPage>;
   historyChanges?(binding: Binding, cursor?: string, limit?: number): Promise<HistoryChanges>;

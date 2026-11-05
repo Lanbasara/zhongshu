@@ -4,7 +4,7 @@ status: accepted
 
 # 工作台接入原生 Harness，保留原生执行权
 
-后续细化：运行托管与原地编辑的统一入口、未决登记和写入收束由 [ADR 0011](0011-managed-workspace-execution.md) 决定；状态、历史与正文的有界接入由 [ADR 0012](0012-bounded-data-paths.md) 扩展。它们不改变本决定的原生执行权与身份边界，目标是否已实现以架构地图和功能地图为准。
+后续细化：[ADR 0014](0014-observation-lifetime-and-concurrent-editing.md) 将普通文件编辑与 Host 停机解耦并明确观察生命周期；运行托管与原地编辑的统一入口、未决登记和写入收束由 [ADR 0011](0011-managed-workspace-execution.md) 决定；状态、历史与正文的有界接入由 [ADR 0012](0012-bounded-data-paths.md) 扩展。它们不改变本决定的原生执行权与身份边界，目标是否已实现以架构地图和功能地图为准。
 
 中书采用单用户、可自托管的 PWA，电脑和 Android 访问同一应用服务。首版接入 Codex App Server 与 DSH Web Host：中书拥有工作台交互，Harness 拥有 Agent 执行、工具、上下文和原生子 Agent。这使中书能改善跨设备工作体验，同时保留原生能力；代价是必须接纳并验证两个 Harness 的能力差异。
 

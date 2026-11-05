@@ -21,14 +21,16 @@ type FileTarget = { workspaceId: string; path: string };
 const errors = new Map([
   ['workspace_not_idle', '工作区正在运行或尚未确认空闲。修改已保留。'],
   ['workspace_writes_unmanaged', '此工作区未启用原地保存。'],
-  ['workspace_maintenance_online', '进入编辑时会暂停工作区的 DSH。'],
+  ['workspace_maintenance_online', '工作区已在线，请重新打开编辑器。'],
+  ['workspace_maintenance_paused', '此工作区保留了旧版暂停状态，请先恢复 Agent。'],
   ['workspace_maintenance_transition', '正在切换工作区维护状态。'],
   ['workspace_maintenance_unknown', '无法核对 DSH 状态，请恢复 Agent 后重试。'],
   ['workspace_maintenance_busy', '工作区正在保存或切换状态，请稍后重试。'],
   ['workspace_maintenance_unavailable', '未能确认 DSH 已暂停或恢复。请重试恢复。'],
   ['workspace_save_in_progress', '此工作区正在保存文件，请稍后重试。'],
-  ['execution_online', '编辑前会等待现有任务完成，再暂停相关 Agent。'],
-  ['execution_draining', '正在等待已受理任务完成；任务不会因编辑而取消。'],
+  ['execution_online', '工作区已在线，请重新打开编辑器。'],
+  ['execution_editable', '此工作区保留了旧版编辑窗口，请先恢复 Agent。'],
+  ['execution_draining', '旧版编辑窗口尚未结束，请恢复 Agent 后再编辑。'],
   ['execution_resuming', '正在恢复 Agent，确认完成后才接受新任务。'],
   ['execution_unknown', '运行状态尚待核实，修改已保留。'],
   ['execution_baseline_incomplete', '正在后台核验已有会话和任务，完成后可进入编辑。'],
@@ -41,7 +43,7 @@ const errors = new Map([
   ['execution_native_state_unknown', '尚未核实原生会话状态，初始化仍在继续。'],
   ['execution_restore_requires_reconciliation', '恢复的运行记录需要操作者核对，现有存档仍可阅读。'],
   ['execution_save_in_progress', '另一个保存请求仍在处理，请稍后重试。'],
-  ['execution_save_unresolved', '保存结果尚待核实，修改已保留；请勿重复提交或恢复 Agent。'],
+  ['execution_save_unresolved', '保存结果尚待核实，修改已保留；请勿重复提交。'],
   ['execution_save_already_resolved', '这次保存请求已处理，请重新打开文件核对结果。'],
   ['execution_pending_unknown', '部分已受理任务仍待核实，暂时不能保存；其他已受理任务仍会继续完成。'],
   ['file_writer_capacity_reached', '保存记录空间不足，文件尚未写入；修改已保留，扩容后可再次保存。'],
@@ -110,7 +112,7 @@ export function WorkspaceReader({ workspaces, workspaceCursor, initialWorkspace,
 }) {
   const [workspace, setWorkspace] = useState(() => target?.workspaceId ?? initialFile?.workspaceId ?? initialWorkspace ?? workspaces[0]?.id ?? '');
   const [browsing, setBrowsing] = useState(() => !target && !initialFile);
-  const [editIntent, setEditIntent] = useState(false);
+
   const content = useRef<HTMLDivElement>(null);
   const picker = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
@@ -248,7 +250,7 @@ export function WorkspaceReader({ workspaces, workspaceCursor, initialWorkspace,
   }
 
   function resetEditor() {
-    setEditIntent(false);
+
     setEditing(false);
     setPreview(false);
     setReadingPreview(false);
@@ -360,19 +362,12 @@ export function WorkspaceReader({ workspaces, workspaceCursor, initialWorkspace,
 
   async function beginEdit() {
     if (!opened || busy || opened.file.kind === 'html' || opened.file.kind === 'source') return;
-    if (!status?.editable && !status?.canPause) return;
-    setEditIntent(false);
+    if (!status?.editable) return;
+
     setPreparingEditor(true);
     onExpand(true);
     try {
       let file = opened.file;
-      if (!status.editable) {
-        if (!await maintenance('pause')) { setNotice('已申请编辑窗口。任务完成后可再次点击编辑。'); return; }
-        setBusy(true);
-        file = await request(base + '/file?path=' + encodeURIComponent(opened.path), fileSchema);
-        setOpened({ ...opened, file });
-        if (file.version !== opened.file.version) setNotice('暂停前文件已变化，已载入工作区当前版本。');
-      }
       setEditing(true);
       setDraft(file.text);
     } catch (reason) {
@@ -390,10 +385,9 @@ export function WorkspaceReader({ workspaces, workspaceCursor, initialWorkspace,
       return;
     }
     if (!mayLeave()) return;
-    // Closing the reader is an explicit end-edit action. A browser disconnect
-    // still leaves the durable window intact, but the reader's close button
-    // must not silently strand that window after a successful save.
-    if ((status?.maintenance === 'paused' || status?.maintenance === 'unknown' || status?.maintenance === 'transition') && !await maintenance('resume')) return;
+    // Compatibility recovery applies only to a legacy paused/unknown Host.
+    // Ordinary online editing never issues a lifecycle request.
+    if ((status?.windowId || !status?.phase && status?.maintenance === 'paused') && !await maintenance('resume')) return;
     resetEditor();
     if (close) {
       if (opened) rememberFile?.({ workspaceId: workspace, path: opened.path, position: content.current?.scrollTop ?? 0 });
@@ -479,21 +473,14 @@ export function WorkspaceReader({ workspaces, workspaceCursor, initialWorkspace,
       {editing ? <>
         {opened.file.kind === 'markdown' && <button onClick={() => setPreview(!preview)}>{preview ? '原文' : '预览'}</button>}
         <button className="reader-action reader-primary" disabled={!dirty || !status?.editable || busy} onClick={() => void save()}><Save size={14}/>保存</button>
-        <button disabled={busy} onClick={() => void leaveEditor(false)}>{status?.phase ? '恢复 Agent 并结束编辑' : '结束编辑'}</button>
+        <button disabled={busy} onClick={() => void leaveEditor(false)}>结束编辑</button>
         <button disabled={busy} onClick={() => void open(opened.path, undefined, true)}>重新打开</button>
-      </> : <button disabled={busy || (!status?.editable && !status?.canPause)} className="reader-action" onClick={() => { if (status?.editable || !status?.phase) void beginEdit(); else setEditIntent(true); }}><Pencil size={14}/>编辑</button>}
+      </> : <button disabled={busy || !status?.editable} className="reader-action" onClick={() => void beginEdit()}><Pencil size={14}/>编辑</button>}
       {!editing && largeMarkdown && <button onClick={() => setReadingPreview(!readingPreview)}>{readingPreview ? '查看原文' : '预览 Markdown'}</button>}
       {!status?.editable && !status?.canPause && <span role="status">{status?.reason ? errors.get(status.reason) ?? '运行状态尚待核实，请稍后重试。' : '正在核对工作区状态…'}</span>}
     </div>}
-    {editIntent && <div className="reader-edit-intent">
-      <strong>进入文件编辑</strong>
-      <p>现有任务会先完成，不会被取消。随后暂停以下运行组中的 Agent；共用运行组的其他工作区也会受到影响。</p>
-      {status?.affectedGroups?.length ? <ul>{status.affectedGroups.map(group => <li key={group}>{group}</li>)}</ul> : <p>暂时无法确认影响范围，请稍后重试。</p>}
-      <p>结束编辑或返回对话时恢复 Agent。</p>
-      <div><button className="reader-action" onClick={() => setEditIntent(false)}>继续阅读</button><button className="reader-action reader-primary" disabled={busy || !status?.canPause || !status.affectedGroups?.length} onClick={() => void beginEdit()}>开始编辑</button></div>
-    </div>}
     {!editing && (status?.maintenance === 'paused' || status?.maintenance === 'unknown') &&
-      <div className="workspace-reader-tools"><button disabled={busy} onClick={() => void leaveEditor(false)}>恢复 Agent</button>
+      <div className="workspace-reader-tools"><button disabled={busy} onClick={() => void maintenance('resume')}>恢复 Agent</button>
         {!opened && status?.canRecover && <span role="status">{status.reason ? errors.get(status.reason) ?? 'Agent 尚未恢复，已有存档仍可阅读。' : 'Agent 尚未恢复，已有存档仍可阅读。'}</span>}
       </div>}
     {error && <p className="workspace-reader-feedback" role="alert">{error}</p>}

@@ -72,6 +72,8 @@ class SyntheticHost {
 }
 
 class BaselineHarness implements HarnessAdapter {
+  // This substitute only removes a listener; no runtime or process is owned by it.
+  readonly observationReleaseSafe = true;
   readonly id = 'codex' as const;
   readonly host: SyntheticHost;
   listeners = new Set<(change: NativeChange) => void>();

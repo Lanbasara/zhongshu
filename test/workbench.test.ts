@@ -26,7 +26,7 @@ class Peer implements HarnessAdapter {
   queuedRead?: (input: { id: string; text: string }, delivery: QueueDelivery) => Promise<Receipt>;
   current = terminal(); records: NativeItem[] = []; listener?: (change: NativeChange) => void;
   stateCalls = 0; stateTargets: (string | undefined)[] = []; historyCalls: (string | undefined)[] = []; submitCalls: string[] = []; stopCalls: string[] = []; reconcileCalls: string[] = [];
-  createCalls = 0; closed = false; unwatchCount = 0;
+  watchCalls = 0; createCalls = 0; closed = false; unwatchCount = 0;
   stateRead?: (targetRunId?: string) => Promise<NativeState>;
   historyRead?: (cursor?: string) => Promise<HistoryPage>;
   historyChanges?: HarnessAdapter['historyChanges'];
@@ -52,7 +52,7 @@ class Peer implements HarnessAdapter {
   }
   async reconcile(_binding: Binding, id: string): Promise<Receipt> { this.reconcileCalls.push(id); return { outcome: 'unknown', reason: 'not_found' }; }
   async stop(_binding: Binding, runId: string): Promise<Receipt> { this.stopCalls.push(runId); return { outcome: 'accepted', runId }; }
-  async watch(_binding: Binding, listener: (change: NativeChange) => void) { this.listener = listener; return () => { this.listener = undefined; this.unwatchCount++; }; }
+  async watch(_binding: Binding, listener: (change: NativeChange) => void) { this.watchCalls++; this.listener = listener; return () => { this.listener = undefined; this.unwatchCount++; }; }
   emit(change: NativeChange) { this.listener?.(change); }
   async close() { this.closed = true; this.listener = undefined; await this.closeRead?.(); }
 }
@@ -548,6 +548,7 @@ for (const outcome of ['success', 'failure'] as const) test(`late transport ${ou
     f.peer.emit({ type: 'unavailable', reason: 'synthetic_connection_lost' });
     await until(() => f.store.getConversation(f.id)?.state.status === 'unknown');
     const recovered = terminal('new-run');
+    await until(() => f.peer.watchCalls >= 2);
     f.peer.emit({ type: 'state', state: recovered });
     if (outcome === 'success') old.resolve({ status: 'running', runId: 'stale-run', pendingInputs: 0, configurationVerified: true });
     else old.reject(new Error('synthetic_old_failure'));
@@ -706,7 +707,7 @@ test('configuration drift still permits stopping the same verified native run wh
   assert.deepEqual(f.peer.stopCalls, ['active-run']); assert.equal(f.peer.submitCalls.length, 0);
 });
 
-test('workspace saving fences a competing send and retains a newer file on stale saves', async t => {
+test('workspace saves remain conditional while native work continues', async t => {
   const f = fixture(t);
   const { mkdtemp, readFile, realpath, rm, writeFile } = await import('node:fs/promises');
   const root = await realpath(await mkdtemp(join(tmpdir(), 'zhongshu-edit-')));
@@ -717,107 +718,52 @@ test('workspace saving fences a competing send and retains a newer file on stale
   f.service.workspaces.push(workspace);
   f.store.createConversation({ id, harnessId: 'codex', workspaceId: workspace.id, cwd: root, configuration });
   f.store.saveBinding(id, { id: 'native-editor', cwd: root, configuration, details: {} });
-  const path = join(root, 'notes.md');
-  await writeFile(path, 'original');
+  const path = join(root, 'notes.md'); await writeFile(path, 'original');
   const original = await f.service.openWorkspaceFile(workspace.id, 'notes.md');
+  f.peer.stateRead = async () => ({ status: 'running', runId: 'active', pendingInputs: 0, configurationVerified: true });
   await f.service.reconcile(id);
+  const reads = f.peer.stateCalls;
   assert.equal((await f.service.workspaceEditStatus(workspace.id)).editable, true);
-  const readingNativeState = deferred<NativeState>();
-  f.peer.stateRead = async () => readingNativeState.promise;
-  const saving = f.service.saveWorkspaceFile(workspace.id, 'notes.md', original.version, 'saved');
-  const sending = f.service.enqueue(operation(id));
-  const sendRejected = assert.rejects(sending, { code: 'workspace_save_in_progress' });
-  await delay(5);
-  readingNativeState.resolve(terminal());
-  await Promise.all([saving, sendRejected]);
-  assert.equal(await readFile(path, 'utf8'), 'saved');
+  await f.service.saveWorkspaceFile(workspace.id, 'notes.md', original.version, 'saved');
+  assert.equal(f.peer.stateCalls, reads, 'saving never queries or changes the task lifecycle');
+  assert.equal(f.peer.stopCalls.length, 0);
   await assert.rejects(f.service.saveWorkspaceFile(workspace.id, 'notes.md', original.version, 'stale'), { message: 'file_version_changed' });
   assert.equal(await readFile(path, 'utf8'), 'saved');
-  const second = randomUUID();
-  f.store.createConversation({ id: second, harnessId: 'codex', workspaceId: workspace.id, cwd: root, configuration });
-  f.store.saveBinding(second, { id: 'native-competitor', cwd: root, configuration, details: {} });
-  await f.service.reconcile(second);
-  f.peer.stateRead = async () => ({ status: 'running', runId: 'active', pendingInputs: 0, configurationVerified: true });
-  await f.service.reconcile(second);
-  assert.equal((await f.service.workspaceEditStatus(workspace.id)).editable, false);
-  await assert.rejects(f.service.saveWorkspaceFile(workspace.id, 'notes.md', original.version, 'unsafe'), { code: 'workspace_not_idle' });
-  assert.equal((await f.service.openWorkspaceFile(workspace.id, 'notes.md')).text, 'saved');
 });
 
-test('dedicated Host maintenance gates execution, persists through controller state and fails closed', async t => {
+test('legacy maintenance can recover an existing pause but file editing never requests one', async t => {
   const f = fixture(t);
   const { mkdtemp, readFile, realpath, rm, writeFile } = await import('node:fs/promises');
   const root = await realpath(await mkdtemp(join(tmpdir(), 'zhongshu-maintenance-')));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const { Workbench } = await import('../src/server/workbench.ts');
-  let host: 'online' | 'paused' | 'unknown' = 'online';
-  const pause = deferred<void>();
-  const service = new Workbench(f.store, [{
-    id: 'dedicated', label: 'Dedicated', directory: root, managedWrites: true,
-    async maintenance(action) {
-      if (action === 'pause') { await pause.promise; host = 'paused'; }
-      if (action === 'resume' && host !== 'unknown') host = 'online';
-      return host;
-    },
+  let host: 'online' | 'paused' | 'unknown' = 'paused';
+  const actions: string[] = [];
+  const service = new Workbench(f.store, [{ id: 'dedicated', label: 'Dedicated', directory: root, managedWrites: true,
+    async maintenance(action) { actions.push(action); if (action === 'resume') host = 'online'; return host; },
   }], new Map());
   t.after(() => service.close());
-  const path = join(root, 'notes.md');
-  await writeFile(path, 'before');
-  const original = await service.openWorkspaceFile('dedicated', 'notes.md');
+  const path = join(root, 'notes.md'); await writeFile(path, 'before');
   await service.start();
   assert.equal((await service.workspaceEditStatus('dedicated')).editable, false);
-  const pending = service.changeWorkspaceMaintenance('dedicated', 'pause');
-  assert.equal((await service.workspaceEditStatus('dedicated')).editable, false);
-  await assert.rejects(service.saveWorkspaceFile('dedicated', 'notes.md', original.version, 'unsafe'));
-  pause.resolve();
-  await pending;
-  assert.equal((await service.workspaceEditStatus('dedicated')).editable, true);
-  const saved = await service.saveWorkspaceFile('dedicated', 'notes.md', original.version, 'saved');
-  assert.equal(await readFile(path, 'utf8'), 'saved');
-  host = 'unknown';
-  await assert.rejects(service.saveWorkspaceFile('dedicated', 'notes.md', saved.version, 'unsafe'), { code: 'workspace_maintenance_unavailable' });
-  await assert.rejects(async () => service.changeWorkspaceMaintenance('dedicated', 'resume'), { code: 'workspace_maintenance_unavailable' });
-  assert.equal((await service.workspaceEditStatus('dedicated')).editable, false);
-  host = 'paused';
-  await service.start();
-  assert.equal((await service.workspaceEditStatus('dedicated')).editable, true);
   await service.changeWorkspaceMaintenance('dedicated', 'resume');
-  assert.equal((await service.workspaceEditStatus('dedicated')).editable, false);
+  assert.equal((await service.workspaceEditStatus('dedicated')).editable, true);
+  await service.changeWorkspaceMaintenance('dedicated', 'pause');
+  assert.equal(host, 'online'); assert.equal(actions.includes('pause'), false);
+  const original = await service.openWorkspaceFile('dedicated', 'notes.md');
+  await service.saveWorkspaceFile('dedicated', 'notes.md', original.version, 'saved');
   assert.equal(await readFile(path, 'utf8'), 'saved');
 });
 
-test('maintenance checks cold native sessions even when independent history archiving is unavailable', async t => {
+test('editing does not activate cold sessions even when independent history is unavailable', async t => {
   const f = fixture(t);
+  let controls = 0;
   const workspace = { id: 'fixture', label: 'Fixture', directory: '/synthetic/workspace', managedWrites: true,
-    async maintenance(action: 'status' | 'pause' | 'resume') {
-      if (action === 'pause') phase = 'paused';
-      if (action === 'resume') phase = 'online';
-      return phase;
-    } };
-  let phase: 'online' | 'paused' = 'online';
+    async maintenance() { controls++; return 'online' as const; } };
   const service = new Workbench(f.store, [workspace], new Map([['codex', f.peer]]));
-  t.after(() => service.close());
-  await service.start();
-  await until(() => f.peer.historyCalls.length > 0);
-  const configuration = { modelId: 'model', permissionId: 'workspace' };
-  f.peer.historyCalls.length = 0;
+  t.after(() => service.close()); await service.start();
   f.peer.historyRead = async () => { throw new Error('synthetic_archive_unavailable'); };
   f.peer.current = { status: 'waiting', pendingInputs: 1, configurationVerified: true };
-  await assert.rejects(async () => service.changeWorkspaceMaintenance('fixture', 'pause'), { code: 'workspace_not_idle' });
-  assert.equal(phase, 'online');
-  f.peer.current = terminal();
-  let count = 1;
-  for (const target of [1, 20, 100]) {
-    while (count < target) {
-      const id = randomUUID();
-      f.store.createConversation({ id, harnessId: 'codex', workspaceId: workspace.id, cwd: workspace.directory, configuration });
-      f.store.saveBinding(id, { id: 'cold-native-' + count, cwd: workspace.directory, configuration, details: {} });
-      count++;
-    }
-    const before = f.peer.stateCalls;
-    await service.changeWorkspaceMaintenance('fixture', 'pause');
-    await service.changeWorkspaceMaintenance('fixture', 'resume');
-    assert.equal(f.peer.stateCalls - before, target * 2);
-    assert.equal(phase, 'online');
-  }
+  const reads = f.peer.stateCalls; const beforeControls = controls;
+  assert.equal((await service.changeWorkspaceMaintenance('fixture', 'pause')).editable, true);
+  assert.equal(f.peer.stateCalls, reads); assert.equal(controls, beforeControls);
 });

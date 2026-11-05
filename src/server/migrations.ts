@@ -579,6 +579,9 @@ CREATE TABLE execution_baseline_sources (
 ` }, { version: 31, sql: `
   CREATE INDEX execution_native_observation_pending ON execution_admissions(conversation_id,binding_id,workspace_id,directory_identity,sequence,id)
     WHERE source='native' AND source_key GLOB 'observe:*' AND kind<>'settled';
+` }, { version: 32, sql: `
+  CREATE INDEX workbench_conversations_recovery ON workbench_conversations(id)
+    WHERE readiness='preparing' OR json_extract(state_json,'$.status') IN ('running','waiting','unknown');
 ` }];
 
 /** Runs inside restoreDatabase's private staging transaction, before the database is published. */

@@ -20,7 +20,7 @@ const MAX_BYTES = 12 * 1024 * 1024;
 const requestSchema = z.object({ type: z.literal('call'), id: z.number().int().positive().safe(), method: z.enum(methods), args: z.array(z.unknown()).max(4) }).strict();
 const controlSchema = z.object({ type: z.enum(['bound-ack', 'unwatch']), id: z.number().int().positive().safe(), accepted: z.boolean().optional() }).strict();
 const responseSchema = z.object({ type: z.enum(['result', 'error', 'bound', 'invalidate']), id: z.number().int().positive().safe(), value: z.unknown().optional() }).strict();
-const capabilitySchema = z.object({ id: z.enum(['codex', 'dsh']), methods: z.array(z.enum(methods)).max(methods.length), earlyInput: z.enum(['current', 'soon']).optional() }).strict();
+const capabilitySchema = z.object({ id: z.enum(['codex', 'dsh']), methods: z.array(z.enum(methods)).max(methods.length), earlyInput: z.enum(['current', 'soon']).optional(), observationReleaseSafe: z.boolean().optional() }).strict();
 function decode(data: RawData): unknown {
   const bytes = Array.isArray(data) ? Buffer.concat(data) : Buffer.isBuffer(data) ? data : Buffer.from(data);
   if (bytes.length > MAX_BYTES) throw new Error('native_rpc_frame_limit');
@@ -51,7 +51,7 @@ export async function serveManagedHarness(adapter: HarnessAdapter, input: z.inpu
   const ws = new WebSocketServer({ noServer: true, maxPayload: MAX_BYTES, perMessageDeflate: false });
   const clients = new Set<WebSocket>();
   let pluginBusy = false;
-  const capability = { id: adapter.id, methods: methods.filter(method => method.startsWith('plugin') ? !!plugins : typeof adapter[method as keyof HarnessAdapter] === 'function'), ...(adapter.earlyInput ? { earlyInput: adapter.earlyInput } : {}) };
+  const capability = { id: adapter.id, observationReleaseSafe: adapter.observationReleaseSafe === true, methods: methods.filter(method => method.startsWith('plugin') ? !!plugins : typeof adapter[method as keyof HarnessAdapter] === 'function'), ...(adapter.earlyInput ? { earlyInput: adapter.earlyInput } : {}) };
   server.on('upgrade', (request, socket, head) => {
     const supplied = request.headers.authorization;
     const expected = 'Bearer ' + options.token;
@@ -114,8 +114,8 @@ export async function serveManagedHarness(adapter: HarnessAdapter, input: z.inpu
             });
           } else if (command.method === 'watch') {
             if (command.args.length !== 1 || watches.size >= 16) throw new Error('native_watch_limit');
-            const stop = await adapter.watch(command.args[0] as Binding, () => {
-              try { send(socket, { type: 'invalidate', id: command.id }); } catch { socket.terminate(); }
+            const stop = await adapter.watch(command.args[0] as Binding, change => {
+              try { send(socket, { type: 'invalidate', id: command.id, ...(change.type === 'unavailable' ? { value: { unavailable: true } } : {}) }); } catch { socket.terminate(); }
             });
             if (socket.readyState !== WebSocket.OPEN) stop(); else watches.set(command.id, stop);
             result = { watching: true };
@@ -157,7 +157,7 @@ export class ManagedHarnessRpc {
       socket.on('message', data => {
         try {
           const message = responseSchema.parse(decode(data)); const pending = this.pending.get(message.id);
-          if (message.type === 'invalidate') { for (const watch of this.watches.values()) if (watch.id === message.id) watch.listener({ type: 'invalidate' }); return; }
+          if (message.type === 'invalidate') { for (const watch of this.watches.values()) if (watch.id === message.id) watch.listener(message.value && typeof message.value === 'object' && 'unavailable' in message.value && message.value.unavailable === true ? { type: 'unavailable', reason: 'managed_native_disconnected' } : { type: 'invalidate' }); return; }
           if (!pending) throw new Error('native_unexpected_receipt');
           if (message.type === 'bound') {
             if (!pending.bound) throw new Error('native_unexpected_binding');
@@ -170,7 +170,8 @@ export class ManagedHarnessRpc {
       socket.once('close', () => {
         if (this.socket !== socket) return; this.socket = undefined; this.capability = undefined;
         for (const entry of this.pending.values()) { clearTimeout(entry.timer); entry.reject(new ExecutionHostError('managed_native_result_unknown', 503)); } this.pending.clear();
-        for (const watch of this.watches.values()) watch.listener({ type: 'unavailable', reason: 'managed_native_disconnected' }); this.watches.clear();
+        const lost = [...this.watches.values()]; this.watches.clear();
+        for (const watch of lost) watch.listener({ type: 'unavailable', reason: 'managed_native_disconnected' });
       });
       socket.on('error', () => socket.terminate());
       await new Promise<void>((resolve, reject) => { socket.once('open', resolve); socket.once('error', () => reject(new ExecutionHostError('managed_native_unavailable', 503))); socket.once('close', () => reject(new ExecutionHostError('managed_native_unavailable', 503))); });

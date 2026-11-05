@@ -103,6 +103,10 @@ async function main() {
   privateFile(nativePath);
   const native = new DatabaseSync(nativePath);
   native.exec('PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, body TEXT NOT NULL) STRICT; CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY, fail_create INTEGER NOT NULL) STRICT; INSERT OR IGNORE INTO settings VALUES (1, 0)');
+  native.exec('CREATE TABLE IF NOT EXISTS observations (id TEXT PRIMARY KEY, stateCalls INTEGER NOT NULL DEFAULT 0, watchCalls INTEGER NOT NULL DEFAULT 0, releases INTEGER NOT NULL DEFAULT 0, active INTEGER NOT NULL DEFAULT 0) STRICT');
+  const countState = native.prepare('INSERT INTO observations(id,stateCalls) VALUES(?,1) ON CONFLICT(id) DO UPDATE SET stateCalls=stateCalls+1');
+  const countWatch = native.prepare('INSERT INTO observations(id,watchCalls,active) VALUES(?,1,1) ON CONFLICT(id) DO UPDATE SET watchCalls=watchCalls+1,active=active+1');
+  const countRelease = native.prepare('UPDATE observations SET releases=releases+1,active=MAX(0,active-1) WHERE id=?');
   const all = (): Native[] => native.prepare('SELECT body FROM sessions ORDER BY rowid').all().map(row => recordSchema.parse(JSON.parse(String(row.body))));
   const load = (id: string): Native => {
     const row = native.prepare('SELECT body FROM sessions WHERE id = ?').get(id);
@@ -125,7 +129,7 @@ async function main() {
     try {
       if (input.command === 'fail-create') { native.prepare('UPDATE settings SET fail_create = 1 WHERE id = 1').run(); }
       else if (input.command === 'inspect') {
-        console.log(JSON.stringify(all().filter(value => !input.title || value.title === input.title).map(value => ({ id: value.id, title: value.title, harnessId: value.harnessId, configuration: value.configuration, state: value.state, submitCalls: value.submitCalls, stopCalls: value.stopCalls, operationIds: value.submissions.map(item => item.id), rejectedOperationIds: value.rejectedOperationIds, nextReceipt: value.rejectNext ? 'rejected' : value.unknownReceipt ? 'unknown' : 'accepted', revision: value.revision, historyCount: value.items.length, offline: value.offline }))));
+        console.log(JSON.stringify(all().filter(value => !input.title || value.title === input.title).map(value => ({ id: value.id, title: value.title, harnessId: value.harnessId, configuration: value.configuration, state: value.state, observation: native.prepare('SELECT stateCalls,watchCalls,releases,active FROM observations WHERE id=?').get(value.id) ?? { stateCalls: 0, watchCalls: 0, releases: 0, active: 0 }, submitCalls: value.submitCalls, stopCalls: value.stopCalls, operationIds: value.submissions.map(item => item.id), rejectedOperationIds: value.rejectedOperationIds, nextReceipt: value.rejectNext ? 'rejected' : value.unknownReceipt ? 'unknown' : 'accepted', revision: value.revision, historyCount: value.items.length, offline: value.offline }))));
         return;
       } else {
         const matches = all().filter(value => value.title === input.title);
@@ -193,6 +197,7 @@ async function main() {
     unlinkSync(lock);
   }
   writeFileSync(lock, JSON.stringify({ pid: process.pid }), { flag: 'wx', mode: 0o600 });
+  native.exec('UPDATE observations SET active=0');
   const workspaces = ['a', 'b'].map(id => {
     const directory = join(root, 'workspace-' + id);
     mkdirSync(directory, { recursive: true, mode: 0o700 });
@@ -235,7 +240,7 @@ async function main() {
       return receipt;
     }
     const synthetic: HarnessAdapter = {
-      id, historyReadOnly: true, earlyInput: id === 'codex' ? 'current' : 'soon', submit, submitQueued: submit,
+      id, historyReadOnly: true, observationReleaseSafe: true, earlyInput: id === 'codex' ? 'current' : 'soon', submit, submitQueued: submit,
       async skills(binding) { return skillOptions(skills(binding)); },
       async catalog() { return { id, available: true, models: [{ id: 'fixture-model', label: 'Fixture · 非真实模型' }], permissions: [{ id: 'fixture-write', label: 'Fixture write', description: 'Synthetic boundary; no actual agent execution.' }, { id: 'fixture-read', label: 'Fixture read', description: 'Synthetic configuration selection only.' }] }; },
       async create(input, onBound) {
@@ -249,6 +254,7 @@ async function main() {
         return binding;
       },
       async state(binding, target) {
+        countState.run(binding.id);
         const value = checked(binding);
         return { ...value.state, ...(target && value.items.some(item => item.runId === target && item.kind === 'assistant' && item.status === 'completed') ? { terminalRunId: target, terminalStatus: 'completed' as const } : {}) };
       },
@@ -278,13 +284,15 @@ async function main() {
         return { outcome: 'accepted', runId };
       },
       async watch(binding, listener) {
+        checked(binding); countWatch.run(binding.id);
+        let released = false;
         let revision = load(binding.id).revision;
         const timer = setInterval(() => {
-          try { const next = load(binding.id).revision; if (next !== revision) { revision = next; listener({ type: 'invalidate' }); } }
+          try { const value = load(binding.id); if (value.offline) { listener({ type: 'unavailable', reason: 'fixture_disconnected' }); return; } const next = value.revision; if (next !== revision) { revision = next; listener({ type: 'invalidate' }); } }
           catch { listener({ type: 'invalidate' }); }
         }, 100);
         timers.add(timer);
-        return () => { clearInterval(timer); timers.delete(timer); };
+        return () => { if (released) return; released = true; clearInterval(timer); timers.delete(timer); countRelease.run(binding.id); };
       },
       async close() { for (const timer of timers) clearInterval(timer); timers.clear(); },
     };

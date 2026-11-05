@@ -24,7 +24,7 @@ export const storageMethods = {
   createConversation: 'write', getConversation: 'read', listConversations: 'read', searchConversations: 'read', renameConversation: 'write',
   setArchived: 'unsupported', setArchivedChecked: 'write', saveBinding: 'write', setConversationState: 'write', setUsage: 'write', setHistoryCursor: 'write',
   enqueueOperation: 'write', getOperation: 'read', listOperations: 'read', claimOperation: 'write', settleOperation: 'write',
-  recoverDispatching: 'write', readQueue: 'read', queuedConversations: 'read', queueAdmissionExists: 'read', changeQueue: 'write',
+  recoverDispatching: 'write', readQueue: 'read', queuedConversations: 'read', recoveryConversations: 'read', queueAdmissionExists: 'read', changeQueue: 'write',
   readQueueSummary: 'read', readQueueEntry: 'read', readTurnFilesPage: 'read',
   operationState: 'read',
   readOperationViews: 'read',
@@ -47,7 +47,7 @@ export const storageExecutionMethods = { load: 'read', save: 'write', registerGr
   baselineStatus: 'read', beginBaseline: 'write', seedLegacyAdmissions: 'write', bindingsPage: 'read', registerBaselineObservation: 'write', commitBaselineBatch: 'write',
   bindNativeRequest: 'write', bindAssociatedRequest: 'write', bindObservationRequest: 'write', registerObservation: 'write', permissionForStop: 'write', registerNative: 'write', permissionForNative: 'read', attachNativeBinding: 'write',
   freezeAdmissions: 'write', pendingPage: 'read', unresolvedPage: 'read', beginResume: 'write', hasUnsettledSaves: 'read', completeResume: 'write',
-  acquireSave: 'write', settleSave: 'write', pendingSaves: 'read', admission: 'read', confirmTerminal: 'write',
+  acquireSave: 'write', settleSave: 'write', pendingSaves: 'read', pendingConcurrentSaves: 'read', admission: 'read', confirmTerminal: 'write',
 } as const satisfies Record<keyof ExecutionStore, 'read' | 'write'>;
 export const storageCommandMethods = { auth: storageAuthMethods, store: storageMethods, resources: storageResourceMethods, plugins: storagePluginMethods, workspaces: storageWorkspaceMethods, execution: storageExecutionMethods };
 

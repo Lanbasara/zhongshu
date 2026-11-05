@@ -6,6 +6,7 @@ spec 是与用户讨论后确认的临时约定：它回答“接下来建什么
 
 | 切片 | 用户行为 | 状态 | 退出条件 | 证据 | 更新 |
 | --- | --- | --- | --- | --- | --- |
+| 生命周期与并发编辑 | 冷读不激活、订阅重连、编辑不中断 Agent | active | 按 ADR 0014 完成真实子 Agent/后台任务连续性验证并部署 PRE | [ADR 0014](../adr/0014-observation-lifetime-and-concurrent-editing.md) | 2026-11-05 |
 | [多年使用与极限规模](long-term-performance.md) | 长对话完整阅读、后台全量存档、大量工作区与文件持续可用 | active | 按 ADR 0013 完成五项固定验收；失败即给出具体不通过结论，不自动扩展 | [PR #33：实现及进行中的联合验收](https://github.com/Lanbasara/zhongshu/pull/33) | 2026-11-05 |
 | 主界面与设计系统 | 用统一设计完成真实对话，隔离展示公共组件 | done | 本轮实现及已声明验证范围经用户认可；未覆盖项见 PR | [PR #18](https://github.com/Lanbasara/zhongshu/pull/18) | 2026-11-03 |
 | 首条 Agent 曳光弹 | 选 Codex 或 DSH，完成真实工作，关页后接续；必要时停止 | done | 本机两 Harness 完成真实工作、关页或应用中断后接续；目标设备与部署链路分别有证据 | PR #5、#6、#9；[发布检查](https://github.com/Lanbasara/zhongshu/actions/runs/41433423972)；目标设备与部署链路已由用户验收 | 2026-11-02 |
