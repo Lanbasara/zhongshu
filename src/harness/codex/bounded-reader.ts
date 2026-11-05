@@ -5,6 +5,7 @@ import { HarnessError } from '../types.ts';
 import type { Binding, HistoryPage, HistoryChanges, NativeBodyChunk, NativeItem, Receipt } from '../types.ts';
 import { createHash } from 'node:crypto';
 import type { CachedQueryPosition } from '../dsh/bounded-cache.ts';
+import type { configuredThread } from './protocol.ts';
 
 const path = z.string().min(1).max(4096).refine(value => isAbsolute(value) && normalize(value) === value && !value.includes('\0'));
 export const boundedCodexOptions = z.object({ nativeRoot: path, cacheRoot: path, maxCacheBytes: z.number().int().min(1024 * 1024).max(16 * 1024 ** 3).default(512 * 1024 ** 2) }).strict();
@@ -55,6 +56,9 @@ export class BoundedCodexReader {
     return this.request('history', { binding: rolloutBinding.parse(binding), cursor: parsed, limit: z.number().int().min(1).max(100).parse(limit) });
   }
   readItems(binding: RolloutBinding, ids: string[]): Promise<NativeItem[]> { return this.request('items', { binding: rolloutBinding.parse(binding), ids: z.array(z.string().min(1).max(512)).max(16).parse(ids) }); }
+  creationConfiguration(binding: RolloutBinding): Promise<z.infer<typeof configuredThread> | null> {
+    return this.request('creation-configuration', rolloutBinding.parse(binding));
+  }
   historyChanges(binding: RolloutBinding, cursor?: string, limit = 16): Promise<HistoryChanges> {
     const parsed = cursor === undefined ? undefined : decode('cc1.', cursor, rolloutChangesCursor);
     if (parsed && parsed.key !== rolloutKey(binding)) throw new HarnessError('history_cursor_invalid');

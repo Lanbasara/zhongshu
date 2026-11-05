@@ -1,4 +1,5 @@
 import { basename, isAbsolute, normalize } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { HarnessError } from '../types.ts';
@@ -169,20 +170,47 @@ class CodexAdapter implements HarnessAdapter {
   }
 
   async create(input: { cwd: string; configuration: Configuration; title?: string }, onBound: (binding: Binding) => void | Promise<void>): Promise<Binding> {
-    const selected = parse(z.object({ cwd: workspace, configuration, title: titleSchema.optional() }), input);
+    const selected = parse(z.object({ cwd: workspace, configuration, title: titleSchema.default('新对话') }), input);
     const response = await this.rpc.request('thread/start', { cwd: selected.cwd, model: selected.configuration.modelId, permissions: selected.configuration.permissionId, approvalPolicy: 'never', historyMode: 'paginated', ephemeral: false });
     // Persist only identity and requested configuration before examining the remaining native response.
     const identity = parse(z.object({ thread: z.object({ id: nativeId }) }), response);
-    const binding: Binding = { id: identity.thread.id, cwd: selected.cwd, configuration: selected.configuration, details: { version: 1, approvalPolicy: 'never', ...(selected.title ? { title: selected.title } : {}) } };
+    const binding: Binding = { id: identity.thread.id, cwd: selected.cwd, configuration: selected.configuration, details: { version: 1, approvalPolicy: 'never', title: selected.title } };
     let retained = false;
     try {
       try { await onBound(binding); } catch { throw new HarnessError('codex_binding_persistence_failed'); }
       this.retain(binding.id); retained = true;
       if (!matches(binding, parse(configuredThread, response))) throw new HarnessError('codex_configuration_mismatch');
       // Naming the user's new conversation also materializes its native rollout before the first turn.
-      if (selected.title) await this.rpc.request('thread/name/set', { threadId: binding.id, name: selected.title });
+      await this.rpc.request('thread/name/set', { threadId: binding.id, name: selected.title });
+      // A zero-turn paginated rollout initially has only session_meta. In the
+      // pinned native version, cold resume otherwise falls back to default
+      // model/approval/permission settings. Submit an owned settings snapshot
+      // while this newly created, verified thread is still retained. This is
+      // creation finalization only: load() must never overwrite later drift.
+      parse(z.object({}), await this.rpc.request('thread/settings/update', {
+        threadId: binding.id, cwd: binding.cwd, model: binding.configuration.modelId,
+        permissions: binding.configuration.permissionId, approvalPolicy: 'never',
+      }));
+      // The socket-only adapter has no native filesystem access contract. Its
+      // settings acknowledgement is not a crash-durability proof; load() still
+      // rejects any configuration drift. Performance deployments explicitly
+      // provide the bounded reader and must prove the physical record first.
+      if (this.bounded) await this.confirmCreatedConfiguration(binding, this.bounded);
       return binding;
     } finally { if (retained) await this.release(binding.id); else await this.releaseUnused(binding.id); }
+  }
+
+  private async confirmCreatedConfiguration(binding: Binding, reader: BoundedCodexReader): Promise<void> {
+    const rollout = await this.rollout(binding), deadline = performance.now() + 5000;
+    for (let attempt = 0; attempt < 25 && performance.now() < deadline; attempt++) {
+      const proof = await reader.creationConfiguration(rollout);
+      if (proof) {
+        if (!matches(binding, proof)) throw new HarnessError('codex_configuration_mismatch');
+        return;
+      }
+      await delay(100);
+    }
+    throw new HarnessError('codex_configuration_persistence_unconfirmed');
   }
 
   private async terminalRun(binding: Binding, targetRunId: string): Promise<NativeState['terminalStatus']> {

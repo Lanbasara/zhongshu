@@ -13,6 +13,7 @@ import type { RolloutBinding } from './bounded-reader.ts';
 import type { NativeItem, NativeBodySource, HistoryPage } from '../types.ts';
 import { editPath } from '../edit-paths.ts';
 import { fileURLToPath } from 'node:url';
+import { configuredThread } from './protocol.ts';
 
 const options = boundedCodexOptions.parse(workerData);
 const count = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
@@ -88,6 +89,43 @@ async function database(key: string) {
     CREATE INDEX IF NOT EXISTS anchors_order ON anchors(first_seq DESC);
     CREATE TABLE IF NOT EXISTS extractions(seq INTEGER PRIMARY KEY,metadata TEXT NOT NULL) STRICT;`);
   return db;
+}
+/** Only creation uses this proof: scan at most 8 MiB/256 records of the new
+ * rollout, retaining metadata alone. A complete native-owned settings record
+ * survives native process exit; this does not assert power-loss durability. */
+async function creationConfiguration(binding: RolloutBinding) {
+  const handle = await source(binding);
+  try {
+    const before = await handle.stat({ bigint: true }), size = Number(before.size);
+    if (size > 8 * 1024 ** 2) fail('codex_creation_proof_capacity');
+    const head = await header(handle, binding, size);
+    const paths = new Set(['/ordinal', '/type', '/payload/type', '/payload/thread_id',
+      '/payload/thread_settings/model', '/payload/thread_settings/cwd', '/payload/thread_settings/approval_policy', '/payload/thread_settings/active_permission_profile/id']);
+    const selected = { capture: (path: string) => paths.has(path), stream: () => false };
+    let parser = new BoundedJsonEnvelope(undefined, selected), decoder = new TextDecoder('utf-8', { fatal: true }), sequence = 0, partial = false;
+    let proof: z.infer<typeof configuredThread> | null = null;
+    for (let offset = head.bytes; offset < size; offset += 64 * 1024) {
+      const bytes = await read(handle, offset, Math.min(64 * 1024, size - offset)); let begin = 0;
+      while (begin < bytes.length) {
+        const newline = bytes.indexOf(10, begin), end = newline < 0 ? bytes.length : newline + 1;
+        parser.write(decoder.decode(bytes.subarray(begin, end), { stream: true })); begin = end; partial = newline < 0;
+        if (partial) continue;
+        parser.write(decoder.decode()); parser.finishDocument(); const value = parser.fields;
+        if (value['/ordinal'] !== ++sequence) fail('codex_bounded_ordinal_gap');
+        if (sequence > 256) fail('codex_creation_proof_capacity');
+        if (value['/type'] === 'turn_context' || value['/type'] === 'response_item' || value['/payload/type'] === 'task_started') fail('codex_creation_not_empty');
+        if (value['/type'] === 'event_msg' && value['/payload/type'] === 'thread_settings_applied') {
+          if (value['/payload/thread_id'] !== binding.id) fail('history_source_changed');
+          const prefix = '/payload/thread_settings/', permission = value[prefix + 'active_permission_profile/id'];
+          proof = configuredThread.parse({ thread: { id: binding.id }, model: value[prefix + 'model'], cwd: value[prefix + 'cwd'], approvalPolicy: value[prefix + 'approval_policy'], activePermissionProfile: permission === undefined ? null : { id: permission } });
+        }
+        parser = new BoundedJsonEnvelope(undefined, selected); decoder = new TextDecoder('utf-8', { fatal: true });
+      }
+    }
+    const after = await handle.stat({ bigint: true }), path = await lstat(binding.path, { bigint: true });
+    if (after.ino !== before.ino || after.dev !== before.dev || path.ino !== before.ino || path.dev !== before.dev || after.size < before.size || after.size === before.size && after.mtimeNs !== before.mtimeNs) fail('history_source_changed');
+    return partial || after.size !== before.size ? null : proof;
+  } finally { await handle.close(); }
 }
 async function scan(handle: FileHandle, db: DatabaseSync, binding: RolloutBinding): Promise<State> {
   const stat = await handle.stat({ bigint: true }), size = Number(stat.size), head = await header(handle, binding, size);
@@ -326,6 +364,7 @@ async function history(raw: unknown): Promise<HistoryPage> {
   });
 }
 async function dispatch(method: string, args: unknown): Promise<unknown> {
+  if (method === 'creation-configuration') return creationConfiguration(rolloutBinding.parse(args));
   if (method === 'retire-turn-query') {
     const parsed = turnQueryRetirement.parse(args);
     return quota.retireQuery(hash(JSON.stringify([options.nativeRoot, parsed.key])), parsed.before);
@@ -408,7 +447,7 @@ parentPort!.on('message', (message: { id: number; method: string; args: unknown 
         } finally { quota.close(); }
       }
     }
-    catch (cause) { const code = cause instanceof Error ? cause.message : ''; error = /^(?:codex_bounded_|history_|codex_body_)[a-z_]+$/.test(code) ? code : code.startsWith('dsh_bounded_') ? code.replace('dsh_bounded_', 'codex_bounded_') : (cause as NodeJS.ErrnoException)?.code === 'ENOENT' ? 'history_source_missing' : 'codex_bounded_invalid_data'; }
+    catch (cause) { const code = cause instanceof Error ? cause.message : ''; error = /^(?:codex_bounded_|codex_creation_|history_|codex_body_)[a-z_]+$/.test(code) ? code : code.startsWith('dsh_bounded_') ? code.replace('dsh_bounded_', 'codex_bounded_') : (cause as NodeJS.ErrnoException)?.code === 'ENOENT' ? 'history_source_missing' : 'codex_bounded_invalid_data'; }
     parentPort!.postMessage({ id: message.id, ...(error ? { error } : { result }), ...(cache ? { cache } : {}) });
   }).catch(() => { parentPort!.postMessage({ id: message.id, error: 'codex_bounded_read_failed' }); });
 });

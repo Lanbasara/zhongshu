@@ -32,6 +32,38 @@ async function fixture(maxCacheBytes?: number) {
   return { root, binding, header, options, reader, append, item, close, restart, full, release, latest };
 }
 
+test('Codex creation proof requires a complete owned record and exposes the latest exact configuration', async () => {
+  const f = await fixture();
+  const settings = (model: string) => ({ type: 'event_msg', payload: { type: 'thread_settings_applied', thread_id: f.binding.id, thread_settings: { model, cwd: f.binding.cwd, approval_policy: 'never', active_permission_profile: { id: ':workspace' } } } });
+  try {
+    assert.equal(await f.reader.creationConfiguration(f.binding), null);
+    const line = JSON.stringify({ ordinal: 1, ...settings('selected-model') });
+    await appendFile(f.binding.path, line.slice(0, -2));
+    assert.equal(await f.reader.creationConfiguration(f.binding), null);
+    await appendFile(f.binding.path, line.slice(-2) + '\n');
+    const proof = await f.reader.creationConfiguration(f.binding);
+    assert.deepEqual(proof, { thread: { id: f.binding.id }, model: 'selected-model', cwd: f.binding.cwd, approvalPolicy: 'never', activePermissionProfile: { id: ':workspace' } });
+    await appendFile(f.binding.path, JSON.stringify({ ordinal: 2, ...settings('external-change') }) + '\n');
+    assert.equal((await f.reader.creationConfiguration(f.binding))?.model, 'external-change', 'do not accept an earlier matching record over newer drift');
+    await appendFile(f.binding.path, JSON.stringify({ ordinal: 3, type: 'event_msg', payload: { type: 'task_started' } }) + '\n');
+    await assert.rejects(f.reader.creationConfiguration(f.binding), /codex_creation_not_empty/);
+  } finally { await f.close(); }
+});
+
+test('Codex creation proof rejects wrong ownership, ordinal, version and bounded scan overflow', async () => {
+  for (const kind of ['owner', 'ordinal', 'version', 'records', 'bytes'] as const) {
+    const f = await fixture();
+    try {
+      const setting = { ordinal: kind === 'ordinal' ? 2 : 1, type: 'event_msg', payload: { type: 'thread_settings_applied', thread_id: kind === 'owner' ? 'foreign' : f.binding.id, thread_settings: { model: 'selected', cwd: f.binding.cwd, approval_policy: 'never', active_permission_profile: { id: ':read-only' } } } };
+      if (kind === 'version') await writeFile(f.binding.path, JSON.stringify({ ...f.header, payload: { ...f.header.payload, cli_version: 'unverified-version' } }) + '\n');
+      else if (kind === 'records') await f.append(...Array.from({ length: 257 }, () => ({ type: 'event_msg', payload: { type: 'other_metadata' } })));
+      else if (kind === 'bytes') await appendFile(f.binding.path, JSON.stringify({ ordinal: 1, type: 'event_msg', payload: { type: 'other_metadata', body: 'x'.repeat(8 * 1024 ** 2) } }) + '\n');
+      else await appendFile(f.binding.path, JSON.stringify(setting) + '\n');
+      await assert.rejects(f.reader.creationConfiguration(f.binding), kind === 'records' || kind === 'bytes' ? /codex_creation_proof_capacity/ : kind === 'ordinal' ? /codex_bounded_ordinal_gap/ : /history_source_changed/);
+    } finally { await f.close(); }
+  }
+});
+
 test('Codex persistent query positions use cross-worker CAS, restart identity and native-root scoping', async () => {
   const f = await fixture(), key = 'a'.repeat(64), second = new BoundedCodexReader(f.options);
   try {

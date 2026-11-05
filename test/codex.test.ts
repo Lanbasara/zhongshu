@@ -2,6 +2,7 @@ import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { mkdtemp, mkdir, rm, stat } from 'node:fs/promises';
+import { writeFileSync, appendFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -17,7 +18,7 @@ const saved: Binding = { id: 'thread-1', cwd: '/workspace/synthetic', configurat
 const nativeConfiguration = () => ({ thread: { id: saved.id, status: { type: 'idle' } }, cwd: saved.cwd, model: 'model-a', activePermissionProfile: { id: 'workspace' }, approvalPolicy: 'never' });
 function userItem(id: string, clientId = id) { return { turnId: 'run-1', item: { id, type: 'userMessage', clientId, content: [{ type: 'text', text: id }] }, completedAtMs: 1 }; }
 
-async function peer(t: TestContext, override?: (request: Request, socket: WebSocket) => unknown, managedExecution = false, persistentQueries = false) {
+async function peer(t: TestContext, override?: (request: Request, socket: WebSocket) => unknown, managedExecution = false, persistentQueries = false, persistCreationSettings = true) {
   const dir = await mkdtemp(join(tmpdir(), 'zh codex test '));
   const socketPath = join(dir, 'rpc.sock');
   const http = createServer(); const sockets = new Set<WebSocket>(); const calls: Request[] = []; const clientResponses: unknown[] = [];
@@ -34,7 +35,7 @@ async function peer(t: TestContext, override?: (request: Request, socket: WebSoc
       let result = custom;
       if (result === undefined) {
         switch (data.method) {
-          case 'initialize': result = {}; break;
+          case 'initialize': result = { codexHome: nativeRoot }; break;
           case 'account/read': result = { account: { type: 'chatgpt' } }; break;
           case 'model/list': result = { data: [{ model: 'model-a', displayName: 'Model A', hidden: false }], nextCursor: null }; break;
           case 'permissionProfile/list': result = { data: [{ id: 'workspace', allowed: true, description: 'Synthetic workspace permission' }], nextCursor: null }; break;
@@ -44,17 +45,30 @@ async function peer(t: TestContext, override?: (request: Request, socket: WebSoc
           case 'thread/items/list': result = { data: [], nextCursor: null }; break;
           case 'thread/unsubscribe': result = { status: 'unsubscribed' }; break;
           case 'thread/name/set': result = {}; break;
+          case 'thread/settings/update': result = {}; break;
           case 'turn/start': result = { turn: { id: 'run-1', status: 'inProgress' } }; break;
           case 'turn/interrupt': result = {}; break;
           default: socket.send(JSON.stringify({ id: data.id, error: { code: -32601, message: 'Synthetic unsupported method' } })); return;
         }
+      }
+      const path = (id: string) => join(nativeRoot, 'sessions', `rollout-${id}.jsonl`);
+      if (data.method === 'thread/start') {
+        const id = (result as ReturnType<typeof nativeConfiguration>).thread.id;
+        writeFileSync(path(id), JSON.stringify({ ordinal: 0, type: 'session_meta', payload: { id, cwd: data.params.cwd, cli_version: '0.166.0-alpha.5.1', history_mode: 'paginated' } }) + '\n');
+      }
+      if (data.method === 'thread/settings/update' && persistCreationSettings) {
+        appendFileSync(path(String(data.params.threadId)), JSON.stringify({ ordinal: 1, type: 'event_msg', payload: { type: 'thread_settings_applied', thread_id: data.params.threadId, thread_settings: { model: data.params.model, cwd: data.params.cwd, approval_policy: data.params.approvalPolicy, active_permission_profile: { id: data.params.permissions } } } }) + '\n');
+      }
+      if (data.method === 'thread/read') {
+        const value = result as { thread: { id: string; path?: string; cliVersion?: string } };
+        if (existsSync(path(value.thread.id))) { value.thread.path = path(value.thread.id); value.thread.cliVersion = '0.166.0-alpha.5.1'; }
       }
       socket.send(JSON.stringify({ id: data.id, result }));
     });
   });
   await new Promise<void>(resolve => http.listen(socketPath, resolve));
   const nativeRoot = join(dir, 'native'), cacheRoot = join(dir, 'cache');
-  if (persistentQueries) await mkdir(nativeRoot);
+  await mkdir(join(nativeRoot, 'sessions'), { recursive: true });
   const options = { socketPath, managedExecution, ...(persistentQueries ? { boundedHistory: { nativeRoot, cacheRoot } } : {}) };
   let adapter = createCodexAdapter(options);
   t.after(async () => {
@@ -64,7 +78,7 @@ async function peer(t: TestContext, override?: (request: Request, socket: WebSoc
     await new Promise<void>(resolve => http.close(() => resolve()));
     await rm(dir, { recursive: true, force: true });
   });
-  return { get adapter() { return adapter; }, calls, sockets, clientResponses, cacheRoot,
+  return { get adapter() { return adapter; }, calls, sockets, clientResponses, cacheRoot, nativeRoot,
     async restart() { await adapter.close(); adapter = createCodexAdapter(options); },
     notify(method: string, params: unknown) { for (const socket of sockets) socket.send(JSON.stringify({ method, params })); } };
 }
@@ -129,9 +143,110 @@ test('Codex persists the native identity before configuration verification can f
   const p = await peer(t, request => request.method === 'thread/start' ? { ...nativeConfiguration(), model: 'unexpected-model' } : undefined);
   let bound: Binding | undefined;
   await assert.rejects(p.adapter.create({ cwd: saved.cwd, configuration: saved.configuration }, value => { bound = value; }), { message: 'codex_configuration_mismatch' });
-  assert.deepEqual(bound, saved);
+  assert.deepEqual(bound, { ...saved, details: { ...saved.details, title: '新对话' } });
   assert.equal(p.calls.filter(call => call.method === 'thread/start').length, 1);
   assert.equal(p.calls.some(call => call.method === 'turn/start'), false);
+  assert.equal(p.calls.some(call => call.method === 'thread/settings/update'), false);
+});
+
+test('Codex creation settings survive cold empty-thread resume and stay isolated across concurrent bindings', async t => {
+  let next = 0, cold = false;
+  const selected = new Map<string, ReturnType<typeof nativeConfiguration>>(), persisted = new Map<string, ReturnType<typeof nativeConfiguration>>();
+  const p = await peer(t, request => {
+    const id = String(request.params.threadId);
+    if (request.method === 'thread/start') {
+      const config = { ...nativeConfiguration(), thread: { id: `empty-${++next}`, status: { type: 'idle' } }, cwd: String(request.params.cwd), model: String(request.params.model), activePermissionProfile: { id: String(request.params.permissions) } };
+      selected.set(config.thread.id, config); return config;
+    }
+    if (request.method === 'thread/settings/update') {
+      const expected = selected.get(id)!;
+      assert.deepEqual(request.params, { threadId: id, cwd: expected.cwd, model: expected.model, permissions: expected.activePermissionProfile.id, approvalPolicy: 'never' });
+      assert(p.calls.some(call => call.method === 'thread/name/set' && call.params.threadId === id));
+      persisted.set(id, expected); return {};
+    }
+    if (request.method === 'thread/resume') {
+      assert.deepEqual(request.params, { threadId: id, excludeTurns: true }, 'verification must not overwrite externally changed settings');
+      return !cold ? selected.get(id) : persisted.get(id) ?? { ...selected.get(id)!, model: 'native-default', approvalPolicy: 'on-request', activePermissionProfile: null };
+    }
+    if (request.method === 'thread/read') return { thread: { id, status: { type: 'idle' } } };
+    return undefined;
+  });
+  const bound: Binding[] = [];
+  const bindings = await Promise.all(Array.from({ length: 4 }, (_, n) => p.adapter.create({ cwd: saved.cwd, configuration: { modelId: `model-${n}`, permissionId: n % 2 ? 'read-only' : 'workspace' }, title: `Empty ${n}` }, binding => { bound.push(binding); })));
+  assert.deepEqual(new Set(bound.map(binding => binding.id)), new Set(bindings.map(binding => binding.id)));
+  cold = true; await p.restart();
+  for (const binding of bindings) assert.deepEqual(await p.adapter.state(binding), { status: 'idle', pendingInputs: 0, configurationVerified: true });
+  assert.equal(p.calls.filter(call => call.method === 'thread/start').length, 4);
+  assert.equal(p.calls.filter(call => call.method === 'thread/settings/update').length, 4);
+  for (const binding of bindings) {
+    const update = p.calls.findIndex(call => call.method === 'thread/settings/update' && call.params.threadId === binding.id);
+    assert(update < p.calls.findIndex(call => call.method === 'thread/unsubscribe' && call.params.threadId === binding.id));
+  }
+  const first = bindings[0]!;
+  persisted.set(first.id, { ...persisted.get(first.id)!, activePermissionProfile: { id: 'changed-externally' } });
+  assert.equal((await p.adapter.state(first)).reason, 'codex_configuration_mismatch');
+  assert.deepEqual(await p.adapter.submit(first, { id: 'original-operation', text: 'synthetic' }), { outcome: 'rejected', reason: 'codex_configuration_mismatch' });
+  assert.equal(p.calls.filter(call => call.method === 'thread/settings/update').length, 4, 'recovery must not repair permission drift by writing saved settings');
+  assert.equal(p.calls.some(call => call.method === 'turn/start'), false);
+});
+
+test('Codex creation settings failure retains the bound identity without replacing or resending work', async t => {
+  const p = await peer(t, (request, socket) => {
+    if (request.method !== 'thread/settings/update') return undefined;
+    socket.send(JSON.stringify({ id: request.id, error: { code: -32601, message: 'synthetic settings failure' } })); return NO_RESPONSE;
+  });
+  let bound: Binding | undefined;
+  await assert.rejects(p.adapter.create({ cwd: saved.cwd, configuration: saved.configuration, title: 'Empty bound thread' }, binding => { bound = binding; }));
+  assert.equal(bound?.id, saved.id); assert.deepEqual(bound?.configuration, saved.configuration);
+  assert.equal(p.calls.filter(call => call.method === 'thread/start').length, 1);
+  assert.equal(p.calls.filter(call => call.method === 'thread/settings/update').length, 1);
+  assert.equal(p.calls.filter(call => call.method === 'thread/unsubscribe').length, 1);
+  assert.equal(p.calls.some(call => call.method === 'turn/start'), false);
+});
+
+test('Codex waits for the physical creation record after an empty settings acknowledgement', async t => {
+  const p = await peer(t, undefined, false, true, false);
+  let bound: Binding | undefined, finished = false;
+  const creating = p.adapter.create({ cwd: saved.cwd, configuration: saved.configuration, title: 'Delayed physical settings' }, binding => { bound = binding; }).then(value => { finished = true; return value; });
+  await until(() => p.calls.some(call => call.method === 'thread/read'));
+  await delay(150); assert.equal(finished, false); assert.equal(bound?.id, saved.id);
+  assert.equal(p.calls.filter(call => call.method === 'thread/settings/update').length, 1);
+  assert.equal(p.calls.some(call => call.method === 'thread/unsubscribe'), false);
+  appendFileSync(join(p.nativeRoot, 'sessions', `rollout-${saved.id}.jsonl`), JSON.stringify({ ordinal: 1, type: 'event_msg', payload: { type: 'thread_settings_applied', thread_id: saved.id, thread_settings: { model: saved.configuration.modelId, cwd: saved.cwd, approval_policy: 'never', active_permission_profile: { id: saved.configuration.permissionId } } } }) + '\n');
+  assert.equal((await creating).id, saved.id);
+  assert.equal(p.calls.filter(call => call.method === 'thread/settings/update').length, 1);
+  assert.equal(p.calls.some(call => call.method === 'turn/start'), false);
+});
+
+test('Codex leaves an unproven creation bound after its finite persistence budget', async t => {
+  const p = await peer(t, undefined, false, true, false); let bound: Binding | undefined;
+  await assert.rejects(p.adapter.create({ cwd: saved.cwd, configuration: saved.configuration, title: 'Unproven settings' }, binding => { bound = binding; }), { message: 'codex_configuration_persistence_unconfirmed' });
+  assert.equal(bound?.id, saved.id);
+  assert.equal(p.calls.filter(call => call.method === 'thread/start').length, 1);
+  assert.equal(p.calls.filter(call => call.method === 'thread/settings/update').length, 1);
+  assert.equal(p.calls.some(call => call.method === 'turn/start'), false);
+});
+
+test('Codex socket-only creation keeps its connection contract, default title and strict drift refusal', async t => {
+  let drift = false;
+  const direct = await peer(t, request => {
+    if (request.method === 'initialize') return {};
+    if (request.method === 'thread/resume' && drift) return { ...nativeConfiguration(), model: 'native-default' };
+    return undefined;
+  }, false, false, false);
+  const binding = await direct.adapter.create({ cwd: saved.cwd, configuration: saved.configuration }, () => {});
+  assert.equal(binding.details.title, '新对话');
+  assert.deepEqual(direct.calls.find(call => call.method === 'thread/name/set')?.params, { threadId: saved.id, name: '新对话' });
+  assert.equal(direct.calls.some(call => call.method === 'thread/read' || call.method === 'thread/resume'), false, 'socket-only creation does not require native files or hydrate history');
+  drift = true;
+  assert.equal((await direct.adapter.state(binding)).reason, 'codex_configuration_mismatch');
+  assert.deepEqual(await direct.adapter.submit(binding, { id: 'same-operation', text: 'synthetic' }), { outcome: 'rejected', reason: 'codex_configuration_mismatch' });
+  assert.equal(direct.calls.filter(call => call.method === 'thread/start').length, 1);
+  assert.equal(direct.calls.filter(call => call.method === 'thread/settings/update').length, 1);
+  assert.equal(direct.calls.some(call => call.method === 'turn/start'), false);
+  const configured = await peer(t, undefined, false, true);
+  const created = await configured.adapter.create({ cwd: saved.cwd, configuration: saved.configuration }, () => {});
+  assert.equal(created.id, saved.id); assert.equal(created.details.title, '新对话');
 });
 
 test('Codex binds before naming, then names a new conversation before releasing its native observation', async t => {
