@@ -1,5 +1,5 @@
 /** Streaming JSON syntax/envelope validation; body strings are never accumulated. */
-type Frame = { kind: 'object' | 'array'; stage: string; path: string; key?: string; index: number; start: number };
+type Frame = { kind: 'object' | 'array'; stage: string; path: string; key?: string; index: number; start: number; textBlock?: { type: boolean; nonempty: boolean }; hasText?: boolean };
 const envelopeFields = ['/type', '/seq', '/time', '/data/turn', '/data/step', '/data/callId', '/data/name', '/data/message/toolCallId', '/data/toolCall/callId', '/data/source/rpcId', '/data/kind', '/data/producerReported', '/data/outcome', '/data/reason/kind'];
 export type JsonEnvelopeEvents = { string(path: string, text: string, final: boolean): void; value(path: string, value: unknown): void; end(path: string): void; span(path: string, start: number, end: number): void };
 export type JsonSelection = { capture(path: string): boolean; stream(path: string): boolean };
@@ -18,10 +18,15 @@ export class BoundedJsonEnvelope {
   private stream = false;
   private decoded = '';
   private escapeDigits = '';
+  private stringNonempty = false;
+  private messageText = false;
   private readonly events?: JsonEnvelopeEvents;
   private selection?: JsonSelection;
   constructor(events?: JsonEnvelopeEvents, selection?: JsonSelection) { this.events = events; this.selection = selection; }
   readonly fields: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+  /** native.textContent concatenates text blocks without separators. Keep only
+   * presence, even when text precedes type or a body spans many input chunks. */
+  get hasMessageText(): boolean { return this.messageText; }
 
   private fail(): never { throw new Error('dsh_bounded_invalid_json'); }
   private path(): string {
@@ -52,9 +57,9 @@ export class BoundedJsonEnvelope {
         }
         if (this.unicode) { if (!/[0-9a-fA-F]/.test(char)) this.fail(); this.escapeDigits += char; this.unicode--; if (!this.unicode && this.stream) { this.decoded += String.fromCharCode(parseInt(this.escapeDigits, 16)); this.flush(false); } continue; }
         if (this.escaped) { this.escaped = false; if (char === 'u') { this.unicode = 4; this.escapeDigits = ''; } else if (!'"\\/bfnrt'.includes(char)) this.fail(); else if (this.stream) { this.decoded += ({ b: '\b', f: '\f', n: '\n', r: '\r', t: '\t' } as Record<string, string>)[char] ?? char; this.flush(false); } continue; }
-        if (char === '\\') { this.escaped = true; continue; }
+        if (char === '\\') { this.stringNonempty = true; this.escaped = true; continue; }
         if (char.charCodeAt(0) < 32) this.fail();
-        if (char !== '"') { if (this.stream) { this.decoded += char; this.flush(false); } continue; }
+        if (char !== '"') { this.stringNonempty = true; if (this.stream) { this.decoded += char; this.flush(false); } continue; }
         this.token = undefined;
         if (this.key) {
           const frame = this.stack.at(-1)!;
@@ -62,6 +67,11 @@ export class BoundedJsonEnvelope {
         } else {
           if (this.stream) this.flush(true);
           const value: unknown = this.capture ? JSON.parse(this.value) : undefined;
+          const frame = this.stack.at(-1);
+          if (frame?.textBlock) {
+            if (frame.key === 'type') frame.textBlock.type = value === 'text';
+            if (frame.key === 'text') frame.textBlock.nonempty = this.stringNonempty;
+          }
           if (this.capture) this.events?.value(this.tokenPath, value);
           this.events?.span(this.tokenPath, this.tokenStart, this.offset); this.done(value);
         }
@@ -79,7 +89,10 @@ export class BoundedJsonEnvelope {
       if (char === '}' || char === ']') {
         if (!frame || (char === '}' ? frame.kind !== 'object' : frame.kind !== 'array')) this.fail();
         if (!['empty', 'comma'].includes(frame.stage)) this.fail();
-        this.stack.pop(); this.events?.end(frame.path); this.events?.span(frame.path, frame.start, this.offset); this.capture = false; this.done(); continue;
+        this.stack.pop();
+        if (frame.textBlock?.type && frame.textBlock.nonempty) this.stack.at(-1)!.hasText = true;
+        if (frame.kind === 'array' && frame.path === '/data/message/content') this.messageText = frame.hasText === true;
+        this.events?.end(frame.path); this.events?.span(frame.path, frame.start, this.offset); this.capture = false; this.done(); continue;
       }
       if (frame?.stage === 'comma') {
         if (char !== ',') this.fail(); frame.stage = frame.kind === 'object' ? 'key' : 'value'; continue;
@@ -90,14 +103,23 @@ export class BoundedJsonEnvelope {
       }
       if (frame?.kind === 'array' && frame.stage === 'empty') frame.stage = 'value';
       this.valueAllowed(); this.key = false; this.tokenPath = this.path();
+      // Resets also follow JSON's last-property-wins behavior. Non-string text
+      // and non-array content never become visible assistant text.
+      if (['/data', '/data/message', '/data/message/content'].includes(this.tokenPath)) this.messageText = false;
+      if (frame?.textBlock) {
+        if (frame.key === 'type') frame.textBlock.type = false;
+        if (frame.key === 'text') frame.textBlock.nonempty = false;
+      }
       this.tokenStart = previousOffset;
       this.capture = envelopeFields.includes(this.tokenPath) || !!this.events && (/^\/data\/(step|callId|name|interrupted|kind|producerReported|detail|outcome)$/.test(this.tokenPath) || /^\/data\/(source\/rpcId|message\/(toolCallId|isError)|reason\/kind|toolCall\/callId|meta\/(path|operation))$/.test(this.tokenPath) || /^\/data\/(?:message\/)?content\/\d+\/type$/.test(this.tokenPath));
       this.stream = !!this.events && (/^\/data\/(?:message\/)?content\/\d+\/text$/.test(this.tokenPath) || /^\/data\/(input|arguments)$/.test(this.tokenPath));
       if (this.selection) { this.capture = this.selection.capture(this.tokenPath); this.stream = !!this.events && this.selection.stream(this.tokenPath); }
+      if (frame?.textBlock && frame.key === 'type') this.capture = true;
       if (char === '{' || char === '[') {
         if (this.stack.length >= 128) throw new Error('dsh_bounded_json_depth');
-        this.stack.push({ kind: char === '{' ? 'object' : 'array', stage: 'empty', path: this.tokenPath, index: 0, start: previousOffset }); this.capture = false; this.stream = false;
-      } else if (char === '"') { this.token = 'string'; this.value = this.capture ? '"' : ''; }
+        const textBlock = char === '{' && frame?.kind === 'array' && frame.path === '/data/message/content' ? { type: false, nonempty: false } : undefined;
+        this.stack.push({ kind: char === '{' ? 'object' : 'array', stage: 'empty', path: this.tokenPath, index: 0, start: previousOffset, ...(textBlock ? { textBlock } : {}) }); this.capture = false; this.stream = false;
+      } else if (char === '"') { this.token = 'string'; this.stringNonempty = false; this.value = this.capture ? '"' : ''; }
       else { this.token = 'scalar'; this.value = char; }
     }
   }

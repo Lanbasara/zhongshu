@@ -132,7 +132,10 @@ async function cache(binding: z.infer<typeof boundedBinding>) {
   const name = `v2-${key}`, path = join(options.cacheRoot, `${name}.sqlite`);
   const reserved = await file(path, true); await reserved.close();
   const db = new DatabaseSync(path);
-  if (Number(db.prepare('PRAGMA user_version').get()!.user_version) !== 4) db.exec('DROP TABLE IF EXISTS records; DROP TABLE IF EXISTS generations; DROP TABLE IF EXISTS current; DROP TABLE IF EXISTS extractions; DROP TABLE IF EXISTS item_events; DROP TABLE IF EXISTS items;');
+  // v4 indexed assistant tool-call/empty messages that native.itemFrom omits.
+  // Rebuild the disposable index; generation/cursors still identify the same
+  // native source, and leased body files live under the separate quota ledger.
+  if (Number(db.prepare('PRAGMA user_version').get()!.user_version) !== 5) db.exec('DROP TABLE IF EXISTS records; DROP TABLE IF EXISTS generations; DROP TABLE IF EXISTS current; DROP TABLE IF EXISTS extractions; DROP TABLE IF EXISTS item_events; DROP TABLE IF EXISTS items;');
   db.exec(`PRAGMA journal_mode=DELETE; PRAGMA synchronous=NORMAL; PRAGMA auto_vacuum=FULL;
     CREATE TABLE IF NOT EXISTS generations(id TEXT PRIMARY KEY, identity TEXT NOT NULL, header TEXT NOT NULL, source_offset INTEGER NOT NULL, source_bytes INTEGER NOT NULL, modified TEXT NOT NULL, raw_bytes INTEGER NOT NULL, through_seq INTEGER NOT NULL, turn INTEGER) STRICT;
     CREATE TABLE IF NOT EXISTS current(id INTEGER PRIMARY KEY CHECK(id=1), generation TEXT NOT NULL) STRICT;
@@ -143,7 +146,7 @@ async function cache(binding: z.infer<typeof boundedBinding>) {
     CREATE INDEX IF NOT EXISTS items_order ON items(generation,first_seq DESC);
     CREATE TABLE IF NOT EXISTS item_events(generation TEXT NOT NULL,key TEXT NOT NULL,type TEXT NOT NULL,seq INTEGER NOT NULL,PRIMARY KEY(generation,key,type,seq)) STRICT;
     CREATE INDEX IF NOT EXISTS item_events_sequence ON item_events(generation,seq);
-    PRAGMA user_version=4;`);
+    PRAGMA user_version=5;`);
   db.exec('CREATE INDEX IF NOT EXISTS records_call ON records(generation,call_id,turn,type,seq);');
   const current = db.prepare('SELECT g.id,g.source_bytes,g.modified FROM generations g JOIN current c ON c.generation=g.id').get();
   if (current) { const generation = String(current.id); observations.delete(generation); observations.set(generation, { bytes: Number(current.source_bytes), modified: String(current.modified) }); if (observations.size > 16) observations.delete(observations.keys().next().value!); }
@@ -185,7 +188,10 @@ async function scan(args: unknown) {
         insert.run(generation!.id, event.seq, event.type, event.time, currentTurn, frame, frameEndOffset, rowOffset, rowBytes, hash.digest('hex'), event.callId ?? null, event.toolName ?? null);
         const fields = parser.fields;
         const tool = event.callId && (['tool/call', 'tool/result'].includes(event.type) || event.type === 'job/settled' && fields['/data/kind'] === 'bash' && fields['/data/producerReported'] === true);
-        const assistant = event.type === 'assistant/message' && currentTurn !== null && Number.isSafeInteger(fields['/data/step']);
+        // Only events that native.itemFrom projects may anchor an item or
+        // replace its latest revision. An empty/tool-only later revision must
+        // leave the preceding visible text available at both current/old cuts.
+        const assistant = event.type === 'assistant/message' && currentTurn !== null && Number.isSafeInteger(fields['/data/step']) && parser.hasMessageText;
         const standalone = event.type === 'user/message' && typeof fields['/data/source/rpcId'] === 'string' || event.type === 'approval/asked' || event.type === 'approval/decided' && fields['/data/outcome'] === 'unavailable' || event.type === 'turn/end' && fields['/data/reason/kind'] !== 'completed';
         const itemKey = tool ? `tool:${event.callId}` : assistant ? `assistant:${currentTurn}:${fields['/data/step']}` : standalone ? `event:${event.seq}` : undefined;
         if (itemKey) {

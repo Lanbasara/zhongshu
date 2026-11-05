@@ -150,6 +150,8 @@ node test/support/native-archive-verify.ts --harness dsh --dsh-compressed --coun
 
 原生上下文压缩须另外调用真实 Codex `thread/compact/start` 或 DSH `commands/execute /compact`，核对原生持久压缩事件，再用压缩前的历史 cursor、精确 `readItems` 和 Workbench 存档逐项核对旧正文 SHA；重启 Host、reader 和 storage worker 后重复。DSH rc.4 空闲压缩的 `compaction/start/end` 合法地使用 `data.turn:null`；兼容层只在这两类事件接纳空归属，其余事件的非法 turn 仍拒绝。[reader 回归](../../test/dsh-bounded-reader.test.ts) 的 `idle compaction` 分支覆盖 JSONL/Zstandard、旧 cursor、增量水位推进和压缩后新增轮次；它不能替代真实原生压缩验收。
 
+DSH 历史与修订索引必须遵循相同的条目投影。只有工具调用、没有文本的 assistant 记录不单独生成正文条目；后续同 step 的空记录不抹掉此前有效文本。真实复验须完成一次工具调用，核对用户、工具和最终回复正文，并等待历史回填及修订水位都完整，再关页、重启和读回；仅看到原生轮次 completed 不算存档完成。`node --test test/dsh-bounded-projection.test.ts` 覆盖 JSONL/Zstandard、text-before-type、巨型正文、空修订及固定旧页。可重建索引的缓存版本 5 会重建版本 4 的错误锚点，保留原生源、永久存档和仍有效的正文租约；此缓存版本与原生日志 v4、产品数据库 schema 分开。未知条目仍须先由历史路径确定顺序，不能通过跳过修订 ID 来伪造完整水位。
+
 代次和缓存反例：替换原生日志后旧 cursor 应失效，已发布中书正文保持可读；仍持有租约的旧正文在释放前保持版本不变。不断增加绑定/代次使原生源总量超过兼容缓存预算，缓存应回收可重建索引及临时正文，旧源仍可按需重建和归档；租约占满时须明确暂停，释放后可恢复。不能删除中书永久存档来通过。对应 [Codex](../../test/codex-bounded-reader.test.ts)、[DSH](../../test/dsh-bounded-reader.test.ts) 与 [状态投影](../../test/dsh-bounded-state.test.ts) 的反例覆盖必须一并通过。
 
 DSH 的迁移可能把多年事件写入单个 Zstandard frame。索引扫描同时生成受同一全局 quota 约束、可校验和重建的 256 KiB 解压块；常驻内存最多四块。复验需构造单 frame 20,001 事件，重启后随机旧页的 `cacheStatus().frameReads` 不得新增 frame 解码；原生源超过缓存预算时，冷旧窗口应共享一次重建，不得每条消息从 frame 开头重解压。缓存损坏应从未改动的原生源重建，同大小原生改写则拒绝。冷缓存重建仍可能扫描原生压缩 frame，不能把首次随机读取宣称为常数时间。
