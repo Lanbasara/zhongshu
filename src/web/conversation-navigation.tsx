@@ -6,6 +6,7 @@ import { progressiveSearch } from './progressive-search.ts';
 import { useWorkspacePage, WorkspacePages } from './workspace-selection.tsx';
 import { Button } from './ui/controls.tsx';
 import { CursorWindowCache, ScrollContinuation, useCursorWindow, WindowRegion } from './cursor-window.tsx';
+import type { NavigationUpdates } from './navigation-updates.ts';
 
 const widthKey = 'zhongshu:sidebar-width';
 const minWidth = 224;
@@ -51,10 +52,11 @@ type NavigationProps = {
   workspaceAction(action: WorkspaceAction): void;
   selected?: string;
   revision: number;
+  updates: NavigationUpdates;
   csrf: string;
   choose(id: string): void;
   create(workspaceId: string): void;
-  changed(): void;
+  changed(workspaceId?: string): void;
   report(reason: unknown): void;
   stateLabel(conversation: Conversation): string;
 };
@@ -69,12 +71,12 @@ type RowProps = {
 
 type ConversationPage = import('zod').z.infer<typeof conversationListSchema>;
 function Results({ query, revision, csrf, report, rows, hideEmpty, workspaceLabel, label, visible = true, cache }: {
-  query: Query; revision: number; csrf: string; report(reason: unknown): void; rows: RowProps;
+  query: Query; revision: NavigationUpdates; csrf: string; report(reason: unknown): void; rows: RowProps;
   hideEmpty?: boolean; workspaceLabel?: (id: string) => string; label?: string; visible?: boolean; cache: CursorWindowCache<ConversationPage>;
 }) {
   const [scanned, setScanned] = useState(0); const pauseSearch = useRef(false);
   const [searchPaused, setSearchPaused] = useState(false);
-  const feed = useCursorWindow({ key: JSON.stringify(query), cache, revision, enabled: visible,
+  const feed = useCursorWindow({ key: JSON.stringify(query), cache, revision: revision.version(query.workspaceId), enabled: visible,
     load: async (cursor, signal, intent) => {
       if (intent === 'load') { pauseSearch.current = false; setSearchPaused(false); }
       const batch = await progressiveSearch({ cursor, signal, continuous: !!query.title && intent === 'load', paused: () => pauseSearch.current,
@@ -97,7 +99,7 @@ function Results({ query, revision, csrf, report, rows, hideEmpty, workspaceLabe
     {!feed.pages.length && feed.pending && <p className="navigation-empty" role="status">{query.title ? `正在查找，已检查 ${scanned} 条…` : '正在加载…'}</p>}
     {label && results.length > 0 && <p className="nav-label">{label}</p>}
     {feed.error && <p className="navigation-empty">读取失败。<button className="text-button" onClick={feed.refresh}>重试</button></p>}
-    {!!feed.pages.length && !feed.pending && !feed.error && !results.length && !hideEmpty && <p className="navigation-empty">{feed.canNext ? '还没有找到匹配的对话。' : '暂无对话'}</p>}
+    {!!feed.pages.length && !feed.error && !results.length && !hideEmpty && <p className="navigation-empty">{feed.canNext ? '还没有找到匹配的对话。' : '暂无对话'}</p>}
     {results.map(conversation => <div className="conversation-row" data-scroll-row key={conversation.id}>
       <button className={`conversation-link ${conversation.id === rows.selected ? 'selected' : ''}`}
         aria-current={conversation.id === rows.selected ? 'page' : undefined} onClick={() => rows.choose(conversation.id)}>
@@ -136,7 +138,7 @@ export const ConversationNavigation = memo(function ConversationNavigation(props
   const matchingWorkspaces = workspacePage.entries;
   const rows = { ...props, manage: setManaging };
   const resultCache = useRef(new CursorWindowCache<ConversationPage>());
-  const resultProps = { cache: resultCache.current, revision: props.revision, csrf: props.csrf, report: props.report, rows };
+  const resultProps = { cache: resultCache.current, revision: props.updates, csrf: props.csrf, report: props.report, rows };
   const scroll = useRef<HTMLElement>(null);
   const positions = useRef(new Map<string, number>());
   const viewKey = showRemoved ? 'removed' : archived ? 'archived:' + term : searchActive ? 'search:' + term : 'normal';
@@ -215,7 +217,7 @@ export const ConversationNavigation = memo(function ConversationNavigation(props
           <Results key={JSON.stringify([archived, term])} {...resultProps} query={{ archived, title: searchActive ? term : undefined }} workspaceLabel={workspaceLabel} />}
       </section>}
     </nav>
-    {managing && <ManageDialog conversation={managing} csrf={props.csrf} close={() => setManaging(undefined)} changed={message => { setNotice(message); props.changed(); }} report={props.report} />}
+    {managing && <ManageDialog conversation={managing} csrf={props.csrf} close={() => setManaging(undefined)} changed={message => { setNotice(message); props.changed(managing.workspaceId); }} report={props.report} />}
   </>;
 });
 

@@ -151,7 +151,8 @@ export const snapshotSchema = z.object({
   history: z.object({ items: z.array(itemSchema).max(100), liveItems: z.array(itemSchema).max(100), liveItemsLimited: z.boolean(), olderBeforeItemId: identifierSchema.nullable(), hasOlder: z.boolean(), loaded: z.boolean() }).strict(),
   operations: z.array(operationSchema).max(100), queue: queueSummarySchema.optional(), turnFiles: z.array(turnFilesSchema).max(200).optional(), usage: usageSchema.optional(), revision: revisionSchema,
 }).strict();
-export const changeEventSchema = z.object({ type: z.literal('change'), revision: revisionSchema, conversationId: z.uuid(), item: itemSchema.optional() }).strict();
+export const changeEventSchema = z.object({ type: z.literal('change'), revision: revisionSchema, conversationId: z.uuid(), item: itemSchema.optional(),
+  navigation: z.object({ workspaceId: identifierSchema, version: z.string().regex(/^[a-f0-9]{64}$/) }).strict().optional() }).strict();
 export const resetEventSchema = z.object({ type: z.literal('reset'), revision: revisionSchema }).strict();
 export const readyEventSchema = z.object({ type: z.literal('ready'), revision: revisionSchema }).strict();
 export type WorkbenchConfiguration = z.infer<typeof workbenchConfigurationSchema>;

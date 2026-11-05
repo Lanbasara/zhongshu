@@ -13,6 +13,7 @@ import './workbench.css';
 import { Transcript, FilePicker } from './conversation-content.tsx';
 import { Composer } from './composer.tsx';
 import { ConversationNavigation, useSidebarWidth } from './conversation-navigation.tsx';
+import { NavigationUpdates } from './navigation-updates.ts';
 import type { MessageReference } from '../shared/content.ts';
 import { WorkspaceManagement, type WorkspaceAction } from './workspace-management.tsx';
 import { InputQueue } from './input-queue.tsx';
@@ -94,6 +95,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
   const [workspaceAction, setWorkspaceAction] = useState<WorkspaceAction>();
   const [managingPlugins, setManagingPlugins] = useState(false);
   const [listRevision, refreshList] = useState(0);
+  const navigationUpdates = useRef(new NavigationUpdates());
   const sidebarWidth = useSidebarWidth();
   const [reader, setReader] = useState(false);
   const [workspaceStatus, setWorkspaceStatus] = useState<{ id: string; value?: WorkspaceEditStatus }>();
@@ -191,8 +193,11 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
     return job.task;
   };
   const loadRef = useRef(load); loadRef.current = load;
-  const scheduleRefresh = (id?: string, refreshNavigation = true) => {
-    if (refreshNavigation && !listTimer.current) listTimer.current = setTimeout(() => { listTimer.current = undefined; refreshList(value => value + 1); }, 700);
+  const scheduleRefresh = (id?: string, refreshNavigation: boolean | string = true) => {
+    if (refreshNavigation) {
+      navigationUpdates.current.invalidate(typeof refreshNavigation === 'string' ? refreshNavigation : undefined);
+      if (!listTimer.current) listTimer.current = setTimeout(() => { listTimer.current = undefined; refreshList(value => value + 1); }, 700);
+    }
     if (id && id !== selectedRef.current) return;
     if (!refreshTimer.current) refreshTimer.current = setTimeout(() => { refreshTimer.current = undefined; if (selectedRef.current) void loadRef.current(selectedRef.current); }, 180);
   };
@@ -220,7 +225,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
     };
     const connect = () => {
       if (stopped) return;
-      source?.close(); source = new EventSource(`/api/private/workbench/events?cursor=${cursor}`); lastMessage = Date.now();
+      source?.close(); source = new EventSource(`/api/private/workbench/events?cursor=${cursor}&navigation=1`); lastMessage = Date.now();
       const own = source;
       source.addEventListener('ready', () => { if (source !== own || stopped) return; delay = 500; lastMessage = Date.now(); setConnection('已连接'); scheduleRefresh(); configurationRefresh.current(); });
       source.addEventListener('heartbeat', () => { if (source === own && !stopped) lastMessage = Date.now(); });
@@ -235,7 +240,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
             setSnapshot(current => current ? { ...current, history: { ...current.history, liveItems: [...current.history.liveItems.filter(old => old.id !== item.id), item].slice(-100) } } : current);
           }
           // History snapshots reconcile live and durable identities; this also catches missed terminal events.
-          scheduleRefresh(change.conversationId, !change.item);
+          scheduleRefresh(change.conversationId, navigationUpdates.current.changed(change));
         } catch { cursor = 0; reconnect(); }
       });
       source.addEventListener('reset', event => { if (source !== own || stopped) return; try { cursor = resetEventSchema.parse(JSON.parse((event as MessageEvent).data)).revision; scheduleRefresh(); } catch { cursor = 0; reconnect(); } });
@@ -254,7 +259,8 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
   }, [items, snapshot?.history.liveItems]);
   const choose = useCallback((id: string) => { history.replaceState(null, '', `#${id}`); setSelected(id); setManagingPlugins(false); setNavigation(false); }, []);
   const createInWorkspace = useCallback((id: string) => { setCreating(id); setNavigation(false); }, []);
-  const refreshNavigation = useCallback(() => {
+  const refreshNavigation = useCallback((workspaceId?: string) => {
+    navigationUpdates.current.invalidate(workspaceId);
     refreshList(value => value + 1);
     if (selectedRef.current) void loadRef.current(selectedRef.current);
   }, []);
@@ -416,7 +422,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
       <Button className="new-conversation" onClick={() => { setCreating(true); setNavigation(false); }}><Plus size={16}/>新对话</Button>
       <ConversationNavigation workspaces={configuration?.workspaces} removedWorkspaces={configuration?.removedWorkspaces}
         workspaceCursor={configuration?.workspaceCursor} removedWorkspaceCursor={configuration?.removedWorkspaceCursor}
-        canAddWorkspace={!!configuration?.workspaceRoots?.length} workspaceAction={action => { setNavigation(false); setWorkspaceAction(action); }} selected={selected} revision={listRevision} csrf={csrf}
+        canAddWorkspace={!!configuration?.workspaceRoots?.length} workspaceAction={action => { setNavigation(false); setWorkspaceAction(action); }} selected={selected} revision={listRevision} updates={navigationUpdates.current} csrf={csrf}
         choose={choose} create={createInWorkspace} stateLabel={stateLabel} report={report}
         changed={refreshNavigation} />
       {sidebarWidth.separator}
@@ -496,7 +502,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
       </>}
       {(error || authError) && <div className="workbench-error" role="alert"><span>{error || authError}</span><button className="text-button" onClick={() => setError('')}>关闭</button></div>}
     </WorkbenchFrame>
-    {creating && <CreateConversation configuration={configuration} csrf={csrf} initialWorkspace={typeof creating === 'string' ? creating : undefined} onClose={() => setCreating(undefined)} onCreated={c => { setCreating(undefined); refreshList(value => value + 1); choose(c.id); }} onError={report} />}
+    {creating && <CreateConversation configuration={configuration} csrf={csrf} initialWorkspace={typeof creating === 'string' ? creating : undefined} onClose={() => setCreating(undefined)} onCreated={c => { setCreating(undefined); refreshNavigation(c.workspaceId); choose(c.id); }} onError={report} />}
     {pickingFile && selected && !workspaceRemoved && <FilePicker conversation={selected} onClose={() => setPickingFile(false)} onSelect={(reference: MessageReference) => { const next = { ...draft, text: draft.text.endsWith('@') ? draft.text.slice(0,-1) : draft.text, references: [...(draft.references ?? []), reference].slice(0,8) }; updateDraft(next); }}/ >}
     {workspaceAction && <WorkspaceManagement action={workspaceAction} roots={configuration?.workspaceRoots ?? []} csrf={csrf}
       close={() => setWorkspaceAction(undefined)} changed={() => { refreshConfiguration(); refreshNavigation(); }} report={report} />}

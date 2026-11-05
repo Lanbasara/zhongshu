@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { ServerResponse } from 'node:http';
+import { createHash } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { z } from 'zod';
 import { conversationManagementSchema, conversationSearchSchema, createConversationSchema, enqueueOperationSchema, identifierSchema, queueCommandSchema, workbenchConfigurationSchema,
@@ -22,7 +23,7 @@ const noQuery = z.object({}).strict();
 const listQuery = z.object({ beforeId: z.uuid().optional() }).strict();
 const olderQuery = z.object({ beforeItemId: identifierSchema.optional() }).strict();
 const cursorSchema = z.string().regex(/^(0|[1-9][0-9]{0,15})$/).transform(Number).refine(Number.isSafeInteger);
-const eventsQuery = z.object({ cursor: cursorSchema.optional() }).strict();
+const eventsQuery = z.object({ cursor: cursorSchema.optional(), navigation: z.literal('1').optional() }).strict();
 const directoryPageOptions = z.object({ cursor: z.string().min(1).max(4096).optional(), limit: z.number().int().min(1).max(100).optional(), refresh: z.boolean().optional() });
 const optionsSchema = z.object({
   heartbeatMs: z.number().int().min(20).max(30_000).default(15_000),
@@ -104,7 +105,7 @@ function json(reply: FastifyReply, value: unknown): FastifyReply {
 }
 
 type Connection = {
-  response: ServerResponse; sessionId: string; token: string; context: PrivateContext; cursor: number;
+  response: ServerResponse; sessionId: string; token: string; context: PrivateContext; cursor: number; navigation: boolean;
   closed: boolean; blocked: boolean; pumping?: boolean; again?: boolean; heartbeating?: boolean; timeout?: NodeJS.Timeout; scheduled?: NodeJS.Immediate; drain: () => void;
 };
 
@@ -162,9 +163,16 @@ export function createWorkbenchHttp(workbench: Workbench, input: Partial<z.input
         return;
       }
       for (const change of batch.events) {
-        const value: { type: 'change'; revision: number; conversationId: string; item?: Awaited<ReturnType<Workbench['store']['getItem']>> } = {
+        const value: { type: 'change'; revision: number; conversationId: string; navigation?: { workspaceId: string; version: string }; item?: Awaited<ReturnType<Workbench['store']['getItem']>> } = {
           type: 'change', revision: change.sequence, conversationId: change.conversationId,
         };
+        if (connection.navigation) {
+          // Archive progress, bodies and usage are not sidebar changes. This
+          // bounded local metadata read never activates a native conversation.
+          const row = await workbench.store.getConversation(change.conversationId);
+          if (row) value.navigation = { workspaceId: row.workspaceId, version: createHash('sha256')
+            .update(JSON.stringify([row.title, row.workspaceId, row.harnessId, row.archived, row.readiness, row.state.status, row.createdAt])).digest('hex') };
+        }
         if (change.itemId) {
           const item = (await workbench.store.getItem(change.conversationId, change.itemId));
           // Large bodies use the same invalidation + snapshot path, never fragmented deltas.
@@ -450,7 +458,7 @@ export function createWorkbenchHttp(workbench: Workbench, input: Partial<z.input
         const headers = Object.fromEntries(Object.entries(reply.getHeaders()).filter(([, value]) => value !== undefined)
           .map(([name, value]) => [name, Array.isArray(value) ? value : String(value)]));
         reply.raw.writeHead(200, headers); reply.raw.setTimeout(0);
-        const connection: Connection = { response: reply.raw, sessionId: session.id, token, context, cursor, closed: false, blocked: false, drain: () => {
+        const connection: Connection = { response: reply.raw, sessionId: session.id, token, context, cursor, navigation: query.navigation === '1', closed: false, blocked: false, drain: () => {
           if (connection.timeout) clearTimeout(connection.timeout); connection.timeout = undefined; connection.blocked = false; schedule(connection);
         } };
         connections.add(connection);

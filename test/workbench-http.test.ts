@@ -321,6 +321,23 @@ test('HTTP receipt loss retains stable operation identity and reconciliation nev
   assert.deepEqual(f.submissions, [operationId]);
 });
 
+test('negotiated SSE separates sidebar metadata from archive progress, bodies and usage', async t => {
+  const f = await fixture(t); const id = f.seed();
+  const stream = await f.stream(`?cursor=${f.store.version()}&navigation=1`); await stream.named('ready');
+  const next = async () => changeEventSchema.parse((await stream.named('change'))!.data).navigation!;
+  f.store.setUsage(id, { total: 1 }); const initial = await next();
+  assert.equal(initial.workspaceId, 'fixture'); assert.match(initial.version, /^[a-f0-9]{64}$/);
+  const job = f.store.claimArchiveJob(id, 'latest', true)!; assert.ok(job);
+  f.store.commitArchivePage(job, [], null); assert.deepEqual(await next(), initial);
+  f.store.saveLiveItem(id, { id: 'body-only', kind: 'assistant', status: 'running', text: 'synthetic text' }); assert.deepEqual(await next(), initial);
+  f.store.setUsage(id, { total: 2 }); assert.deepEqual(await next(), initial);
+  f.store.renameConversation(id, 'new synthetic title'); const renamed = await next(); assert.notEqual(renamed.version, initial.version);
+  f.store.setConversationState(id, { state: { ...nativeState, status: 'running' } }); const running = await next(); assert.notEqual(running.version, renamed.version);
+  f.store.setConversationState(id, { state: nativeState }); await next();
+  f.store.setArchived(id, true, () => true); assert.notEqual((await next()).version, renamed.version);
+  stream.close();
+});
+
 test('SSE preserves security headers, replays durable changes and resets expired cursors', async t => {
   const f = await fixture(t); const id = f.seed(); const cut = f.store.version();
   const first = await f.stream(`?cursor=${cut}`); assert.equal(first.response.status, 200);
@@ -332,6 +349,7 @@ test('SSE preserves security headers, replays durable changes and resets expired
   assert.ok(await first.named('heartbeat'));
   f.store.saveLiveItem(id, { id: 'live-one', kind: 'assistant', status: 'running', text: 'first body' });
   const emitted = (await first.named('change'))!; changeEventSchema.parse(emitted.data);
+  assert.equal(emitted.data.navigation, undefined, 'unnegotiated clients retain the original strict event shape');
   assert.equal(emitted.data.item.text, 'first body'); assert.equal(emitted.id, String(emitted.data.revision)); first.close();
   f.store.saveLiveItem(id, { id: 'live-one', kind: 'assistant', status: 'running', text: 'full current body after disconnect' });
   const replay = await f.stream('?cursor=0', { 'last-event-id': emitted.id! }); await replay.named('ready');
