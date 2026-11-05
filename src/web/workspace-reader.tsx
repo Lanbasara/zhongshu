@@ -6,15 +6,14 @@ import { referenceSchema } from '../shared/content.ts';
 import { RequestError, request } from './workbench-client.ts';
 import { WorkspaceReport } from './workspace-report.tsx';
 import { directoryFilesSchema, directoryProgress, useDirectoryPage } from './directory-client.ts';
-import { DirectoryControls } from './directory-controls.tsx';
+import { DirectoryControls, DirectoryStart } from './directory-controls.tsx';
 import { WorkspaceSelect } from './workspace-selection.tsx';
 import { workspacePreviewPages } from './workspace-preview.ts';
+import { workspaceEditStatusSchema as statusSchema, publishWorkspaceStatus } from './workspace-execution-status.tsx';
 
 const WorkspaceTextEditor = lazy(() => import('./workspace-text-editor.tsx'));
 
 const fileSchema = z.object({ kind: z.enum(['markdown', 'text', 'html', 'source']), text: z.string(), version: z.string() });
-const statusSchema = z.object({ editable: z.boolean(), reason: z.string().nullable(), canPause: z.boolean().optional(), canRecover: z.boolean().optional(), maintenance: z.enum(['online', 'paused', 'unknown', 'transition']).optional(),
-  phase: z.enum(['online', 'draining', 'editable', 'resuming', 'unknown', 'initializing']).optional(), windowId: z.string().optional(), affectedGroups: z.array(z.string()).max(32).optional(), initialized: z.boolean().optional() });
 type File = z.infer<typeof fileSchema>;
 type OpenFile = { path: string; file: File; position: number };
 type FileTarget = { workspaceId: string; path: string };
@@ -340,6 +339,7 @@ export function WorkspaceReader({ workspaces, workspaceCursor, initialWorkspace,
     try {
       const value = await request(base + '/maintenance', statusSchema, { csrf, body: { action }, timeoutMs: 110_000 });
       setStatus(value);
+      publishWorkspaceStatus(workspace, value);
       return value.maintenance === (action === 'pause' ? 'paused' : 'online');
     } catch (reason) {
       setError(message(reason));
@@ -378,7 +378,10 @@ export function WorkspaceReader({ workspaces, workspaceCursor, initialWorkspace,
       return;
     }
     if (!mayLeave()) return;
-    if ((!status?.phase || !close) && (status?.maintenance === 'paused' || status?.maintenance === 'unknown') && !await maintenance('resume')) return;
+    // Closing the reader is an explicit end-edit action. A browser disconnect
+    // still leaves the durable window intact, but the reader's close button
+    // must not silently strand that window after a successful save.
+    if ((status?.maintenance === 'paused' || status?.maintenance === 'unknown' || status?.maintenance === 'transition') && !await maintenance('resume')) return;
     resetEditor();
     if (close) onClose();
   }
@@ -430,7 +433,7 @@ export function WorkspaceReader({ workspaces, workspaceCursor, initialWorkspace,
           {directory && <button className="reader-file-parent" disabled={busy} onClick={() => {
             setError(''); setDirectory(directory.split('/').slice(0, -1).join('/'));
           }}><ArrowLeft size={14}/><span>{directory}</span></button>}
-          <ul aria-busy={directoryPage.pending}>{files.map(entry => <li key={entry.path}><button className="reader-file-row" disabled={busy || directoryPage.pending || !entry.supported}
+          <ul aria-busy={directoryPage.pending}><li><DirectoryStart {...directoryPage}/></li>{files.map(entry => <li key={entry.path} data-scroll-row><button className="reader-file-row" disabled={busy || !entry.supported}
             aria-current={opened?.path === entry.path ? 'true' : undefined} onClick={() => {
               if (entry.directory) { setError(''); setDirectory(entry.path); }
               else void open(entry.path);
@@ -438,12 +441,11 @@ export function WorkspaceReader({ workspaces, workspaceCursor, initialWorkspace,
             {entry.directory ? <Folder size={16}/> : /\.(?:html?|json|toml|ya?ml|ini)$/i.test(entry.name) ? <FileCode2 size={16}/> : <FileText size={16}/>}
             <span>{entry.name}{directory && <small>{entry.path}</small>}</span>
             {entry.directory && <ChevronRight size={15}/>}
-          </button></li>)}</ul>
+          </button></li>)}<li><DirectoryControls {...directoryPage} label="工作区文件" className="reader-popover-title" /></li></ul>
           {directoryPage.error && <p className="reader-popover-empty" role="alert">{directoryPage.error}</p>}
           {directoryPage.notice && <p className="reader-popover-empty" role="status">{directoryPage.notice}</p>}
           {!directoryPage.error && listingProgress && <p className="reader-popover-empty" role="status">{listingProgress}</p>}
           {!directoryPage.pending && !directoryPage.error && directoryPage.data?.complete && !files.length && <p className="reader-popover-empty">此目录暂无可浏览的文件</p>}
-          <DirectoryControls {...directoryPage} label="工作区文件分页" className="reader-popover-title" />
         </div>}
       </div>
       <button className="reader-icon workspace-reader-expand" aria-label={expanded ? '并排阅读' : '展开阅读'}
@@ -468,7 +470,7 @@ export function WorkspaceReader({ workspaces, workspaceCursor, initialWorkspace,
       {!editing && largeMarkdown && <button onClick={() => setReadingPreview(!readingPreview)}>{readingPreview ? '查看原文' : '预览 Markdown'}</button>}
       {!status?.editable && <span role="status">{status?.reason ? errors.get(status.reason) ?? '运行状态尚待核实，请稍后重试。' : '正在核对工作区状态…'}</span>}
     </div>}
-    {!!status?.affectedGroups?.length && <div className="workspace-reader-tools">编辑影响范围：{status.affectedGroups.join('、')}。关闭页面会保留编辑窗口。</div>}
+    {!!status?.affectedGroups?.length && <div className="workspace-reader-tools">编辑期间，共用这些文件的 Agent 会暂停；已有任务先完成，不会因编辑被取消。结束编辑或关闭阅读器后恢复。</div>}
     {!editing && (status?.maintenance === 'paused' || status?.maintenance === 'unknown') &&
       <div className="workspace-reader-tools"><button disabled={busy} onClick={() => void leaveEditor(false)}>恢复 Agent</button>
         {!opened && status?.canRecover && <span role="status">{status.reason ? errors.get(status.reason) ?? 'Agent 尚未恢复，已有存档仍可阅读。' : 'Agent 尚未恢复，已有存档仍可阅读。'}</span>}

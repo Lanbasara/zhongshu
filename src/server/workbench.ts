@@ -218,16 +218,26 @@ export class Workbench {
   }
   private unknown(id: string, reason: string): Promise<void> {
     const runtime = this.runtimes.get(id);
-    if (runtime) runtime.state = 'unknown';
     const generation = runtime?.stateGeneration;
     const write = this.task(async () => {
       const current = await this.store.getConversation(id);
       if (!current || this.runtimes.get(id) !== runtime || runtime?.stateGeneration !== generation) return;
+      if (await this.editWindowOwnsExecution(current.workspaceId)) return;
+      if (this.runtimes.get(id) !== runtime || runtime?.stateGeneration !== generation) return;
+      if (runtime) runtime.state = 'unknown';
       await this.store.setConversationState(id, { error: reason, state: { status: 'unknown', pendingInputs: current.state.pendingInputs,
         configurationVerified: false, reason, ...(current.state.runId ? { runId: current.state.runId } : {}) } });
     });
     if (runtime) runtime.stateWrite = write;
     return write;
+  }
+
+  /** An intentional editing stop is not a lost execution receipt. The durable
+   * coordinator, not the display subscription, drains and verifies that work. */
+  private async editWindowOwnsExecution(workspaceId: string): Promise<boolean> {
+    if (!this.execution || !await this.execution.managed(workspaceId)) return false;
+    const status = await this.execution.status(workspaceId);
+    return !!status.windowId && ['draining', 'editable', 'resuming'].includes(status.phase);
   }
 
   catalogs(): Promise<Catalog[]> {
@@ -413,6 +423,12 @@ export class Workbench {
     const confirm = async () => {
       await execution.port.confirmTerminal({ admissionId: admission!.id, bindingId: conversation!.binding!.id, operationId: admission!.currentOperation,
         proof: createHash('sha256').update(JSON.stringify([admission!.id, admission!.currentOperation, conversation!.binding!.id, state])).digest('hex') });
+      // During editing the coordinator is the active observer. Publish its
+      // verified terminal state before the Host is intentionally stopped.
+      if (await this.editWindowOwnsExecution(conversation!.workspaceId)) {
+        await this.store.setConversationState(conversation!.id, { readiness: 'ready', state, error: null });
+        const runtime = this.runtimes.get(conversation!.id); if (runtime) runtime.state = state.status;
+      }
       return 'settled' as const;
     };
     if (admission.source === 'native') return terminal() ? confirm() : 'pending';
@@ -1150,7 +1166,9 @@ export class Workbench {
   }
   private async observe(id: string): Promise<void> {
     if (this.closed) return Promise.resolve();
-    const conversation = (await this.conversation(id)); const adapter = (await this.adapter(conversation)); if (!conversation.binding) return Promise.resolve();
+    const conversation = (await this.conversation(id));
+    if (await this.editWindowOwnsExecution(conversation.workspaceId)) return;
+    const adapter = (await this.adapter(conversation)); if (!conversation.binding) return Promise.resolve();
     const runtime = this.runtime(id);
     if (runtime.stop) return Promise.resolve(); if (runtime.watching) return runtime.watching;
     runtime.watching = this.task(async () => {
@@ -1180,6 +1198,7 @@ export class Workbench {
           } else {
             runtime.stateGeneration++;
             if (change.type === 'state') {
+              if (change.state.status === 'unknown') { this.launch(this.unknown(id, change.state.reason ?? 'native_state_unavailable')); this.scheduleSync(id); return; }
               runtime.state = change.state.status;
               runtime.stateWrite = this.store.setConversationState(id, { state: change.state });
               this.launch(runtime.stateWrite);
@@ -1322,6 +1341,7 @@ export class Workbench {
   private async sync(id: string): Promise<void> {
     if (this.closed) return Promise.resolve();
     const conversation = (await this.conversation(id)); if (!conversation.binding) return Promise.resolve();
+    if (await this.editWindowOwnsExecution(conversation.workspaceId)) return;
     const runtime = this.runtime(id); runtime.dirty = true;
     if (runtime.syncing) return runtime.syncing;
     runtime.syncing = this.task(async () => {

@@ -19,6 +19,7 @@ import { InputQueue } from './input-queue.tsx';
 import { PluginManagement } from './plugin-management.tsx';
 import { WorkspaceSelect } from './workspace-selection.tsx';
 import { StorageNotice } from './storage-notice.tsx';
+import { WorkspaceExecutionStatus, type WorkspaceEditStatus } from './workspace-execution-status.tsx';
 const emptyWorkspaces: WorkbenchConfiguration['workspaces'] = [];
 const WorkspaceReader = lazy(() => import('./workspace-reader.tsx').then(module => ({ default: module.WorkspaceReader })));
 
@@ -95,6 +96,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
   const [listRevision, refreshList] = useState(0);
   const sidebarWidth = useSidebarWidth();
   const [reader, setReader] = useState(false);
+  const [workspaceStatus, setWorkspaceStatus] = useState<{ id: string; value?: WorkspaceEditStatus }>();
   const [readerExpanded, setReaderExpanded] = useState(false);
   const [readerTarget, setReaderTarget] = useState<ReaderTarget>();
   const [unavailableFiles, setUnavailableFiles] = useState<ReadonlySet<string>>(new Set());
@@ -348,6 +350,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
     finally { if (alive.current) setLoadingOlder(false); }
   };
   const conversation = snapshot?.conversation;
+  const editingWorkspace = workspaceStatus?.id === conversation?.workspaceId && !!workspaceStatus?.value?.windowId && workspaceStatus.value.maintenance !== 'online';
   const [selectedWorkspace, setSelectedWorkspace] = useState<(WorkbenchConfiguration['workspaces'][number] & { removed: boolean }) | null>(null);
   useEffect(() => {
     const id = conversation?.workspaceId;
@@ -413,7 +416,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
       <Button className="new-conversation" onClick={() => { setCreating(true); setNavigation(false); }}><Plus size={16}/>新对话</Button>
       <ConversationNavigation workspaces={configuration?.workspaces} removedWorkspaces={configuration?.removedWorkspaces}
         workspaceCursor={configuration?.workspaceCursor} removedWorkspaceCursor={configuration?.removedWorkspaceCursor}
-        canAddWorkspace={!!configuration?.workspaceRoots?.length} workspaceAction={setWorkspaceAction} selected={selected} revision={listRevision} csrf={csrf}
+        canAddWorkspace={!!configuration?.workspaceRoots?.length} workspaceAction={action => { setNavigation(false); setWorkspaceAction(action); }} selected={selected} revision={listRevision} csrf={csrf}
         choose={choose} create={createInWorkspace} stateLabel={stateLabel} report={report}
         changed={refreshNavigation} />
       {sidebarWidth.separator}
@@ -462,12 +465,13 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
           </div>
         </div>
         <div className="composer-region">
+          {!reader && conversation && !workspaceRemoved && <WorkspaceExecutionStatus key={conversation.workspaceId} workspace={conversation.workspaceId} csrf={csrf} observed={(id, value) => setWorkspaceStatus({ id, value })} changed={() => { scheduleRefresh(); }}/>}
           {moreOutput && <button className="new-output" onClick={() => { atBottom.current = true; if (scroll.current) scroll.current.scrollTop = scroll.current.scrollHeight; setMoreOutput(false); }}>↓ 有新内容</button>}
-          {(conversation?.error || conversation?.state.reason) && <p className="state-notice">{explain(conversation.error ?? conversation.state.reason!)}</p>}
+          {(conversation?.error || conversation?.state.reason) && !editingWorkspace && <p className="state-notice">{explain(conversation.error ?? conversation.state.reason!)}</p>}
           {conversation?.state.status === 'interrupted' && <p className="state-notice">本轮已中断。此前启动的后台工具可能仍在运行，已经产生的改动不会撤销。</p>}
           {snapshot?.history.liveItemsLimited && <p className="state-notice">部分实时输出较长，将在完成后从历史中读取完整内容。</p>}
           {!!conversation?.state.pendingInputs && <p className="state-notice">原生服务仍保留 {conversation.state.pendingInputs} 项待处理输入。停止当前轮不会清空它们。</p>}
-          {!workspaceRemoved && (unresolved || conversation?.state.status === 'unknown' || !previousMessageSettled) && <div className="state-notice">{!previousMessageSettled ? '正在核对上一条消息对应轮次的执行结果。' : '正在核对执行结果。'}<button className="text-button" onClick={() => void reconcile()}>查询原生结果</button></div>}
+          {!workspaceRemoved && !editingWorkspace && (unresolved || conversation?.state.status === 'unknown' || !previousMessageSettled) && <div className="state-notice">{!previousMessageSettled ? '正在核对上一条消息对应轮次的执行结果。' : '正在核对执行结果。'}<button className="text-button" onClick={() => void reconcile()}>查询原生结果</button></div>}
           {removedWorkspace && <button className="text-button" onClick={() => setWorkspaceAction({ kind: 'restore', workspace: removedWorkspace })}>恢复工作区</button>}
           {conversation?.archived && <p className="state-notice">这段对话已归档。可在侧栏恢复后继续。</p>}
           {lastEarly?.delivery && lastEarly.delivery.mode !== 'next' && <div className="state-notice" role="status">

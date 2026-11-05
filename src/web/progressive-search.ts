@@ -25,9 +25,10 @@ export async function progressiveSearch<T>(options: {
     options.signal.throwIfAborted();
     scanned += batch.scanned;
     options.progress(batch, scanned);
-    if (!options.continuous || batch.found || !batch.nextCursor || options.paused()) return batch;
+    if (!options.continuous || batch.found || !batch.nextCursor || options.paused()) return { ...batch, startCursor: cursor };
+    const startCursor = cursor;
     cursor = batch.nextCursor;
     await yieldBatch(options.signal);
-    if (options.paused()) return batch;
+    if (options.paused()) return { ...batch, startCursor };
   }
 }

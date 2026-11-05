@@ -6,7 +6,7 @@ import { referenceSchema } from '../shared/content.ts';
 import { ConversationTurnFiles } from './conversation-turn-files.tsx';
 import { BodyLink } from './body-reader.tsx';
 import { directoryFilesSchema, directoryProgress, useDirectoryPage } from './directory-client.ts';
-import { DirectoryControls } from './directory-controls.tsx';
+import { DirectoryControls, DirectoryStart } from './directory-controls.tsx';
 import { request } from './workbench-client.ts';
 const RichMessage = lazy(() => import('./rich-message.tsx'));
 
@@ -141,7 +141,8 @@ export function FilePicker({ conversation, onSelect, onClose }: { conversation: 
   useEffect(() => { dialog.current?.showModal(); return () => dialog.current?.close(); }, []);
   return <dialog ref={dialog} className="file-picker" onCancel={onClose}><header><h2>引用工作区文件</h2><button aria-label="关闭文件选择" onClick={onClose}><X size={18}/></button></header><p>Agent 读取时使用原文件的实际内容。</p><button className="file-parent" disabled={!directory} onClick={() => setDirectory(directory.split('/').slice(0,-1).join('/'))}>{directory ? '← ' + directory : '工作区'}</button>
     {(page.error || page.notice || directoryProgress(page.data)) && <p role="status">{page.error || page.notice || directoryProgress(page.data)}</p>}
-    <div className="file-list" aria-busy={page.pending}>{files.map(file => <button key={file.path} disabled={page.pending} onClick={() => { if (file.directory) setDirectory(file.path); else { onSelect({ type: 'file', path: file.path }); onClose(); } }}><FileText size={16}/>{file.name}{file.directory && <span>›</span>}</button>)}</div>
-    <DirectoryControls label="引用文件分页" {...page}/>
+    <div className="file-list" aria-busy={page.pending}><DirectoryStart {...page}/>{files.map(file => <button key={file.path} data-scroll-row onClick={() => { if (file.directory) setDirectory(file.path); else { onSelect({ type: 'file', path: file.path }); onClose(); } }}><FileText size={16}/>{file.name}{file.directory && <span>›</span>}</button>)}
+      <DirectoryControls label="引用文件" {...page}/>
+    </div>
   </dialog>;
 }

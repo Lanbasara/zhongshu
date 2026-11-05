@@ -1,13 +1,19 @@
-export function DirectoryControls({ label, number, pending, canPrevious, canNext, previous, next, first, refresh, className, buttonClassName }: {
-  label: string; number: number; pending: boolean; canPrevious: boolean; canNext: boolean;
-  previous(): void; next(): void; first(): void; refresh(): void;
+import type { RefObject } from 'react';
+import { RefreshCw } from 'lucide-react';
+import { ScrollContinuation } from './cursor-window.tsx';
+import { Button } from './ui/controls.tsx';
+
+export function DirectoryControls({ label, pending, canNext, next, refresh, marker, refreshAvailable, className }: {
+  label: string; pending: boolean; canPrevious: boolean; canNext: boolean;
+  previous(): void; next(): void; refresh(): void; marker?: RefObject<HTMLDivElement | null>; refreshAvailable?: boolean;
   className?: string; buttonClassName?: string;
 }) {
-  return <nav aria-label={label} className={className}>
-    <button type="button" className={buttonClassName} disabled={pending} onClick={refresh}>刷新</button>
-    {number > 1 && <button type="button" className={buttonClassName} disabled={pending} onClick={first}>第一页</button>}
-    <button type="button" className={buttonClassName} disabled={!canPrevious} onClick={previous}>上一页</button>
-    <span aria-live="polite">第 {number} 页</span>
-    <button type="button" className={buttonClassName} disabled={!canNext} onClick={next}>下一页</button>
-  </nav>;
+  return <div ref={marker} className={className}>
+    <ScrollContinuation available={canNext} pending={pending && canNext} load={next}/>
+    {refreshAvailable && <Button variant="quiet" disabled={pending} onClick={refresh} aria-label={`更新${label}`}><RefreshCw size={14}/>更新目录</Button>}
+  </div>;
+}
+
+export function DirectoryStart({ canPrevious, previous }: { canPrevious: boolean; previous(): void }) {
+  return <ScrollContinuation available={canPrevious} pending={false} load={previous} label="显示上方项目"/>;
 }

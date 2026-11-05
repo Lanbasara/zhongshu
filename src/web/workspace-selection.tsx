@@ -1,71 +1,83 @@
 import { useEffect, useRef, useState } from 'react';
+import { Popover } from 'radix-ui';
+import { Check, ChevronDown } from 'lucide-react';
 import { workspaceLookupSchema, workspacePageSchema, type WorkbenchConfiguration } from '../shared/workbench.ts';
 import { RequestError, request } from './workbench-client.ts';
 import { progressiveSearch } from './progressive-search.ts';
 import { Button } from './ui/controls.tsx';
+import { ScrollContinuation, useCursorWindow } from './cursor-window.tsx';
 
 type Workspace = WorkbenchConfiguration['workspaces'][number];
 export function useWorkspacePage(initial: Workspace[] | undefined, initialCursor: string | null | undefined, query = '', removed = false, enabled = true) {
-  const [entries, setEntries] = useState(initial ?? []);
-  const [cursors, setCursors] = useState<string[]>([]);
-  const [next, setNext] = useState(initialCursor ?? null);
-  const [scanLimited, setScanLimited] = useState(false); const [scanned, setScanned] = useState(0);
-  const pause = useRef(() => {});
-  const [error, setError] = useState(''); const [loading, setLoading] = useState(false);
-  const [retry, setRetry] = useState(0); const cursor = cursors.at(-1);
-  const [term, setTerm] = useState(query);
-  useEffect(() => { const timer = setTimeout(() => { setTerm(query.trim()); setCursors([]); }, 180); return () => clearTimeout(timer); }, [query, removed]);
-  useEffect(() => {
-    if (!enabled) return;
-    if (initialCursor === undefined && !term && !cursor && !retry) { setEntries(initial ?? []); setNext(null); setLoading(false); setScanned(0); setScanLimited(false); return; }
-    if (query.trim() !== term) return;
-    const controller = new AbortController(); setLoading(true); setError(''); setScanned(0);
-    let paused = false; pause.current = () => { paused = true; };
-    void progressiveSearch({ cursor, signal: controller.signal, continuous: !!term, paused: () => paused,
-      fetch: async current => {
-        const params = new URLSearchParams({ removed: removed ? '1' : '0', ...(term ? { query: term } : {}), ...(current ? { cursor: current } : {}) });
-        const value = await request(`/workspaces?${params}`, workspacePageSchema, { signal: controller.signal });
-        return { value, nextCursor: value.nextCursor, scanned: value.scanned ?? value.workspaces.length, found: value.workspaces.length > 0 };
-      },
-      progress: ({ value }, total) => { setEntries(value.workspaces); setNext(value.nextCursor); setScanLimited(value.scanLimited ?? false); setScanned(total); },
-    }).catch(reason => {
-      if (controller.signal.aborted) return;
-      if (reason instanceof RequestError && reason.code === 'workspace_cursor_expired') { setCursors([]); setRetry(value => value + 1); setError('工作区列表已更新，已回到第一页。'); }
-      else setError('工作区列表暂时无法读取。');
-    }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
-    return () => controller.abort();
-  }, [initial, initialCursor, term, query, cursor, removed, retry, enabled]);
-  return { entries, loading, error, scanLimited, scanned, searching: !!term, pause: () => pause.current(), page: cursors.length + 1, hasPrevious: cursors.length > 0, hasNext: !!next,
-    previous: () => setCursors(value => value.slice(0, -1)), next: () => { if (next) setCursors(value => [...value.slice(-31), next]); },
-    first: () => { setCursors([]); setRetry(value => value + 1); }, retry: () => setRetry(value => value + 1) };
+  const [term, setTerm] = useState(query.trim());
+  const [scanned, setScanned] = useState(0); const pause = useRef(false);
+  const [searchPaused, setSearchPaused] = useState(false);
+  useEffect(() => { const timer = setTimeout(() => setTerm(query.trim()), 180); return () => clearTimeout(timer); }, [query]);
+  const feed = useCursorWindow({ key: JSON.stringify([removed, term]), enabled: enabled && term === query.trim(),
+    revision: JSON.stringify([initial, initialCursor]),
+    initial: !term && initial ? { value: { workspaces: initial, nextCursor: initialCursor ?? null }, next: initialCursor ?? null } : undefined,
+    load: async (cursor, signal, intent) => {
+      if (intent === 'load') { pause.current = false; setSearchPaused(false); }
+      const batch = await progressiveSearch({ cursor, signal, continuous: !!term && intent === 'load', paused: () => pause.current,
+        fetch: async current => {
+          const params = new URLSearchParams({ removed: removed ? '1' : '0', ...(term ? { query: term } : {}), ...(current ? { cursor: current } : {}) });
+          const value = await request(`/workspaces?${params}`, workspacePageSchema, { signal });
+          return { value, nextCursor: value.nextCursor, scanned: value.scanned ?? value.workspaces.length, found: value.workspaces.length > 0 };
+        }, progress: (_batch, total) => setScanned(total),
+      });
+      return { value: batch.value, next: batch.nextCursor, cursor: batch.startCursor };
+    },
+  });
+  useEffect(() => { if (feed.error instanceof RequestError && feed.error.code === 'workspace_cursor_expired') feed.reset(); }, [feed.error]);
+  return { ...feed, entries: [...new Map(feed.pages.flatMap(page => page.workspaces).map(row => [row.id, row])).values()], loading: feed.pending,
+    hasPrevious: feed.canPrevious, hasNext: feed.canNext, scanned, searching: !!term, searchPaused, pause: () => { pause.current = true; setSearchPaused(true); },
+    retry: feed.refresh, first: feed.reset };
 }
 
 export function WorkspacePages({ page }: { page: ReturnType<typeof useWorkspacePage> }) {
-  return <><div className="directory-pages" aria-label="工作区分页">
-    <Button variant="quiet" disabled={!page.hasPrevious || page.loading} onClick={page.previous}>上一页</Button>
-    <Button variant="quiet" disabled={!page.hasPrevious || page.loading} onClick={page.first}>第一页</Button>
-    <Button variant="quiet" disabled={!page.hasNext || page.loading} onClick={page.next}>{page.scanLimited ? '继续查找' : '下一页'}</Button>
-  </div>{page.scanLimited && !page.loading && <p className="quiet" role="status">这批记录已查找完，可继续查找后续工作区。</p>}{page.loading && <p className="quiet" role="status">{page.searching ? `正在查找工作区，已检查 ${page.scanned} 条…` : '正在读取工作区…'} {page.searching && <button type="button" className="text-button" onClick={page.pause}>暂停查找</button>}</p>}{page.error && <p role="status">{page.error} <button type="button" className="text-button" onClick={page.retry}>重试</button></p>}</>;
+  return <div ref={page.marker}>
+    <ScrollContinuation available={page.hasNext} pending={page.loading && (!page.entries.length || page.hasNext)} load={page.next} automatic={!page.searchPaused}/>
+    {page.loading && page.searching && <p className="quiet" role="status">正在查找工作区，已检查 {page.scanned} 条… <button type="button" className="text-button" onClick={page.pause}>暂停查找</button></p>}
+    {!!page.error && <p role="status">工作区列表暂时无法读取。 <button type="button" className="text-button" onClick={page.retry}>重试</button></p>}
+  </div>;
 }
 
 export function WorkspaceSelect({ id, label = '工作区', value, onChange, initial, cursor, disabled }: {
   id?: string; label?: string; value: string; onChange(id: string): void; initial: Workspace[]; cursor?: string | null; disabled?: boolean;
 }) {
-  const [query, setQuery] = useState(''); const page = useWorkspacePage(initial, cursor, query);
+  const [open, setOpen] = useState(false); const [query, setQuery] = useState('');
+  const container = useRef<HTMLDivElement>(null);
+  const page = useWorkspacePage(initial, cursor, query, false, open);
   const [selected, setSelected] = useState<Workspace | null>(null);
   const selection = useRef(value); selection.current = value;
   useEffect(() => {
     const present = initial.find(entry => entry.id === value) ?? page.entries.find(entry => entry.id === value);
-    if (present) { setSelected(present); return; }
+    if (present) { setSelected(previous => previous?.id === present.id && previous.label === present.label ? previous : present); return; }
     if (!value) { setSelected(null); return; }
+    if (selected?.id === value) return;
     const controller = new AbortController();
     void request(`/workspaces/${encodeURIComponent(value)}`, workspaceLookupSchema, { signal: controller.signal })
       .then(result => { if (!controller.signal.aborted && selection.current === value) setSelected(result.workspace); }).catch(() => {});
     return () => controller.abort();
-  }, [value, initial, page.entries]);
-  const options = selected && !page.entries.some(entry => entry.id === selected.id) ? [selected, ...page.entries] : page.entries;
-  return <div className="workspace-selection"><input type="search" aria-label={`搜索${label}`} placeholder={`搜索${label}`} maxLength={200} value={query} disabled={disabled} onChange={event => setQuery(event.target.value)}/>
-    <select id={id} aria-label={label} value={value} disabled={disabled} onChange={event => onChange(event.target.value)}>{options.map(entry => <option key={entry.id} value={entry.id}>{entry.label}</option>)}</select>
-    <WorkspacePages page={page}/>
-  </div>;
+  }, [value, initial, page.entries.map(row => row.id + row.label).join('|')]);
+  return <div ref={container}><Popover.Root open={open} onOpenChange={setOpen}>
+    <Popover.Trigger asChild><Button id={id} className="workspace-combobox" role="combobox" aria-label={label} aria-expanded={open} aria-haspopup="listbox" disabled={disabled}>
+      <span>{selected?.label ?? initial.find(row => row.id === value)?.label ?? '选择工作区'}</span><ChevronDown size={16}/>
+    </Button></Popover.Trigger>
+    <Popover.Portal container={container.current ?? undefined}><Popover.Content className="workspace-options" sideOffset={4} align="start" collisionPadding={12}>
+      <input type="search" aria-label={`搜索${label}`} placeholder="搜索工作区…" maxLength={200} value={query} onChange={event => setQuery(event.target.value)}
+        onKeyDown={event => { if (event.key === 'ArrowDown') { event.preventDefault(); event.currentTarget.parentElement?.querySelector<HTMLElement>('[role=option]')?.focus(); } }}/>
+      <div className="workspace-options-scroll" role="listbox" aria-label={`${label}选项`}>
+        <ScrollContinuation available={page.hasPrevious} pending={false} load={page.previous} label="显示上方工作区"/>
+        {page.entries.map(entry => <button key={entry.id} type="button" role="option" data-scroll-row aria-selected={entry.id === value}
+          onClick={() => { onChange(entry.id); setSelected(entry); setOpen(false); }} onKeyDown={event => {
+            if (!['ArrowDown', 'ArrowUp'].includes(event.key)) return;
+            event.preventDefault(); const options = [...event.currentTarget.parentElement!.querySelectorAll<HTMLElement>('[role=option]')];
+            options[(options.indexOf(event.currentTarget) + (event.key === 'ArrowDown' ? 1 : -1) + options.length) % options.length]?.focus();
+          }}><span>{entry.label}</span>{entry.id === value && <Check size={15}/>}</button>)}
+        {!page.loading && !page.entries.length && !page.error && <p className="quiet">没有匹配的工作区</p>}
+        <WorkspacePages page={page}/>
+      </div>
+    </Popover.Content></Popover.Portal>
+  </Popover.Root></div>;
 }

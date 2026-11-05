@@ -21,6 +21,7 @@ import type { QueueDelivery } from '../../src/shared/workbench.ts';
 import { buildApp } from '../../src/server/app.ts';
 import { createStorageClient } from '../../src/server/storage-client.ts';
 import { DirectoryIndex } from '../../src/server/directory-index.ts';
+import { managedUiFixture } from './managed-ui-fixture.ts';
 import { Workbench } from '../../src/server/workbench.ts';
 import { createWorkbenchHttp } from '../../src/server/workbench-http.ts';
 import { WorkspaceRegistry } from '../../src/server/workspace-registry.ts';
@@ -36,6 +37,7 @@ const cliSchema = z.object({
   host: z.enum(['127.0.0.1', '0.0.0.0']).default('127.0.0.1'),
   build: z.string().refine(isAbsolute).optional(),
   physical: z.boolean().default(false),
+  managed: z.boolean().default(false),
   sampleMs: z.coerce.number().int().min(1000).max(60_000).default(30_000),
   title: z.string().min(1).max(200).optional(),
   count: z.coerce.number().int().min(1).max(700).default(650),
@@ -62,9 +64,9 @@ function privateFile(path: string): void {
 }
 
 async function main() {
-  const args = parseArgs({ options: { root: { type: 'string' }, port: { type: 'string' }, host: { type: 'string' }, build: { type: 'string' }, physical: { type: 'boolean' }, sampleMs: { type: 'string' }, title: { type: 'string' }, count: { type: 'string' }, chars: { type: 'string' }, pathPadding: { type: 'string' }, separateRuns: { type: 'boolean' }, help: { type: 'boolean' } }, allowPositionals: true, strict: true });
+  const args = parseArgs({ options: { root: { type: 'string' }, port: { type: 'string' }, host: { type: 'string' }, build: { type: 'string' }, physical: { type: 'boolean' }, managed: { type: 'boolean' }, sampleMs: { type: 'string' }, title: { type: 'string' }, count: { type: 'string' }, chars: { type: 'string' }, pathPadding: { type: 'string' }, separateRuns: { type: 'boolean' }, help: { type: 'boolean' } }, allowPositionals: true, strict: true });
   if (args.values.help) {
-    console.log(`node test/support/feature-fixture.ts <${cliSchema.shape.command.options.join('|')}> --root ABSOLUTE_DIRECTORY [--port 4391] [--title TITLE] [--count 650 --chars 80] [--pathPadding 700 --separateRuns]`);
+    console.log(`node test/support/feature-fixture.ts <${cliSchema.shape.command.options.join('|')}> --root ABSOLUTE_DIRECTORY [--port 4391] [--managed] [--title TITLE] [--count 650 --chars 80] [--pathPadding 700 --separateRuns]`);
     return;
   }
   if (args.positionals.length !== 1) throw new Error('one_command_required');
@@ -309,7 +311,9 @@ async function main() {
   mkdirSync(join(directory, 'existing'), { recursive: true, mode: 0o700 });
   const registry = new WorkspaceRegistry(storage.workspaces, workspaces, [{ id: 'fixture-root', label: 'Fixture directories', directory }]);
   await registry.ready;
-  const workbench = new Workbench(storage.store, workspaces, new Map<HarnessId, HarnessAdapter>([['codex', adapter('codex')], ['dsh', adapter('dsh')]]), registry, directories);
+  const adapters = new Map<HarnessId, HarnessAdapter>([['codex', adapter('codex')], ['dsh', adapter('dsh')]]);
+  const managed = input.managed ? managedUiFixture(storage, native, root, adapters, id => all().some(value => value.harnessId === id && ['running', 'waiting'].includes(value.state.status))) : {};
+  const workbench = new Workbench(storage.store, workspaces, adapters, registry, directories, managed);
   const physicalIds: { harness: HarnessId; id: string }[] = [];
   for (const source of physical) {
     const harness = source.binding.id === 'physical-codex' ? 'codex' : 'dsh';
@@ -362,7 +366,7 @@ async function main() {
         })().catch(async () => { await appendFile(join(root, 'private/performance-service.ndjson'), JSON.stringify({ time: new Date().toISOString(), failure: 'performance_sample_failed', storage: storage.diagnostics() }) + '\n', { mode: 0o600 }); }).finally(() => { sampleTask = undefined; });
       }, input.sampleMs); timer.unref(); timers.add(timer);
     }
-    console.log(JSON.stringify({ event: 'ready', mode: 'fixture', pid: process.pid, root, origin, revision: metadata.revision }));
+    console.log(JSON.stringify({ event: 'ready', mode: 'fixture', managed: input.managed, pid: process.pid, root, origin, revision: metadata.revision }));
   } catch (error) { await stop(); throw error; }
 }
 

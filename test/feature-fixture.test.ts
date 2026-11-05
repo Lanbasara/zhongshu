@@ -21,6 +21,7 @@ test('permanent E04 controls reject once, preserve native state and reach real H
   // The CLI requires built assets. A tiny static fixture keeps this HTTP test
   // independent of a prior build, while copying the unmodified CLI under test.
   copyFileSync(join(repository, 'test/support/feature-fixture.ts'), join(checkout, 'test/support/feature-fixture.ts'));
+  copyFileSync(join(repository, 'test/support/managed-ui-fixture.ts'), join(checkout, 'test/support/managed-ui-fixture.ts'));
   cpSync(join(repository, 'src'), join(checkout, 'src'), { recursive: true });
   symlinkSync(join(repository, 'node_modules'), join(checkout, 'node_modules'), 'dir');
   writeFileSync(join(checkout, 'package.json'), '{"type":"module"}');

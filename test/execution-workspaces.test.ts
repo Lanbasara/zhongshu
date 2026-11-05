@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { test, type TestContext } from 'node:test';
-import type { HarnessAdapter, NativeState } from '../src/harness/types.ts';
+import type { HarnessAdapter, NativeState, NativeChange } from '../src/harness/types.ts';
 import type { ExecutionController, ExecutionControllerMutation, ExecutionGroupState } from '../src/server/execution-controller.ts';
 import { ManagedWorkspaceExecution } from '../src/server/execution-workspaces.ts';
 import { createStorageClient, type StorageClient } from '../src/server/storage-client.ts';
@@ -30,6 +30,7 @@ async function fixture(t: TestContext, count: number) {
   t.after(async () => { for (const value of owned.reverse()) { await value.workbench?.close(); await value.client.close(); } await rm(directory, { recursive: true, force: true }); });
   let stateReads = 0; let watches = 0; let submits = 0; let stops = 0; let keepRunning = false;
   const states = new Map<string, NativeState>();
+  const listeners = new Set<(change: NativeChange) => void>();
   let controllerState: ExecutionGroupState = { groupId: 'host', generation: 'synthetic-durable-generation', epoch: 0, admission: 'open', writers: 'running', durable: true };
   const receipts = new Map<string, { signature: string; state: ExecutionGroupState }>();
   async function mutation(action: 'fence' | 'quiesce' | 'resume', input: ExecutionControllerMutation) {
@@ -50,7 +51,7 @@ async function fixture(t: TestContext, count: number) {
     submit: async (binding, input) => { submits++; const runId = 'run-' + input.id; states.set(binding.id, { status: keepRunning ? 'running' : 'idle', runId, terminalRunId: keepRunning ? undefined : runId, terminalStatus: keepRunning ? undefined : 'completed', pendingInputs: 0, configurationVerified: true }); return { outcome: 'accepted', runId }; },
     reconcile: async (binding, operationId) => { const state = states.get(binding.id)!; return state.runId === 'run-' + operationId ? { outcome: 'accepted', runId: state.runId } : { outcome: 'unknown', reason: 'synthetic-no-receipt' }; },
     stop: async () => { stops++; return { outcome: 'unknown', reason: 'explicit-stop-not-used' }; },
-    watch: async () => { watches++; return () => {}; }, close: async () => {},
+    watch: async (_binding, listener) => { watches++; listeners.add(listener); return () => { listeners.delete(listener); }; }, close: async () => {},
   };
   const seed = createStorageClient({ dataDirectory }); owned.push({ client: seed }); await seed.ready;
   const registry = new WorkspaceRegistry(seed.workspaces, workspaces, []); await registry.ready;
@@ -68,12 +69,12 @@ async function fixture(t: TestContext, count: number) {
     const client = createStorageClient({ dataDirectory }); await client.ready;
     const registry = new WorkspaceRegistry(client.workspaces, workspaces, []); await registry.ready;
     const execution = new ManagedWorkspaceExecution({ port: client.execution, workspaces: client.workspaces, groups: [{ groupId: 'host', workspaceIds: ['workspace'], workspaceRootIds: [], controller }] });
-    const wrapper = async (conversation: { id: string }, adapter: HarnessAdapter, context?: ManagedAdapterContext): Promise<HarnessAdapter> => ({ ...adapter,
+    const wrapper = async (conversation: { id: string; workspaceId: string }, adapter: HarnessAdapter, context?: ManagedAdapterContext): Promise<HarnessAdapter> => ({ ...adapter,
       state: async (binding, target) => {
         const wireDigest = digest(['state', binding.id, target ?? null]);
         if (context?.baseline) await client.execution.registerBaselineObservation({ ...context.baseline, conversationId: conversation.id, wireDigest });
         else if (context?.admissionId) await client.execution.bindObservationRequest({ admissionId: context.admissionId, requestId: randomUUID(), wireDigest });
-        else throw new Error('fixture rejects unregistered native activation');
+        else await client.execution.registerObservation({ requestId: randomUUID(), workspaceId: conversation.workspaceId, conversationId: conversation.id, bindingId: binding.id, wireDigest });
         return adapter.state(binding, target);
       },
       submit: async (binding, input) => { await client.execution.bindNativeRequest(input.id, digest(['submit', binding.id, input])); return adapter.submit(binding, input); },
@@ -85,9 +86,34 @@ async function fixture(t: TestContext, count: number) {
     return { client, execution, workbench, writer };
   }
   return { open, controller, conversationIds, workspaceDirectory, writerDirectory: join(dataDirectory, 'workspace-writer'), controllerState: () => controllerState,
+    disconnect: () => { for (const listener of listeners) listener({ type: 'unavailable', reason: 'managed_native_disconnected' }); },
     counts: () => ({ stateReads, watches, submits, stops }), runContinuously: () => { keepRunning = true; },
     finish: () => { keepRunning = false; for (const [id, state] of states) states.set(id, { ...state, status: 'idle', terminalRunId: state.runId, terminalStatus: state.runId ? 'completed' : undefined }); } };
 }
+
+test('intentional editing stop preserves idle history and permits local archive without waking the Host', async t => {
+  const f = await fixture(t, 1); const instance = await f.open(); const id = f.conversationIds[0]!;
+  await instance.workbench.open(id);
+  await until(async () => f.counts().watches > 0);
+  const original = await instance.client.store.getConversation(id);
+  assert.equal((await instance.workbench.changeWorkspaceMaintenance('workspace', 'pause')).editable, true);
+  const reads = f.counts().stateReads;
+  f.disconnect(); await delay(50);
+  const paused = await instance.workbench.open(id);
+  assert.equal(paused.conversation.state.status, 'idle');
+  assert.equal(paused.conversation.readiness, 'blocked', 'the display still blocks new work during editing');
+  assert.equal((await instance.client.store.getConversation(id))!.state.configurationVerified, true, 'verified idle history remains stored');
+  assert.equal((await instance.workbench.setArchived(id, true)).archived, true);
+  assert.equal(f.counts().stateReads, reads, 'archiving in a proven edit window never wakes or queries the stopped native');
+  assert.equal(f.controllerState().writers, 'quiescent');
+  assert.equal((await instance.workbench.setArchived(id, false)).archived, false);
+  await instance.workbench.changeWorkspaceMaintenance('workspace', 'resume');
+  const operation = randomUUID();
+  await instance.workbench.enqueue({ id: operation, conversationId: id, type: 'message', payload: { text: 'continue after editing' } });
+  await until(async () => (await instance.client.store.getOperation(operation))?.status === 'accepted');
+  assert.equal(f.counts().submits, 1);
+  assert.deepEqual((await instance.client.store.getConversation(id))!.binding, original!.binding);
+});
 
 test('online Host recovery is bounded per second and explicit recovery works before initialization after restart', async t => {
   const f = await fixture(t, 1); const first = await f.open();
@@ -96,8 +122,16 @@ test('online Host recovery is bounded per second and explicit recovery works bef
     calls.push(request); if (request.explicit) unavailable = false;
     return unavailable ? { status: 'unknown', reason: 'execution_host_recovery_exhausted' } : { status: 'known', state: f.controllerState() };
   };
-  await assert.rejects(first.execution.step(), { code: 'execution_host_recovery_exhausted' });
-  for (let index = 0; index < 10; index++) await assert.rejects(first.execution.step(), { code: 'execution_host_recovery_exhausted' });
+  // A scheduled initialization step may still be active when the synthetic
+  // failure is installed. Observe the resulting gate, not that tick's promise.
+  await until(async () => {
+    await first.execution.step().catch(error => assert.equal(error.code, 'execution_host_recovery_exhausted'));
+    return (await first.execution.status('workspace')).canRecover === true;
+  });
+  for (let index = 0; index < 10; index++) {
+    await first.execution.step().catch(error => assert.equal(error.code, 'execution_host_recovery_exhausted'));
+    assert.equal((await first.execution.status('workspace')).canRecover, true);
+  }
   assert.equal(calls.length, 1); await assert.rejects(first.execution.assertAdmission('workspace'), { code: 'execution_admission_closed' });
   const failed = await first.execution.status('workspace'); assert.equal(failed.canRecover, true); assert.equal(failed.editable, false);
   await first.workbench.close(); await first.client.close();
@@ -240,6 +274,8 @@ test('an edit request drains the original queued operation, blocks newcomers, an
   f.finish();
   await until(async () => (await instance.workbench.workspaceEditStatus('workspace')).editable);
   assert.equal(f.counts().submits, 1); assert.equal(f.counts().stops, 0); assert.equal(f.controllerState().admission, 'closed');
+  assert.equal((await instance.workbench.open(original.conversationId)).conversation.state.status, 'idle');
+  assert.equal((await instance.workbench.setArchived(original.conversationId, true)).archived, true);
 });
 
 test('Workbench automatically reconciles a killed writer and settles its durable save before allowing explicit resume', async t => {

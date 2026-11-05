@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
-import { ChevronLeft, ChevronRight, Folder, FolderPlus, X } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Folder, FolderPlus, RefreshCw, X } from 'lucide-react';
 import { z } from 'zod';
 import { folderName, workspaceLabelSchema, workspaceManagementSchema, type WorkbenchConfiguration } from '../shared/workbench.ts';
 import { RequestError, request } from './workbench-client.ts';
 import { directoryMetadataSchema, directoryProgress, useDirectoryPage } from './directory-client.ts';
-import { DirectoryControls } from './directory-controls.tsx';
+import { DirectoryControls, DirectoryStart } from './directory-controls.tsx';
 
 export type WorkspaceAction = { kind: 'add' } |
   { kind: 'manage'; workspace: WorkbenchConfiguration['workspaces'][number] } |
@@ -64,6 +64,7 @@ function WorkspaceDirectoryPicker({ roots, csrf, busy, error, clearError, submit
     if (canSubmit && !busy) void submit({ rootId, path, ...(creating ? { name: folder } : {}) });
   }}>
     <div className="workspace-picker-toolbar">
+      {!creating && <button type="button" className="workspace-picker-up" aria-label="刷新目录" title="刷新目录" disabled={busy || directoryPage.pending} onClick={directoryPage.refresh}><RefreshCw size={16}/></button>}
       <button type="button" className="workspace-picker-up" aria-label="上一级" disabled={!path.length || creating || busy}
         onClick={() => visit(path.slice(0, -1))}><ChevronLeft size={19} aria-hidden="true" /></button>
       <div className="workspace-picker-location">
@@ -92,17 +93,18 @@ function WorkspaceDirectoryPicker({ roots, csrf, busy, error, clearError, submit
         <summary>{creating ? '查看创建位置' : '查看完整路径'}</summary>
         <code>{target}</code>
       </details>}
+      {!creating && <DirectoryStart {...directoryPage}/>}
       {!creating && (browseError ? <div className="workspace-picker-empty" role="status">
         <p>{browseError}</p><button type="button" className="workspace-picker-secondary" onClick={directoryPage.refresh}>重试</button>
       </div> : !directory ? <p className="workspace-picker-empty" role="status">正在读取文件夹…</p> :
         directory.names.length ? <ul className="workspace-picker-list" aria-label="子文件夹">
-          {directory.names.map(name => <li key={name}><button type="button" onClick={() => visit([...path, name])} disabled={path.length >= 12 || busy || directoryPage.pending}>
+          {directory.names.map(name => <li key={name} data-scroll-row><button type="button" onClick={() => visit([...path, name])} disabled={path.length >= 12 || busy}>
             <Folder size={18} aria-hidden="true" /><span>{name}</span><ChevronRight size={17} aria-hidden="true" />
           </button></li>)}
-        </ul> : directory.complete ? <div className="workspace-picker-empty"><Folder size={24} aria-hidden="true" /><p>{directory.nextCursor ? '本页没有可选择的子文件夹，请继续下一页。' : '这里没有子文件夹'}</p></div> : null)}
+        </ul> : directory.complete ? <div className="workspace-picker-empty"><Folder size={24} aria-hidden="true" /><p>{directory.nextCursor ? '正在查找子文件夹…' : '这里没有子文件夹'}</p></div> : null)}
       {!creating && directoryPage.notice && <p className="workspace-picker-empty" role="status">{directoryPage.notice}</p>}
       {!creating && !browseError && directory && progress && <p className="workspace-picker-empty" role="status">{progress}</p>}
-      {!creating && <DirectoryControls {...directoryPage} label="子文件夹分页" className="workspace-picker-toolbar" buttonClassName="workspace-picker-secondary" />}
+      {!creating && <DirectoryControls {...directoryPage} label="子文件夹" className="directory-continuation" buttonClassName="workspace-picker-secondary" />}
     </div>
     <div className="workspace-picker-footer">
       {error && <p className="workspace-picker-error" role="alert">{error}</p>}

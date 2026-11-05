@@ -37,7 +37,9 @@
 | `fixture` | React 构建产物、源代码 Fastify / Workbench / SQLite / HTTP / SSE、浏览器动作；只在 `HarnessAdapter` 边界接确定性替身 | Codex/DSH 协议、模型上下文、工具执行、原生权限、Host 崩溃恢复 |
 | `native` | 标准 `dist/server/main.js`、已配置的真实原生 Host、真实模型与合成工作区 | 未运行的另一 Harness、另一设备、代理链路、故障和性能分支 |
 
-fixture 的模型标签明确写“非真实模型”。控制命令只改替身自己的 `native.sqlite`，不写产品数据库或伪造浏览器响应正文。真实 Host 需要操作者提供隔离账号、受限执行身份和连接文件；缺少这些前提时记录 `BLOCKED`，仍可跑 fixture。
+fixture 的模型标签明确写“非真实模型”。控制命令只改替身自己的 `native.sqlite`，不写产品数据库或伪造浏览器响应正文。受管编辑界面分支在 `serve` 后加 `--managed`：使用真实执行协调器和文件写者，额外替换 Host/controller，仍不能证明容器隔离与真实 Harness 恢复；驱动与证明边界见[工作区文件](workspace-files.md)。
+
+真实 Host 需要操作者提供隔离账号、受限执行身份和连接文件；缺少这些前提时记录 `BLOCKED`，仍可跑 fixture。
 
 ## Launch：从干净克隆开始
 

@@ -1,9 +1,11 @@
-import { memo, useEffect, useRef, useState, type CSSProperties } from 'react';
+import { memo, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react';
 import { conversationListSchema, conversationResponseSchema, conversationTitleSchema, type Conversation, type WorkbenchConfiguration } from '../shared/workbench.ts';
 import { RequestError, request } from './workbench-client.ts';
 import type { WorkspaceAction } from './workspace-management.tsx';
 import { progressiveSearch } from './progressive-search.ts';
 import { useWorkspacePage, WorkspacePages } from './workspace-selection.tsx';
+import { Button } from './ui/controls.tsx';
+import { CursorWindowCache, ScrollContinuation, useCursorWindow, WindowRegion } from './cursor-window.tsx';
 
 const widthKey = 'zhongshu:sidebar-width';
 const minWidth = 224;
@@ -65,98 +67,47 @@ type RowProps = {
   stateLabel(conversation: Conversation): string;
 };
 
-function Results({ query, revision, csrf, report, rows, hideEmpty, workspaceLabel, label, visible = true }: {
+type ConversationPage = import('zod').z.infer<typeof conversationListSchema>;
+function Results({ query, revision, csrf, report, rows, hideEmpty, workspaceLabel, label, visible = true, cache }: {
   query: Query; revision: number; csrf: string; report(reason: unknown): void; rows: RowProps;
-  hideEmpty?: boolean; workspaceLabel?: (id: string) => string; label?: string; visible?: boolean;
+  hideEmpty?: boolean; workspaceLabel?: (id: string) => string; label?: string; visible?: boolean; cache: CursorWindowCache<ConversationPage>;
 }) {
-  const [cursors, setCursors] = useState<string[]>([]);
-  const beforeId = cursors.at(-1);
-  const [results, setResults] = useState<Conversation[]>([]);
-  const [resultLabels, setResultLabels] = useState<Map<string, string>>(new Map());
-  const [next, setNext] = useState<string | null>(null);
-  const [loadingPage, setLoadingPage] = useState(true);
-  const [loaded, setLoaded] = useState(false);
-  const [scanned, setScanned] = useState(0); const pauseSearch = useRef(() => {});
-  const [failed, setFailed] = useState(false);
-  const [retry, setRetry] = useState(0);
-  const queryKey = JSON.stringify(query);
-  const pendingRefresh = useRef<() => void>(() => {});
-  const latestReport = useRef(report);
-  latestReport.current = report;
-
-  useEffect(() => {
-    if (!visible) return;
-    const controller = new AbortController();
-    let loading = false;
-    let displayedCursor = beforeId;
-    let refreshRequested = false; let paused = false; pauseSearch.current = () => { paused = true; };
-    const fetchPage = async (foreground = false) => {
-      loading = true;
-      // Passive revalidation keeps the known page and its controls usable.
-      // Only an explicit page/query change owns the loading indicator/lock.
-      if (foreground) { setLoadingPage(true); setScanned(0); }
-      try {
-        await progressiveSearch({ cursor: foreground ? beforeId : displayedCursor, signal: controller.signal, continuous: foreground && !!query.title, paused: () => paused,
-          fetch: async current => {
-            const result = await request('/conversation-search', conversationListSchema, {
-              csrf, signal: controller.signal, body: { ...JSON.parse(queryKey), beforeId: current },
-            });
-            return { value: { result, cursor: current }, nextCursor: result.olderBeforeId, scanned: result.scanned ?? result.conversations.length, found: result.conversations.length > 0 };
-          },
-          progress: ({ value: { result, cursor } }, total) => { displayedCursor = cursor; setResults(result.conversations); setResultLabels(new Map(result.workspaceLabels?.map(value => [value.id, value.label]))); setNext(result.olderBeforeId); setScanned(total); setLoaded(true); setFailed(false); },
-        });
-      } catch (reason) {
-        if (controller.signal.aborted) return;
-        setFailed(true);
-        if (reason instanceof RequestError && reason.status === 401) latestReport.current(reason);
-      } finally {
-        loading = false;
-        if (foreground && !controller.signal.aborted) setLoadingPage(false);
-        if (refreshRequested && !controller.signal.aborted) {
-          refreshRequested = false;
-          void fetchPage();
-        }
-      }
-    };
-    pendingRefresh.current = () => {
-      if (query.title && paused) return;
-      if (loading) { if (!query.title) refreshRequested = true; }
-      else void fetchPage();
-    };
-    void fetchPage(true);
-    return () => controller.abort();
-  }, [beforeId, queryKey, csrf, retry, visible]);
-
-  const seenRevision = useRef(revision);
-  useEffect(() => {
-    if (seenRevision.current === revision) return;
-    seenRevision.current = revision;
-    if (visible) pendingRefresh.current();
-  }, [revision, visible]);
-
+  const [scanned, setScanned] = useState(0); const pauseSearch = useRef(false);
+  const [searchPaused, setSearchPaused] = useState(false);
+  const feed = useCursorWindow({ key: JSON.stringify(query), cache, revision, enabled: visible,
+    load: async (cursor, signal, intent) => {
+      if (intent === 'load') { pauseSearch.current = false; setSearchPaused(false); }
+      const batch = await progressiveSearch({ cursor, signal, continuous: !!query.title && intent === 'load', paused: () => pauseSearch.current,
+        fetch: async beforeId => {
+          const value = await request('/conversation-search', conversationListSchema, { csrf, signal, body: { ...query, beforeId } });
+          return { value, nextCursor: value.olderBeforeId, scanned: value.scanned ?? value.conversations.length, found: value.conversations.length > 0 };
+        }, progress: (_batch, total) => setScanned(total),
+      });
+      // Pausing occurs only after a confirmed batch; retain that checkpoint.
+      if (!batch) throw new Error('search_cancelled');
+      return { value: batch.value, next: batch.nextCursor, cursor: batch.startCursor };
+    }, onError: reason => { if (reason instanceof RequestError && reason.status === 401) report(reason); },
+  });
+  const results = [...new Map(feed.pages.flatMap(page => page.conversations).map(row => [row.id, row])).values()];
+  const labels = new Map(feed.pages.flatMap(page => page.workspaceLabels ?? []).map(row => [row.id, row.label]));
+  if (!visible) return null;
   return <>
-    {visible && loadingPage && !failed && <p className="navigation-empty" role="status">{query.title ? `正在查找，已检查 ${scanned} 条…` : '正在加载…'} {query.title && <button type="button" className="text-button" onClick={() => pauseSearch.current()}>暂停查找</button>}</p>}
+    <div ref={feed.marker}/>
+    <ScrollContinuation available={feed.canPrevious} pending={false} load={feed.previous} label="显示上方对话"/>
+    {!feed.pages.length && feed.pending && <p className="navigation-empty" role="status">{query.title ? `正在查找，已检查 ${scanned} 条…` : '正在加载…'}</p>}
     {label && results.length > 0 && <p className="nav-label">{label}</p>}
-    {failed && <p className="navigation-empty">读取失败。<button className="text-button" onClick={() => setRetry(value => value + 1)}>重试</button></p>}
-    {loaded && !loadingPage && !failed && !results.length && !hideEmpty && <p className="navigation-empty">{next ? '这批记录暂无匹配，还可以继续查找。' : '暂无对话'}</p>}
-    {visible && results.map(conversation => <div className="conversation-row" key={conversation.id}>
+    {feed.error && <p className="navigation-empty">读取失败。<button className="text-button" onClick={feed.refresh}>重试</button></p>}
+    {!!feed.pages.length && !feed.pending && !feed.error && !results.length && !hideEmpty && <p className="navigation-empty">{feed.canNext ? '还没有找到匹配的对话。' : '暂无对话'}</p>}
+    {results.map(conversation => <div className="conversation-row" data-scroll-row key={conversation.id}>
       <button className={`conversation-link ${conversation.id === rows.selected ? 'selected' : ''}`}
         aria-current={conversation.id === rows.selected ? 'page' : undefined} onClick={() => rows.choose(conversation.id)}>
         <strong title={conversation.title}>{conversation.title}</strong>
-        <span>{conversation.harnessId === 'codex' ? 'Codex' : 'DSH'}<i title={workspaceLabel ? resultLabels.get(conversation.workspaceId) ?? workspaceLabel(conversation.workspaceId) : undefined}>{workspaceLabel ? resultLabels.get(conversation.workspaceId) ?? workspaceLabel(conversation.workspaceId) : rows.stateLabel(conversation)}</i></span>
+        <span>{conversation.harnessId === 'codex' ? 'Codex' : 'DSH'}<i title={workspaceLabel ? labels.get(conversation.workspaceId) ?? workspaceLabel(conversation.workspaceId) : undefined}>{workspaceLabel ? labels.get(conversation.workspaceId) ?? workspaceLabel(conversation.workspaceId) : rows.stateLabel(conversation)}</i></span>
       </button>
       <button className="icon-button conversation-options" aria-label={`管理对话：${conversation.title}`} onClick={() => rows.manage(conversation)}>⋯</button>
     </div>)}
-    {visible && (next || beforeId) && <div className="conversation-pagination">
-      {beforeId && <button className="text-button" disabled={loadingPage} onClick={() => {
-        setLoadingPage(true);
-        setCursors(current => current.slice(0, -1));
-      }}>较新对话</button>}
-      {next && <button className="text-button" disabled={loadingPage} onClick={() => {
-        setLoadingPage(true);
-        setCursors(current => [...current.slice(-31), next]);
-      }}>{query.title ? '继续查找' : '更早对话'}</button>}
-    </div>}
+    <ScrollContinuation available={feed.canNext} pending={feed.pending && feed.canNext} load={feed.next} automatic={!query.workspaceId && !searchPaused} label={query.title ? '继续查找' : '显示更多对话'}/>
+    {query.title && feed.pending && <p className="navigation-empty" role="status">已检查 {scanned} 条 <button className="text-button" onClick={() => { pauseSearch.current = true; setSearchPaused(true); }}>暂停查找</button></p>}
   </>;
 }
 
@@ -184,13 +135,17 @@ export const ConversationNavigation = memo(function ConversationNavigation(props
   const removedPage = useWorkspacePage(props.removedWorkspaces, props.removedWorkspaceCursor, '', true, showRemoved);
   const matchingWorkspaces = workspacePage.entries;
   const rows = { ...props, manage: setManaging };
-  const resultProps = { revision: props.revision, csrf: props.csrf, report: props.report, rows };
+  const resultCache = useRef(new CursorWindowCache<ConversationPage>());
+  const resultProps = { cache: resultCache.current, revision: props.revision, csrf: props.csrf, report: props.report, rows };
   const scroll = useRef<HTMLElement>(null);
-  const normalScroll = useRef(0);
+  const positions = useRef(new Map<string, number>());
+  const viewKey = showRemoved ? 'removed' : archived ? 'archived:' + term : searchActive ? 'search:' + term : 'normal';
+  const priorView = useRef(viewKey);
   const alternate = showRemoved || archived || searchActive;
-  useEffect(() => { if (scroll.current) scroll.current.scrollTop = alternate ? 0 : normalScroll.current; }, [alternate]);
+  useLayoutEffect(() => { if (scroll.current) scroll.current.scrollTop = positions.current.get(viewKey) ?? 0; priorView.current = viewKey; }, [viewKey]);
   const changeView = (callback: () => void) => {
-    if (!alternate) normalScroll.current = scroll.current?.scrollTop ?? 0;
+    positions.current.set(priorView.current, scroll.current?.scrollTop ?? 0);
+    if (positions.current.size > 16) positions.current.delete(positions.current.keys().next().value!);
     callback();
   };
   return <>
@@ -215,9 +170,10 @@ export const ConversationNavigation = memo(function ConversationNavigation(props
     <div className="navigation-notice" role="status">{notice}</div>
     <nav ref={scroll} aria-label="工作区与对话">
       <div hidden={alternate}>
+        <ScrollContinuation available={workspacePage.hasPrevious} pending={false} load={workspacePage.previous} label="显示上方工作区"/>
         {matchingWorkspaces?.map((workspace, index) => {
           const closed = collapsed.get(workspace.id) ?? index >= 16;
-          return <section key={workspace.id} className="workspace-group">
+          return <section key={workspace.id} className="workspace-group" data-scroll-row>
             <header>
               <button className="workspace-toggle" aria-expanded={!closed} onClick={() => setCollapsed(current => {
                 const next = new Map(current);
@@ -233,7 +189,7 @@ export const ConversationNavigation = memo(function ConversationNavigation(props
               {props.removedWorkspaces && <button className="icon-button" aria-label={`管理工作区：${workspace.label}`}
                 onClick={() => props.workspaceAction({ kind: 'manage', workspace })}>⋯</button>}
             </header>
-            <div hidden={closed}><Results {...resultProps} visible={!alternate && !closed} query={{ workspaceId: workspace.id }} /></div>
+            {!closed && <WindowRegion><Results {...resultProps} visible={!alternate} query={{ workspaceId: workspace.id }} /></WindowRegion>}
           </section>;
         })}
         {workspaceTerm && !matchingWorkspaces?.length && <p className="navigation-empty">没有匹配的工作区</p>}
@@ -287,7 +243,9 @@ function ManageDialog({ conversation, csrf, close, changed, report }: {
     } catch (reason) {
       if (reason instanceof RequestError && reason.status === 401) report(reason);
       setError(reason instanceof RequestError && reason.code === 'conversation_archive_busy' ?
-        '这段对话正在运行、等待输入或尚待核实。请在结果明确后归档。' : '暂时无法确认更改。可以重试。');
+        '这段对话正在运行、等待输入或尚待核实。请在结果明确后归档。' :
+        reason instanceof RequestError && /execution_|workspace_maintenance|managed_native/.test(reason.code) ?
+          'Agent 正在暂停或恢复。请先结束文件编辑，或在对话中恢复 Agent 后再归档。' : '暂时无法确认更改。可以重试。');
     } finally { setBusy(false); }
   };
   return <dialog className="create-dialog manage-dialog" aria-labelledby="manage-dialog-title" ref={dialog} onCancel={event => { event.preventDefault(); if (!busy) close(); }}>
@@ -302,7 +260,7 @@ function ManageDialog({ conversation, csrf, close, changed, report }: {
       </div>
       <div className="manage-archive">
         <p>{conversation.archived ? '恢复后，对话会回到未归档列表。' : '归档后仍可在「已归档」查看历史。'}</p>
-        <button type="button" disabled={busy} onClick={() => void submit('archive')}>{conversation.archived ? '恢复对话' : '归档对话'}</button>
+        <Button disabled={busy} onClick={() => void submit('archive')}>{conversation.archived ? '恢复对话' : '归档对话'}</Button>
       </div>
       {busy && <p role="status">正在保存更改…</p>}
     </form>
