@@ -67,17 +67,19 @@ node test/support/performance-corpus.ts --root "$zh_verify_root" --items 60000 -
 
 旧条目修订须单独构造：先存档至少 35 条已完成消息，再在原生源末尾修订最早的两条，修订顺序与历史顺序相反。不要打开旧页，等后台变更水位推进后核对新正文、原有历史顺序和旧摘要正文均可读取；短正文、空正文及巨型正文各覆盖一例。中途杀应用再恢复，正文和水位不能出现只提交一方。只读观察 `workbench_archive_updates`，并核对公开“完整”状态不会在变更页尚未完成时提前成立。原生替身缺少变更流时须显示 `archive_updates_unavailable`，不能拿一次头页成功代替旧条目覆盖。事务、迟到页和真实 worker 重启入口见 [修订回归](../../test/archive-updates.test.ts)。
 
+存档持久化另有[确定性进程崩溃入口](../../test/archive-crash.test.ts)：运行 `node --test test/archive-crash.test.ts`。独立子进程通过真实 storage worker 写入合成源，在取得页、暂存两个正文块、完整正文验证后尚未发布、整页提交后四个确认点分别 SIGKILL。重开后核对检查点与发布状态一致、旧正文仍可读、同绑定和未决操作身份保留、未发布正文不可读；按原检查点续传后逐块比较完整摘要、顺序及无重复。报告必须区分杀进程与 SQL 异常回滚，不能将本入口外推为真实 Harness 或断电存储硬件测试。
+
 修订积压超过一页时，后台续页应直接推进变更水位，不为每批旧修订重复提取同一巨型头页。强制同步仍读取新头；出现尚未进入历史的 ID 或源游标失效时，必须回到历史路径恢复，不能跳过对应变更。用 `node --test --test-name-pattern='change-feed' test/workbench.test.ts` 同时验证调用量和恢复分支。
 
 按 [W03](workspace-management.md) 移除工作区后，再向已授权的同一物理源追加未读正文；保持工作区移除，等待归档并通过原对话全文接口核对。发送和原文件接口仍须拒绝；后台不得启动原生执行或任意读取已移除目录中的图片路径。目录被替换或绑定变化时暂停新读取，旧档仍在。
 
 联合持续运行使用 R07 的可销毁规模现场。固定源码副本和已通过 `check:release` 的构建目录；应用运行时不要重建其 `dist` 或替换源码，worker 也必须使用同一版本。以 `feature-fixture.ts serve --root "$zh_verify_root" --port 4391 --build <固定构建绝对目录> --physical` 启动：两个独立原生格式源各含 20,000 条消息，实际物理 reader 和产品后台泵负责导入；执行/state/watch 仍是明确替身。每 30 秒把进程内存、event loop、storage 队列与失败分类、数据库/WAL 大小、归档检查点及独立源清单摘要写入私有 `performance-service.ndjson`，每十次采样给两个源各追加 100 条。永久正文不通过测试脚本直接写入。
 
-在自己拥有的 Chromium 调试 profile 上运行 `node test/support/performance-soak.ts --root "$zh_verify_root" --port 4391 --browser <自有调试端口> --output <新建仓库外NDJSON绝对路径> --seconds 86400`。客户端持续发送/停止两种合成执行、读取历史和正文块、刷新和翻阅目录、搜索元数据、保持两个 SSE 客户端（其中一个延迟读取），并在 4 倍 CPU 节流、80 ms/10 Mbps 下实测页面首屏和键入。`--seconds 300` 只用于先验证装配，不能代替 24 小时。浏览器客户端放在应用资源限额之外；Linux 应用及其 workers 共用测量配置的 2 CPU/4 GiB，原生执行 Host 另计。本入口没有证明真实 Harness 模型执行或编辑保存，这些仍需执行地图的受管原生分支。
+需要针对明确时间相关缺陷运行耐久专项时，在自己拥有的 Chromium 调试 profile 上运行 `node test/support/performance-soak.ts --root "$zh_verify_root" --port 4391 --browser <自有调试端口> --output <新建仓库外NDJSON绝对路径> --seconds <本次声明的持续秒数>`。客户端持续发送/停止两种合成执行、读取历史和正文块、刷新和翻阅目录、搜索元数据、保持两个 SSE 客户端（其中一个延迟读取），并在 4 倍 CPU 节流、80 ms/10 Mbps 下实测页面首屏和键入。数分钟的装配检查不能宣称验证了未实际经历的长周期。这个客户端每轮刷新页面，同页生命周期须另按 R04/R07 连续操作、保持同一 renderer，对固定工作量前后相同返回状态比较资源保留，不能用刷新清掉的堆证明无泄漏。浏览器客户端放在应用资源限额之外；Linux 应用及其 workers 共用测量配置的 2 CPU/4 GiB，原生执行 Host 另计。本入口没有证明真实 Harness 模型执行或编辑保存，这些仍需执行地图的受管原生分支。
 
 保存源码/构建清单、容器约束、客户端 NDJSON/summary 和服务端采样；独立确认计时完整、无失败、每项阈值符合测量配置，并检查归档检查点持续前进及最终内容全集。脚本退出码不能代替 RSS/WAL/缓存曲线和原生源完整性核对。中断、worker 退出或字节不一致都保留原失败；定位修复后用新的固定候选重新运行。取消时只向自己拥有的客户端/应用发停止信号，等待清理完成。
 
-24 小时结束后，先按本现场的停止步骤关闭应用并确认 `app.lock` 已消失，再用相同代码位置和迁移版本运行离线核验。输出父目录须为自己拥有的私有目录，输出文件必须不存在且位于 fixture root 外；脚本拒绝升级或修改不匹配的数据库结构。
+本次声明的工作量或专项时长结束后，先按本现场的停止步骤关闭应用并确认 `app.lock` 已消失，再用相同代码位置和迁移版本运行离线核验。输出父目录须为自己拥有的私有目录，输出文件必须不存在且位于 fixture root 外；脚本拒绝升级或修改不匹配的数据库结构。
 
 ```sh
 node test/support/performance-archive-audit.ts --root "$zh_verify_root" --output <新建仓库外JSON绝对路径> --seconds 3600
