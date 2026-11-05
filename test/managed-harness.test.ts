@@ -18,7 +18,7 @@ import { ManagedWorkspaceExecution } from '../src/server/execution-workspaces.ts
 import { Workbench } from '../src/server/workbench.ts';
 import { WorkspaceFileWriter } from '../src/server/workspace-writer.ts';
 import type { ContainerProof } from '../src/server/execution-host-docker.ts';
-import { hostDigest } from '../src/server/execution-host-docker.ts';
+import { dockerHostDigest } from '../src/server/execution-host-docker.ts';
 import { managedHostConfigurationSchema, startManagedHarnesses } from '../src/server/managed-harness-config.ts';
 import type { PluginBackend } from '../src/server/plugin-backend.ts';
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
@@ -41,7 +41,7 @@ test('reopening an initialized Host with plugin management offline preserves arc
       mounts: [{ source: nativeData, target: '/native', kind: 'data' }] } });
   // Durable evidence of an earlier successful bootstrap; the native and Docker
   // sockets are now absent. No process is launched by this isolated test.
-  const configurationDigest = hostDigest({ docker: config.docker, workspaceWriterDirectory: writer });
+  const configurationDigest = dockerHostDigest(config.docker, writer, 'codex-bwrap-v1');
   const ledger = createExecutionHostLedger({ directory: config.ledgerDirectory, groupId: config.groupId, configurationDigest });
   await ledger.ready;
   const generation = (await ledger.load()).state.generation;
