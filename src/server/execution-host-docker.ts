@@ -3,6 +3,7 @@ import { request } from 'node:http';
 import { realpath, stat } from 'node:fs/promises';
 import { isAbsolute, join, normalize, relative } from 'node:path';
 import { z } from 'zod';
+import { codexSandboxArchitectures, codexSeccompDigest, dockerSecurityOptions, type DockerSandboxPolicy } from './execution-sandbox-policy.ts';
 
 const identifier = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/);
 const path = z.string().min(1).max(4096).refine(value => isAbsolute(value) && normalize(value) === value && !value.includes('\0'));
@@ -40,14 +41,22 @@ export class ExecutionHostError extends Error {
 }
 export function hostDigest(value: unknown): string { return createHash('sha256').update(JSON.stringify(value)).digest('hex'); }
 
+export function dockerHostDigest(input: DockerHostConfiguration, workspaceWriterDirectory?: string, sandboxPolicy: DockerSandboxPolicy = 'docker-default'): string {
+  const config = dockerHostConfigurationSchema.parse(input);
+  const identity = workspaceWriterDirectory ? { docker: config, workspaceWriterDirectory } : config;
+  return sandboxPolicy === 'codex-bwrap-v1' ? hostDigest({ configuration: identity, sandboxPolicy, seccompDigest: codexSeccompDigest }) : hostDigest(identity);
+}
+
 /** Operator-only Docker configuration, never HTTP/browser input. Docker owns the
  * entire process tree. No host PID namespace, Docker socket mount, published
  * native port, privileged process or automatic restart is part of this profile.
  * External service managers must manage the gateway, never this container.
  */
-export function createDockerExecutionHost(input: DockerHostConfiguration, groupId: string, generation: string, protectedPaths: string[] = [], workspaceWriterDirectory?: string): ExecutionHostRuntime {
+export function createDockerExecutionHost(input: DockerHostConfiguration, groupId: string, generation: string, protectedPaths: string[] = [], workspaceWriterDirectory?: string, sandboxPolicy: DockerSandboxPolicy = 'docker-default'): ExecutionHostRuntime {
   const config = dockerHostConfigurationSchema.parse(input); identifier.parse(groupId); identifier.parse(generation);
-  const configurationDigest = workspaceWriterDirectory ? hostDigest({ docker: config, workspaceWriterDirectory }) : hostDigest(config);
+  z.enum(['docker-default', 'codex-bwrap-v1']).parse(sandboxPolicy);
+  const securityOptions = dockerSecurityOptions(sandboxPolicy);
+  const configurationDigest = dockerHostDigest(config, workspaceWriterDirectory, sandboxPolicy);
   const name = 'zhongshu-host-' + hostDigest([groupId, generation]).slice(0, 32);
   const labels = { 'zhongshu.execution.group': groupId, 'zhongshu.execution.generation': generation, 'zhongshu.execution.configuration': configurationDigest };
   let containerId: string | undefined;
@@ -73,9 +82,10 @@ export function createDockerExecutionHost(input: DockerHostConfiguration, groupI
   }
   const inspectSchema = z.object({ Id: z.string().regex(/^[a-f0-9]{64}$/), Name: z.string(),
     State: z.object({ Running: z.boolean(), Paused: z.boolean(), Restarting: z.boolean(), Dead: z.boolean(), Pid: z.number().int().nonnegative(), Status: z.string().max(30) }),
-    Config: z.object({ Labels: z.record(z.string(), z.string()) }),
+    Config: z.object({ Labels: z.record(z.string(), z.string()), User: z.string() }),
     HostConfig: z.object({ RestartPolicy: z.object({ Name: z.string() }), Privileged: z.boolean(), PidMode: z.string(),
-      NetworkMode: z.string(), PortBindings: z.record(z.string(), z.unknown()).nullable(), AutoRemove: z.boolean() }),
+      NetworkMode: z.string(), PortBindings: z.record(z.string(), z.unknown()).nullable(), AutoRemove: z.boolean(),
+      ReadonlyRootfs: z.boolean(), CapAdd: z.array(z.string()).nullable(), CapDrop: z.array(z.string()).nullable(), SecurityOpt: z.array(z.string()).nullable() }),
   });
   function proof(value: unknown): ContainerProof {
     const row = inspectSchema.safeParse(value);
@@ -83,6 +93,9 @@ export function createDockerExecutionHost(input: DockerHostConfiguration, groupI
     const container = row.data;
     if ((containerId && container.Id !== containerId) || container.Name !== '/' + name ||
       Object.entries(labels).some(([key, value]) => container.Config.Labels[key] !== value) ||
+      container.Config.User !== config.user || !container.HostConfig.ReadonlyRootfs ||
+      (container.HostConfig.CapAdd?.length ?? 0) !== 0 || JSON.stringify(container.HostConfig.CapDrop) !== JSON.stringify(['ALL']) ||
+      JSON.stringify([...(container.HostConfig.SecurityOpt ?? [])].sort()) !== JSON.stringify([...securityOptions].sort()) ||
       container.HostConfig.RestartPolicy.Name !== 'no' || container.HostConfig.Privileged || container.HostConfig.PidMode ||
       container.HostConfig.AutoRemove || !['none', 'bridge'].includes(container.HostConfig.NetworkMode) ||
       Object.keys(container.HostConfig.PortBindings ?? {}).length || container.State.Paused || container.State.Restarting || container.State.Dead)
@@ -108,6 +121,18 @@ export function createDockerExecutionHost(input: DockerHostConfiguration, groupI
     async prepare() {
       const version = await call('GET', '/version');
       if (version.status !== 200 || !z.object({ Os: z.literal('linux') }).safeParse(version.value).success) throw new ExecutionHostError('execution_linux_docker_required');
+      if (sandboxPolicy === 'codex-bwrap-v1' && !z.object({ Arch: z.enum(codexSandboxArchitectures) }).safeParse(version.value).success)
+        throw new ExecutionHostError('execution_codex_sandbox_arch_unsupported');
+      if (sandboxPolicy === 'codex-bwrap-v1') {
+        const info = await call('GET', '/info');
+        const security = z.object({ SecurityOptions: z.array(z.string().max(1024)).max(128) }).safeParse(info.value);
+        if (info.status !== 200 || !security.success) throw new ExecutionHostError('execution_docker_security_unknown', 503);
+        if (!security.data.SecurityOptions.some(value => /^name=seccomp(?:,|$)/.test(value))) throw new ExecutionHostError('execution_seccomp_required');
+        // Docker's default AppArmor policy denies mount even when seccomp permits
+        // the native sandbox. Never silently disable an additional host policy.
+        if (security.data.SecurityOptions.some(value => /^name=(?:apparmor|selinux)(?:,|$)/.test(value)))
+          throw new ExecutionHostError('execution_codex_lsm_policy_unsupported');
+      }
       await exclusiveContainer();
       const existing = await call('GET', '/containers/' + name + '/json');
       if (existing.status === 200) return proof(existing.value);
@@ -128,7 +153,7 @@ export function createDockerExecutionHost(input: DockerHostConfiguration, groupI
         Env: Object.entries(config.environment).map(([key, value]) => key + '=' + value), Labels: labels,
         Healthcheck: { Test: ['NONE'] },
         HostConfig: { RestartPolicy: { Name: 'no' }, AutoRemove: false, Privileged: false, ReadonlyRootfs: true, Init: true,
-          CapDrop: ['ALL'], SecurityOpt: ['no-new-privileges:true'], NetworkMode: config.network, PidsLimit: config.pids,
+          CapDrop: ['ALL'], SecurityOpt: securityOptions, NetworkMode: config.network, PidsLimit: config.pids,
           Memory: config.memoryBytes, MemorySwap: config.memoryBytes, NanoCpus: Math.floor(config.cpus * 1e9),
           Mounts: config.mounts.map(mount => mount.volume
             ? { Type: 'volume', Source: mount.volume.name, Target: mount.target, ReadOnly: mount.readOnly, VolumeOptions: { NoCopy: true, Subpath: mount.volume.subpath } }

@@ -3,7 +3,7 @@ import { isAbsolute, join, relative } from 'node:path';
 import { z } from 'zod';
 import type { HarnessAdapter, HarnessId } from '../harness/types.ts';
 import { workspaceIdSchema } from '../shared/workbench.ts';
-import { dockerHostConfigurationSchema, createDockerExecutionHost, hostDigest } from './execution-host-docker.ts';
+import { dockerHostConfigurationSchema, createDockerExecutionHost, dockerHostDigest } from './execution-host-docker.ts';
 import { createExecutionHostLedger, hostLedgerOptionsSchema } from './execution-host-ledger.ts';
 import { acquireExecutionHostOwnership, ExecutionHost } from './execution-host.ts';
 import { ManagedHarnessRpc } from './managed-harness-rpc.ts';
@@ -46,13 +46,14 @@ export async function startManagedHarnesses(input: { configurations: ManagedHost
       const gatewayToken = (await readOperatorFile(config.gateway.tokenFile, 128)).trim();
       if (gatewayToken === token) throw new Error('execution_gateway_requires_separate_credential');
       const owner = await acquireExecutionHostOwnership(config.docker.ownershipPort, join(canonical, 'owner.lock'));
-      const ledger = createExecutionHostLedger({ directory: canonical, groupId: config.groupId, configurationDigest: hostDigest({ docker: config.docker, workspaceWriterDirectory: input.workspaceWriterDirectory }), capacity: config.ledgerCapacity });
+      const sandboxPolicy = config.harnessId === 'codex' ? 'codex-bwrap-v1' : 'docker-default';
+      const ledger = createExecutionHostLedger({ directory: canonical, groupId: config.groupId, configurationDigest: dockerHostDigest(config.docker, input.workspaceWriterDirectory, sandboxPolicy), capacity: config.ledgerCapacity });
       const client = new ManagedHarnessRpc({ socketPath: config.native.socketPath, token });
       let host: ExecutionHost | undefined;
       try {
         await ledger.ready;
         const generation = (await ledger.load()).state.generation;
-        const runtime = createDockerExecutionHost(config.docker, config.groupId, generation, [input.dataDirectory, canonical, input.workspaceWriterDirectory!], input.workspaceWriterDirectory);
+        const runtime = createDockerExecutionHost(config.docker, config.groupId, generation, [input.dataDirectory, canonical, input.workspaceWriterDirectory!], input.workspaceWriterDirectory, sandboxPolicy);
         host = new ExecutionHost(ledger, runtime, client, createManagedHarnessAuthority({ groupId: config.groupId, harnessId: config.harnessId, store: input.storage.store, execution: input.storage.execution, registry: input.registry }), owner);
         await host.bootstrap();
         const server = await serveExecutionGateway(host, { socketPath: config.gateway.socketPath, token: gatewayToken });

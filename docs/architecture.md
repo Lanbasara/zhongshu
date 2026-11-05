@@ -134,6 +134,8 @@ Harness Adapter 提供可归因的编辑目标。工作台在写入历史或实�
 
 两个 Harness 的原地保存要求受管专用 Host。固定受理集合排空后，控制器证明 Host 及其写者退出，才开放编辑。保存或关闭页面不解除窗口，必须显式恢复。控制意图在外部动作之前持久化，代次与 epoch 拒绝旧结果；未知状态关闭门禁，不自动取消或重发任务。
 
+[execution-sandbox-policy](../src/server/execution-sandbox-policy.ts) 为受管 Codex 提供固定原生版本的内层沙箱兼容规则；[Moby 默认清单](../src/server/moby-seccomp-default.ts)保留原规则与许可证，只增精确参数的 namespace/mount 调用，DSH 继续使用 Docker 默认策略。规则摘要进入 Host 持久身份；Docker 退出证明同时核对非 root 身份、只读根、capabilities 和实际安全选项，原标签不能掩盖这些配置漂移。支持的架构与宿主策略前提归 [README](../README.md#managed-host-deployment)，不因原生 catalog 宣称权限可用就省略真实工具验证。
+
 [workspace-writer](../src/server/workspace-writer.ts) 的独立子进程是唯一受管文件写者，以单独 SQLite owner 事务持有操作系统锁，保存 intent 与结果另存持久日志。版本由文件内容和身份共同决定；替换与目录同步后才确认成功。主库未决保存跨重启恢复时，新 owner 先取得同一锁，再以旧版本和新摘要判断成功、未写入或未知，不重复不确定副作用。操作者配置稳定的独立写者目录，Host 配置摘要绑定该目录；产品库备份恢复不得回滚或替换这些 owner/Host 日志。边界取舍见 [ADR 0011](adr/0011-managed-workspace-execution.md)，当前行为和复验归[文件功能地图](features/workspace-files.md)。
 
 标题及工作区名称搜索保留任意子串语义。存储 worker 先按排序索引和 keyset 游标读取固定原始候选批次，再做匹配；`conversation-search` 与工作区 `page` 的游标指向已扫描位置，而非只指向最后命中。空批次保留 continuation，前端只持有当前结果页和有限游标。全库稀疏搜索仍是线性总工作量，但单个请求不会持有 worker 遍历终身记录；预算与复跑见[对话管理](features/conversation-management.md)和[工作区管理](features/workspace-management.md)。

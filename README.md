@@ -46,6 +46,8 @@ Codex uses a private Unix socket. DSH's `launchFile` must be an operator-owned r
 
 在上述配置中，用 `managedHosts` 替代相应的直接 `codex`/`dsh` 配置，同一 Harness 只能配置一个受管 Host。下面是路径结构示例，镜像摘要须替换为操作者核验的不可变镜像；镜像应包含 Node 24、产品 `dist`/生产依赖及固定版本的原生 Harness。
 
+Codex 必须安装完整的同版本运行包，包括 `codex-code-mode-host` 和 `codex-resources/bwrap` 等配套程序，并保持发行包目录结构；仅主程序能启动或打印版本不证明工具可执行。受管 Codex 自动采用产品内置的版本化 seccomp 规则：固定 Moby 默认允许清单加该版原生沙箱必需的精确命名空间/挂载调用，仍拒绝未列出的调用。只支持 amd64/arm64，宿主须允许非特权用户命名空间并启用 seccomp。当前 profile 不支持 Docker 启用的默认 AppArmor/SELinux 策略；启动明确拒绝，不能通过关闭 LSM、`seccomp=unconfined`、增加 `SYS_ADMIN` 或把所选原生权限改为完全访问来绕过验收。DSH 保留 Docker 默认策略。原生完整包、宿主策略和真实工具路径须在目标实例分别验证。
+
 ```json
 {
   "workspaces": [{ "id": "notes", "label": "Notes", "directory": "/srv/workspaces/notes" }],
@@ -73,6 +75,8 @@ Codex uses a private Unix socket. DSH's `launchFile` must be an operator-owned r
 ```
 
 两个 token 文件分别保存独立随机 32 字节的 base64url 编码（43 字符）；配置/凭据为同一操作者所有的 `0600` 文件，IPC 和账本目录为 `0700`。网关与容器使用相同非 root UID。`workspaceWriterDirectory` 与每个 `ledgerDirectory` 必须独立于可恢复的产品数据库，恢复主库时保留它们及原生数据。文件写者路径已绑定到每个 Host 的持久配置摘要，不能换一个空目录便认定旧写者已退出。尚未核实的保存和派发会继续阻止不安全的恢复。
+
+Codex 沙箱规则的版本与摘要也属于持久 Host 身份。旧运行策略、镜像或挂载与新配置不符时拒绝接管；不要删除账本、换空目录或重用旧 generation 来消除错误。策略变更属于显式 Host 迁移，须先核对旧受理集合和副作用并保留原生数据；源码更新不自动授权重建运行现场。
 
 `workspaceIds`/`workspaceRootIds` 的真实目录必须与 `kind: workspace` 的挂载范围一致；相交的可写挂载自动形成冲突组。辅助 data/runtime 可写挂载不得覆盖工作区。Host 固定非 root、只读根文件系统、去除全部 capabilities、禁止提权、无主机 PID 命名空间、无发布端口、`restart=no`，默认 2 CPU/2 GiB/256 PID。网关必须运行在 Linux 本地 ext4/btrfs/xfs/tmpfs/overlay 文件系统上，并提供 root 所有、不可由普通用户改写的 `/usr/bin/flock`。父进程持有 `ledgerDirectory/owner.lock` 的文件描述符；固定 helper 对继承描述符加内核锁后退出，锁继续由父进程持有，跨网络/PID/容器命名空间互斥。只有所有在途 Host effects 结束后关闭描述符，或父进程真正退出，才会释放；禁止删除锁文件。`ownershipPort` 是附加 loopback 存活锁，不是 API 端口。不要复用端口、账本或组 ID。
 
