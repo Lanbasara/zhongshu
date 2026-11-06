@@ -6,7 +6,7 @@ import { HarnessError } from '../types.ts';
 import type { Binding, Catalog, Configuration, HarnessAdapter, HarnessInput, HistoryPage, NativeChange, NativeItem, NativeState, NativeSubagent, Receipt, SubagentHistory, SubagentSnapshot } from '../types.ts';
 import { Connection, NativeRejection } from './connection.ts';
 import { LiveAssistant } from './live.ts';
-import { boundaryFrom, decodeModel, selectedModel, eventSchema, historyItems, identifier, itemFrom, modelId, modelSchema, object, pageSchema, snapshotSchema, stateFrom, targetTurnRange, terminalStatusFrom, textContent, turnAt, usageFrom } from './native.ts';
+import { boundaryFrom, decodeModel, selectedModel, eventSchema, historyItems, identifier, inboxSenders, itemFrom, modelId, modelSchema, object, pageSchema, snapshotSchema, stateFrom, targetTurnRange, terminalStatusFrom, textBlocks, textContent, turnAt, usageFrom } from './native.ts';
 import type { Event } from './native.ts';
 import type { Snapshot, TurnOutline } from './native.ts';
 import { nativeSkill, resolveSkillInput, skillOptions, type NativeSkill } from '../skills.ts';
@@ -401,7 +401,8 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
       // The delegated instruction is the child's first message, a few events after its header.
       const opening = pageSchema.parse(await connection.call('session/page', request({ throughSeq: current.cursor, beforeSeq: Math.min(current.cursor + 1, 64), maxMessages: 64 })));
       const first = [...opening.records, ...records].map(record => record.event).filter(event => event.type === 'user/message' && object(event.data.source).kind === 'user' && typeof object(event.data.source).rpcId !== 'string').sort((a, b) => a.seq - b.seq)[0];
-      if (first) { brief = textContent(first.data.content).slice(0, 64 * 1024); briefSeq = first.seq; }
+      // Delegated instructions arrive as separate text parts; keep them apart.
+      if (first) { brief = textBlocks(first.data.content).join('\n\n').slice(0, 64 * 1024); briefSeq = first.seq; }
     }
     const first = records.length ? Math.min(...records.map(record => record.event.seq)) : undefined;
     if (hasMore && (first === undefined || first === 0)) throw new HarnessError('DSH_HISTORY_NO_PROGRESS');
@@ -490,6 +491,7 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
                 const item = itemFrom(binding.id, event, true, turnAt(outline, event.seq)); if (item) emit({ type: 'item', item });
                 if (item?.collaboration) emit({ type: 'subagents', ...(item.collaboration.agentIds.length === 1 ? { agentId: item.collaboration.agentIds[0]! } : {}) });
                 else if (/^team\//.test(event.type)) emit({ type: 'subagents' });
+                else if (event.type === 'agent/inbox/spliced') for (const agentId of inboxSenders(event.data)) emit({ type: 'subagents', agentId });
                 if (event.type === 'assistant/message') { pendingItem = undefined; if (textTimer) clearTimeout(textTimer); textTimer = undefined; }
                 if (/^(turn\/|agent\/inbox|approval\/|permission\/|sandbox\/|model\/|tool\/|assistant\/(?:message|attempt)$|compaction\/)/.test(event.type)) refresh();
               } else if (frame.type === 'assistant-stream') {

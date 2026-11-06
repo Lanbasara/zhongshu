@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { mapItem, nativeItem } from '../src/harness/codex/protocol.ts';
-import { itemFrom } from '../src/harness/dsh/native.ts';
+import { itemFrom, textBlocks } from '../src/harness/dsh/native.ts';
 
 // Shapes follow captured Codex 0.166.0-alpha.5.1 and DSH 0.2.1-rc.4 records (synthetic identities).
 const child = '01a1b025-3337-7de3-a97f-e0b95900eede';
@@ -28,4 +28,9 @@ test('DSH catalog and settlement events become cards; injected context snapshots
   assert.deepEqual([settled?.text, settled?.collaboration], ['Run gate dalpha 已完成', { action: 'completed', agentIds: ['60fbb4f8-b9dd-46c3-a02f-542cf68d1d93'] }]);
   const runtime = itemFrom(session, { type: 'user/message', seq: 9, time: 3, data: { source: { kind: 'runtime-context', form: 'snapshot', sections: [] }, content: [{ type: 'text', text: 'Current runtime context.' }] } });
   assert.equal(runtime, undefined);
+});
+
+test('DSH delegated instructions keep their text parts apart', () => {
+  assert.deepEqual(textBlocks([{ type: 'text', text: 'Run the gate.' }, { type: 'image' }, { type: 'text', text: '' }, { type: 'text', text: 'Report the exit code.' }]), ['Run the gate.', 'Report the exit code.']);
+  assert.deepEqual(textBlocks('not content'), []);
 });

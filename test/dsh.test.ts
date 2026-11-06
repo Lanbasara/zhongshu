@@ -228,6 +228,27 @@ test('DSH live text and durable text share an ID, and connection loss is explici
   } finally { await context.close(); }
 });
 
+test('DSH announces sub-agent progress from the parent inbox before a busy parent records it', async () => {
+  const context = await setup();
+  try {
+    const binding = await context.create(); const native = context.fixture.sessions.get(binding.id)!; const changes: NativeChange[] = [];
+    const unsubscribe = await context.adapter.watch(binding, change => changes.push(change)); await until(() => changes.some(change => change.type === 'state'));
+    // Shape captured from DSH 0.2.1-rc.4 while the parent was inside its own tool call.
+    context.fixture.append(native, 'agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [
+      { role: 'user', id: 'relay', source: { kind: 'agent-message', form: 'relay', senderSessionId: 'child-0001' }, content: [{ type: 'text', text: 'done' }] },
+      { role: 'user', id: 'settled', source: { kind: 'subagent-settled', form: 'notice', senderSessionId: 'child-0001' }, content: [{ type: 'text', text: 'finished' }] },
+      { role: 'user', id: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'queued by the user' }] },
+      { role: 'user', id: 'unsafe', source: { kind: 'subagent-settled', senderSessionId: '../escape' }, content: [] }] });
+    await until(() => changes.some(change => change.type === 'subagents'));
+    assert.deepEqual(changes.filter(change => change.type === 'subagents'), [{ type: 'subagents', agentId: 'child-0001' }]);
+    context.fixture.append(native, 'agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 2, inserted: [] });
+    context.fixture.append(native, 'user/message', { source: { kind: 'user', rpcId: 'marker' }, content: [{ type: 'text', text: 'after splice' }] });
+    await until(() => changes.some(change => change.type === 'item' && change.item.text === 'after splice'));
+    assert.equal(changes.filter(change => change.type === 'subagents').length, 1, 'removals and user input are not sub-agent progress');
+    unsubscribe();
+  } finally { await context.close(); }
+});
+
 test('DSH reconnect rereads a rotated launch file and never transfers credentials to the old Host', async () => {
   const context = await setup(); const replacement = await host();
   try {

@@ -125,6 +125,29 @@ export function boundaryFrom(snapshot: Snapshot): { openTurnStartSeq: number | n
     && events.at(-1)?.seq === snapshot.cursor && events.every((event, index) => index === 0 || event.seq === events[index - 1]!.seq + 1))
     return { openTurnStartSeq: latest.seq, lastTurn: latest.turn };
 }
+/**
+ * Senders of child messages and settle notices spliced into a parent's inbox. A busy parent receives these
+ * immediately but records them as transcript messages only when its current step ends.
+ */
+export function inboxSenders(data: Record<string, unknown>): string[] {
+  const inserted = Array.isArray(data.inserted) ? data.inserted.slice(0, 32) : [];
+  return [...new Set(inserted.flatMap(entry => {
+    const source = object(object(entry).source); const sender = source.senderSessionId;
+    return (source.kind === 'subagent-settled' || source.kind === 'agent-message') && typeof sender === 'string' && subagentIdSchema.safeParse(sender).success ? [sender] : [];
+  }))];
+}
+/** Text parts kept separate, bounded like {@link textContent}. */
+export function textBlocks(content: unknown): string[] {
+  if (!Array.isArray(content)) return [];
+  const blocks: string[] = []; let size = 0;
+  for (const value of content) {
+    const block = object(value);
+    if (block.type !== 'text' || typeof block.text !== 'string' || !block.text) continue;
+    size += block.text.length; if (size > 1024 * 1024) throw new HarnessError('DSH_ITEM_TOO_LARGE');
+    blocks.push(block.text);
+  }
+  return blocks;
+}
 export function textContent(content: unknown): string {
   if (!Array.isArray(content)) return '';
   let text = '';

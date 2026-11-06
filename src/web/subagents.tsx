@@ -137,9 +137,10 @@ export function SubagentPanelHost({ conversation, list, selectedId, narrow, csrf
     setNotice('');
     setRequested(current => new Set(current).add(agentId));
     try {
-      await request(`/conversations/${conversation.id}/subagents/${encodeURIComponent(agentId)}/stop`, subagentStopResponseSchema, { csrf, body: { id: crypto.randomUUID() } });
+      const result = await request(`/conversations/${conversation.id}/subagents/${encodeURIComponent(agentId)}/stop`, subagentStopResponseSchema, { csrf, body: { id: crypto.randomUUID() } });
       // DSH reports a stopped child to its parent; an idle parent starts a new turn on that notice.
-      if (conversation.harnessId === 'dsh') setNotice('已请求停止。DSH 会把停止结果告诉主 Agent，主 Agent 空闲时会因此自动开始新的一轮。');
+      // An unconfirmed stop has its own callout and must not be described as delivered.
+      if (conversation.harnessId === 'dsh' && result.stop.status !== 'unknown') setNotice('已请求停止。DSH 会把停止结果告诉主 Agent，主 Agent 空闲时会因此自动开始新的一轮。');
     } catch (reason) {
       if (reason instanceof RequestError && stopFailures[reason.code]) setNotice(stopFailures[reason.code]!); else reportRef.current(reason);
     } finally { answered.current.add(agentId); onReload(); }
