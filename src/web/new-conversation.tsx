@@ -26,6 +26,7 @@ function trackImageWrite(id:string){
   return()=>{if(imageWrites.get(id)===pending)imageWrites.delete(id);finish();};
 }
 const defaultsSchema=z.object({conversation:conversationSchema.nullable()}).strict();
+const preparationSchema=skillCatalogSchema.extend({preparationId:z.uuid()}).strict();
 type Props={ configuration:WorkbenchConfiguration; initialWorkspace?:string; addedWorkspace?:string; csrf:string; onCreated(conversation:Conversation):void; onAddWorkspace():void; onWorkspace(workspace:string):void; report(error:unknown):void };
 function StagedImage({item,disabled,onRemove}:{item:UploadDraft;disabled:boolean;onRemove():void}) {
   const [url,setUrl]=useState('');useEffect(()=>{const url=URL.createObjectURL(item.file);setUrl(url);return()=>URL.revokeObjectURL(url);},[item.file]);
@@ -40,6 +41,9 @@ export function NewConversation(props:Props) {
   const [draft,setDraft]=useState<NewDraft>(()=>readNewDraft(props.initialWorkspace??'')??emptyNewDraft(props.initialWorkspace??''));
   const current=useRef(draft);current.current=draft;
   const [skillsSupported,setSkillsSupported]=useState<boolean|undefined>(undefined);
+  const [preparationState,setPreparationState]=useState<'loading'|'ready'|'failed'|undefined>();
+  const [preparationRetry,setPreparationRetry]=useState(0);
+  const [preparationClaimed,setPreparationClaimed]=useState(false);
   const [initialized,setInitialized]=useState(false);const [uploads,setUploads]=useState<UploadDraft[]>([]);const [imagesReady,setImagesReady]=useState(false);
   const [busy,setBusy]=useState(false);const busyRef=useRef(false);
   const [staging,setStaging]=useState(false);const stagingRef=useRef(false);
@@ -79,19 +83,36 @@ export function NewConversation(props:Props) {
   const model=catalog?.models.find(m=>m.id===draft.configuration.modelId);
   const valid=!!workspace&&!!catalog?.available&&!!model&&catalog.permissions.some(p=>p.id===draft.configuration.permissionId)&&(!model.reasoningEfforts?.length||model.reasoningEfforts.some(e=>e.id===draft.configuration.reasoningEffort));
   const locked=busy||!!draft.submission;
+  async function prepareDraft(value:NewDraft,signal:AbortSignal) {
+    const result=await request('/draft-preparation',preparationSchema,{csrf:props.csrf,body:{workspaceId:value.workspaceId,harnessId:'dsh',...(value.preparationId?{preparationId:value.preparationId}:{})},signal});
+    signal.throwIfAborted();
+    const latest=current.current;
+    if(!alive.current||latest.id!==value.id||latest.workspaceId!==value.workspaceId||latest.harnessId!=='dsh')throw new DOMException('Draft changed','AbortError');
+    if(latest.preparationId&&latest.preparationId!==result.preparationId)throw Error('草稿准备身份已变化，请重新核对。');
+    if(!persist({...latest,preparationId:result.preparationId},true))throw Error('无法保留准备编号，本次尚未发送。');
+    setPreparationState('ready');setPreparationClaimed(false);setSkillsSupported(true);
+    return result;
+  }
   const loadSkills=useCallback(async(signal:AbortSignal)=>{
+    if(draft.harnessId==='dsh')return (await prepareDraft(current.current,signal)).skills;
     const result=await request(`/draft-skills?workspaceId=${encodeURIComponent(draft.workspaceId)}&harnessId=${draft.harnessId}`,draftSkillsSchema,{signal});
     if(!result.supported)throw Error('当前 Power 首次发送后可选择技能。请先移除技能标记，再发送首条消息。');
     return result.skills;
   },[draft.workspaceId,draft.harnessId]);
   useEffect(()=>{
-    const abort=new AbortController();setSkillsSupported(undefined);
+    const abort=new AbortController();setSkillsSupported(undefined);setPreparationState(undefined);setPreparationClaimed(false);
     if(!initialized||!workspace||!catalog?.available)return()=>abort.abort();
+    if(current.current.submission)return()=>abort.abort();
+    if(catalog.id==='dsh'){
+      setPreparationState('loading');
+      void prepareDraft(current.current,abort.signal).catch(reason=>{if(!abort.signal.aborted){setPreparationState('failed');setPreparationClaimed(reason instanceof RequestError&&reason.code==='draft_preparation_claimed');}});
+      return()=>abort.abort();
+    }
     void request(`/draft-skills?workspaceId=${encodeURIComponent(workspace.id)}&harnessId=${catalog.id}`,draftSkillsSchema,{signal:abort.signal})
       .then(result=>{if(!abort.signal.aborted)setSkillsSupported(result.supported);})
       .catch(reason=>{if(!abort.signal.aborted){setSkillsSupported(undefined);setError('暂时无法读取技能能力，请稍后重试。');props.report(reason);}});
     return()=>abort.abort();
-  },[initialized,workspace?.id,catalog?.id,catalog?.available]);
+  },[initialized,workspace?.id,catalog?.id,catalog?.available,preparationRetry]);
   const edit=(text:string,skills:SkillReference[])=>{if(!locked)persist({...current.current,text,skills:skills.length?skills:undefined});};
   async function addImages(files:File[]) {
     if(busyRef.current||stagingRef.current||current.current.submission||!imagesReady||!initialized)return;
@@ -138,9 +159,14 @@ export function NewConversation(props:Props) {
     busyRef.current=true;setBusy(true);setError('');const abort=new AbortController();controller.current=abort;
     try {
       if(!value.submission){
+        if(value.harnessId==='dsh'){
+          setStatus('正在核对首发技能与原生准备…');
+          await prepareDraft(value,abort.signal);
+          value=current.current;
+        }
         // Verify selected skills against this exact workspace and Power before freezing.
         if(value.skills?.length){const skills=await loadSkills(abort.signal);if(value.skills.some(s=>!skills.some(item=>item.id===s.id)))throw Error('所选技能在当前 Power 或工作区已不可用，请重新选择。');}
-        value={...value,submission:{creation:{id:value.id,workspaceId:value.workspaceId,harnessId:value.harnessId,configuration:configurationSchema.parse(value.configuration),title:initialConversationTitle(value.text)},operationId:crypto.randomUUID(),uploaded:{},dispatchStarted:false}};
+        value={...value,submission:{creation:{id:value.id,workspaceId:value.workspaceId,harnessId:value.harnessId,configuration:configurationSchema.parse(value.configuration),title:initialConversationTitle(value.text),...(value.harnessId==='dsh'&&value.preparationId?{preparationId:value.preparationId}:{})},operationId:crypto.randomUUID(),uploaded:{},dispatchStarted:false}};
         if(!persist(value,true))return;
       }
       const submission=value.submission!;
@@ -177,7 +203,17 @@ export function NewConversation(props:Props) {
       if(response.operation.status==='accepted')await complete(snapshot.conversation);
       else if(response.operation.status==='rejected')setStatus('首条消息未被接受，原内容已保留。');
       else await confirmFirstSend(value.id,submission.operationId,abort.signal);
-    }catch(reason){if(!alive.current)return;if(reason instanceof RequestError){props.report(reason);setError('暂时无法确认结果。原配置和内容已保留，请重试核对。');}else if(!(reason instanceof DOMException&&reason.name==='AbortError'))setError(reason instanceof Error?reason.message:'暂时无法确认结果，请重试。');}
+    }catch(reason){
+      if(!alive.current)return;
+      if(reason instanceof RequestError&&reason.code==='draft_preparation_claimed'&&!current.current.submission?.dispatchStarted){
+        // The server only returns this rejection before creating this conversation.
+        // An unknown response never enters this branch and keeps its frozen identity.
+        persist({...current.current,submission:undefined});
+        setPreparationState('failed');setPreparationClaimed(true);setSkillsSupported(false);setStatus('');
+        setError('原生准备已被使用，本次尚未发送。请重新准备并核验技能。');
+      }else if(reason instanceof RequestError){props.report(reason);setError('暂时无法确认结果。原配置和内容已保留，请重试核对。');}
+      else if(!(reason instanceof DOMException&&reason.name==='AbortError'))setError(reason instanceof Error?reason.message:'暂时无法确认结果，请重试。');
+    }
     finally{busyRef.current=false;if(alive.current)setBusy(false);}
   }
   async function openCreated(){
@@ -228,7 +264,9 @@ export function NewConversation(props:Props) {
       sendDisabled={busy||staging||!initialized||!imagesReady||(!draft.submission&&(!valid||(!draft.text.trim()&&!uploads.length&&!draft.references?.length)))} sending={busy} running={false} model={model?.label??'选择模型'} permission={catalog?.permissions.find(p=>p.id===draft.configuration.permissionId)?.label??'选择权限'} configurationNote="首次发送后配置固定。"
       configurationControls={<DraftConfiguration catalogs={props.configuration.harnesses} harnessId={draft.harnessId} configuration={draft.configuration} disabled={locked||!initialized} onPowerChange={switchPower} onConfigurationChange={configuration=>persist({...current.current,configuration})}/>}
       hasMaterials={!!uploads.length||!!draft.references?.length} error={error} materials={<>{uploads.length>0&&<div className="attachment-tray">{uploads.map(item=><StagedImage key={item.id} item={item} disabled={locked||staging} onRemove={()=>void removeImage(item.id)}/>)}</div>}{draft.references?.map((r,index)=><div className="reference-card" key={index}><FileText size={14}/><span>{r.type==='file'?r.path:r.text}</span><button type="button" aria-label="移除引用" disabled={locked} onClick={()=>persist({...current.current,references:current.current.references?.filter((_,i)=>i!==index)})}><X size={14}/></button></div>)}</>}/>
-    {skillsSupported===false&&<p className="new-draft-status">首次发送后可选择技能</p>}
+    {skillsSupported===false&&<p className="new-draft-status">当前 Power 暂未提供首发技能目录。</p>}
+    {!draft.submission&&preparationState==='loading'&&<p className="new-draft-status" role="status">正在准备首发技能…</p>}
+    {!draft.submission&&preparationState==='failed'&&<div className="new-draft-status" role="status"><p>{preparationClaimed?'此准备已被另一份草稿用于创建对话。内容已保留，可重新准备并核验技能。':'首发技能准备未完成，内容已保留。可重试核对同一准备。'}</p><Button disabled={busy} onClick={()=>{if(preparationClaimed&&!persist({...current.current,preparationId:undefined},true))return;setPreparationRetry(value=>value+1);}}>{preparationClaimed?'重新准备首发技能':'重试准备首发技能'}</Button></div>}
     <p className="new-draft-status" role="status">{status||(!initialized?'正在读取配置…':draft.submission?'上次创建或发送尚待核对，重试会使用同一编号。':'首次发送时创建对话；配置在对话中保持不变。')}</p>
     {draft.submission&&!busy&&<Button onClick={()=>void send()}>重试核对首条消息</Button>}
     {draft.submission&&!busy&&<Button disabled={staging} onClick={()=>void openCreated()}>查看已创建的对话</Button>}

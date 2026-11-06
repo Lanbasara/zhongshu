@@ -213,10 +213,20 @@ async function main() {
           { id: 'fixture-model', label: 'Fixture · 非真实模型', reasoningEfforts, ...(id === 'codex' ? { defaultReasoningEffort: 'medium' } : {}) },
           { id: 'fixture-alternate', label: 'Fixture Alternate · 非真实模型', reasoningEfforts: reasoningEfforts.slice(0, 3), ...(id === 'codex' ? { defaultReasoningEffort: 'low' } : {}) },
         ], permissions: [{ id: 'fixture-write', label: 'Fixture write', description: 'Synthetic boundary; no actual agent execution.' }, { id: 'fixture-read', label: 'Fixture read', description: 'Synthetic configuration selection only.' }] }; },
+      ...(id === 'dsh' ? { async prepareDraft(input: { id: string; cwd: string }) {
+        const row = native.prepare('SELECT body FROM sessions WHERE id=?').get(input.id);
+        if (!row) {
+          save({ id: input.id, title: 'Prepared draft', harnessId: id, cwd: input.cwd, configuration: { modelId: 'fixture-model', permissionId: 'fixture-read' }, state: idle(), items: [], submissions: [], rejectedOperationIds: [], rejectNext: false, submitCalls: 0, stopCalls: 0, offline: false, unknownReceipt: false, hidden: false, revision: 0 });
+        }
+        const value = load(input.id);
+        if (value.cwd !== input.cwd || value.submissions.length) throw new Error('fixture_prepared_not_empty');
+        return skillOptions(skills({ id: value.id, cwd: value.cwd, configuration: value.configuration, details: {} }));
+      } } : {}),
       async create(input, onBound) {
+        if (input.preparedId) { const previous = load(input.preparedId); if (previous.cwd !== input.cwd || previous.harnessId !== id || previous.submissions.length) throw new Error('fixture_prepared_not_empty'); }
         const fail = native.prepare('SELECT fail_create FROM settings WHERE id = 1').get()!.fail_create === 1;
         native.prepare('UPDATE settings SET fail_create = 0 WHERE id = 1').run();
-        const value: Native = { id: randomUUID(), title: input.title ?? 'Untitled', harnessId: id, cwd: input.cwd, configuration: input.configuration, state: fail ? { ...idle(), status: 'unknown', configurationVerified: false } : idle(), items: [], submissions: [], rejectedOperationIds: [], rejectNext: false, submitCalls: 0, stopCalls: 0, offline: false, unknownReceipt: false, hidden: false, revision: 0 };
+        const value: Native = { id: input.preparedId ?? randomUUID(), title: input.title ?? 'Untitled', harnessId: id, cwd: input.cwd, configuration: input.configuration, state: fail ? { ...idle(), status: 'unknown', configurationVerified: false } : idle(), items: [], submissions: [], rejectedOperationIds: [], rejectNext: false, submitCalls: 0, stopCalls: 0, offline: false, unknownReceipt: false, hidden: false, revision: 0 };
         save(value);
         const binding: Binding = { id: value.id, cwd: input.cwd, configuration: input.configuration, details: {} };
         onBound(binding);

@@ -120,6 +120,24 @@ async function fixture(t: TestContext, limits: Parameters<typeof createWorkbench
   };
 }
 
+test('draft preparation requires authentication and CSRF before native work and keeps native identity private', async t => {
+  const f=await fixture(t); const ids:string[]=[];
+  f.adapter.prepareDraft=async input=>{ids.push(input.id);return [];};
+  const body={workspaceId:'fixture',harnessId:'dsh'};
+  assert.equal((await f.request('/draft-preparation',{method:'POST',body,authenticated:false})).status,401);
+  assert.equal((await f.request('/draft-preparation',{method:'POST',body,headers:{'x-csrf-token':''}})).status,403);
+  assert.equal((await f.request('/draft-preparation',{method:'POST',body:{...body,cwd:'/outside'}})).status,400);
+  assert.equal(ids.length,0);
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM workbench_draft_preparations').get()!.n,0);
+  const response=await f.request('/draft-preparation',{method:'POST',body});
+  assert.equal(response.status,200);assert.equal(response.headers.get('cache-control'),'no-store');
+  assert.deepEqual(Object.keys(response.body).sort(),['preparationId','skills']);
+  assert.notEqual(response.body.preparationId,ids[0]);
+  const again=await f.request('/draft-preparation',{method:'POST',body:{...body,preparationId:response.body.preparationId}});
+  assert.deepEqual(again.body,response.body);assert.equal(new Set(ids).size,1);
+  assert.equal(f.store.listConversations().length,0);
+});
+
 test('skills and usage stay behind conversation authorization and skill identity is frozen for retry', async t => {
   const f = await fixture(t);
   const id = f.seed();

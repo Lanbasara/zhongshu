@@ -9,12 +9,14 @@ export const newDraftSchema = z.object({
   id:z.uuid(), workspaceId:workspaceIdSchema.or(z.literal('')), text:z.string().max(16000), ...inputFields,
   harnessId:z.enum(['codex','dsh']), configuration:draftConfiguration,
   powers:z.object({ codex:draftConfiguration.optional(), dsh:draftConfiguration.optional() }),
+  preparationId:z.uuid().optional(),
   submission:z.object({ creation:createConversationSchema, operationId:z.uuid(), uploaded:z.record(z.uuid(),z.uuid()), dispatchStarted:z.boolean() }).optional(),
 }).refine(validSkillSpans).refine(draft=>{
   const frozen=draft.submission?.creation;
   return !frozen || (frozen.id===draft.id && frozen.workspaceId===draft.workspaceId && frozen.harnessId===draft.harnessId
     && frozen.configuration.modelId===draft.configuration.modelId && frozen.configuration.permissionId===draft.configuration.permissionId
-    && frozen.configuration.reasoningEffort===draft.configuration.reasoningEffort);
+    && frozen.configuration.reasoningEffort===draft.configuration.reasoningEffort
+    && (!frozen.preparationId || frozen.preparationId===draft.preparationId));
 }, 'Frozen submission must belong to this draft');
 export type NewDraft = z.infer<typeof newDraftSchema>;
 export function emptyNewDraft(workspaceId:string, selected?:z.infer<typeof selectionSchema>):NewDraft {

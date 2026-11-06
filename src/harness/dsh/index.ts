@@ -9,7 +9,7 @@ import { boundaryFrom, decodeModel, selectedModel, eventSchema, historyItems, id
 import type { Snapshot, TurnOutline } from './native.ts';
 import { nativeSkill, resolveSkillInput, skillOptions, type NativeSkill } from '../skills.ts';
 
-const modelCatalog = z.object({ groups: z.array(z.object({ id: identifier, name: z.string().max(240), models: z.array(z.object({ id: identifier, name: z.string().max(240), reasoning: z.object({ efforts: z.array(z.object({ id: identifier, name: z.string().max(240) })).max(32) }).optional() })).max(300) })).max(100) });
+const modelCatalog = z.object({ default: modelSchema.optional(), groups: z.array(z.object({ id: identifier, name: z.string().max(240), models: z.array(z.object({ id: identifier, name: z.string().max(240), reasoning: z.object({ efforts: z.array(z.object({ id: identifier, name: z.string().max(240) })).max(32), defaultEffort: identifier.optional() }).optional() })).max(300) })).max(100) });
 const permissionCatalog = z.object({ options: z.array(z.object({ value: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/), name: z.string().max(240), description: z.string().max(2000).optional() })).max(100) });
 const permissionNames: Record<string, string> = { 'read-only': '只读', 'workspace-write': '工作区读写', 'danger-full-access': '完全访问' };
 const nativeSkillRow = z.object({ name: z.string().min(1).max(120).regex(/^[a-z0-9][a-z0-9-]*$/), description: z.string().max(16_000), path: z.string().max(4096).optional() });
@@ -96,28 +96,60 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
     try {
       const [models, permissions, account] = await Promise.all([connection.call('session/modelCatalog'), connection.call('permissionPresets/catalog'), connection.call('account/getState')]);
       const signedIn = z.object({ status: z.enum(['signed-out', 'credential-stored']) }).parse(account).status === 'credential-stored';
-      const groups = modelCatalog.parse(models).groups.filter(group => group.id !== 'deepseek-account' || signedIn);
+      const nativeCatalog = modelCatalog.parse(models);
+      const groups = nativeCatalog.groups.filter(group => group.id !== 'deepseek-account' || signedIn);
       const result: Catalog = { id: 'dsh', available: groups.length > 0, models: [], permissions: permissionCatalog.parse(permissions).options.map(option => ({ id: option.value, label: permissionNames[option.value] ?? option.name,
         description: `使用 DSH 原生 ${option.value} 权限；交互式审批尚不支持，遇到审批需在原生界面处理或停止。${option.description ? ` ${option.description}` : ''}` })) };
       for (const group of groups) for (const model of group.models) {
         if (result.models.length >= 2048) throw new HarnessError('DSH_CATALOG_TOO_LARGE');
         const efforts = model.reasoning?.efforts;
-        result.models.push({ id: modelId({ provider: group.id, model: model.id }), label: `${group.name} · ${model.name}`, ...(efforts?.length ? { reasoningEfforts: efforts.map(effort => ({ id: effort.id, label: effort.name })) } : {}) });
+        const isDefault = nativeCatalog.default?.provider === group.id && nativeCatalog.default.model === model.id;
+        const defaultEffort = isDefault && nativeCatalog.default?.reasoningEffort !== undefined
+          ? nativeCatalog.default.reasoningEffort : model.reasoning?.defaultEffort;
+        const id = modelId({ provider: group.id, model: model.id });
+        result.models.push({ id, label: `${group.name} · ${model.name}`, ...(efforts?.length ? { reasoningEfforts: efforts.map(effort => ({ id: effort.id, label: effort.name })) } : {}),
+          ...(efforts?.some(effort => effort.id === defaultEffort) ? { defaultReasoningEffort: defaultEffort } : {}) });
+        if (isDefault) result.defaultModelId = id;
       }
       if (!result.models.length || !result.permissions.length) { result.available = false; result.reason = '请在 DSH 原生界面登录并配置可用模型与权限。'; }
       return result;
     } catch { return { id: 'dsh', available: false, reason: 'DSH Host 不可用或受保护的连接文件无效。', models: [], permissions: [] }; }
   }
 
-  async function create(input: { cwd: string; configuration: Configuration }, onBound: (binding: Binding) => void): Promise<Binding> {
+  async function assertBlank(binding: Binding): Promise<void> {
+    const current = await snapshot(binding, 10);
+    const state = stateFrom(binding, current);
+    if (!current.projections.values.turnOutline || current.projections.values.turnOutline.length ||
+      current.records.some(row => row.event.type === 'user/message' || row.event.type === 'turn/start') ||
+      !current.projections.values.inbox || current.projections.values.userQuestions?.active.length ||
+      state.pendingInputs || boundaryFrom(current)?.lastTurn !== 0 || boundaryFrom(current)?.openTurnStartSeq !== null) throw new HarnessError('DSH_PREPARED_SESSION_NOT_EMPTY');
+  }
+
+  async function prepareDraft(input: { id: string; cwd: string }) {
+    z.uuid().parse(input.id);
+    if (!isAbsolute(input.cwd) || normalize(input.cwd) !== input.cwd || input.cwd.length > 4096) throw new HarnessError('DSH_CWD_INVALID');
+    const rows = z.object({ items: z.array(z.object({ sessionId: identifier, blank: z.boolean(), cwd: z.string().optional() })).max(20000) }).parse(await connection.call('session/list', { _request: {} }));
+    const existing = rows.items.find(row => row.sessionId === input.id);
+    if (existing && (!existing.blank || existing.cwd !== input.cwd)) throw new HarnessError('DSH_PREPARED_SESSION_NOT_EMPTY');
+    if (!existing) {
+      const created = z.object({ sessionId: identifier }).parse(await connection.call('session/create', { request: { cwd: input.cwd, sessionId: input.id } }));
+      if (created.sessionId !== input.id) throw new HarnessError('DSH_PREPARED_IDENTITY_CHANGED');
+    }
+    const binding: Binding = { id: input.id, cwd: input.cwd, configuration: { modelId: modelId({ provider: 'prepared', model: 'prepared' }), permissionId: 'read-only' }, details: {} };
+    await assertBlank(binding);
+    return skillOptions(await skillCatalog(binding));
+  }
+
+  async function create(input: { cwd: string; configuration: Configuration; preparedId?: string }, onBound: (binding: Binding) => void): Promise<Binding> {
     try {
       const selected = selectedModel(input.configuration); const available = await catalog();
       const model = available.models.find(model => model.id === modelId({ provider: selected.provider, model: selected.model }));
       if (!model || (model.reasoningEfforts?.length ? !model.reasoningEfforts.some(effort => effort.id === selected.reasoningEffort) : selected.reasoningEffort !== undefined)) throw new HarnessError('DSH_REASONING_EFFORT_UNAVAILABLE');
       if (!available.available || !available.permissions.some(permission => permission.id === input.configuration.permissionId)) throw new HarnessError('DSH_CONFIGURATION_UNAVAILABLE');
       if (!isAbsolute(input.cwd) || normalize(input.cwd) !== input.cwd || input.cwd.length > 4096) throw new HarnessError('DSH_CWD_INVALID');
-      const native = z.object({ sessionId: identifier }).parse(await connection.call('session/create', { request: { cwd: input.cwd } }));
+      const native = input.preparedId ? { sessionId: z.uuid().parse(input.preparedId) } : z.object({ sessionId: identifier }).parse(await connection.call('session/create', { request: { cwd: input.cwd } }));
       const binding: Binding = { id: native.sessionId, cwd: input.cwd, configuration: { ...input.configuration }, details: { provider: selected.provider, model: selected.model, ...(selected.reasoningEffort ? { reasoningEffort: selected.reasoningEffort } : {}) } };
+      if (input.preparedId) await assertBlank(binding);
       onBound(binding);
       await connection.call('session/selectModel', { request: { sessionId: binding.id, ...selected } });
       const permission = z.object({ result: z.object({ kind: z.literal('success') }) }).parse(await connection.call('commands/execute', { agentId: binding.id, line: `/permission ${input.configuration.permissionId}`, submittedAttachments: [] }));
@@ -293,5 +325,5 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
       const selected = selectedModel(configuration);
       return { ...configuration, modelId: modelId({ provider: selected.provider, model: selected.model }),
         ...(selected.reasoningEffort === undefined ? {} : { reasoningEffort: selected.reasoningEffort }) };
-    }, skills: async binding => skillOptions(await skillCatalog(binding)), create, state, history, submit, submitQueued: submit, readImage, reconcile, stop, watch, async close() { closed = true; for (const dispose of [...subscriptions]) dispose(); lastStates.clear(); await connection.close(); } };
+    }, prepareDraft, skills: async binding => skillOptions(await skillCatalog(binding)), create, state, history, submit, submitQueued: submit, readImage, reconcile, stop, watch, async close() { closed = true; for (const dispose of [...subscriptions]) dispose(); lastStates.clear(); await connection.close(); } };
 }

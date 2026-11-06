@@ -7,6 +7,8 @@ evidence: https://github.com/Lanbasara/zhongshu/pull/34
 
 # 新对话草稿与思考深度
 
+> 试用后的范围调整：DSH 原生准备与首发技能按 [ADR 0011](../adr/0011-dsh-prepared-session.md) 及[原生体验补齐](native-experience.md)执行。本文“首发前无原生会话”“DSH 首发后才可选技能”及 N01 对 DSH 原生会话数量的旧判据被替代；N03/N04 的相关新增验收归新工作单。其余要求及既有验证的覆盖边界保持，不将新目标计为已实现。
+
 ## Goal
 
 落实 [ADR 0010](../adr/0010-draft-first-conversation.md)：取消新建弹窗，首次发送才创建，优化输入区并补齐 Codex 思考深度；保持已有输入、执行与恢复能力。依据为 2026-11-06 用户对交互的逐轮修订及本次正式化要求。当前按已确认范围实施；本工作单不代表已完成验收。

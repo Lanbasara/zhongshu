@@ -19,7 +19,7 @@ export const stateSchema = z.object({
 }).strict();
 export const itemSchema = z.object({
   id: identifierSchema, kind: z.enum(['user', 'assistant', 'tool', 'notice']),
-  text: boundedText(1_048_576), status: z.enum(['running', 'completed', 'failed']),
+  text: boundedText(1_048_576), status: z.enum(['running', 'completed', 'failed', 'unknown']),
   runId: identifierSchema.optional(), operationId: identifierSchema.optional(),
   ...contentFields, tool: toolSchema.optional(),
 }).strict();
@@ -59,7 +59,7 @@ export const workbenchConfigurationSchema = z.object({
 }).strict();
 export const createConversationSchema = z.object({
   id: z.uuid(), harnessId: z.enum(['codex', 'dsh']), workspaceId: identifierSchema,
-  configuration: configurationSchema, title: boundedText(200).min(1).optional(),
+  configuration: configurationSchema, title: boundedText(200).min(1).optional(), preparationId: z.uuid().optional(),
 }).strict();
 export const conversationTitleSchema = boundedText(200).refine(title => !!title.trim() && !title.includes('\0'));
 export const conversationManagementSchema = z.discriminatedUnion('action', [

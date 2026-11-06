@@ -64,6 +64,27 @@ async function peer(t: TestContext, override?: (request: Request, socket: WebSoc
 }
 async function until(predicate: () => boolean) { for (let tries = 0; tries < 100; tries++) { if (predicate()) return; await delay(20); } assert.fail('Expected protocol observation did not arrive'); }
 
+test('Codex web history and live notifications preserve completion evidence and unknown states', async t => {
+  const p = await peer(t, request => {
+    if (request.method === 'thread/items/list') return { data: [
+      { turnId: 'run-1', item: { id: 'missing', type: 'webSearch', query: 'unknown' } },
+      { turnId: 'run-1', completedAtMs: 42, item: { id: 'done', type: 'webSearch', action: { type: 'openPage', url: 'https://example.com/' } } },
+      { turnId: 'run-1', completedAtMs: null, item: { id: 'active', type: 'webSearch', query: 'active' } },
+    ], nextCursor: null };
+  });
+  const history = await p.adapter.history(saved);
+  assert.deepEqual(history.items.map(item => [item.id, item.status]), [['active', 'running'], ['done', 'completed'], ['missing', 'unknown']]);
+  const changes: NativeChange[] = [];
+  await p.adapter.watch(saved, change => changes.push(change));
+  const params = { threadId: saved.id, turnId: 'run-1', item: { id: 'live-web', type: 'webSearch', action: { type: 'findInPage', url: 'https://example.com/', pattern: 'needle' } } };
+  p.notify('item/started', params);
+  p.notify('item/completed', params);
+  await until(() => changes.filter(change => change.type === 'item').length === 2);
+  const items = changes.flatMap(change => change.type === 'item' ? [change.item] : []);
+  assert.deepEqual(items.map(item => [item.id, item.status]), [['live-web', 'running'], ['live-web', 'completed']]);
+  assert.equal(items[1]?.tool?.input, 'https://example.com/\nneedle');
+});
+
 test('Codex resolves explicit skill occurrences from the current cwd and observes usage on the bound thread', async t => {
   let enabled = true;
   const path = saved.cwd + '/.agents/skills/zhi-proof/SKILL.md';

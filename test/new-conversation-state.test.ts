@@ -148,3 +148,18 @@ test('frozen submission cannot restore with a different conversation identity or
     assert.equal(readNewDraft('first'),undefined);
   }
 }));
+
+test('DSH preparation survives refresh and Power switching, but a frozen first send cannot change its preparation', () => withStorage((_local, session) => {
+  const draft = emptyNewDraft('second', second);
+  draft.preparationId = crypto.randomUUID();
+  draft.text = '首发技能材料';
+  assert.equal(saveNewDraft(draft), true);
+  assert.deepEqual(readNewDraft('second'), draft);
+  assert.equal(saveNewDraft({...draft,harnessId:'codex',configuration:config}),true);
+  assert.equal(readNewDraft('second')?.preparationId,draft.preparationId);
+  const frozen = {...draft,submission:{creation:{id:draft.id,workspaceId:draft.workspaceId,harnessId:'dsh' as const,configuration:draft.configuration,title:'首发技能材料',preparationId:draft.preparationId},operationId:crypto.randomUUID(),uploaded:{},dispatchStarted:false}};
+  assert.equal(saveNewDraft(frozen),true);
+  assert.deepEqual(readNewDraft('second'),frozen);
+  session.setItem(draftKey+'second',JSON.stringify({...frozen,preparationId:crypto.randomUUID()}));
+  assert.equal(readNewDraft('second'),undefined);
+}));

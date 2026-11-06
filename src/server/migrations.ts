@@ -145,6 +145,50 @@ export const productMigrations: Migration[] = [{ version: 2, sql: `
 ` }, { version: 10, sql: `
   ALTER TABLE workbench_conversations ADD COLUMN usage_json TEXT;
   ALTER TABLE workbench_queue_entries ADD COLUMN skill_unavailable INTEGER NOT NULL DEFAULT 0 CHECK (skill_unavailable IN (0, 1));
+` }, { version: 11, sql: `
+  CREATE TABLE workbench_items_with_unknown (
+    conversation_id TEXT NOT NULL REFERENCES workbench_conversations(id) ON DELETE CASCADE,
+    id TEXT NOT NULL,
+    position INTEGER NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('user', 'assistant', 'tool', 'notice')),
+    text TEXT NOT NULL CHECK (length(CAST(text AS BLOB)) <= 1048576),
+    status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed', 'unknown')),
+    run_id TEXT,
+    operation_id TEXT,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    PRIMARY KEY (conversation_id, id),
+    UNIQUE (conversation_id, position)
+  ) STRICT;
+  INSERT INTO workbench_items_with_unknown SELECT * FROM workbench_items;
+  DROP TABLE workbench_items;
+  ALTER TABLE workbench_items_with_unknown RENAME TO workbench_items;
+  CREATE INDEX workbench_items_operation ON workbench_items(conversation_id, operation_id, kind, run_id);
+  CREATE TABLE workbench_live_items_with_unknown (
+    conversation_id TEXT NOT NULL REFERENCES workbench_conversations(id) ON DELETE CASCADE,
+    id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('user', 'assistant', 'tool', 'notice')),
+    text TEXT NOT NULL CHECK (length(CAST(text AS BLOB)) <= 1048576),
+    status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed', 'unknown')),
+    run_id TEXT,
+    operation_id TEXT,
+    updated_at INTEGER NOT NULL,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    PRIMARY KEY (conversation_id, id)
+  ) STRICT;
+  INSERT INTO workbench_live_items_with_unknown SELECT * FROM workbench_live_items;
+  DROP TABLE workbench_live_items;
+  ALTER TABLE workbench_live_items_with_unknown RENAME TO workbench_live_items;
+  CREATE INDEX workbench_live_items_operation ON workbench_live_items(conversation_id, operation_id, kind, run_id);
+  CREATE INDEX workbench_live_items_updated ON workbench_live_items(conversation_id, updated_at, id);
+` }, { version: 12, sql: `
+  CREATE TABLE workbench_draft_preparations (
+    workspace_id TEXT PRIMARY KEY,
+    cwd TEXT NOT NULL,
+    preparation_id TEXT NOT NULL UNIQUE,
+    native_id TEXT NOT NULL UNIQUE,
+    claimed_by TEXT
+  ) STRICT;
+  ALTER TABLE workbench_conversations ADD COLUMN native_preparation_id TEXT;
 ` }];
 
 /** Runs inside restoreDatabase's private staging transaction, before the database is published. */

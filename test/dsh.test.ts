@@ -23,6 +23,8 @@ async function host() {
   const follows = new Map<string, { socket: WebSocket; session: string }>();
   const calls: { method: string; args: Record<string, any> }[] = [];
   let rejectModel = false; let losePromptReceipt = false; let exchanges = 0; let nextPage: (() => void) | undefined;
+  let catalog: unknown = { groups: [{ id: 'deepseek-account', name: 'DeepSeek', models: [{ id: 'test-model', name: 'Test', reasoning: { efforts: [{ id: 'high', name: 'High' }] } }] }] };
+  let signedIn = true;
   const wss = new WebSocketServer({ noServer: true });
   function append(session: Session, type: string, data: Record<string, unknown>): Event {
     const event = { type, data, seq: session.events.length, time: Date.now() }; session.events.push(event);
@@ -46,11 +48,13 @@ async function host() {
       const session = sessions.get(args.request?.sessionId ?? args.agentId ?? args.request?.address?.sessionId);
       let value: unknown;
       switch (body.method) {
-        case 'account/getState': value = { status: 'credential-stored' }; break;
-        case 'session/modelCatalog': value = { groups: [{ id: 'deepseek-account', name: 'DeepSeek', models: [{ id: 'test-model', name: 'Test', reasoning: { efforts: [{ id: 'high', name: 'High' }] } }] }] }; break;
+        case 'account/getState': value = { status: signedIn ? 'credential-stored' : 'signed-out' }; break;
+        case 'session/modelCatalog': value = catalog; break;
         case 'permissionPresets/catalog': value = { options: ['workspace-write', 'danger-full-access'].map(value => ({ value, name: value, description: 'Fixture permission' })) }; break;
+        case 'session/list': assert.deepEqual(args, { _request: {} }); value = { items: [...sessions.values()].map(s => ({ sessionId: s.id, cwd: s.cwd, blank: !s.turn })) }; break;
+        case 'skills/list': assert.ok(session); value = { skills: [{ name: 'proof', description: 'Synthetic skill' }] }; break;
         case 'session/create': {
-          const id = `session-${sessions.size + 1}`; const created: Session = { id, cwd: args.request.cwd, model: { provider: 'deepseek-account', model: 'test-model', reasoningEffort: 'high' }, permission: 'workspace-write', events: [], turn: 0, open: null, inbox: [], stepInbox: [], questions: [] };
+          const id = args.request.sessionId ?? `session-${sessions.size + 1}`; const created: Session = { id, cwd: args.request.cwd, model: { provider: 'deepseek-account', model: 'test-model', reasoningEffort: 'high' }, permission: 'workspace-write', events: [], turn: 0, open: null, inbox: [], stepInbox: [], questions: [] };
           sessions.set(id, created); append(created, 'permission/preset', { preset: 'workspace-write' }); value = { sessionId: id }; break;
         }
         case 'session/selectModel': {
@@ -98,7 +102,7 @@ async function host() {
   });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve)); const address = server.address(); assert.ok(address && typeof address !== 'string');
   const launch = `http://127.0.0.1:${address.port}/?token=${token}`;
-  return { launch, sessions, calls, peers, follows, append, onNextPage(hook: () => void) { nextPage = hook; }, exchanges: () => exchanges, rejectModel: () => { rejectModel = true; }, losePromptReceipt: () => { losePromptReceipt = true; }, live(session: string, frame: unknown) { for (const [streamId, follow] of follows) if (follow.session === session) follow.socket.send(JSON.stringify({ type: 'item', streamId, value: { type: 'assistant-stream', frame } })); }, disconnect() { for (const peer of peers.values()) peer?.terminate(); }, async close() { for (const peer of peers.values()) peer?.terminate(); await new Promise<void>(resolve => wss.close(() => resolve())); await new Promise<void>(resolve => server.close(() => resolve())); } };
+  return { launch, sessions, calls, peers, follows, append, setCatalog(value: unknown) { catalog = value; }, signOut() { signedIn = false; }, onNextPage(hook: () => void) { nextPage = hook; }, exchanges: () => exchanges, rejectModel: () => { rejectModel = true; }, losePromptReceipt: () => { losePromptReceipt = true; }, live(session: string, frame: unknown) { for (const [streamId, follow] of follows) if (follow.session === session) follow.socket.send(JSON.stringify({ type: 'item', streamId, value: { type: 'assistant-stream', frame } })); }, disconnect() { for (const peer of peers.values()) peer?.terminate(); }, async close() { for (const peer of peers.values()) peer?.terminate(); await new Promise<void>(resolve => wss.close(() => resolve())); await new Promise<void>(resolve => server.close(() => resolve())); } };
 }
 
 async function setup() {
@@ -451,6 +455,43 @@ test('DSH separates reasoning choices, rejects invalid selections before creatio
 });
 
 
+test('DSH reads native default selection and model effort defaults without guessing unavailable values', async () => {
+  const context = await setup();
+  try {
+    const efforts = [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }];
+    const groups = [{ id: 'deepseek-account', name: 'DeepSeek', models: [
+      { id: 'test-model', name: 'Test', reasoning: { efforts, defaultEffort: 'low' } },
+      { id: 'other-model', name: 'Other', reasoning: { efforts, defaultEffort: 'low' } },
+    ] }];
+    context.fixture.setCatalog({ default: { provider: 'deepseek-account', model: 'test-model', reasoningEffort: 'high' }, groups });
+    const catalog = await context.adapter.catalog();
+    assert.equal(catalog.defaultModelId, catalog.models[0]!.id);
+    assert.equal(catalog.models[0]!.defaultReasoningEffort, 'high');
+    assert.equal(catalog.models[1]!.defaultReasoningEffort, 'low');
+    const binding = await context.adapter.create({ cwd: context.directory, configuration: { modelId: catalog.defaultModelId!, reasoningEffort: catalog.models[0]!.defaultReasoningEffort!, permissionId: 'workspace-write' } }, () => {});
+    assert.equal(context.fixture.sessions.get(binding.id)!.model.reasoningEffort, 'high');
+
+    context.fixture.setCatalog({ default: { provider: 'deepseek-account', model: 'test-model' }, groups });
+    assert.equal((await context.adapter.catalog()).models[0]!.defaultReasoningEffort, 'low');
+    context.fixture.setCatalog({ default: { provider: 'deepseek-account', model: 'test-model', reasoningEffort: 'removed' }, groups });
+    assert.equal((await context.adapter.catalog()).models[0]!.defaultReasoningEffort, undefined);
+    context.fixture.setCatalog({ default: { provider: 'deepseek-account', model: 'removed' }, groups });
+    assert.equal((await context.adapter.catalog()).defaultModelId, undefined);
+    context.fixture.setCatalog({ groups: [{ id: 'deepseek-account', name: 'DeepSeek', models: [{ id: 'test-model', name: 'Test', reasoning: { efforts, defaultEffort: 'removed' } }] }] });
+    const unavailable = await context.adapter.catalog();
+    assert.equal(unavailable.defaultModelId, undefined);
+    assert.equal(unavailable.models[0]!.defaultReasoningEffort, undefined);
+
+    context.fixture.setCatalog({ default: { provider: 'deepseek-account', model: 'test-model', reasoningEffort: 'high' }, groups });
+    context.fixture.signOut();
+    const signedOut = await context.adapter.catalog();
+    assert.equal(signedOut.defaultModelId, undefined);
+    assert.equal(signedOut.models.length, 0);
+    assert.equal(signedOut.available, false);
+    assert.equal(context.fixture.sessions.get(binding.id)!.model.reasoningEffort, 'high');
+  } finally { await context.close(); }
+});
+
 test('DSH catalog projection splits legacy effort while preserving immutable input', async () => {
   const adapter = createDshAdapter({ launchFile: '/unused-projection-test.json' });
   try {
@@ -463,4 +504,26 @@ test('DSH catalog projection splits legacy effort while preserving immutable inp
     assert.deepEqual(adapter.normalizeConfiguration!(normalized), normalized);
     assert.throws(() => adapter.normalizeConfiguration!({ ...legacy, reasoningEffort: 'low' }), { code: 'DSH_MODEL_CONFLICT' });
   } finally { await adapter.close(); }
+});
+
+test('DSH prepares one named blank, adopts it with final configuration, and rejects used sessions', async () => {
+  const context=await setup();
+  try {
+    const id=randomUUID(); const input={id,cwd:context.directory};
+    const skills=await context.adapter.prepareDraft!(input);
+    assert.equal(skills.length,1);
+    assert.deepEqual(await context.adapter.prepareDraft!(input),skills);
+    assert.equal(context.fixture.calls.filter(call=>call.method==='session/create').length,1);
+    assert.equal(context.fixture.calls.some(call=>call.method==='session/selectModel'),false);
+    const catalog=await context.adapter.catalog();
+    const binding=await context.adapter.create({cwd:input.cwd,configuration:{modelId:catalog.models[0]!.id,permissionId:'danger-full-access',reasoningEffort:'high'},preparedId:id},()=>{});
+    assert.equal(binding.id,id);assert.equal((await context.adapter.state(binding)).configurationVerified,true);
+    assert.equal(context.fixture.calls.filter(call=>call.method==='session/create').length,1);
+    await context.adapter.submit(binding,{id:randomUUID(),text:'synthetic'});
+    const before=context.fixture.calls.filter(call=>call.method==='session/selectModel').length;
+    await assert.rejects(context.adapter.prepareDraft!(input),/DSH_PREPARED_SESSION_NOT_EMPTY/);
+    await assert.rejects(context.adapter.create({cwd:input.cwd,configuration:binding.configuration,preparedId:id},()=>{}),/DSH_PREPARED_SESSION_NOT_EMPTY/);
+    assert.equal(context.fixture.calls.filter(call=>call.method==='session/selectModel').length,before);
+    assert.equal(context.fixture.sessions.size,1);
+  } finally {await context.close();}
 });
