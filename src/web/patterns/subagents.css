@@ -125,6 +125,7 @@
 /* Narrow screens open the panel as a full page. */
 .workspace-reader.subagent-sheet { position:fixed; inset:0; z-index:var(--zs-layer-dialog); padding-bottom:env(safe-area-inset-bottom); border:0; overflow:hidden; }
 .subagent-sheet .zs-icon { min-width:var(--zs-control-touch); min-height:var(--zs-control-touch); }
+.subagent-sheet .reader-icon { width:var(--zs-control-touch); height:var(--zs-control-touch); }
 .subagent-panel .workspace-reader-content { overflow:auto; }
 .subagent-panel .subagent-notice { margin:var(--zs-space-2) 14px 0; }
 

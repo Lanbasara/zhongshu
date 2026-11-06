@@ -145,7 +145,8 @@ async function main() {
             const at = Date.now(); const runId = value.state.runId ?? 'fixture-run:subagents';
             const created = Array.from({ length: Math.min(input.count, 8) }, (_, index) => {
               const number = value.subagents.length + index + 1;
-              return { id: 'fixture-agent-' + number, parentId: value.id, name: 'fixture_agent_' + number, task: '合成子任务 ' + number + '：整理资料', status: 'running' as const, startedAt: at,
+              // Ids are unique per conversation so ownership checks can use another conversation's sub-agent.
+              return { id: 'fixture-' + value.id.slice(0, 8) + '-agent-' + number, parentId: value.id, name: 'fixture_agent_' + number, task: '合成子任务 ' + number + '：整理资料', status: 'running' as const, startedAt: at,
                 items: [{ id: 'agent-' + number + ':reply', kind: 'assistant' as const, text: 'FIXTURE SUBAGENT ' + number + ' 正在整理资料。', status: 'completed' as const, runId: 'agent-run-' + number },
                   { id: 'agent-' + number + ':tool', kind: 'tool' as const, text: '读取资料', status: 'running' as const, runId: 'agent-run-' + number, tool: { name: '运行命令', input: 'rg -n fixture notes.md' } }] };
             });

@@ -18,7 +18,8 @@ export const stateSchema = z.object({
   configurationVerified: z.boolean(), reason: boundedText(4096).optional(),
 }).strict();
 /** Native identities of sub-agents are opaque, URL-safe values verified against the owning conversation. */
-export const subagentIdSchema = z.string().regex(/^[A-Za-z0-9:._-]{1,240}$/);
+/** Native sub-agent identity as it may appear in a URL path; dot segments are refused outright. */
+export const subagentIdSchema = z.string().regex(/^[A-Za-z0-9:._-]{1,240}$/).refine(value => !value.includes('..'), 'dot_segment');
 export const subagentLimit = 200;
 export const collaborationActionSchema = z.enum(['started', 'completed', 'interrupted', 'closed', 'messaged', 'waiting']);
 /** A native collaboration record in the main transcript; agent bodies are never inlined. */

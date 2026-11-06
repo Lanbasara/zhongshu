@@ -68,11 +68,20 @@ export function SubagentPanelHost({ conversation, list, selectedId, narrow, csrf
   const [now, setNow] = useState(() => Date.now());
   const [detail, setDetail] = useState<Detail>();
   const [notice, setNotice] = useState('');
+  // Stops this page has requested whose outcome the list has not shown yet; they read as stopping immediately.
+  const [requested, setRequested] = useState<ReadonlySet<string>>(() => new Set());
+  const answered = useRef(new Set<string>());
   const harness = harnessName(conversation);
   const selected = list?.agents.find(agent => agent.id === selectedId);
   const reportRef = useRef(report); reportRef.current = report;
   useEffect(() => { const timer = setInterval(() => setNow(Date.now()), 30_000); return () => clearInterval(timer); }, []);
   useEffect(() => { setNotice(''); }, [selectedId]);
+  // A list read that arrives after the stop request returned carries the server's own stop state.
+  useEffect(() => {
+    if (!answered.current.size) return;
+    const done = answered.current; answered.current = new Set();
+    setRequested(current => new Set([...current].filter(id => !done.has(id))));
+  }, [list]);
   // Move focus into the panel when it opens or changes view; the opener regains it on close.
   useEffect(() => { if (!narrow) requestAnimationFrame(() => closeRef.current?.focus({ preventScroll: true })); }, [selectedId, narrow, closeRef]);
 
@@ -126,13 +135,14 @@ export function SubagentPanelHost({ conversation, list, selectedId, narrow, csrf
   };
   const stop = async (agentId: string) => {
     setNotice('');
+    setRequested(current => new Set(current).add(agentId));
     try {
       await request(`/conversations/${conversation.id}/subagents/${encodeURIComponent(agentId)}/stop`, subagentStopResponseSchema, { csrf, body: { id: crypto.randomUUID() } });
       // DSH reports a stopped child to its parent; an idle parent starts a new turn on that notice.
       if (conversation.harnessId === 'dsh') setNotice('已请求停止。DSH 会把停止结果告诉主 Agent，主 Agent 空闲时会因此自动开始新的一轮。');
     } catch (reason) {
       if (reason instanceof RequestError && stopFailures[reason.code]) setNotice(stopFailures[reason.code]!); else reportRef.current(reason);
-    } finally { onReload(); }
+    } finally { answered.current.add(agentId); onReload(); }
   };
   const reconcileStop = async (agentId: string) => {
     const stopId = list?.agents.find(agent => agent.id === agentId)?.stop?.id;
@@ -143,7 +153,8 @@ export function SubagentPanelHost({ conversation, list, selectedId, narrow, csrf
     } catch (reason) { reportRef.current(reason); }
     finally { onReload(); }
   };
-  const agents = useMemo(() => subagentDisplays(list?.agents ?? [], now), [list, now]);
+  const agents = useMemo(() => subagentDisplays(list?.agents ?? [], now)
+    .map(agent => agent.status === 'running' && requested.has(agent.id) ? { ...agent, status: 'stopping' as const } : agent), [list, now, requested]);
   const selectedDisplay = selected ? agents.find(agent => agent.id === selected.id) : undefined;
   const transcript = selected && detail?.agentId === selected.id && <>
     {detail.olderCursor && <button type="button" className="load-history" onClick={() => void older()}>查看更早的内容</button>}

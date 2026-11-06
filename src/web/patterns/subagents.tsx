@@ -32,6 +32,8 @@ export const subagentStatusLabel: Record<SubagentStatus, string> = {
   running: '运行中', stopping: '正在停止…', idle: '空闲', completed: '已完成', interrupted: '已停止', failed: '未完成', unknown: '待核实',
 };
 const active = (status: SubagentStatus) => status === 'running' || status === 'stopping';
+/** Visible and accessible status text; an unconfirmed stop outranks the last verified status. */
+const statusText = (agent: Pick<SubagentSummary, 'status' | 'stopUnverified'>) => agent.stopUnverified ? '停止待核实' : subagentStatusLabel[agent.status];
 const memberLabel = { running: '运行中', idle: '未运行', unknown: '待核实' } as const;
 const taskLabel = { pending: '待处理', in_progress: '进行中', completed: '已完成' } as const;
 
@@ -73,14 +75,14 @@ function AgentRow({ agent, stale, onSelect, onStop }: RowActions & { agent: Suba
   const meta = [agent.external && '外部执行', agent.task, agent.spawnedBy && `由 ${agent.spawnedBy} 派出`].filter(Boolean).join(' · ');
   return <li className="subagent-row">
     <button type="button" className="subagent-row-main" onClick={event => onSelect(agent.id, event.currentTarget)}
-      aria-label={`查看 ${agent.name} 的过程，${subagentStatusLabel[agent.status]}`}>
+      aria-label={`查看 ${agent.name} 的过程，${statusText(agent)}`}>
       <Avatar name={agent.name} badge={agent.badge}/>
       <span className="subagent-row-text">
         <strong>{agent.name}</strong>
         {meta && <small>{meta}</small>}
       </span>
       <span className="subagent-row-state">
-        <span className={`subagent-status is-${agent.status}`}><StatusMark status={agent.status}/>{agent.stopUnverified ? '停止待核实' : subagentStatusLabel[agent.status]}</span>
+        <span className={`subagent-status is-${agent.status}`}><StatusMark status={agent.status}/>{statusText(agent)}</span>
         {agent.time && <small>{agent.time}</small>}
       </span>
       <ChevronRight size={15} aria-hidden="true"/>
@@ -190,7 +192,7 @@ export function SubagentPanel({ harness, agents, team, stale, selected, brief, d
       <div className="workspace-reader-bar subagent-bar">
         <IconButton label="返回子 Agent 列表" onClick={onBack}><ChevronLeft size={17} aria-hidden="true"/></IconButton>
         <span className="subagent-bar-title"><strong>{selected.name}</strong>
-          <span className={`subagent-status is-${selected.status}`}><StatusMark status={selected.status}/>{selected.stopUnverified ? '停止待核实' : subagentStatusLabel[selected.status]}</span></span>
+          <span className={`subagent-status is-${selected.status}`}><StatusMark status={selected.status}/>{statusText(selected)}</span></span>
         {selected.status === 'running' && <Button className="subagent-detail-stop" disabled={stale} onClick={() => onStop(selected.id)}><Square size={12} aria-hidden="true"/>停止</Button>}
         <button ref={closeRef} type="button" className="reader-icon" aria-label="关闭子 Agent 面板" onClick={onClose}><X size={17} aria-hidden="true"/></button>
       </div>
@@ -231,7 +233,7 @@ export function SubagentPanel({ harness, agents, team, stale, selected, brief, d
 /** A compact transcript card for native collaboration items; it never inlines a child transcript. */
 export function SubagentActivity({ action, agents, onOpen }: {
   action: 'started' | 'completed' | 'interrupted' | 'closed' | 'messaged' | 'waiting';
-  agents: Pick<SubagentSummary, 'id' | 'name' | 'task' | 'status' | 'badge'>[];
+  agents: Pick<SubagentSummary, 'id' | 'name' | 'task' | 'status' | 'badge' | 'stopUnverified'>[];
   onOpen(id: string, trigger: HTMLButtonElement): void;
 }) {
   const title = action === 'started' ? `派出 ${agents.length} 个子 Agent`
@@ -247,10 +249,10 @@ export function SubagentActivity({ action, agents, onOpen }: {
     <header><Users size={15} aria-hidden="true"/><h2>{title}</h2></header>
     <ul role="list" id={id}>{agents.map((agent, index) => <li key={agent.id} hidden={!expanded && index >= 3}>
       <button type="button" className="subagent-activity-row" onClick={event => onOpen(agent.id, event.currentTarget)}
-        aria-label={`查看 ${agent.name} 的过程，${subagentStatusLabel[agent.status]}`}>
+        aria-label={`查看 ${agent.name} 的过程，${statusText(agent)}`}>
         <Avatar name={agent.name} badge={agent.badge}/>
         <span className="subagent-row-text"><strong>{agent.name}</strong>{agent.task && <small>{agent.task}</small>}</span>
-        <span className={`subagent-status is-${agent.status}`}><StatusMark status={agent.status}/>{subagentStatusLabel[agent.status]}</span>
+        <span className={`subagent-status is-${agent.status}`}><StatusMark status={agent.status}/>{statusText(agent)}</span>
         <ChevronRight size={15} aria-hidden="true"/>
       </button>
     </li>)}</ul>

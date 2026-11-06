@@ -73,6 +73,7 @@ test('the native tree becomes an index with ownership, nesting and conversation 
   assert.deepEqual(await f.service.subagentHistory(f.id, 'external'), { items: [], olderCursor: null });
   await assert.rejects(f.service.subagentHistory(f.id, 'other-conversation-agent'), { code: 'subagent_not_found' });
   await assert.rejects(f.service.subagentHistory(f.id, '../escape'), { code: 'invalid_request' });
+  await assert.rejects(f.service.subagentHistory(f.id, 'a..b'), { code: 'invalid_request' }, 'dot segments are refused even without a slash');
   assert.equal(f.store.readHistory(f.id).items.length, 0, 'child transcripts are never stored');
 });
 

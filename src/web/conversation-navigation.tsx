@@ -299,11 +299,12 @@ function ManageDialog({ conversation, workspaceLabel, csrf, close, changed, repo
     } catch (reason) {
       if (reason instanceof RequestError && reason.status === 401) report(reason);
       const code = reason instanceof RequestError ? reason.code : '';
-      setError(['conversation_delete_busy', 'conversation_busy', 'conversation_preparation_incomplete'].includes(code) ? '对话仍在运行、等待输入或有待核实的工作。请先停止并处理待办，核实后再删除。' :
+      // A refusal means deletion never started; only an unknown outcome is announced as unfinished.
+      const refusal = ['conversation_delete_busy', 'conversation_busy', 'conversation_preparation_incomplete'].includes(code) ? '对话仍在运行、等待输入或有待核实的工作。请先停止并处理待办，核实后再删除。' :
         ['subagents_running', 'subagents_unverified'].includes(code) ? '仍有子 Agent 在运行或状态待核实。删除会同时删除它们；请等它们结束或先停止，核实后再删除。' :
-        ['conversation_delete_unsupported', 'native_delete_unsupported', 'native_deletion_unavailable'].includes(code) ? '当前原生服务尚不支持完整删除。对话未被当作已删除，请配置支持删除的服务后重试。' :
-        '删除尚未确认完成。请重试同一段对话的删除；系统会核对并继续清理，不会另建对话。');
-      changed('删除尚未确认完成');
+        ['conversation_delete_unsupported', 'native_delete_unsupported', 'native_deletion_unavailable'].includes(code) ? '当前原生服务尚不支持完整删除。对话未被当作已删除，请配置支持删除的服务后重试。' : undefined;
+      setError(refusal ?? '删除尚未确认完成。请重试同一段对话的删除；系统会核对并继续清理，不会另建对话。');
+      if (!refusal) changed('删除尚未确认完成');
     } finally { setBusy(false); }
   };
   return <dialog className="create-dialog manage-dialog" aria-labelledby="manage-dialog-title" ref={dialog} onCancel={event => { event.preventDefault(); if (!busy) close(); }}>
