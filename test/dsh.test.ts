@@ -22,7 +22,7 @@ async function host() {
   const token = randomUUID(); const sessions = new Map<string, Session>(); const peers = new Map<string, WebSocket | null>();
   const follows = new Map<string, { socket: WebSocket; session: string }>();
   const calls: { method: string; args: Record<string, any> }[] = [];
-  let rejectModel = false; let losePromptReceipt = false; let exchanges = 0; let nextPage: (() => void) | undefined;
+  let rejectModel = false; let losePromptReceipt = false; let exchanges = 0; let nextPage: (() => void) | undefined; let followCalls = 0;
   let catalog: unknown = { groups: [{ id: 'deepseek-account', name: 'DeepSeek', models: [{ id: 'test-model', name: 'Test', reasoning: { efforts: [{ id: 'high', name: 'High' }] } }] }] };
   let signedIn = true;
   const wss = new WebSocketServer({ noServer: true });
@@ -94,7 +94,7 @@ async function host() {
         const message = JSON.parse(bytes.toString());
         if (message.type === 'cancel') { follows.delete(message.streamId); return; }
         assert.equal(message.endpoint, 'session/follow'); const input = message.payload.args.request; const session = sessions.get(input.address.sessionId); assert.ok(session);
-        follows.set(message.streamId, { socket: ws, session: session.id });
+        follows.set(message.streamId, { socket: ws, session: session.id }); followCalls++;
         const records = session.events.slice(-input.maxMessages).map(event => ({ type: 'event', event }));
         ws.send(JSON.stringify({ type: 'item', streamId: message.streamId, value: { type: 'snapshot', header: { id: session.id, cwd: session.cwd }, cursor: session.events.length - 1, records, hasMore: session.events.length > records.length, projections: projections(session) } }));
       });
@@ -102,7 +102,7 @@ async function host() {
   });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve)); const address = server.address(); assert.ok(address && typeof address !== 'string');
   const launch = `http://127.0.0.1:${address.port}/?token=${token}`;
-  return { launch, sessions, calls, peers, follows, append, setCatalog(value: unknown) { catalog = value; }, signOut() { signedIn = false; }, onNextPage(hook: () => void) { nextPage = hook; }, exchanges: () => exchanges, rejectModel: () => { rejectModel = true; }, losePromptReceipt: () => { losePromptReceipt = true; }, live(session: string, frame: unknown) { for (const [streamId, follow] of follows) if (follow.session === session) follow.socket.send(JSON.stringify({ type: 'item', streamId, value: { type: 'assistant-stream', frame } })); }, disconnect() { for (const peer of peers.values()) peer?.terminate(); }, async close() { for (const peer of peers.values()) peer?.terminate(); await new Promise<void>(resolve => wss.close(() => resolve())); await new Promise<void>(resolve => server.close(() => resolve())); } };
+  return { launch, sessions, calls, peers, follows, append, followCalls: () => followCalls, setCatalog(value: unknown) { catalog = value; }, signOut() { signedIn = false; }, onNextPage(hook: () => void) { nextPage = hook; }, exchanges: () => exchanges, rejectModel: () => { rejectModel = true; }, losePromptReceipt: () => { losePromptReceipt = true; }, live(session: string, frame: unknown) { for (const [streamId, follow] of follows) if (follow.session === session) follow.socket.send(JSON.stringify({ type: 'item', streamId, value: { type: 'assistant-stream', frame } })); }, disconnect() { for (const peer of peers.values()) peer?.terminate(); }, async close() { for (const peer of peers.values()) peer?.terminate(); await new Promise<void>(resolve => wss.close(() => resolve())); await new Promise<void>(resolve => server.close(() => resolve())); } };
 }
 
 async function setup() {
@@ -192,6 +192,32 @@ test('DSH history pages remain chronological at their native cut and cursors can
     context.fixture.append(native, 'user/message', { source: { kind: 'user', rpcId: 'later' }, content: [{ type: 'text', text: 'later' }] });
     const older = await context.adapter.history(binding, page.olderCursor, 2); assert.deepEqual(older.items.map(item => item.text), ['message-2', 'message-3']);
     const other = await context.create(); await assert.rejects(context.adapter.history(other, page.olderCursor));
+  } finally { await context.close(); }
+});
+
+test('DSH older pages read without follow (no Agent activation) and number turns from the cursor', async () => {
+  const context = await setup();
+  try {
+    const binding = await context.create(); const native = context.fixture.sessions.get(binding.id)!;
+    const operations = [randomUUID(), randomUUID(), randomUUID()];
+    for (const [index, id] of operations.entries()) {
+      await context.adapter.submit(binding, { id, text: `Turn ${index + 1}` });
+      context.fixture.append(native, 'tool/call', { name: 'read', input: `step-${index + 1}` });
+      context.fixture.append(native, 'turn/end', { turn: index + 1, reason: { kind: 'completed' } }); native.open = null;
+    }
+    const latest = await context.adapter.history(binding, undefined, 1);
+    const follows = context.fixture.followCalls();
+    const runs = new Map<string, string | undefined>(); let cursor = latest.olderCursor;
+    for (const item of latest.items) if (item.operationId) runs.set(item.operationId, item.runId);
+    while (cursor) {
+      const page = await context.adapter.history(binding, cursor, 1);
+      for (const item of page.items) if (item.operationId) runs.set(item.operationId, item.runId);
+      cursor = page.olderCursor;
+    }
+    assert.equal(context.fixture.followCalls(), follows, 'older pages use session/page only');
+    assert.deepEqual(operations.map(id => runs.get(id)), [1, 2, 3].map(turn => `dsh:${binding.id}:turn:${turn}`));
+    const legacy = Buffer.from(JSON.stringify({ session: binding.id, through: 3, before: 2 })).toString('base64url');
+    await assert.rejects(context.adapter.history(binding, legacy, 1), 'a cursor without its turn boundary is refused');
   } finally { await context.close(); }
 });
 

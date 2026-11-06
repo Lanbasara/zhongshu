@@ -51,6 +51,8 @@ For a production build, run `npm run build`, set `ZHONGSHU_ORIGIN` to the public
 
 The administrator password comes from `ZHONGSHU_ADMIN_PASSWORD` (at least 8 characters). It is applied at startup, and changing it signs out every session. A local instance (HTTP on loopback) without it uses `zhongshu-local`. A remote instance without it keeps the password set with `npm run admin -- init` or `reset`. Keep each instance's value in that instance's own configuration, never in this repository.
 
+Conversation history is read from the native Harness on demand; the application database keeps only its own records (bindings, operations, uploads, image copies). `ZHONGSHU_STORAGE_BUDGET` bounds that database (bytes or units such as `16GiB`; default `16GiB`). From 80% the interface warns; at the limit, image uploads and new conversations are refused until regenerable image copies are cleared or Codex conversations are deleted, while reading and sending text continue. When nothing is left to clean, raise the budget in the instance configuration.
+
 ## UI development
 
 ```sh

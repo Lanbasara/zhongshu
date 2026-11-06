@@ -24,11 +24,11 @@ React 浏览器 ──同源 HTTP / SSE──→ Fastify 应用
 | --- | --- | --- |
 | 页面与服务 | [React 页面](../src/web/main.tsx) / [HTTP 应用](../src/server/app.ts) | 同源接口，私有路由统一认证、来源与 CSRF 检查 |
 | 身份 | [auth.ts](../src/server/auth.ts) / [管理员命令](../src/server/admin.ts) / [ADR 0006](adr/0006-auth-session-data.md) | 单管理员、服务端会话、私有数据目录边界 |
-| 持久数据 | [database.ts](../src/server/database.ts) / [产品迁移](../src/server/migrations.ts) / [ADR 0003](adr/0003-local-persistence.md) | WAL/FULL、显式迁移、在线备份与新目录恢复；数据不在镜像内 |
-| 对话与操作 | [Workbench](../src/server/workbench.ts) / [存储](../src/server/workbench-store.ts) | 派发前落库、未知回执核对、历史身份和原生生命周期统一管理 |
+| 持久数据 | [database.ts](../src/server/database.ts) / [产品迁移](../src/server/migrations.ts) / [存储预算](../src/server/storage.ts) / [ADR 0003](adr/0003-local-persistence.md) | WAL/FULL、显式迁移、在线备份与新目录恢复；数据不在镜像内；不保存历史正文，实例预算约束库大小 |
+| 对话与操作 | [Workbench](../src/server/workbench.ts) / [存储](../src/server/workbench-store.ts) | 派发前落库、未知回执核对和原生生命周期统一管理；历史正文按需从原生读取（[ADR 0014](adr/0014-native-history-source.md)） |
 | 原生能力 | [共同语义](../src/harness/types.ts) / [Codex](../src/harness/codex/index.ts) / [DSH](../src/harness/dsh/index.ts) / [ADR 0001](adr/0001-native-harness-boundary.md) | 原生字段与版本差异留在各 adapter；不自行实现 Agent loop |
 | 消息与资源 | [内容契约](../src/shared/content.ts) / [资源存储与路径](../src/server/resources.ts) / [正文](../src/web/conversation-content.tsx) / [输入](../src/web/composer.tsx) | 原生解释图片和工具，应用保存授权资源与消息元数据；前端不执行原始 HTML |
-| 浏览器恢复 | [公开契约](../src/shared/workbench.ts) / [HTTP 与更新流](../src/server/workbench-http.ts) / [工作台](../src/web/workbench.tsx) / [ADR 0004](adr/0004-recoverable-communication.md) | 稳定操作编号、持久事件水位、有界慢端恢复和旧响应防覆盖 |
+| 浏览器恢复 | [公开契约](../src/shared/workbench.ts) / [HTTP 与更新流](../src/server/workbench-http.ts) / [工作台](../src/web/workbench.tsx) / [历史窗口](../src/web/history-window.ts) / [ADR 0004](adr/0004-recoverable-communication.md) | 稳定操作编号、持久事件水位、有界慢端恢复和旧响应防覆盖；按原生页组成有界窗口，两端可读回 |
 | 启动与配置 | [main.ts](../src/server/main.ts) / [config.ts](../src/server/config.ts) / [README](../README.md) | 先验证配置与迁移，再监听；HTTP 开发例外只允许回环 |
 | 源码与产物 | [构建脚本](../scripts/build.mjs) / [Dockerfile](../Dockerfile) | 将版本信息嵌入产物，使运行结果能够关联源码提交 |
 | 产品与运行环境 | [Compose](../compose.yaml) / [配置示例](../.env.example) | 可配置的运行契约支持不同部署目标，本地开发不需要生产凭据 |
@@ -74,7 +74,7 @@ Web manifest 提供独立窗口入口。界面以 Streamdown 渲染 Markdown/GFM
 
 共享 schema 约束图片元数据、工具字段与引用；旧文本条目缺少这些字段时仍可读取。原文件引用只保留工作区相对路径，选择、发送及派发校验当前文件；Agent 读取时使用原文件。消息选段保存来源条目与选中文字。Workbench 不重写原操作编号；恢复中的输入仍为同一提交。
 
-图片字节作为 BLOB 与消息元数据同存 SQLite，沿用现有在线备份/恢复；不会新增个人路径或挂载。资源属于指定对话，读写均经过私有认证，写入另查来源/CSRF；公开契约只暴露资源 ID，不暴露原生路径。上传只接 PNG/JPEG/WebP，服务端核验魔数和字节：每张输入最多 2 MiB、每消息最多 4 张且合计 4 MiB；原生输出/工作区图片最多 6 MiB。库内图片总额上限 512 MiB，满额明确拒绝，不删历史腾空间。未关联上传在后续新资源写入时回收超过 7 天的项；pending 操作与历史关联的资源持续保留，移除不会删除已关联资源。
+图片字节作为 BLOB 存在 SQLite，沿用现有在线备份/恢复；不会新增个人路径或挂载。资源属于指定对话，读写均经过私有认证，写入另查来源/CSRF；公开契约只暴露资源 ID，不暴露原生路径。上传只接 PNG/JPEG/WebP，服务端核验魔数和字节：每张输入最多 2 MiB、每消息最多 4 张且合计 4 MiB；原生输出/工作区图片最多 6 MiB。图片计入下文的实例存储预算：上传在预算满时被拒绝；原生图片副本以 `native:` 引用标记，可淘汰、需要时从原生重新取回；工作区图片的首次可读快照与上传一样不被自动淘汰。未关联上传在后续新资源写入时回收超过 7 天的项；pending 操作与历史关联的资源持续保留，移除不会删除已关联资源。
 
 Codex 以原生 image input、DSH 以原生 image content 接图片，无需新增 Host 挂载。生成结果仅采集原生返回的图片字节或原生文件读取结果；失败显式显示。Markdown 工作区图片先验证消息来源、相对路径与非符号链接边界，再通过对应 Host 文件接口读取，按消息/来源保存首次可读快照；原文件之后移走仍能回看。它不是任意宿主文件代理。HTTPS 图片在浏览器直接请求并禁用 referrer；HTML、SVG 与可执行 URL 不通过本地资源通道。
 
@@ -118,6 +118,18 @@ Codex 经专用 Unix socket 管理进程调用固定 CLI 和同一实例的 App 
 
 ## 对话观察与删除协调
 
-会话管理边界依据 [ADR 0012](adr/0012-conversation-lifecycle.md)。Workbench 按持久化执行责任恢复，浏览器当前阅读通过有期限的租约共享观察；冷历史投影读取不建立永久订阅。事件驱动核对与有界未知状态补偿替代曾打开对话的固定正文轮询。原生驻留仍由 Harness 管理。
+会话管理边界依据 [ADR 0012](adr/0012-conversation-lifecycle.md)。Workbench 按持久化执行责任恢复，浏览器当前阅读通过有期限的租约共享观察；冷历史只按需读取原生页，不建立永久订阅。事件驱动核对与有界未知状态补偿替代曾打开对话的固定正文轮询。原生驻留仍由 Harness 管理。
 
 Store 的最近接收消息提交时序支持侧栏分页，游标独立保存排序边界。独立删除日志记录目标身份与清理阶段，变更流记录不再随对话级联消失。Workbench 隔离新提交并核实可删除条件，adapter 执行原生删除，之后事务清理本地内容。Codex 已接入原生删除；DSH 按已确认产品边界仅归档恢复，界面不提供删除且服务端拒绝请求，不维护修改版 Host。当前用户路径与验证方法见[对话管理](features/conversation-management.md)。
+
+## 历史读取与存储边界
+
+依据 [ADR 0014](adr/0014-native-history-source.md)：历史正文以原生 Harness 为唯一来源，中书不保存正文副本，也不补齐缺口。
+
+| 层 | 当前职责 |
+| --- | --- |
+| 接入 | `history(binding, cursor, limit)` 返回原生页与不透明游标。[Codex](../src/harness/codex/index.ts) 直接调用 `thread/items/list`（分页线程有索引，读取不 `resume`），按条目大小增减每次条数；旧格式线程报 `codex_history_unsupported`。[DSH](../src/harness/dsh/index.ts) 最新页来自快照，旧页只用不激活 Agent 的 `session/page`，游标携带边界轮次，用页内 `turn/start` 推算条目所属轮次 |
+| 服务 | [Workbench](../src/server/workbench.ts) 在运行时内存中保持最新页与实时条目：相邻两次读取有重叠时拼接（上限 200 条），早于读取且已结束的实时副本退场；状态与最新页一同读取，历史读取失败只标记可读性，不改变执行核实。旧页由服务端签发、绑定对话身份的游标读取；只含隐藏事件的页向前跳过，超出序列化预算的页以更少条目重读。引用与工作区图片核验先查内存中的近期条目，再从最新页向前有界查找 |
+| 数据 | Store 只记录变更提示（可带条目身份）与本轮文件路径；`workbench_items`、`workbench_live_items` 为退役表，不再读写，待验证后由迁移删除。[存储预算](../src/server/storage.ts)按数据库在用页面计量（退役表单独统计、不计入），达到预算拒绝上传与新建对话，原生图片副本可淘汰 |
+| 接口 | 快照返回最新页、实时条目、`olderCursor` 与可选 `error`；`GET /conversations/:id/history?cursor=` 返回一页；`GET /storage`、`POST /storage/clear-cache` 提供用量与缓存清理 |
+| 界面 | [历史窗口](../src/web/history-window.ts)按页组成窗口（≤500 条/8 MiB），每页记住读回它的游标；向上超出时最新端的页带游标离开，向下逐页读回，最后拼回最新页。[工作台](../src/web/workbench.tsx)滚动到两端时自动读取，并以首个可见条目固定阅读位置；[存储入口](../src/web/storage-status.tsx)显示用量与清理 |

@@ -33,7 +33,7 @@ function message(conversationId: string): OperationInput { return { id: randomUU
 test('conversation identity/configuration and an early native binding survive partial initialization and reopen', t => {
   const f = fixture(t); let db = f.open(); let store = createWorkbenchStore(db); const input = conversation();
   const created = store.createConversation(input); assert.equal(created.created, true); assert.equal(created.conversation.title, '新对话');
-  assert.equal(created.conversation.readiness, 'preparing'); assert.equal(created.conversation.historyLoaded, false);
+  assert.equal(created.conversation.readiness, 'preparing');
   assert.throws(() => store.setConversationState(input.id, { readiness: 'ready' }), { code: 'native_binding_required' });
   const native = binding(input); store.saveBinding(input.id, native);
   store.setConversationState(input.id, { readiness: 'blocked', error: 'native_configuration_failed' });
@@ -188,76 +188,21 @@ test('operation pagination follows durable insertion sequence despite tied times
   }
 });
 
-test('canonical history merges chronological pages and overlap, while live remains separate until canonical arrives', t => {
+test('change hints and edited paths persist without any history body (ADR 0014)', t => {
   const f = fixture(t); const db = f.open(); const store = createWorkbenchStore(db); const input = conversation(); store.createConversation(input);
-  assert.equal(store.readHistory(input.id).historyLoaded, false);
-  store.saveLiveItem(input.id, { ...item('live', 'partial streamed body'), status: 'running' });
-  store.saveLiveItem(input.id, item('live', 'complete streamed body'));
-  assert.equal(store.readHistory(input.id).items.length, 0); assert.equal(store.getItem(input.id, 'live')?.text, 'complete streamed body');
-  store.mergeHistory(input.id, [item('d'), item('e')]); store.setHistoryCursor(input.id, { loaded: true, olderCursor: 'native-page-1', beforeItemId: 'd' });
-  store.mergeHistory(input.id, [item('b'), item('c')], 'd');
-  store.mergeHistory(input.id, [item('a'), item('b', 'updated-b'), item('c')], 'd');
-  store.mergeHistory(input.id, [item('d'), item('e', 'updated-e'), item('live', 'authoritative complete body')]);
-  assert.deepEqual(store.readHistory(input.id).items.map(row => row.id), ['a', 'b', 'c', 'd', 'e', 'live']);
-  assert.equal(store.readHistory(input.id).liveItems.length, 0); assert.equal(store.getItem(input.id, 'live')?.text, 'authoritative complete body');
-  assert.equal(store.getItem(input.id, 'b')?.text, 'updated-b');
-  const snapshot = store.readHistory(input.id, { limit: 2 }); assert.deepEqual(snapshot.items.map(row => row.id), ['e', 'live']); assert.equal(snapshot.olderBeforeItemId, 'e');
-  const older = store.readHistory(input.id, { beforeItemId: snapshot.olderBeforeItemId!, limit: 3 });
-  assert.deepEqual(older.items.map(row => row.id), ['b', 'c', 'd']); assert.equal(older.olderBeforeItemId, 'b');
-  assert.deepEqual(store.readHistory(input.id, { beforeItemId: 'b' }).items.map(row => row.id), ['a']);
-  assert.equal(snapshot.nativeOlderCursor, 'native-page-1'); assert.equal(snapshot.nativeOlderBeforeItemId, 'd'); assert.equal(snapshot.historyLoaded, true);
-  assert.throws(() => store.mergeHistory(input.id, [item('uncommitted')], 'missing-anchor'), { code: 'history_anchor_not_found' });
-  assert.equal(store.getItem(input.id, 'uncommitted'), null);
-});
-
-test('body-only updates never rewrite positions; tightly packed insertion atomically compacts without losing items', t => {
-  const f = fixture(t); const db = f.open(); const store = createWorkbenchStore(db); const input = conversation(); store.createConversation(input);
-  store.mergeHistory(input.id, [item('left'), item('right')]);
-  db.exec('CREATE TABLE position_updates (id TEXT) STRICT; CREATE TRIGGER track_position AFTER UPDATE OF position ON workbench_items BEGIN INSERT INTO position_updates VALUES(NEW.id); END;');
-  store.mergeHistory(input.id, [item('left', 'new body'), item('right')]); store.saveLiveItem(input.id, { ...item('right', 'live full body'), status: 'running' });
-  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM position_updates').get()?.count, 0);
-  store.mergeHistory(input.id, [item('left'), item('middle'), item('right')]);
-  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM position_updates').get()?.count, 0);
-  db.prepare('UPDATE workbench_items SET position=1 WHERE conversation_id=? AND id=?').run(input.id, 'middle');
-  db.prepare('UPDATE workbench_items SET position=2 WHERE conversation_id=? AND id=?').run(input.id, 'right');
-  db.exec('DELETE FROM position_updates');
-  store.mergeHistory(input.id, [item('left'), item('inserted'), item('middle')]);
-  assert.deepEqual(store.readHistory(input.id).items.map(row => row.id), ['left', 'inserted', 'middle', 'right']);
-  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM position_updates WHERE id=?').get('left')?.count, 0);
-  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM position_updates').get()?.count, 4);
-});
-
-test('native cursor and complete bodies survive restart without claiming a partially loaded history is complete', t => {
-  const f = fixture(t); let db = f.open(); let store = createWorkbenchStore(db); const input = conversation(); store.createConversation(input);
-  const text = '完整正文\n'.repeat(3000); store.mergeHistory(input.id, [item('latest', text)]);
-  store.saveLiveItem(input.id, { ...item('streaming', text + 'next'), status: 'running' });
-  store.setHistoryCursor(input.id, { loaded: true, olderCursor: 'opaque-provider-cursor', beforeItemId: 'latest' });
-  const revision = store.version(); f.close(db); db = f.open(); store = createWorkbenchStore(db);
-  const snapshot = store.readHistory(input.id); assert.equal(snapshot.revision, revision);
-  assert.equal(snapshot.items[0]?.text, text); assert.equal(snapshot.liveItems[0]?.text, text + 'next');
-  assert.equal(snapshot.olderBeforeItemId, null); assert.equal(snapshot.nativeOlderCursor, 'opaque-provider-cursor');
-  assert.equal('historyComplete' in snapshot, false);
-});
-
-test('history capacity, text bytes, native details and live bounds fail explicitly without partial mutation', t => {
-  const f = fixture(t); const db = f.open(); const store = createWorkbenchStore(db); const input = conversation(); store.createConversation(input);
-  const insert = db.prepare("INSERT INTO workbench_items(conversation_id,id,position,kind,text,status) VALUES(?,?,?,'assistant','small body','completed')");
-  db.exec('BEGIN IMMEDIATE'); for (let n = 0; n < 50_000; n++) insert.run(input.id, 'item-' + n, n * 1024); db.exec('COMMIT');
   const before = store.version();
-  assert.throws(() => store.mergeHistory(input.id, [item('item-0', 'must roll back'), item('too-many')]), { code: 'history_capacity_reached' });
-  assert.equal(store.getItem(input.id, 'item-0')?.text, 'small body'); assert.equal(store.version(), before);
-  store.mergeHistory(input.id, [item('item-0', 'allowed update at capacity')]);
-  assert.equal(store.getItem(input.id, 'item-0')?.text, 'allowed update at capacity');
-  assert.throws(() => store.saveLiveItem(input.id, item('large', '中'.repeat(400_000))), { statusCode: 400 });
-  assert.throws(() => store.mergeHistory(input.id, [item('large', 'a'.repeat(1_048_577))]), { statusCode: 400 });
-  for (let n = 0; n < 100; n++) store.saveLiveItem(input.id, item('live-' + n));
-  assert.throws(() => store.saveLiveItem(input.id, item('live-overflow')), { code: 'live_history_capacity_reached' });
-  assert.equal(store.readHistory(input.id).items.length, 100); assert.equal(store.readHistory(input.id).liveItems.length, 100);
-  const native = binding(input); const cyclic: Record<string, unknown> = {}; cyclic.self = cyclic;
-  assert.throws(() => store.saveBinding(input.id, { ...native, details: cyclic }), { code: 'invalid_binding_details' });
-  assert.equal(store.getConversation(input.id)?.binding, null);
+  store.touch(input.id, 'live-item');
+  assert.equal(store.version(), before + 1); assert.equal(store.changes(before).events[0]?.itemId, 'live-item');
+  store.touch(input.id); assert.equal(store.changes(before + 1).events[0]?.itemId, undefined);
+  const edit: NativeItem = { id: 'edit', kind: 'tool', text: 'secret tool body', status: 'completed', runId: 'run-1', fileEdits: ['a.ts', 'b/c.ts'] };
+  store.recordTurnFiles(input.id, [edit, item('plain', 'another secret body'), { ...edit, id: 'running', status: 'running', fileEdits: ['d.ts'] }]);
+  assert.deepEqual(store.readTurnFiles(input.id, ['run-1']), [{ runId: 'run-1', paths: ['a.ts', 'b/c.ts'], limited: false }]);
+  const unchanged = store.version(); store.recordTurnFiles(input.id, [edit]); assert.equal(store.version(), unchanged);
+  for (const table of ['workbench_items', 'workbench_live_items', 'workbench_changes', 'workbench_turn_files'])
+    assert.equal(JSON.stringify(db.prepare(`SELECT * FROM ${table}`).all()).includes('secret'), false, table);
+  assert.throws(() => store.touch(randomUUID()), { statusCode: 404 });
+  assert.throws(() => store.recordTurnFiles(input.id, [{ ...edit, fileEdits: ['../escape'] }]), { statusCode: 400 });
 });
-
 test('change cursor is atomic, durable, bounded, body-free and gives an explicit reset outside retained history', t => {
   const f = fixture(t); let db = f.open(); const observer = f.open(); const callbacks: WorkbenchChange[] = [];
   let store = createWorkbenchStore(db, { onChange: event => {
@@ -270,29 +215,25 @@ test('change cursor is atomic, durable, bounded, body-free and gives an explicit
   store.enqueueOperation(operation); assert.equal(store.version(), afterEnqueue);
   assert.throws(() => store.enqueueOperation({ ...operation, type: 'message', payload: { text: 'changed' } }), { statusCode: 409 });
   assert.equal(store.version(), afterEnqueue);
-  store.saveLiveItem(input.id, item('live', 'body never copied into event'));
+  store.touch(input.id, 'live');
   assert.equal(callbacks.at(-1)?.itemId, 'live');
   const unchanged = store.version();
-  store.saveLiveItem(input.id, item('live', 'body never copied into event'));
   store.setConversationState(input.id, { readiness: 'preparing' });
-  store.mergeHistory(input.id, []);
+  store.recordTurnFiles(input.id, []);
   assert.equal(store.version(), unchanged);
   db.exec("CREATE TRIGGER reject_fixture_event BEFORE INSERT ON workbench_changes WHEN NEW.item_id='rollback-item' BEGIN SELECT RAISE(ABORT,'synthetic_event_failure'); END;");
-  assert.throws(() => store.saveLiveItem(input.id, item('rollback-item', 'must not commit')), { code: 'workbench_storage_failed' });
-  assert.equal(store.getItem(input.id, 'rollback-item'), null);
+  assert.throws(() => store.touch(input.id, 'rollback-item'), { code: 'workbench_storage_failed' });
   assert.equal(store.version(), unchanged);
   db.exec('DROP TRIGGER reject_fixture_event');
-  assert.equal(JSON.stringify(db.prepare('SELECT * FROM workbench_changes ORDER BY sequence').all()).includes('body never'), false);
   const version = store.version(); const replay = store.changes(0); assert.equal(replay.reset, false); assert.equal(replay.latest, version);
   assert.equal(replay.events.at(-1)?.itemId, 'live'); assert.equal(callbacks.length, version);
   f.close(db); db = f.open(); store = createWorkbenchStore(db);
   assert.deepEqual(store.changes(0), replay);
-  for (let n = 0; n < 2001; n++) store.saveLiveItem(input.id, item('live', 'update-' + n));
+  for (let n = 0; n < 2001; n++) store.touch(input.id, 'live');
   const latest = store.version(); assert.equal(db.prepare('SELECT COUNT(*) AS count FROM workbench_changes').get()?.count, 2000);
   assert.equal(store.changes(0).reset, true); assert.equal(store.changes(latest + 1).reset, true);
   assert.equal(store.changes(latest - 2000).reset, false); assert.equal(store.changes(latest - 2000).events.length, 200);
   assert.deepEqual(store.changes(latest), { latest, reset: false, events: [] });
-  const final = store.readHistory(input.id); assert.equal(final.revision, latest); assert.equal(final.liveItems[0]?.text, 'update-2000');
 });
 
 
@@ -335,23 +276,6 @@ test('a restore hook failure rolls back and never publishes the staging database
   assert.equal(store.getOperation(operation.id)?.status, 'queued');
 });
 
-test('large history and live reads have byte bounds before HTTP serialization and retain complete paging', t => {
-  const f = fixture(t); const store = createWorkbenchStore(f.open()); const input = conversation(); store.createConversation(input);
-  const body = 'x'.repeat(512 * 1024); const records = Array.from({ length: 20 }, (_, index) => item('large-' + index, body));
-  store.mergeHistory(input.id, records);
-  const first = store.readHistory(input.id);
-  assert(first.items.length > 0 && first.items.length < records.length);
-  assert(first.items.reduce((bytes, entry) => bytes + Buffer.byteLength(entry.text) + 2048, 0) <= 8 * 1024 * 1024);
-  assert.equal(first.items.at(-1)?.id, 'large-19'); assert(first.olderBeforeItemId);
-  const older = store.readHistory(input.id, { beforeItemId: first.olderBeforeItemId });
-  assert.deepEqual([...older.items, ...first.items].map(entry => entry.id), records.map(entry => entry.id));
-  assert([...older.items, ...first.items].every(entry => entry.text === body));
-  for (let index = 0; index < 12; index++) store.saveLiveItem(input.id, { ...item('live-' + index, body), status: 'running' });
-  const live = store.readHistory(input.id); assert.equal(live.liveItemsLimited, true);
-  assert(live.liveItems.reduce((bytes, entry) => bytes + Buffer.byteLength(entry.text) + 2048, 0) <= 4 * 1024 * 1024);
-  assert(live.liveItems.every(entry => entry.text === body));
-});
-
 // Seed the historical format directly: migration evidence must not rely on today's Store
 // being able to write a schema that predates its requirements.
 function seedLegacyConversation(db: DatabaseSync, input: CreateConversation, at = 100, native: Binding | null = null) {
@@ -386,7 +310,8 @@ test('v3 conversation history upgrades to active and management metadata survive
   assert.deepEqual(store.listConversations({ archived: false }), []);
   assert.equal(store.listConversations({ archived: true })[0]?.title, '升级后的标题');
   assert.deepEqual(store.getConversation(input.id)?.binding, native);
-  assert.equal(store.readHistory(input.id).items[0]?.text, '旧库原文');
+  // Retired projection rows stay untouched until a later, user-confirmed migration removes them (ADR 0014).
+  assert.equal(db.prepare('SELECT text FROM workbench_items WHERE conversation_id=?').get(input.id)?.text, '旧库原文');
 });
 
 test('v10 history and live metadata survive unknown-status migration and reopen', t => {
@@ -401,15 +326,13 @@ test('v10 history and live metadata survive unknown-status migration and reopen'
     legacy.prepare('INSERT INTO workbench_live_items(conversation_id,id,kind,text,status,run_id,updated_at,metadata_json) VALUES(?,?,?,?,?,?,?,?)')
       .run(input.id, 'old-live', oldItem.kind, oldItem.text, 'running', oldItem.runId!, 100, metadata);
   } finally { legacy.close(); }
-  let db = f.open(); let store = createWorkbenchStore(db);
-  assert.deepEqual(store.getItem(input.id, 'old-tool'), oldItem);
-  assert.equal(store.getItem(input.id, 'old-live')?.tool?.output, 'old result');
-  store.mergeHistory(input.id, [{ ...oldItem, id: 'unknown-tool', status: 'unknown' }]);
-  store.saveLiveItem(input.id, { ...oldItem, id: 'unknown-live', status: 'unknown' });
-  f.close(db); db = f.open(); store = createWorkbenchStore(db);
-  assert.equal(store.getItem(input.id, 'unknown-tool')?.status, 'unknown');
-  assert.equal(store.getItem(input.id, 'unknown-live')?.status, 'unknown');
-  assert.equal(store.getItem(input.id, 'old-live')?.status, 'running');
+  let db = f.open(); createWorkbenchStore(db);
+  f.close(db); db = f.open(); const store = createWorkbenchStore(db);
+  assert.equal(store.getConversation(input.id)?.id, input.id);
+  // Retired projection rows keep their content and metadata until a later, user-confirmed migration (ADR 0014).
+  assert.deepEqual({ ...db.prepare('SELECT id,status,metadata_json FROM workbench_items WHERE conversation_id=?').get(input.id) },
+    { id: 'old-tool', status: 'completed', metadata_json: JSON.stringify({ tool: oldItem.tool }) });
+  assert.equal(db.prepare('SELECT status FROM workbench_live_items WHERE conversation_id=? AND id=?').get(input.id, 'old-live')?.status, 'running');
   assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []);
 });
 
@@ -454,7 +377,7 @@ test('conversation activity changes only on accepted messages using submission t
   store.createConversation(a); clock = 200; store.createConversation(b);
   const ids = () => store.listConversations().map(value => value.id);
   assert.deepEqual(ids(), [b.id, a.id]);
-  clock = 300; store.getConversation(a.id); store.readHistory(a.id); store.renameConversation(a.id, 'renamed');
+  clock = 300; store.getConversation(a.id); store.renameConversation(a.id, 'renamed');
   store.setArchived(a.id, true, () => true); store.setArchived(a.id, false, () => true);
   assert.deepEqual(ids(), [b.id, a.id]);
   const failed = message(a.id); store.enqueueOperation(failed); store.claimOperation(failed.id);

@@ -211,7 +211,8 @@ export function NewConversation(props:Props) {
         persist({...current.current,submission:undefined});
         setPreparationState('failed');setPreparationClaimed(true);setSkillsSupported(false);setStatus('');
         setError('原生准备已被使用，本次尚未发送。请重新准备并核验技能。');
-      }else if(reason instanceof RequestError){props.report(reason);setError('暂时无法确认结果。原配置和内容已保留，请重试核对。');}
+      }else if(reason instanceof RequestError&&reason.code==='storage_budget_reached'){setError('存储已达到预算上限，暂时不能新建对话或上传图片。内容已保留；可以在侧栏“存储”中清理后重试。');}
+      else if(reason instanceof RequestError){props.report(reason);setError('暂时无法确认结果。原配置和内容已保留，请重试核对。');}
       else if(!(reason instanceof DOMException&&reason.name==='AbortError'))setError(reason instanceof Error?reason.message:'暂时无法确认结果，请重试。');
     }
     finally{busyRef.current=false;if(alive.current)setBusy(false);}

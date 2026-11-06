@@ -2,7 +2,7 @@
 
 ## Sub-features
 
-M01 工作区分组与接续，M02 搜索与重命名，M03 归档与恢复，M04 忙碌与并发，M05 桌面宽度与手机导航。
+M01 工作区分组与接续，M02 搜索与重命名，M03 归档与恢复，M04 忙碌与并发，M05 桌面宽度与手机导航，M06 观察释放，M07–M08 删除，M09 存储预算与清理。
 
 ## How to get to it (user POV)
 
@@ -30,6 +30,16 @@ fixture 可用 `node test/support/feature-fixture.ts reject-delete-next --root "
 
 M08：在运行、排队或未知状态尝试删除，应拒绝并保留可到达对话。空闲删除请求丢失响应或应用在原生清理后中断时，以同一对话再次删除/重启，核对持久阶段恢复和幂等结果。当前删除日志不保留正文，原生已完成后本地清理可独立恢复；失败的原生步骤可从管理入口重试。回归运行 `node --test test/conversation-deletions.test.ts test/workbench.test.ts`。本节是执行方法，不代表每个真实原生分支已取得证据。
 
+### 存储预算与清理
+
+M09：中书数据库有实例预算（`ZHONGSHU_STORAGE_BUDGET`，默认 16 GiB；fixture 用 `serve --storage-budget`）。用较大预算启动隔离 fixture，在一段对话的输入框加入三张约 2 MiB 的合成图片（上传即计入）；以相同 root 改用 `--storage-budget 4MiB` 重启。侧栏底部显示“存储已满”，点开后核对用量、预算、各类别（上传与快照图片、可清理的图片缓存、旧版历史副本）和“已达到预算上限”说明；没有缓存时“清理图片缓存”不可用，并提示删除不再需要的 Codex 对话或调高预算。再验证：
+
+- 再加入一张图片被拒绝，提示存储已满且文件保留；在另一工作区草稿首次发送被拒绝，内容保留且列表不出现新对话。伪造的上传和创建请求同样返回 `storage_budget_reached`。
+- 在已有对话只发送文字（不带新图片）照常被接收；阅读、停止、归档不受影响。
+- 删除该 Codex 对话（M07 路径）后，侧栏立即回到正常比例，新建对话恢复可用。图片缓存的清理（只删除可从原生重新取回的图片副本，不动上传和工作区图片快照）由 `node --test test/storage.test.ts` 覆盖；真实原生图片缓存需在有原生图片的对话上另行核对。
+
+80% 起侧栏显示“存储接近上限”。预算按数据库实际使用的页面计算，删除后立即释放，不等待整理；旧版历史副本单独列出、不计入，验证通过后由后续迁移删除。原生自己的会话文件不在此统计，也不作为拦截条件。
+
 ## Gotchas
 
 搜索只查标题。旧对话和归档结果从服务端查询。主列表按最近被接收的用户消息的提交时间排序；没有消息时按创建时间排序，侧栏宽度保存在当前浏览器。归档对话的历史仍可读，新提交必须先恢复。
@@ -40,5 +50,6 @@ M08：在运行、排队或未知状态尝试删除，应拒绝并保留可到�
 - [侧栏与管理表单](../../src/web/conversation-navigation.tsx)负责宽度、分组与视图切换，[工作台](../../src/web/workbench.tsx)负责打开对话和草稿。
 - [私有路由](../../src/server/workbench-http.ts)约束输入并沿用登录与 CSRF，[Workbench](../../src/server/workbench.ts)核对原生状态，[存储](../../src/server/workbench-store.ts)保存标题和归档标记，并在提交入队时检查归档状态。
 - `node --test test/workbench-http.test.ts test/workbench-store.test.ts` 覆盖查询分页、迁移、认证与归档竞态。独立运行证据按[共同要求](README.md#独立执行验收)记录。
+- 存储预算：[storage.ts](../../src/server/storage.ts) 计量与淘汰，[资源](../../src/server/resources.ts)区分上传与可再生副本，[侧栏存储入口](../../src/web/storage-status.tsx)；`node --test test/storage.test.ts`。
 
 Codex 等待输入的协议回归可用 `node --test test/codex-workbench.test.ts` 复跑。测试对端通过本地 socket 返回原生等待标志，归档请求应返回 409，读回仍为未归档。测试对端结束等待后，同一请求应成功。真实 Codex 等待状态需另行触发并记录。

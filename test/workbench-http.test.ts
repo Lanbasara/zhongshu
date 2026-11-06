@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile } fr
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { get as httpGet } from 'node:http';
-import type { HarnessAdapter, NativeItem, NativeState, Receipt } from '../src/harness/types.ts';
+import type { HarnessAdapter, NativeChange, NativeItem, NativeState, Receipt } from '../src/harness/types.ts';
 import { openDatabase } from '../src/server/database.ts';
 import { createAuth } from '../src/server/auth.ts';
 import { buildApp } from '../src/server/app.ts';
@@ -14,7 +14,7 @@ import { createWorkbenchStore } from '../src/server/workbench-store.ts';
 import { Workbench } from '../src/server/workbench.ts';
 import { createWorkbenchHttp } from '../src/server/workbench-http.ts';
 import { WorkspaceRegistry } from '../src/server/workspace-registry.ts';
-import { changeEventSchema, snapshotSchema, workbenchConfigurationSchema } from '../src/shared/workbench.ts';
+import { changeEventSchema, historyPageSchema, snapshotSchema, workbenchConfigurationSchema } from '../src/shared/workbench.ts';
 
 const origin = 'https://workbench.example';
 const configuration = { modelId: 'synthetic-model', permissionId: 'workspace-write' };
@@ -23,6 +23,11 @@ async function eventually(check: () => Promise<boolean> | boolean, timeout = 400
   const until = Date.now() + timeout;
   while (Date.now() < until) { if (await check()) return; await new Promise(resolve => setTimeout(resolve, 20)); }
   assert.fail('bounded condition was not observed');
+}
+
+/** The next change frame that carries a live item; latest-page refreshes also emit item-less hints. */
+async function itemChange(stream: { named(name: string): Promise<{ name: string; id?: string; data: any } | null> }) {
+  for (;;) { const event = await stream.named('change'); if (!event || event.data.item) return event; }
 }
 
 async function fixture(t: TestContext, limits: Parameters<typeof createWorkbenchHttp>[1] = {}, withRegistry = false) {
@@ -36,6 +41,7 @@ async function fixture(t: TestContext, limits: Parameters<typeof createWorkbench
   let state = nativeState;
   let historyItems: NativeItem[] = [];
   let nextStateRead: (() => Promise<void>) | undefined;
+  let listener: ((change: NativeChange) => void) | undefined;
   const adapter: HarnessAdapter = {
     id: 'dsh',
     async skills() { return [{ id: 'a'.repeat(64), name: 'proof', label: 'Proof', description: 'Synthetic skill' }]; },
@@ -47,11 +53,14 @@ async function fixture(t: TestContext, limits: Parameters<typeof createWorkbench
       if (pause) await pause();
       return state;
     },
-    async history() { return { items: historyItems, olderCursor: null }; },
+    async history(_binding, cursor, limit = 50) {
+      const end = cursor === undefined ? historyItems.length : Number(cursor); const start = Math.max(0, end - limit);
+      return { items: historyItems.slice(start, end), olderCursor: start ? String(start) : null };
+    },
     async submit(_binding, operation) { submissions.push(operation.id); return receipt; },
     async reconcile() { return { outcome: 'accepted', runId: 'synthetic-turn' }; },
     async stop() { return { outcome: 'accepted', runId: 'synthetic-turn' }; },
-    async watch() { return () => {}; }, async close() {},
+    async watch(_binding, value) { listener = value; return () => { listener = undefined; }; }, async close() {},
   };
   const root = join(await realpath(directory), 'folders');
   if (withRegistry) await mkdir(root);
@@ -110,6 +119,8 @@ async function fixture(t: TestContext, limits: Parameters<typeof createWorkbench
   return { db, auth, store, workbench, transport, app, base, credentials, login, request, seed, stream, submissions, root, roots, adapter,
     setReceipt(value: Receipt) { receipt = value; }, setState(value: NativeState) { state = value; },
     setHistory(value: NativeItem[]) { historyItems = value; },
+    /** Live output reaches the workbench only through native observation (ADR 0014). */
+    async live(id: string, item: NativeItem) { await workbench.reading(id, 'http-test-reader'); assert.ok(listener, 'conversation is observed'); listener({ type: 'item', item }); },
     pauseNextState() {
       let entered = false;
       let release!: () => void;
@@ -211,7 +222,6 @@ test('workspace registration gates real HTTP and retains disk files, history and
   assert.equal(binding?.cwd, folder);
   const history = [{ id: 'saved-message', kind: 'assistant', status: 'completed', text: 'Saved conversation' }] as const;
   f.setHistory([...history]);
-  f.store.mergeHistory(id, [...history]);
   f.setState({ ...nativeState, status: 'waiting', runId: 'waiting-run', pendingInputs: 1 });
   assert.equal((await manage({ action: 'remove' })).body.error, 'workspace_remove_busy');
   f.setState(nativeState);
@@ -292,12 +302,12 @@ test('SSE preserves security headers, replays durable changes and resets expired
   assert.match(first.response.headers.get('cache-control')!, /no-store/);
   assert.equal((await first.named('ready'))?.data.revision, cut);
   assert.ok(await first.named('heartbeat'));
-  f.store.saveLiveItem(id, { id: 'live-one', kind: 'assistant', status: 'running', text: 'first body' });
-  const emitted = (await first.named('change'))!; changeEventSchema.parse(emitted.data);
+  await f.live(id, { id: 'live-one', kind: 'assistant', status: 'running', text: 'first body' });
+  const emitted = (await itemChange(first))!; changeEventSchema.parse(emitted.data);
   assert.equal(emitted.data.item.text, 'first body'); assert.equal(emitted.id, String(emitted.data.revision)); first.close();
-  f.store.saveLiveItem(id, { id: 'live-one', kind: 'assistant', status: 'running', text: 'full current body after disconnect' });
+  await f.live(id, { id: 'live-one', kind: 'assistant', status: 'running', text: 'full current body after disconnect' });
   const replay = await f.stream('?cursor=0', { 'last-event-id': emitted.id! }); await replay.named('ready');
-  const resumed = (await replay.named('change'))!; assert.equal(resumed.data.revision, emitted.data.revision + 1);
+  const resumed = (await itemChange(replay))!; assert.ok(resumed.data.revision > emitted.data.revision);
   assert.equal(resumed.data.item.id, 'live-one'); assert.equal(resumed.data.item.text, 'full current body after disconnect'); replay.close();
   assert.equal((await f.request('/events?cursor=1e3')).status, 400);
   assert.equal((await f.request('/events?cursor=9007199254740992')).status, 400);
@@ -313,11 +323,11 @@ test('logout closes only its session stream, and reset blocks the next event bef
   const end = first.next().then(value => value === null, () => true);
   assert.equal((await f.request('/api/private/logout', { method: 'POST', body: {} })).status, 200);
   assert.equal(await end, true);
-  f.store.saveLiveItem(id, { id: 'after-logout', kind: 'notice', status: 'completed', text: 'Second session still authorized' });
-  assert.equal((await second.named('change'))!.data.item.text, 'Second session still authorized');
+  await f.live(id, { id: 'after-logout', kind: 'notice', status: 'completed', text: 'Second session still authorized' });
+  assert.equal((await itemChange(second))!.data.item.text, 'Second session still authorized');
   await f.auth.reset(randomBytes(32).toString('base64url'));
   const revoked = second.next().then(value => value === null, () => true);
-  f.store.saveLiveItem(id, { id: 'after-reset', kind: 'notice', status: 'completed', text: 'Must not reach revoked reader' });
+  await f.live(id, { id: 'after-reset', kind: 'notice', status: 'completed', text: 'Must not reach revoked reader' });
   assert.equal(await revoked, true);
 });
 
@@ -343,7 +353,7 @@ test('idle streams recheck revoked credentials, while oversized events fall back
   const f = await fixture(t); const id = f.seed();
   const stream = await f.stream(); await stream.named('ready');
   const text = 'Synthetic long body '.repeat(8000);
-  f.store.saveLiveItem(id, { id: 'long-live', kind: 'assistant', status: 'running', text });
+  await f.live(id, { id: 'long-live', kind: 'assistant', status: 'running', text });
   const change = (await stream.named('change'))!; assert.equal(change.data.item, undefined);
   assert.equal((await f.request(`/conversations/${id}`)).body.history.liveItems.find((item: NativeItem) => item.id === 'long-live').text, text);
   await f.auth.reset(randomBytes(32).toString('base64url'));
@@ -353,21 +363,31 @@ test('idle streams recheck revoked credentials, while oversized events fall back
   assert.ok(Date.now() - revokedAt < 1000, 'server heartbeat must close before the client safety timeout');
 });
 
-test('history byte pagination preserves complete messages and reports bounded live output', async t => {
+test('native pages shrink to fit the response budget, read through to the first message, and report bounded live output', async t => {
   const f = await fixture(t); const id = f.seed();
   const items: NativeItem[] = Array.from({ length: 16 }, (_, index) => ({ id: `large-${index}`, kind: 'assistant', status: 'completed', text: String(index).padStart(2, '0') + 'x'.repeat(1024 * 1024 - 2) }));
-  f.store.mergeHistory(id, items);
+  f.setHistory(items);
   const first = await f.request(`/conversations/${id}`); assert.equal(first.status, 200); snapshotSchema.parse(first.body);
-  assert.ok(first.body.history.items.length < items.length); assert.ok(first.body.history.hasOlder);
+  assert.ok(first.body.history.items.length > 0 && first.body.history.items.length < items.length); assert.ok(first.body.history.olderCursor);
   assert.equal(first.body.history.items.at(-1).id, 'large-15');
-  const older = await f.request(`/conversations/${id}/older?beforeItemId=${encodeURIComponent(first.body.history.olderBeforeItemId)}`);
-  assert.equal(older.status, 200); assert.ok(older.body.history.items.every((item: NativeItem) => !first.body.history.items.some((previous: NativeItem) => previous.id === item.id)));
-  for (const item of [...first.body.history.items, ...older.body.history.items]) assert.equal(item.text, items.find(candidate => candidate.id === item.id)!.text);
-  f.store.saveLiveItem(id, { id: 'huge-live', kind: 'assistant', status: 'running', text: '\u0001'.repeat(1024 * 1024) });
-  const limited = await f.request(`/conversations/${id}`); assert.equal(limited.status, 200); assert.equal(limited.body.history.liveItemsLimited, true);
+  const seen: NativeItem[] = [...first.body.history.items]; let cursor: string | null = first.body.history.olderCursor;
+  while (cursor) {
+    const older = await f.request(`/conversations/${id}/history?cursor=${encodeURIComponent(cursor)}`);
+    assert.equal(older.status, 200); historyPageSchema.parse(older.body);
+    seen.unshift(...older.body.items); cursor = older.body.olderCursor;
+  }
+  assert.deepEqual(seen.map(item => item.id), items.map(item => item.id));
+  for (const item of seen) assert.equal(item.text, items.find(candidate => candidate.id === item.id)!.text);
+  assert.equal((await f.request(`/conversations/${id}/history?cursor=${Buffer.from(JSON.stringify({ c: randomUUID(), n: '4' })).toString('base64url')}`)).body.error, 'history_cursor_invalid');
+  assert.equal((await f.request(`/conversations/${id}/history?cursor=bad%2Fcursor`)).status, 400);
+  assert.equal((await f.request(`/conversations/${id}/history?cursor=${encodeURIComponent(first.body.history.olderCursor)}`, { authenticated: false })).status, 401);
+  await f.live(id, { id: 'huge-live', kind: 'assistant', status: 'running', text: '\u0001'.repeat(1024 * 1024) });
+  // Live output is bounded by the response budget: it is either returned whole or flagged as limited.
+  await eventually(async () => { const body = (await f.request(`/conversations/${id}`)).body; return body.history.liveItemsLimited || body.history.liveItems.some((item: NativeItem) => item.id === 'huge-live'); });
+  const limited = await f.request(`/conversations/${id}`); assert.equal(limited.status, 200); snapshotSchema.parse(limited.body);
   assert.ok(Buffer.byteLength(JSON.stringify(limited.body)) < 12 * 1024 * 1024);
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM workbench_live_items').get()?.n, 0);
 });
-
 test('a real non-reading TCP client is evicted under backpressure without an unbounded event queue', async t => {
   const f = await fixture(t, { maxConnections: 1, maxConnectionsPerSession: 1, slowClientMs: 100 }); const id = f.seed();
   const paused = await new Promise<import('node:http').IncomingMessage>((resolve, reject) => {
@@ -376,7 +396,9 @@ test('a real non-reading TCP client is evicted under backpressure without an unb
   });
   assert.equal(paused.statusCode, 200); paused.on('error', () => {});
   const text = '\u0001'.repeat(7900);
-  for (let index = 0; index < 700; index++) f.store.saveLiveItem(id, { id: 'backpressure', kind: 'assistant', status: 'running', text: text + String(index) });
+  await f.live(id, { id: 'backpressure', kind: 'assistant', status: 'running', text });
+  // Each durable change hint carries the current in-memory body.
+  for (let index = 0; index < 700; index++) f.store.touch(id, 'backpressure');
   await new Promise(resolve => setTimeout(resolve, 400));
   const replacement = await f.stream(); assert.equal(replacement.response.status, 200, 'slow client connection slot must be released');
   await replacement.named('ready'); replacement.close(); paused.destroy();

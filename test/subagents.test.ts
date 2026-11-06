@@ -26,7 +26,8 @@ class Peer implements HarnessAdapter {
   async catalog(): Promise<Catalog> { return { id: 'codex', available: true, models: [{ id: 'model', label: 'model' }], permissions: [{ id: 'workspace', label: 'workspace', description: 'synthetic' }] }; }
   async create(input: { cwd: string; configuration: Configuration }, bound: (value: Binding) => void): Promise<Binding> { const value = { id: 'root', cwd: input.cwd, configuration: input.configuration, details: {} }; bound(value); return value; }
   async state(): Promise<NativeState> { return idle(); }
-  async history(): Promise<HistoryPage> { return { items: [], olderCursor: null }; }
+  records: HistoryPage['items'] = [];
+  async history(): Promise<HistoryPage> { return { items: structuredClone(this.records), olderCursor: null }; }
   async submit(): Promise<Receipt> { return { outcome: 'accepted', runId: 'run' }; }
   async reconcile(): Promise<Receipt> { return { outcome: 'unknown', reason: 'not_found' }; }
   async stop(_binding: Binding, runId: string): Promise<Receipt> { return { outcome: 'accepted', runId }; }
@@ -52,7 +53,7 @@ function fixture(t: TestContext) {
   const id = randomUUID(); const configuration = { modelId: 'model', permissionId: 'workspace' };
   store.createConversation({ id, harnessId: 'codex', workspaceId: 'fixture', cwd: workspaces[0]!.directory, configuration });
   store.saveBinding(id, { id: 'root', cwd: workspaces[0]!.directory, configuration, details: {} });
-  store.setConversationState(id, { readiness: 'ready', state: idle() }); store.setHistoryCursor(id, { loaded: true, olderCursor: null, beforeItemId: null });
+  store.setConversationState(id, { readiness: 'ready', state: idle() });
   t.after(async () => { await service.close(); db.close(); rmSync(directory, { recursive: true, force: true }); });
   return { db, store, peer, service, id };
 }
@@ -74,7 +75,7 @@ test('the native tree becomes an index with ownership, nesting and conversation 
   await assert.rejects(f.service.subagentHistory(f.id, 'other-conversation-agent'), { code: 'subagent_not_found' });
   await assert.rejects(f.service.subagentHistory(f.id, '../escape'), { code: 'invalid_request' });
   await assert.rejects(f.service.subagentHistory(f.id, 'a..b'), { code: 'invalid_request' }, 'dot segments are refused even without a slash');
-  assert.equal(f.store.readHistory(f.id).items.length, 0, 'child transcripts are never stored');
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM workbench_items').get()?.n, 0, 'child transcripts are never stored');
 });
 
 test('lost observation downgrades every surface to unverified and refuses stops until a verified read', async t => {
@@ -178,15 +179,16 @@ test('a dispatching stop interrupted by a restart becomes unknown, and an empty 
   assert.equal(f.store.getConversation(other)!.subagents, undefined);
 });
 
-test('collaboration records persist with history and replay into snapshots', t => {
+test('collaboration records read from native history and live events replay into snapshots', async t => {
   const f = fixture(t);
-  f.store.mergeHistory(f.id, [{ id: 'collab', kind: 'notice', text: '派出子 Agent', status: 'completed', runId: 'run', collaboration: { action: 'started', agentIds: ['child-a', 'child-b'] } }]);
-  f.store.saveLiveItem(f.id, { id: 'collab-live', kind: 'notice', text: '子 Agent 已完成', status: 'completed', runId: 'run', collaboration: { action: 'completed', agentIds: ['child-a'] } });
-  const history = f.store.readHistory(f.id);
-  assert.deepEqual(history.items[0]!.collaboration, { action: 'started', agentIds: ['child-a', 'child-b'] });
-  assert.deepEqual(f.store.getItem(f.id, 'collab-live')!.collaboration, { action: 'completed', agentIds: ['child-a'] });
+  f.peer.records = [{ id: 'collab', kind: 'notice', text: '派出子 Agent', status: 'completed', runId: 'run', collaboration: { action: 'started', agentIds: ['child-a', 'child-b'] } }];
+  const opened = await f.service.open(f.id);
+  assert.deepEqual(opened.history.items[0]!.collaboration, { action: 'started', agentIds: ['child-a', 'child-b'] });
+  await f.service.reading(f.id, randomUUID());
+  f.peer.emit({ type: 'item', item: { id: 'collab-live', kind: 'notice', text: '子 Agent 已完成', status: 'completed', runId: 'run', collaboration: { action: 'completed', agentIds: ['child-a'] } } });
+  assert.deepEqual(f.service.liveItem(f.id, 'collab-live')!.collaboration, { action: 'completed', agentIds: ['child-a'] });
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM workbench_live_items').get()?.n, 0, 'live bodies stay in memory');
 });
-
 test('a later verified read settles an unknown stop whose target no longer runs, without another native call', async t => {
   const f = fixture(t);
   f.peer.tree = { agents: [running] };

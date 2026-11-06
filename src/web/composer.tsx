@@ -30,14 +30,14 @@ export function Composer(props: Props) {
     try {
       const data = await new Promise<string>((resolve,reject) => { const r = new FileReader(); r.onload = () => resolve(String(r.result).split(',')[1]!); r.onerror = () => reject(Error()); r.readAsDataURL(item.file); });
       const response = await fetch(`/api/private/workbench/conversations/${conversation}/resources`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf }, body: JSON.stringify({ name: item.file.name.slice(0,120) || '图片', data }), signal: AbortSignal.timeout(20000) });
-      if (!response.ok) throw Error('upload_failed');
+      if (!response.ok) throw Error(response.status === 507 ? 'storage_budget_reached' : 'upload_failed');
       const image = imageSchema.parse(await response.json());
       // This component is keyed by conversation: late uploads never enter another draft.
       if (!alive.current) return;
       if (!change({ ...current.current, images: [...(current.current.images ?? []), image] }, true)) throw Error('draft_storage_failed');
       await removeUpload(item.id);
       setUploads(old => old.filter(u => u.id !== item.id));
-    } catch { if (alive.current) { setUploads(old => old.map(u => u.id === item.id ? { ...u, status: 'failed' } : u)); setError('图片上传失败，文件已保留；可以重试或移除。'); } }
+    } catch (reason) { if (alive.current) { setUploads(old => old.map(u => u.id === item.id ? { ...u, status: 'failed' } : u)); setError(reason instanceof Error && reason.message === 'storage_budget_reached' ? '存储已达到预算上限，暂时不能上传图片；文件已保留。可以在侧栏“存储”中清理。' : '图片上传失败，文件已保留；可以重试或移除。'); } }
   }
   async function add(files: File[]) {
     if (draft.pending || sending) return;

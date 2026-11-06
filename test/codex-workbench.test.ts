@@ -112,7 +112,7 @@ test('Codex transport loss immediately persists unknown, preserves facts, and re
   store.enqueueOperation({ id: p.operationId, conversationId: id, type: 'message', payload: { text: 'Synthetic work' } });
   store.claimOperation(p.operationId); store.settleOperation(p.operationId, { outcome: 'accepted', runId: 'run-1' });
   await service.start();
-  await until(() => store.getConversation(id)?.state.status === 'running' && store.readHistory(id).items.length === 1);
+  await until(() => store.getConversation(id)?.state.status === 'running' && service.snapshot(id).history.items.length === 1);
   const changes: NativeChange[] = [];
   const release = await adapter.watch(binding, change => changes.push(change));
   p.cleanup(async () => { release(); });
