@@ -14,6 +14,7 @@ import { parseArgs } from 'node:util';
 import { DatabaseSync } from 'node:sqlite';
 import { z } from 'zod';
 import type { Binding, HarnessAdapter, HarnessId, HarnessInput, NativeItem, NativeState, Receipt } from '../../src/harness/types.ts';
+import { HarnessError } from '../../src/harness/types.ts';
 import { nativeSkill, resolveSkillInput, skillOptions } from '../../src/harness/skills.ts';
 import type { QueueDelivery } from '../../src/shared/workbench.ts';
 import { buildApp } from '../../src/server/app.ts';
@@ -23,12 +24,13 @@ import { createWorkbenchStore } from '../../src/server/workbench-store.ts';
 import { Workbench } from '../../src/server/workbench.ts';
 import { createWorkbenchHttp } from '../../src/server/workbench-http.ts';
 import { WorkspaceRegistry } from '../../src/server/workspace-registry.ts';
-import { itemSchema, stateSchema, usageSchema } from '../../src/shared/workbench.ts';
+import { itemSchema, stateSchema, subagentStatusSchema, teamSchema, usageSchema } from '../../src/shared/workbench.ts';
 
 process.umask(0o077);
 const repository = fileURLToPath(new URL('../../', import.meta.url));
 const cliSchema = z.object({
-  command: z.enum(['serve', 'init', 'reset', 'inspect', 'inspect-deletions', 'reject-delete-next', 'complete', 'prove', 'seed', 'disconnect', 'reconnect', 'unknown-receipt', 'reject-next', 'fail-create', 'repair', 'disable-skills', 'usage-full', 'usage-compact', 'usage-total-only']),
+  command: z.enum(['serve', 'init', 'reset', 'inspect', 'inspect-deletions', 'reject-delete-next', 'complete', 'prove', 'seed', 'disconnect', 'reconnect', 'unknown-receipt', 'reject-next', 'fail-create', 'repair', 'disable-skills', 'usage-full', 'usage-compact', 'usage-total-only',
+    'spawn-subagents', 'complete-subagents', 'subagent-team', 'unknown-subagent-stop']),
   root: z.string().min(1).max(4096).refine(isAbsolute),
   port: z.coerce.number().int().min(1024).max(65535).default(4391),
   title: z.string().min(1).max(200).optional(),
@@ -45,6 +47,12 @@ const recordSchema = z.object({
   offline: z.boolean(), unknownReceipt: z.boolean(), hidden: z.boolean(), revision: z.number().int().min(0),
   skillsDisabled: z.boolean().optional(), usage: usageSchema.optional(),
   rejectDeleteNext: z.boolean().optional(),
+  /** Synthetic sub-agents. They prove workbench and browser behaviour only, never native multi-agent semantics. */
+  subagents: z.array(z.object({ id: z.string().regex(/^[a-z0-9-]{1,80}$/), parentId: z.string().max(240), name: z.string().max(200), task: z.string().max(2000),
+    status: subagentStatusSchema, external: z.literal(true).optional(), startedAt: z.number().int().optional(), endedAt: z.number().int().optional(),
+    items: z.array(itemSchema).max(200) })).max(50).default([]),
+  team: teamSchema.optional(), resultsPending: z.boolean().default(false),
+  subagentStopCalls: z.number().int().min(0).default(0), unknownSubagentStop: z.boolean().default(false),
 });
 type Native = z.infer<typeof recordSchema>;
 const idle = (): NativeState => ({ status: 'idle', pendingInputs: 0, configurationVerified: true });
@@ -120,7 +128,8 @@ async function main() {
         console.log(JSON.stringify(native.prepare('SELECT id,harness_id AS harnessId,calls,outcome FROM deletion_calls ORDER BY id').all()));
         return;
       } else if (input.command === 'inspect') {
-        console.log(JSON.stringify(all().filter(value => !input.title || value.title === input.title).map(value => ({ id: value.id, title: value.title, harnessId: value.harnessId, configuration: value.configuration, state: value.state, submitCalls: value.submitCalls, stopCalls: value.stopCalls, operationIds: value.submissions.map(item => item.id), rejectedOperationIds: value.rejectedOperationIds, nextReceipt: value.rejectNext ? 'rejected' : value.unknownReceipt ? 'unknown' : 'accepted', revision: value.revision, historyCount: value.items.length, offline: value.offline }))));
+        console.log(JSON.stringify(all().filter(value => !input.title || value.title === input.title).map(value => ({ id: value.id, title: value.title, harnessId: value.harnessId, configuration: value.configuration, state: value.state, submitCalls: value.submitCalls, stopCalls: value.stopCalls, operationIds: value.submissions.map(item => item.id), rejectedOperationIds: value.rejectedOperationIds, nextReceipt: value.rejectNext ? 'rejected' : value.unknownReceipt ? 'unknown' : 'accepted', revision: value.revision, historyCount: value.items.length, offline: value.offline,
+          subagents: value.subagents.map(agent => ({ id: agent.id, name: agent.name, status: agent.status })), subagentStopCalls: value.subagentStopCalls, nextSubagentStopReceipt: value.unknownSubagentStop ? 'unknown' : 'accepted' }))));
         return;
       } else {
         const matches = all().filter(value => value.title === input.title);
@@ -132,6 +141,35 @@ async function main() {
             value.usage = { total: 176_222_262, context: { used: input.command === 'usage-full' ? 188_743 : 83_886, capacity: 1_048_576, estimated: true } };
           }
           if (input.command === 'usage-total-only') value.usage = { total: 176_222_262 };
+          if (input.command === 'spawn-subagents') {
+            const at = Date.now(); const runId = value.state.runId ?? 'fixture-run:subagents';
+            const created = Array.from({ length: Math.min(input.count, 8) }, (_, index) => {
+              const number = value.subagents.length + index + 1;
+              return { id: 'fixture-agent-' + number, parentId: value.id, name: 'fixture_agent_' + number, task: '合成子任务 ' + number + '：整理资料', status: 'running' as const, startedAt: at,
+                items: [{ id: 'agent-' + number + ':reply', kind: 'assistant' as const, text: 'FIXTURE SUBAGENT ' + number + ' 正在整理资料。', status: 'completed' as const, runId: 'agent-run-' + number },
+                  { id: 'agent-' + number + ':tool', kind: 'tool' as const, text: '读取资料', status: 'running' as const, runId: 'agent-run-' + number, tool: { name: '运行命令', input: 'rg -n fixture notes.md' } }] };
+            });
+            value.subagents.push(...created); value.resultsPending = false;
+            value.items.push({ id: 'collab:start:' + at, kind: 'notice', text: '派出子 Agent', status: 'completed', runId, collaboration: { action: 'started', agentIds: created.map(agent => agent.id) } });
+          }
+          if (input.command === 'complete-subagents') {
+            const at = Date.now(); const done = value.subagents.filter(agent => agent.status === 'running');
+            for (const agent of done) {
+              agent.status = 'completed'; agent.endedAt = at;
+              agent.items = agent.items.map(item => item.kind === 'tool' ? { ...item, status: 'completed', tool: { ...item.tool!, output: 'notes.md:1: fixture' } } : item);
+              agent.items.push({ id: agent.id + ':done', kind: 'assistant', text: 'FIXTURE SUBAGENT DONE ' + agent.name, status: 'completed', runId: agent.items[0]!.runId! });
+            }
+            if (done.length) value.items.push({ id: 'collab:done:' + at, kind: 'notice', text: '子 Agent 已完成', status: 'completed', runId: value.state.runId ?? 'fixture-run:subagents', collaboration: { action: 'completed', agentIds: done.map(agent => agent.id) } });
+            // Codex keeps results in the parent's mailbox when the parent turn already ended.
+            value.resultsPending = value.harnessId === 'codex' && done.length > 0 && value.state.status !== 'running';
+          }
+          if (input.command === 'subagent-team') {
+            value.team = { members: [{ id: 'lead', name: 'lead', status: value.state.status === 'running' ? 'running' : 'idle', lead: true },
+              ...value.subagents.slice(0, 6).map(agent => ({ id: 'member-' + agent.id, name: agent.name, status: agent.status === 'running' ? 'running' as const : 'idle' as const, agentId: agent.id }))],
+              tasks: value.subagents.slice(0, 6).map((agent, index) => ({ id: 'task-' + (index + 1), title: agent.task, description: '合成共享任务：' + agent.task + '，交付 work/' + agent.name + '.md。',
+                status: agent.status === 'running' ? 'in_progress' as const : 'completed' as const, owner: agent.name, writeScopes: ['work/' + agent.name + '.md'] })) };
+          }
+          if (input.command === 'unknown-subagent-stop') value.unknownSubagentStop = true;
           if (input.command === 'disconnect') value.offline = true;
           if (input.command === 'reconnect') value.offline = false;
           if (input.command === 'repair') value.state = idle();
@@ -152,7 +190,7 @@ async function main() {
           }
         // Arming a future receipt does not change observed native state. An
         // invalidation here would briefly fence the very send being tested.
-        }, !['unknown-receipt', 'reject-next', 'reject-delete-next'].includes(input.command));
+        }, !['unknown-receipt', 'reject-next', 'reject-delete-next', 'unknown-subagent-stop'].includes(input.command));
       }
       console.log(JSON.stringify({ event: input.command, title: input.title }));
     } finally { native.close(); }
@@ -222,7 +260,7 @@ async function main() {
       ...(id === 'dsh' ? { async prepareDraft(input: { id: string; cwd: string }) {
         const row = native.prepare('SELECT body FROM sessions WHERE id=?').get(input.id);
         if (!row) {
-          save({ id: input.id, title: 'Prepared draft', harnessId: id, cwd: input.cwd, configuration: { modelId: 'fixture-model', permissionId: 'fixture-read' }, state: idle(), items: [], submissions: [], rejectedOperationIds: [], rejectNext: false, submitCalls: 0, stopCalls: 0, offline: false, unknownReceipt: false, hidden: false, revision: 0 });
+          save({ id: input.id, title: 'Prepared draft', harnessId: id, cwd: input.cwd, configuration: { modelId: 'fixture-model', permissionId: 'fixture-read' }, state: idle(), items: [], submissions: [], rejectedOperationIds: [], rejectNext: false, submitCalls: 0, stopCalls: 0, offline: false, unknownReceipt: false, hidden: false, revision: 0, subagents: [], resultsPending: false, subagentStopCalls: 0, unknownSubagentStop: false });
         }
         const value = load(input.id);
         if (value.cwd !== input.cwd || value.submissions.length) throw new Error('fixture_prepared_not_empty');
@@ -232,7 +270,7 @@ async function main() {
         if (input.preparedId) { const previous = load(input.preparedId); if (previous.cwd !== input.cwd || previous.harnessId !== id || previous.submissions.length) throw new Error('fixture_prepared_not_empty'); }
         const fail = native.prepare('SELECT fail_create FROM settings WHERE id = 1').get()!.fail_create === 1;
         native.prepare('UPDATE settings SET fail_create = 0 WHERE id = 1').run();
-        const value: Native = { id: input.preparedId ?? randomUUID(), title: input.title ?? 'Untitled', harnessId: id, cwd: input.cwd, configuration: input.configuration, state: fail ? { ...idle(), status: 'unknown', configurationVerified: false } : idle(), items: [], submissions: [], rejectedOperationIds: [], rejectNext: false, submitCalls: 0, stopCalls: 0, offline: false, unknownReceipt: false, hidden: false, revision: 0 };
+        const value: Native = { id: input.preparedId ?? randomUUID(), title: input.title ?? 'Untitled', harnessId: id, cwd: input.cwd, configuration: input.configuration, state: fail ? { ...idle(), status: 'unknown', configurationVerified: false } : idle(), items: [], submissions: [], rejectedOperationIds: [], rejectNext: false, submitCalls: 0, stopCalls: 0, offline: false, unknownReceipt: false, hidden: false, revision: 0, subagents: [], resultsPending: false, subagentStopCalls: 0, unknownSubagentStop: false };
         save(value);
         const binding: Binding = { id: value.id, cwd: input.cwd, configuration: input.configuration, details: {} };
         onBound(binding);
@@ -276,10 +314,38 @@ async function main() {
         } catch (error) { native.exec('ROLLBACK'); throw error; }
         if (outcome !== 'completed') throw new Error('fixture_delete_' + outcome);
       },
+      async subagents(binding) {
+        const value = checked(binding);
+        return { agents: value.subagents.map(({ items: _items, ...agent }) => agent), ...(value.team ? { team: value.team } : {}), resultsPending: value.resultsPending };
+      },
+      async subagentHistory(binding, agentId) {
+        const agent = checked(binding).subagents.find(item => item.id === agentId);
+        if (!agent) throw new HarnessError('subagent_not_owned');
+        return { brief: '主 Agent 交代：' + agent.task + '。完成后交付整理结果。', items: agent.items, olderCursor: null };
+      },
+      async observeSubagent(binding, agentId) {
+        if (!checked(binding).subagents.some(item => item.id === agentId)) throw new HarnessError('subagent_not_owned');
+        return () => {};
+      },
+      async stopSubagent(binding, agentId) {
+        checked(binding);
+        let receipt: Receipt = { outcome: 'accepted' };
+        change(binding.id, value => {
+          const agent = value.subagents.find(item => item.id === agentId);
+          if (!agent) throw new HarnessError('subagent_not_owned');
+          if (agent.status !== 'running') { receipt = { outcome: 'rejected', reason: 'subagent_not_running' }; return; }
+          value.subagentStopCalls++;
+          // A lost request never reached the native side: the agent keeps running and the receipt is unknown.
+          if (value.unknownSubagentStop) { value.unknownSubagentStop = false; receipt = { outcome: 'unknown', reason: 'fixture_receipt_lost' }; return; }
+          agent.status = 'interrupted'; agent.endedAt = Date.now();
+          agent.items = agent.items.map(item => item.status === 'running' ? { ...item, status: 'failed' } : item);
+        });
+        return receipt;
+      },
       async watch(binding, listener) {
         let revision = load(binding.id).revision;
         const timer = setInterval(() => {
-          try { const next = load(binding.id).revision; if (next !== revision) { revision = next; listener({ type: 'invalidate' }); } }
+          try { const next = load(binding.id).revision; if (next !== revision) { revision = next; listener({ type: 'invalidate' }); listener({ type: 'subagents' }); } }
           catch { listener({ type: 'invalidate' }); }
         }, 100);
         timers.add(timer);

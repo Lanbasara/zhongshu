@@ -1,3 +1,4 @@
+import { SubagentBackgroundMark } from './patterns/subagents.tsx';
 import { z } from 'zod';
 import { memo, useEffect, useRef, useState, type CSSProperties } from 'react';
 import { conversationListSchema, conversationResponseSchema, conversationTitleSchema, type Conversation, type WorkbenchConfiguration } from '../shared/workbench.ts';
@@ -144,7 +145,11 @@ function Results({ query, revision, csrf, report, rows, hideEmpty, workspaceLabe
       <button className={`conversation-link ${conversation.id === rows.selected ? 'selected' : ''}`}
         aria-current={conversation.id === rows.selected ? 'page' : undefined} onClick={() => rows.choose(conversation.id)}>
         <strong title={conversation.title}>{conversation.title}</strong>
-        <span>{conversation.harnessId === 'codex' ? 'Codex' : 'DSH'}<i title={workspaceLabel?.(conversation.workspaceId)}>{workspaceLabel?.(conversation.workspaceId) ?? rows.stateLabel(conversation)}</i></span>
+        <span>{conversation.harnessId === 'codex' ? 'Codex' : 'DSH'}{
+          // Delegated work that outlives the main turn matters more than the main agent's idle state.
+          !workspaceLabel && conversation.subagents && !['running', 'waiting'].includes(conversation.state.status) && (conversation.subagents.running || conversation.subagents.unverified)
+            ? <SubagentBackgroundMark running={conversation.subagents.running} unverified={conversation.subagents.unverified}/>
+            : <i title={workspaceLabel?.(conversation.workspaceId)}>{workspaceLabel?.(conversation.workspaceId) ?? rows.stateLabel(conversation)}</i>}</span>
       </button>
       <button className="icon-button conversation-options" aria-label={`管理对话：${conversation.title}`} onClick={() => rows.manage(conversation)}>⋯</button>
     </div>)}
@@ -277,8 +282,10 @@ function ManageDialog({ conversation, workspaceLabel, csrf, close, changed, repo
       close();
     } catch (reason) {
       if (reason instanceof RequestError && reason.status === 401) report(reason);
-      setError(reason instanceof RequestError && reason.code === 'conversation_archive_busy' ?
-        '这段对话正在运行、等待输入或尚待核实。请在结果明确后归档。' : '暂时无法确认更改。可以重试。');
+      const code = reason instanceof RequestError ? reason.code : '';
+      setError(code === 'conversation_archive_busy' ? '这段对话正在运行、等待输入或尚待核实。请在结果明确后归档。'
+        : code === 'subagents_running' ? '仍有子 Agent 在运行或停止结果待核实。归档会让原生服务停止它们；请等它们结束或先停止，再归档。'
+        : code === 'subagents_unverified' ? '暂时无法核对子 Agent 状态，请重新连接后再归档。' : '暂时无法确认更改。可以重试。');
     } finally { setBusy(false); }
   };
   const remove = async () => {
@@ -293,6 +300,7 @@ function ManageDialog({ conversation, workspaceLabel, csrf, close, changed, repo
       if (reason instanceof RequestError && reason.status === 401) report(reason);
       const code = reason instanceof RequestError ? reason.code : '';
       setError(['conversation_delete_busy', 'conversation_busy', 'conversation_preparation_incomplete'].includes(code) ? '对话仍在运行、等待输入或有待核实的工作。请先停止并处理待办，核实后再删除。' :
+        ['subagents_running', 'subagents_unverified'].includes(code) ? '仍有子 Agent 在运行或状态待核实。删除会同时删除它们；请等它们结束或先停止，核实后再删除。' :
         ['conversation_delete_unsupported', 'native_delete_unsupported', 'native_deletion_unavailable'].includes(code) ? '当前原生服务尚不支持完整删除。对话未被当作已删除，请配置支持删除的服务后重试。' :
         '删除尚未确认完成。请重试同一段对话的删除；系统会核对并继续清理，不会另建对话。');
       changed('删除尚未确认完成');

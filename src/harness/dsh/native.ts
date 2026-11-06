@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { HarnessError } from '../types.ts';
 import type { Binding, Configuration, NativeItem, NativeState } from '../types.ts';
 import { editPath } from '../edit-paths.ts';
-import { revisionSchema, usageSchema } from '../../shared/workbench.ts';
+import { revisionSchema, subagentIdSchema, usageSchema } from '../../shared/workbench.ts';
 
 export const identifier = z.string().min(1).max(240);
 export const modelSchema = z.object({ provider: identifier, model: identifier, reasoningEffort: identifier.optional() });
@@ -20,6 +20,8 @@ export const projectionsSchema = z.object({ asOfSeq: z.number().int().nonnegativ
   inbox: z.object({ 'next-turn': z.array(z.unknown()).max(1000), 'next-step': z.array(z.unknown()).max(1000) }).optional(),
   userQuestions: z.object({ active: z.array(z.unknown()).max(1000) }).optional(),
   tokenUsage: z.unknown().optional(), contextPressure: z.unknown().optional(),
+  // Sub-agent projections: the parent's direct-child catalog and team; timing lives on each child.
+  subagentCatalog: z.array(z.unknown()).max(2000).optional(), agentTeam: z.unknown().optional(), subagentTiming: z.unknown().optional(),
 }) });
 export const snapshotSchema = z.object({ type: z.literal('snapshot'), header: z.object({ id: identifier, cwd: z.string().max(4096).optional() }), cursor: z.number().int().nonnegative(), records: z.array(recordSchema).max(20000), hasMore: z.boolean(), projections: projectionsSchema, assistantStream: z.object({ revision: z.number().int(), activeAttempt: z.object({ attemptId: identifier, turn: z.number().int(), step: z.number().int(), nextIndex: z.number().int().nonnegative(), stream: z.array(z.unknown()).max(20000) }).optional() }).optional() });
 export type Snapshot = z.infer<typeof snapshotSchema>;
@@ -160,6 +162,12 @@ export function stateFrom(binding: Binding, snapshot: Snapshot): NativeState {
 export function itemFrom(session: string, event: Event, live = false, inferredTurn?: number): NativeItem | undefined {
   const data = event.data; const turn = typeof data.turn === 'number' ? data.turn : inferredTurn;
   const base = { id: `dsh:${session}:event:${event.seq}`, status: 'completed' as const, runId: turn === undefined ? undefined : runId(session, turn) };
+  // A parent's catalog event announces a new child; a settled notice reports its end and may wake the parent.
+  if (event.type === 'subagent/catalog' && subagentIdSchema.safeParse(data.childId).success)
+    return { ...base, kind: 'notice', text: '派出子 Agent', collaboration: { action: 'started', agentIds: [String(data.childId)] } };
+  const source = object(data.source);
+  if (event.type === 'user/message' && source.kind === 'subagent-settled' && subagentIdSchema.safeParse(source.senderSessionId).success)
+    return { ...base, kind: 'notice', text: typeof source.summary === 'string' ? source.summary.slice(0, 2000) : '子 Agent 已结束', collaboration: { action: 'completed', agentIds: [String(source.senderSessionId)] } };
   if (event.type === 'user/message' && typeof object(data.source).rpcId === 'string') return { ...base, kind: 'user', text: textContent(data.content), operationId: String(object(data.source).rpcId) };
   if (event.type === 'assistant/message' && turn !== undefined && typeof data.step === 'number') {
     const text = textContent(object(data.message).content); if (!text) return;

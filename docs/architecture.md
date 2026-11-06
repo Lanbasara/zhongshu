@@ -104,6 +104,18 @@ DSH 原地保存要求专用 Host 和操作者提供的维护控制器。工作�
 
 Codex 经专用 Unix socket 管理进程调用固定 CLI 和同一实例的 App Server；管理进程核对连接身份、实例状态目录和操作者固定的 Git 市场。DSH 在该实例的 Web Host 上调用原生目录和包管理 API，并按市场核对包来源。中书管理员添加公开 GitHub 来源时，Codex 管理进程持有市场提交和身份，DSH Web Host 持有索引设置；来源变更与同端安装操作互斥。两个 Harness 保留各自的来源、标识和加载语义。长期取舍见 [ADR 0009](adr/0009-instance-plugin-scope.md)，原生连接配置和复验入口见[插件管理功能地图](features/plugin-management.md)。
 
+## 原生子 Agent
+
+边界依据 [ADR 0013](adr/0013-native-subagent-observation.md)：子 Agent 由 Harness 派生和执行，中书只观察并可停止单个子 Agent，不派生、不分配、不发消息。
+
+| 层 | 当前职责 |
+| --- | --- |
+| 接入 | [共同语义](../src/harness/types.ts) 增加子 Agent 列表、过程读取、观察与停止。[Codex](../src/harness/codex/index.ts) 用 `thread/list` 的后代查询（含已归档分区）发现子 thread，沿 `parentThreadId` 核实归属，把带子 thread 身份的通知转成所属对话的提示，用 `turn/interrupt` 停止；子 thread 不被中书解除订阅。[DSH](../src/harness/dsh/index.ts) 从父会话快照读取 `subagentCatalog` 与 `agentTeam`，按 subagent 地址被动跟随子会话取状态和过程，用 `subagents/interruptByParent` 停止。两端把原生协作记录映射为带 `collaboration` 的条目 |
+| 服务 | [Workbench](../src/server/workbench.ts) 合并提示后读取原生子 Agent 树；子 Agent 运行、待核实或停止未决时计入执行责任，归档和删除前要求子树已结束。观察丢失时撤销核实。停止是带稳定编号的操作，未知回执只按核实读取结算，不重发 |
+| 数据 | [子 Agent 存储](../src/server/subagent-store.ts) 在对话行保存子 Agent 索引（身份、父子、显示信息、最后核实状态、每个子 Agent 的修订号）和停止操作表；子 Agent 过程只向原生现读，不入库 |
+| 接口 | 私有路由提供列表、过程分页、阅读租约、停止及停止结果核对；对话视图带子 Agent 摘要，变更流以摘要修订号提示页面重读 |
+| 界面 | [展示组件](../src/web/patterns/subagents.tsx) 只接收数据；[功能层](../src/web/subagents.tsx) 管理请求、租约与停止，[工作台](../src/web/workbench.tsx) 放置头部入口、阅读区面板（窄屏整页）、正文协作卡片和提示，[侧栏](../src/web/conversation-navigation.tsx) 显示后台运行标记 |
+
 ## 对话观察与删除协调
 
 会话管理边界依据 [ADR 0012](adr/0012-conversation-lifecycle.md)。Workbench 按持久化执行责任恢复，浏览器当前阅读通过有期限的租约共享观察；冷历史投影读取不建立永久订阅。事件驱动核对与有界未知状态补偿替代曾打开对话的固定正文轮询。原生驻留仍由 Harness 管理。

@@ -1,4 +1,4 @@
-import { Fragment, memo, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, memo, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Streamdown, defaultRemarkPlugins } from 'streamdown';
 import { code } from '@streamdown/code';
 import { cjk } from '@streamdown/cjk';
@@ -68,28 +68,34 @@ export function ToolGroup({ items }: { items: WorkbenchItem[] }) {
 }
 
 /** Group tools without reordering text or merging actions from separate native turns. */
-export const Transcript = memo(function Transcript({ items, conversation, onQuote, turnFiles, activeRun, activeFile, unavailableFiles, workspaceUnavailable, onOpenFile }: {
+export const Transcript = memo(function Transcript({ items, conversation, onQuote, turnFiles, activeRun, activeFile, unavailableFiles, workspaceUnavailable, onOpenFile, renderCollaboration }: {
   items: WorkbenchItem[]; conversation: string; onQuote(reference: MessageReference): void;
   turnFiles?: ReadonlyMap<string, TurnFileSummary>; activeRun?: string; activeFile?: { runId: string; path: string };
   unavailableFiles?: ReadonlySet<string>; workspaceUnavailable?: boolean;
   onOpenFile?(runId: string, path: string, trigger: HTMLButtonElement): void;
+  /** Native collaboration records render as compact cards; adjacent records of one action and turn share a card. */
+  renderCollaboration?(items: WorkbenchItem[]): ReactNode;
 }) {
-  const groups: { key: string; tools?: WorkbenchItem[]; message?: WorkbenchItem }[] = [];
+  const groups: { key: string; tools?: WorkbenchItem[]; message?: WorkbenchItem; collaboration?: WorkbenchItem[] }[] = [];
   const lastItem = new Map<string, string>();
   for (const item of items) {
     if (item.runId) lastItem.set(item.runId, item.id);
     const previous = groups.at(-1);
-    if (item.kind === 'tool') {
+    if (item.collaboration && renderCollaboration) {
+      const last = previous?.collaboration?.at(-1);
+      if (last && last.runId === item.runId && last.collaboration!.action === item.collaboration.action) previous!.collaboration!.push(item);
+      else groups.push({ key: item.id, collaboration: [item] });
+    } else if (item.kind === 'tool') {
       if (previous?.tools && previous.tools.at(-1)?.runId === item.runId) previous.tools.push(item);
       else groups.push({ key: item.id, tools: [item] });
     } else groups.push({ key: item.id, message: item });
   }
   return groups.map(group => {
-    const last = group.tools?.at(-1) ?? group.message!;
+    const last = group.tools?.at(-1) ?? group.collaboration?.at(-1) ?? group.message!;
     const run = last.runId;
     const summary = run && run !== activeRun && lastItem.get(run) === last.id ? turnFiles?.get(run) : undefined;
     return <Fragment key={group.key}>
-      {group.tools ? <ToolGroup items={group.tools}/> : <Message item={group.message!} conversation={conversation} onQuote={onQuote}/>}
+      {group.collaboration ? renderCollaboration!(group.collaboration) : group.tools ? <ToolGroup items={group.tools}/> : <Message item={group.message!} conversation={conversation} onQuote={onQuote}/>}
       {summary && onOpenFile && <TurnFiles key={summary.runId} activePath={activeFile?.runId === summary.runId ? activeFile.path : undefined}
         limited={summary.limited} onOpen={(path, trigger) => onOpenFile(summary.runId, path, trigger)}
         files={summary.paths.map(path => ({ path, unavailable: workspaceUnavailable || unavailableFiles?.has(JSON.stringify([summary.runId, path])) }))}/>}

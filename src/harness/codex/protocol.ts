@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { NativeItem } from '../types.ts';
 import { editPath } from '../edit-paths.ts';
+import { subagentIdSchema } from '../../shared/workbench.ts';
 
 export const nativeId = z.string().min(1).max(512);
 export const nativeText = z.string().max(2 * 1024 * 1024);
@@ -29,9 +30,21 @@ export const nativeItem = z.object({
   result: z.string().max(8 * 1024 * 1024).optional(), savedPath: z.string().max(4096).optional(),
   changes: z.array(z.object({ path: z.string().max(4096), diff: nativeText.optional(),
     kind: z.object({ type: z.string(), move_path: z.string().max(4096).nullish() }).optional() })).max(200).optional(),
+  // Native collaboration records: collabAgentToolCall (v1 tools, v2 wait) and subAgentActivity (v2).
+  senderThreadId: nativeId.nullish(), receiverThreadIds: z.array(nativeId).max(64).nullish(), prompt: nativeText.nullish(),
+  kind: z.string().max(64).optional(), agentThreadId: nativeId.optional(), agentPath: z.string().max(4096).optional(),
 });
 export const itemEntry = z.object({ turnId: nativeId, item: nativeItem, completedAtMs: z.number().nullable().optional() });
 export const itemsPage = z.object({ data: z.array(itemEntry).max(200), nextCursor: cursor.nullable() });
+
+type CollaborationAction = NonNullable<NativeItem['collaboration']>['action'];
+const subagentId = subagentIdSchema;
+const collabActions: Record<string, CollaborationAction> = { spawnAgent: 'started', sendInput: 'messaged', sendMessage: 'messaged', followupTask: 'messaged',
+  resumeAgent: 'messaged', wait: 'waiting', closeAgent: 'closed', interruptAgent: 'interrupted' };
+const collabText: Record<string, string> = { spawnAgent: '派出子 Agent', sendInput: '向子 Agent 发送输入', sendMessage: '向子 Agent 发送消息',
+  followupTask: '给子 Agent 新任务', resumeAgent: '恢复子 Agent', wait: '等待子 Agent', closeAgent: '关闭子 Agent', interruptAgent: '停止子 Agent', listAgents: '查看子 Agent 列表' };
+const activityActions: Record<string, CollaborationAction> = { started: 'started', interacted: 'messaged', interrupted: 'interrupted', completed: 'completed' };
+const activityText: Record<string, string> = { started: '派出子 Agent', interacted: '与子 Agent 交互', interrupted: '停止子 Agent', completed: '子 Agent 已完成' };
 
 /** Keep stable native identities; unsupported native items remain explicit notices, never fake text. */
 export function mapItem(input: z.infer<typeof nativeItem>, runId: string, cwd: string, running = false, completed = false): NativeItem {
@@ -83,6 +96,19 @@ export function mapItem(input: z.infer<typeof nativeItem>, runId: string, cwd: s
       return { ...base, kind: 'tool', text: output ? name : '原生记录未提供可展示的结果内容。', tool: { name, ...(inputText ? { input: inputText } : {}), ...(output ? { output } : {}) }, status: observedStatus };
     }
     case 'imageGeneration': return { ...base, kind: 'assistant', text: status === 'failed' ? '图片生成未完成。' : status === 'completed' && !input.result && !input.savedPath ? '原生图片资源暂不可读取。' : '', status, ...((input.result || input.savedPath) ? { imageSources: [{ ...(input.result ? { data: input.result } : { path: input.savedPath }) }] } : {}) };
+    case 'collabAgentToolCall': {
+      const action = collabActions[input.tool ?? ''];
+      const agentIds = (input.receiverThreadIds ?? []).filter(id => subagentId.safeParse(id).success).slice(0, 32);
+      const text = collabText[input.tool ?? ''] ?? '子 Agent 协作';
+      return { ...base, kind: 'notice', text, status: observedStatus === 'unknown' ? 'completed' : observedStatus,
+        ...(action && agentIds.length ? { collaboration: { action, agentIds } } : {}) };
+    }
+    case 'subAgentActivity': {
+      const action = activityActions[input.kind ?? ''];
+      const valid = subagentId.safeParse(input.agentThreadId).success;
+      return { ...base, kind: 'notice', text: activityText[input.kind ?? ''] ?? '子 Agent 活动', status: 'completed',
+        ...(action && valid ? { collaboration: { action, agentIds: [input.agentThreadId!] } } : {}) };
+    }
     case 'reasoning': return { ...base, kind: 'notice', text: input.summary?.join('\n') ?? '思考', status: running ? 'running' : 'completed' };
     case 'plan': return { ...base, kind: 'notice', text: input.text ?? '更新计划', status: running ? 'running' : 'completed' };
     default: return { ...base, kind: 'notice', text: `此原生条目的详情尚未适配展示：${input.type}。这不表示原生能力不可用。`, status: observedStatus };

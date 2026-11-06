@@ -2,12 +2,14 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { ServerResponse } from 'node:http';
 import { z } from 'zod';
 import { conversationManagementSchema, conversationSearchSchema, createConversationSchema, enqueueOperationSchema, identifierSchema, queueCommandSchema, workbenchConfigurationSchema,
+  subagentHistorySchema, subagentIdSchema, subagentListSchema, subagentStopResponseSchema,
   workspaceAddSchema, workspaceBrowseSchema, workspaceDirectoryListSchema, workspaceIdSchema, workspaceManagementSchema } from '../shared/workbench.ts';
 import type { Conversation as ConversationView, WorkbenchOperation, WorkbenchSnapshot } from '../shared/workbench.ts';
 import type { PrivateContext } from './app.ts';
 import type { Workbench } from './workbench.ts';
 import { conversationCursor, StoreError, type Conversation, type Operation, type WorkbenchChange } from './workbench-store.ts';
 import { decodeImage, ResourceError } from './resources.ts';
+import { SubagentStoreError, type SubagentStop } from './subagent-store.ts';
 import { textLimit } from './workspace-documents.ts';
 import { imageSchema, skillCatalogSchema } from '../shared/content.ts';
 
@@ -36,8 +38,13 @@ function parse<T>(schema: z.ZodType<T>, value: unknown): T {
 }
 function conversationView(value: Conversation): ConversationView {
   return { id: value.id, title: value.title, harnessId: value.harnessId, workspaceId: value.workspaceId, archived: value.archived,
-    configuration: value.configuration, readiness: value.readiness, state: value.state, error: value.error, createdAt: value.createdAt };
+    configuration: value.configuration, readiness: value.readiness, state: value.state, error: value.error, createdAt: value.createdAt,
+    ...(value.subagents ? { subagents: value.subagents } : {}) };
 }
+function stopView(value: SubagentStop) {
+  return subagentStopResponseSchema.parse({ stop: { id: value.id, status: value.status, reason: value.reason, updatedAt: value.updatedAt } });
+}
+const subagentParams = z.object({ id: z.uuid(), agent: subagentIdSchema }).strict();
 function operationView(value: Operation): WorkbenchOperation {
   const common = { id: value.id, conversationId: value.conversationId, status: value.status, runId: value.runId,
     reason: value.reason, createdAt: value.createdAt, updatedAt: value.updatedAt };
@@ -161,7 +168,7 @@ export function createWorkbenchHttp(workbench: Workbench, input: Partial<z.input
     await app.register(async privateApp => {
       privateApp.addHook('preClose', async () => close());
       privateApp.setErrorHandler((error, _request, reply) => {
-        if (error instanceof StoreError && /^[a-z][a-z0-9_]{0,99}$/.test(error.code)) return reply.code(error.statusCode).send({ error: error.code });
+        if ((error instanceof StoreError || error instanceof SubagentStoreError) && /^[a-z][a-z0-9_]{0,99}$/.test(error.code)) return reply.code(error.statusCode).send({ error: error.code });
         if (error instanceof ResourceError) return reply.code(error.statusCode).send({ error: error.message });
         const code = typeof error === 'object' && error !== null && 'statusCode' in error ? error.statusCode : undefined;
         const status = typeof code === 'number' && code >= 400 && code < 500 ? code : 500;
@@ -239,6 +246,35 @@ export function createWorkbenchHttp(workbench: Workbench, input: Partial<z.input
         if (input.active) await workbench.reading(id, input.readerId);
         else workbench.releaseReading(id, input.readerId);
         return json(reply, { ok: true });
+      });
+      // Native sub-agents: read-only views and per-agent stop. Never spawns or messages a sub-agent (ADR 0013).
+      privateApp.get('/conversations/:id/subagents', async (request, reply) => {
+        parse(noQuery, request.query); const { id } = parse(uuidParams, request.params);
+        return json(reply, subagentListSchema.parse(await workbench.subagents(id)));
+      });
+      privateApp.get('/conversations/:id/subagents/:agent/history', async (request, reply) => {
+        const { id, agent } = parse(subagentParams, request.params);
+        const { cursor } = parse(z.object({ cursor: z.string().min(1).max(4096).optional() }).strict(), request.query);
+        return json(reply, subagentHistorySchema.parse(await workbench.subagentHistory(id, agent, cursor)));
+      });
+      privateApp.post('/conversations/:id/subagents/:agent/reading', { bodyLimit: 4096 }, async (request, reply) => {
+        parse(noQuery, request.query); const { id, agent } = parse(subagentParams, request.params);
+        const input = parse(z.object({ readerId: z.uuid(), active: z.boolean() }).strict(), request.body);
+        await workbench.readingSubagent(id, agent, input.readerId, input.active);
+        return json(reply, { ok: true });
+      });
+      privateApp.post('/conversations/:id/subagents/:agent/stop', { bodyLimit: 4096 }, async (request, reply) => {
+        parse(noQuery, request.query); const { id, agent } = parse(subagentParams, request.params);
+        const input = parse(z.object({ id: z.uuid() }).strict(), request.body);
+        const stop = workbench.stopSubagent(id, agent, input.id);
+        privateApp.log.info({ event: 'subagent_stop_requested' });
+        return json(reply.code(202), stopView(stop));
+      });
+      privateApp.post('/conversations/:id/subagent-stops/:stop/reconcile', { bodyLimit: 4096 }, async (request, reply) => {
+        parse(noQuery, request.query);
+        const { id, stop } = parse(z.object({ id: z.uuid(), stop: z.uuid() }).strict(), request.params);
+        parse(noQuery, request.body ?? {});
+        return json(reply, stopView(await workbench.reconcileSubagentStop(id, stop)));
       });
       privateApp.post('/conversations/:id/delete', { bodyLimit: 4096 }, async (request, reply) => {
         parse(noQuery, request.query);

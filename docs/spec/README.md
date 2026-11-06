@@ -14,7 +14,8 @@ spec 是与用户讨论后确认的临时约定：它回答“接下来建什么
 | 会改变架构的接入实验 | 回答追加、文件保存、HTML 阅读等会改变实现的问题 | next | 每个问题有结论，决定进入 ADR | none yet | 2026-10-31 |
 | [工作区管理](workspace-management.md) | 添加已有或新建的目录，改名、置顶、搜索、移除和恢复工作区 | active | 见工作单退出条件 | 见工作单 | 2026-11-03 |
 | 运行中排队与追加输入 | 运行中排多条消息，逐条提前发送并核对归属轮次 | done | 两个真实 Harness 的队列、轮尾竞争和回执恢复通过独立执行 | [PR #19](https://github.com/Lanbasara/zhongshu/pull/19) · [执行地图](../features/execution.md#e06--e07-排队与提前发送) | 2026-11-03 |
-| 回答提问与审批 | 处理 Harness 等待的用户回答或审批 | next | 两个 Harness 的原生语义分别接通并有真实证据 | none yet | 2026-10-31 |
+| [原生子 Agent 的查看与停止](native-subagents.md) | 在对话中查看主 Agent 派生的子 Agent 与 DSH 团队，单独停止子 Agent | active | 两端真实派生、停止、恢复与待核实反例经独立验收，用户试用确认 | 已实现；作者在 fixture 与真实两端走通，独立验收与用户试用待完成 | 2026-11-06 |
+| 回答提问与审批 | 处理 Harness 等待的用户回答或审批；须同时处理子 Agent 发出的请求（[ADR 0013](../adr/0013-native-subagent-observation.md)） | next | 两个 Harness 的原生语义分别接通并有真实证据 | none yet | 2026-11-06 |
 | [工作区文件阅读与编辑](workspace-file-reading-editing.md) | 查阅工作区文件，阅读 HTML 并跳转底稿，Agent 空闲时编辑并保存纯文本 | active | 桌面和手机走通阅读与返回，验证空闲保存及冲突保稿 | 见切片 PR | 2026-11-03 |
 | 本轮文件 | 从对话轮末查看文件清单并打开工作区原文件 | done | 两个真实 Harness 的归轮、历史回看和文件打开通过独立验收 | [PR #19](https://github.com/Lanbasara/zhongshu/pull/19) · [对话验收 U11](../features/conversation-usability.md#u11-本轮文件) · [Storybook 交互入口](../features/interface.md#driving-it-with-harness) | 2026-11-03 |
 | 通用文档附件 | 在图片之外上传常见文档交给 Agent，并能回看；图片归对话基本可用性 | next | 文档生命周期、真实原生输入、失败与清理验收 | none yet | 2026-11-02 |
@@ -36,6 +37,7 @@ Ledger 状态只允许 `next / active / blocked / done`；spec front matter 使�
 - [workspace-management.md](workspace-management.md) — 已授权实施，按工作单验收
 - [workspace-file-reading-editing.md](workspace-file-reading-editing.md) — 真实 Harness 与浏览器已验证，手机真机待验收
 - [integration-probes.md](integration-probes.md) — next
+- [native-subagents.md](native-subagents.md) — 已授权实施；先实测待核实前提，实现进行中
 
 ## spec 模板
 

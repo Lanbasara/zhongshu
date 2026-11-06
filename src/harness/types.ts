@@ -1,6 +1,6 @@
 /** Product-facing semantics. Native protocol types stay inside each adapter. */
 import type { ImageAttachment, InputContent, SkillOption } from '../shared/content.ts';
-import type { ConversationUsage, QueueDelivery } from '../shared/workbench.ts';
+import type { Collaboration, ConversationUsage, QueueDelivery, SubagentStatus, TeamView } from '../shared/workbench.ts';
 export type HarnessId = 'codex' | 'dsh';
 export type Configuration = { modelId: string; permissionId: string; reasoningEffort?: string };
 export type Catalog = {
@@ -32,6 +32,35 @@ export type NativeItem = {
   fileEdits?: string[];
   /** Transient native image sources: materialized before persistence or HTTP. */
   imageSources?: { data?: string; path?: string; mediaType?: string }[];
+  /** A native collaboration record naming sub-agents of this conversation. */
+  collaboration?: Collaboration;
+};
+/** One native sub-agent in the conversation's spawn tree, as verified by this read. */
+export type NativeSubagent = {
+  id: string;
+  /** Native identity of the agent that spawned it; the conversation's own binding id for direct children. */
+  parentId: string;
+  name: string;
+  task?: string;
+  role?: string;
+  model?: string;
+  status: SubagentStatus;
+  /** Runs outside the Harness transcript (for example DSH external backends); only a final result exists. */
+  external?: boolean;
+  startedAt?: number;
+  endedAt?: number;
+};
+export type SubagentSnapshot = {
+  agents: NativeSubagent[];
+  team?: TeamView;
+  /** Children finished after the main agent's latest turn ended and no later main turn has started. */
+  resultsPending?: boolean;
+};
+export type SubagentHistory = {
+  /** The spawning agent's first instruction. It is delegated input, never the user's message. */
+  brief?: string;
+  items: NativeItem[];
+  olderCursor: string | null;
 };
 export type NativeState = {
   status: 'idle' | 'running' | 'waiting' | 'interrupted' | 'failed' | 'unknown';
@@ -59,6 +88,9 @@ export type NativeChange =
   | { type: 'item'; item: NativeItem }
   | { type: 'state'; state: NativeState }
   | { type: 'usage'; usage: ConversationUsage }
+  /** A hint that the native sub-agent tree changed. `agentId` names the sub-agent concerned; `transcript`
+   * means only its transcript grew, so its status need not be re-read. */
+  | { type: 'subagents'; agentId?: string; transcript?: boolean }
   /** A confirmed loss of observation; retain last-known facts but revoke verification immediately. */
   | { type: 'unavailable'; reason: string }
   | { type: 'invalidate' };
@@ -91,6 +123,14 @@ export interface HarnessAdapter {
    * deletion is confirmed (including a verified already-absent identity). Rejections,
    * partial cleanup and unknown transport outcomes must remain retryable operations. */
   delete?(binding: Binding): Promise<void>;
+  /** Read the verified sub-agent tree of this conversation. Never spawns or activates agents. */
+  subagents?(binding: Binding): Promise<SubagentSnapshot>;
+  /** Read one sub-agent's transcript after verifying it belongs to this binding's spawn tree. */
+  subagentHistory?(binding: Binding, agentId: string, olderCursor?: string, limit?: number): Promise<SubagentHistory>;
+  /** Keep live activity of one owned sub-agent flowing as `subagents` hints on this binding's watch. */
+  observeSubagent?(binding: Binding, agentId: string): Promise<() => void>;
+  /** Interrupt only the named owned sub-agent's current work. Never resend after an unknown receipt. */
+  stopSubagent?(binding: Binding, agentId: string): Promise<Receipt>;
   /** Changes are hints/live items; history and state are re-read on reconnect. */
   watch(binding: Binding, listener: (change: NativeChange) => void): Promise<() => void>;
   /** Close app-owned connections only; native hosts and their work have independent lifetimes. */

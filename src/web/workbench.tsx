@@ -22,6 +22,8 @@ import { InputQueue } from './input-queue.tsx';
 import { NewConversation } from './new-conversation.tsx';
 import { rememberConversation } from './conversation-preferences.ts';
 import { PluginManagement } from './plugin-management.tsx';
+import { SubagentActivity, SubagentTrigger } from './patterns/subagents.tsx';
+import { SubagentPanelHost, subagentDisplays, useSubagentList } from './subagents.tsx';
 
 const states = { idle: '就绪', running: '运行中', waiting: '等待处理', interrupted: '已中断', failed: '执行失败', unknown: '待核实' };
 const stateLabel = (c: Conversation) => c.readiness === 'preparing' ? '正在准备' : c.readiness === 'blocked' ? '准备未完成' : states[c.state.status];
@@ -45,6 +47,9 @@ const failures: Record<string, string> = {
   image_reference_changed: '图片引用已变化，请重新添加。', message_images_too_large: '这一条消息的图片合计超过 4 MiB，请减少图片后再发送。',
   skill_reference_unavailable: '无法核对所选技能。输入已保留，请重新选择技能或移除该引用。',
   queue_skill_requires_next_turn: '带技能的消息将在下一轮派发，已保留在队列中。',
+  subagents_running: '仍有子 Agent 在运行或停止结果待核实。请等它们结束或先停止，再归档或删除。',
+  subagents_unverified: '暂时无法核对子 Agent 状态，请重新连接后再试。',
+  subagent_not_found: '这个子 Agent 不属于当前对话，或已无法读取。',
 };
 const stateReasons: Record<string, string> = {
   workspace_removed: failures.workspace_removed!,
@@ -96,6 +101,12 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
   const [listRevision, refreshList] = useState(0);
   const sidebarWidth = useSidebarWidth();
   const [reader, setReader] = useState(false);
+  /** Open sub-agent panel; `agentId` selects one sub-agent's transcript. Exclusive with the workspace reader. */
+  const [subagentPanel, setSubagentPanel] = useState<{ agentId?: string }>();
+  const subagentOrigin = useRef<HTMLButtonElement | null>(null);
+  const subagentTrigger = useRef<HTMLButtonElement>(null);
+  const subagentClose = useRef<HTMLButtonElement>(null);
+  const [narrow, setNarrow] = useState(() => matchMedia('(max-width:759px)').matches);
   const [readerExpanded, setReaderExpanded] = useState(false);
   const [readerTarget, setReaderTarget] = useState<ReaderTarget>();
   const [unavailableFiles, setUnavailableFiles] = useState<ReadonlySet<string>>(new Set());
@@ -206,6 +217,13 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
     if (id && id !== selectedRef.current) return;
     if (!refreshTimer.current) refreshTimer.current = setTimeout(() => { refreshTimer.current = undefined; if (selectedRef.current) void loadRef.current(selectedRef.current); }, 180);
   };
+  useEffect(() => {
+    const query = matchMedia('(max-width:759px)');
+    const update = () => setNarrow(query.matches);
+    query.addEventListener('change', update);
+    return () => query.removeEventListener('change', update);
+  }, []);
+  useEffect(() => { setSubagentPanel(undefined); }, [selected]);
   useEffect(() => {
     alive.current = true;
     configurationRefresh.current();
@@ -432,6 +450,32 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
     if (draft.pending) { setError('请先核对上次发送，或继续编辑后再添加引用。'); return; }
     updateDraft({ ...draft, references: [...(draft.references ?? []), reference].slice(0,8) });
   }, [draft, updateDraft]);
+  const subagentList = useSubagentList(conversation, report);
+  function openSubagents(agentId?: string, origin?: HTMLButtonElement) {
+    subagentOrigin.current = origin ?? subagentTrigger.current;
+    setReader(false); setReaderExpanded(false); setSubagentPanel({ ...(agentId ? { agentId } : {}) });
+  }
+  function closeSubagents() {
+    const origin = subagentOrigin.current; subagentOrigin.current = null;
+    setSubagentPanel(undefined);
+    requestAnimationFrame(() => { (origin?.isConnected ? origin : subagentTrigger.current)?.focus({ preventScroll: true }); });
+  }
+  const quoteSubagent = (name: string, text: string) => {
+    if (draft.pending) { setError('请先核对上次发送，或继续编辑后再添加引用。'); return; }
+    const quoted = `> ${name}：${text.replace(/\n/g, '\n> ')}\n`;
+    updateDraft({ ...draft, text: draft.text.trim() ? `${draft.text}\n${quoted}` : quoted });
+  };
+  const collaboration = (records: WorkbenchItem[]) => {
+    const ids = [...new Set(records.flatMap(record => record.collaboration?.agentIds ?? []))].slice(0, 32);
+    const all = subagentDisplays(subagentList.list?.agents ?? [], Date.now());
+    const agents = ids.map(id => all.find(agent => agent.id === id) ?? { id, name: '子 Agent', status: 'unknown' as const });
+    return <SubagentActivity action={records[0]!.collaboration!.action} agents={agents}
+      onOpen={(id, trigger) => openSubagents(id, trigger)}/>;
+  };
+  const subagentHost = conversation && subagentPanel && <SubagentPanelHost conversation={conversation} list={subagentList.list}
+    {...(subagentPanel.agentId ? { selectedId: subagentPanel.agentId } : {})} narrow={narrow} csrf={csrf} closeRef={subagentClose}
+    onSelect={(agentId, origin) => { if (origin) subagentOrigin.current = origin; setSubagentPanel({ ...(agentId ? { agentId } : {}) }); }}
+    onClose={closeSubagents} onReload={subagentList.reload} onQuote={quoteSubagent} report={report}/>;
   const configurationLabel = conversationConfigurationLabel(conversation, configuration?.harnesses);
   const permission = configuration?.harnesses.find(h => h.id === conversation?.harnessId)?.permissions.find(p => p.id === conversation?.configuration.permissionId);
   return <><WorkbenchFrame style={sidebarWidth.style} navigationOpen={navigation} onNavigationChange={setNavigation}
@@ -445,12 +489,14 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
       {sidebarWidth.separator}
       <div className="sidebar-bottom">
         <button className="sidebar-files" aria-current={managingPlugins ? 'page' : undefined} onClick={() => { setManagingPlugins(true); setReader(false); setNavigation(false); }}><Puzzle size={16}/><span>插件管理</span><ChevronRight size={13}/></button>
-        <button className="sidebar-files" aria-expanded={reader} disabled={!configuration?.workspaces.length} onClick={() => { setReader(true); setNavigation(false); }}><FolderOpen size={16}/><span>工作区文件</span><ChevronRight size={13}/></button>
+        <button className="sidebar-files" aria-expanded={reader} disabled={!configuration?.workspaces.length} onClick={() => { setSubagentPanel(undefined); setReader(true); setNavigation(false); }}><FolderOpen size={16}/><span>工作区文件</span><ChevronRight size={13}/></button>
         <div className="sidebar-account"><span className="network" role="status"><span className="network-dot"/>{connection}</span><IconButton label="退出登录" onClick={logout} disabled={busy}><LogOut size={15}/></IconButton></div>
       </div>
     </>}
-    header={managingPlugins ? <><div className="conversation-heading"><p>工作台 / 插件</p></div><Button variant="quiet" onClick={() => setManagingPlugins(false)}>返回工作台</Button></> : <><div className="conversation-heading"><h1>{conversation?.title ?? (creating ? '新对话' : selected ? '正在恢复对话…' : '从这里，接着做。')}</h1><p>{conversation ? `${conversation.harnessId === 'codex' ? 'Codex' : 'DSH'} · ${removedWorkspace?.label ?? configuration?.workspaces.find(w => w.id === conversation.workspaceId)?.label ?? '工作区'} · ${workspaceRemoved ? '工作区已移除' : stateLabel(conversation)}` : '一段对话，一个可以接续的工作现场'}</p></div><div className="header-actions"><IconButton label="打开工作区文件" disabled={!configuration?.workspaces.length} onClick={() => setReader(true)}><FolderOpen size={17}/></IconButton><IconButton label="重新连接" onClick={() => { scheduleRefresh(); refreshConfiguration(); }}><RefreshCw size={15}/></IconButton></div></>}
-    reader={!managingPlugins && reader && configuration && <WorkspaceReader workspaces={configuration.workspaces} initialWorkspace={conversation?.workspaceId}
+    header={managingPlugins ? <><div className="conversation-heading"><p>工作台 / 插件</p></div><Button variant="quiet" onClick={() => setManagingPlugins(false)}>返回工作台</Button></> : <><div className="conversation-heading"><h1>{conversation?.title ?? (creating ? '新对话' : selected ? '正在恢复对话…' : '从这里，接着做。')}</h1><p>{conversation ? `${conversation.harnessId === 'codex' ? 'Codex' : 'DSH'} · ${removedWorkspace?.label ?? configuration?.workspaces.find(w => w.id === conversation.workspaceId)?.label ?? '工作区'} · ${workspaceRemoved ? '工作区已移除' : stateLabel(conversation)}` : '一段对话，一个可以接续的工作现场'}</p></div><div className="header-actions">{conversation?.subagents && <SubagentTrigger ref={subagentTrigger} running={conversation.subagents.running} unverified={conversation.subagents.unverified}
+      total={conversation.subagents.total} attention={conversation.subagents.resultsPending} expanded={!!subagentPanel}
+      onClick={() => subagentPanel ? closeSubagents() : openSubagents()}/>}<IconButton label="打开工作区文件" disabled={!configuration?.workspaces.length} onClick={() => { setSubagentPanel(undefined); setReader(true); }}><FolderOpen size={17}/></IconButton><IconButton label="重新连接" onClick={() => { scheduleRefresh(); refreshConfiguration(); }}><RefreshCw size={15}/></IconButton></div></>}
+    reader={!managingPlugins && subagentPanel && conversation && !narrow ? subagentHost : !managingPlugins && reader && configuration && <WorkspaceReader workspaces={configuration.workspaces} initialWorkspace={conversation?.workspaceId}
       target={readerTarget} onTargetUnavailable={target => {
         if (target === readerTarget && readerTarget.conversationId === selectedRef.current)
           setUnavailableFiles(previous => new Set(previous).add(JSON.stringify([readerTarget.runId, target.path])));
@@ -464,7 +510,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
             {windowed && <p className="history-note">正在阅读较早的一页。<button className="text-button" onClick={() => { if (selected) { atBottom.current = true; void load(selected, true); } }}>回到最新内容</button></p>}
             {!snapshot && <p role="status" className="quiet">正在核对远端状态与历史…</p>}
             {snapshot && visible.length === 0 && <p className="quiet conversation-start">{conversation?.readiness === 'ready' ? '对话已准备好。说说你希望完成什么。' : '正在准备原生会话…'}</p>}
-            <Transcript items={visible} conversation={selected} onQuote={quote} turnFiles={turnFiles}
+            <Transcript items={visible} conversation={selected} onQuote={quote} turnFiles={turnFiles} renderCollaboration={collaboration}
               activeRun={running ? conversation?.state.runId : undefined} activeFile={readerTarget?.conversationId === selected ? readerTarget : undefined}
               workspaceUnavailable={workspaceRemoved} unavailableFiles={unavailableFiles} onOpenFile={openTurnFile}/>
           </div>
@@ -473,6 +519,13 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
           {moreOutput && <button className="new-output" onClick={() => { atBottom.current = true; if (scroll.current) scroll.current.scrollTop = scroll.current.scrollHeight; setMoreOutput(false); }}>↓ 有新内容</button>}
           {(conversation?.error || conversation?.state.reason) && <p className="state-notice">{explain(conversation.error ?? conversation.state.reason!)}</p>}
           {conversation?.state.status === 'interrupted' && <p className="state-notice">本轮已中断。此前启动的后台工具可能仍在运行，已经产生的改动不会撤销。</p>}
+          {conversation?.state.status === 'interrupted' && !!conversation.subagents?.running && <p className="state-notice" role="status">
+            主 Agent 已停止，仍有 {conversation.subagents.running} 个子 Agent 在运行。{conversation.harnessId === 'dsh' && '它们完成后，DSH 可能让主 Agent 自动继续工作。'}
+            <button type="button" className="text-button" onClick={() => openSubagents()}>查看子 Agent</button></p>}
+          {conversation?.subagents?.resultsPending && !running && !conversation.subagents.running && <p className="state-notice" role="status">
+            子 Agent 在主 Agent 上一轮结束后才完成，主 Agent 要到下一轮才会读到它们的结果。
+            <button type="button" className="text-button" onClick={() => openSubagents()}>查看子 Agent</button>
+            {usable && !draft.pending && <button type="button" className="text-button" onClick={() => updateDraft({ ...draft, text: draft.text.trim() ? `${draft.text}\n子 Agent 都结束了，请汇总它们的结果。` : '子 Agent 都结束了，请汇总它们的结果。' })}>填入“请汇总结果”</button>}</p>}
           {snapshot?.history.liveItemsLimited && <p className="state-notice">部分实时输出较长，将在完成后从历史中读取完整内容。</p>}
           {!!conversation?.state.pendingInputs && <p className="state-notice">原生服务仍保留 {conversation.state.pendingInputs} 项待处理输入。停止当前轮不会清空它们。</p>}
           {!workspaceRemoved && (unresolved || conversation?.state.status === 'unknown' || !previousMessageSettled) && <div className="state-notice">{!previousMessageSettled ? '正在核对上一条消息对应轮次的执行结果。' : '正在核对执行结果。'}<button className="text-button" onClick={() => void reconcile()}>查询原生结果</button></div>}
@@ -499,7 +552,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
       </>}
       {(error || authError || unavailableNotice) && <div className="workbench-error" role="alert"><span>{error || authError || unavailableNotice}</span><button className="text-button" onClick={() => { setError(''); setUnavailableNotice(''); }}>关闭</button></div>}
     </WorkbenchFrame>
-
+    {!managingPlugins && narrow && subagentHost}
     {pickingFile && selected && !workspaceRemoved && <FilePicker conversation={selected} onClose={() => setPickingFile(false)} onSelect={(reference: MessageReference) => { const next = { ...draft, text: draft.text.endsWith('@') ? draft.text.slice(0,-1) : draft.text, references: [...(draft.references ?? []), reference].slice(0,8) }; updateDraft(next); }}/ >}
     {workspaceAction && <WorkspaceManagement action={workspaceAction} roots={configuration?.workspaceRoots ?? []} csrf={csrf}
       close={() => setWorkspaceAction(undefined)} changed={id => { if(workspaceAction?.kind==='add')setAddedWorkspace(id);refreshConfiguration(); refreshNavigation(); }} report={report} />}

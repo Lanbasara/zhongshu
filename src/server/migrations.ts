@@ -212,6 +212,19 @@ export const productMigrations: Migration[] = [{ version: 2, sql: `
   INSERT INTO workbench_changes_independent SELECT * FROM workbench_changes;
   DROP TABLE workbench_changes;
   ALTER TABLE workbench_changes_independent RENAME TO workbench_changes;
+` }, { version: 15, sql: `
+  ALTER TABLE workbench_conversations ADD COLUMN subagents_json TEXT;
+  CREATE TABLE workbench_subagent_stops (
+    id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL REFERENCES workbench_conversations(id) ON DELETE CASCADE,
+    agent_id TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('queued','dispatching','accepted','unknown','rejected')),
+    reason TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  ) STRICT;
+  CREATE INDEX workbench_subagent_stops_agent ON workbench_subagent_stops(conversation_id, agent_id, created_at);
+  CREATE INDEX workbench_subagent_stops_status ON workbench_subagent_stops(status, conversation_id);
 ` }];
 
 /** Runs inside restoreDatabase's private staging transaction, before the database is published. */

@@ -1,9 +1,10 @@
 import { createDeletionStore, type DeletionStore } from './conversation-deletions.ts';
+import { createSubagentStore, summarizeSubagents, type SubagentStore } from './subagent-store.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import type { DatabaseSync, StatementSync } from 'node:sqlite';
 import { z } from 'zod';
-import { conversationTitleSchema, identifierSchema, messagePayload, queueCommandSchema, queueDeliverySchema, queueLimit, queuePauseSchema, skillRequiresNextTurn, stateSchema, turnFileLimit, usageSchema, workspaceLimit } from '../shared/workbench.ts';
-import type { ConversationUsage, QueueCommand, QueueDelivery, QueuePause, QueueView, TurnFileSummary } from '../shared/workbench.ts';
+import { collaborationSchema, conversationTitleSchema, identifierSchema, messagePayload, queueCommandSchema, queueDeliverySchema, queueLimit, queuePauseSchema, skillRequiresNextTurn, stateSchema, turnFileLimit, usageSchema, workspaceLimit } from '../shared/workbench.ts';
+import type { ConversationUsage, QueueCommand, QueueDelivery, QueuePause, QueueView, SubagentSummary, TurnFileSummary } from '../shared/workbench.ts';
 import { contentFields, inputFields, recordedFilePath, toolSchema, validSkillSpans, type InputContent } from '../shared/content.ts';
 import { createResourceStore } from './resources.ts';
 import type { Binding, Configuration, HarnessId, NativeItem, NativeState, Receipt } from '../harness/types.ts';
@@ -15,6 +16,7 @@ export type Conversation = {
   configuration: Configuration; binding: Binding | null; readiness: Readiness;
   archived: boolean; state: NativeState; error: string | null; createdAt: number; lastActivityAt: number;
   usage?: ConversationUsage;
+  subagents?: SubagentSummary;
   historyLoaded: boolean; nativeOlderCursor: string | null; nativeOlderBeforeItemId: string | null;
 };
 export type CreateConversation = Pick<Conversation, 'id' | 'harnessId' | 'workspaceId' | 'cwd' | 'configuration'> & { title?: string; preparationId?: string };
@@ -53,6 +55,7 @@ export function conversationCursor(conversation: Conversation, query: Conversati
 type StoredQueue = Omit<QueueView, 'mode'> & { afterRunId: string | null };
 export interface WorkbenchStore {
   deletions: DeletionStore;
+  subagents: SubagentStore;
   resources: ReturnType<typeof createResourceStore>;
   reservePreparation(workspaceId: string, cwd: string, id: string, expectedId?: string): { preparationId: string; nativeId: string };
   completePreparation(id: string): void;
@@ -109,7 +112,7 @@ const nativeStateSchema = stateSchema;
 const itemSchema = z.object({
   id: identifier, kind: z.enum(['user', 'assistant', 'tool', 'notice']), text: boundedText(MAX_TEXT_BYTES),
   status: z.enum(['running', 'completed', 'failed', 'unknown']), runId: identifier.optional(), operationId: identifier.optional(),
-  ...contentFields, tool: toolSchema.optional(),
+  ...contentFields, tool: toolSchema.optional(), collaboration: collaborationSchema.optional(),
 }).strict();
 const nativeItemSchema = itemSchema.extend({ fileEdits: z.array(recordedFilePath).max(400).optional() });
 const bindingSchema = z.object({
@@ -190,6 +193,7 @@ function conversationFromRow(row: Row): Conversation {
     readiness: parse(z.enum(['preparing', 'ready', 'blocked']), row.readiness, 'corrupt_workbench_data'),
     state: parseJson(nativeStateSchema, row.state_json), error: row.error === null ? null : String(row.error), createdAt: Number(row.created_at), lastActivityAt: Number(row.last_activity_at ?? row.created_at),
     ...(row.usage_json == null ? {} : { usage: parseJson(usageSchema, row.usage_json) }),
+    ...(summarizeSubagents(row.subagents_json) ? { subagents: summarizeSubagents(row.subagents_json)! } : {}),
     historyLoaded: row.history_loaded === 1, nativeOlderCursor: row.native_older_cursor === null ? null : String(row.native_older_cursor),
     nativeOlderBeforeItemId: row.native_older_before_item_id === null ? null : String(row.native_older_before_item_id),
   };
@@ -294,9 +298,10 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
       throw new StoreError('queue_entry_changed', 409);
     return row;
   };
-  const metadata = (item: NativeItem) => JSON.stringify({ ...(item.images?.length ? { images: item.images } : {}), ...(item.references?.length ? { references: item.references } : {}), ...(item.tool ? { tool: item.tool } : {}) });
+  const metadata = (item: NativeItem) => JSON.stringify({ ...(item.images?.length ? { images: item.images } : {}), ...(item.references?.length ? { references: item.references } : {}), ...(item.tool ? { tool: item.tool } : {}), ...(item.collaboration ? { collaboration: item.collaboration } : {}) });
   const store: WorkbenchStore = {
     deletions: createDeletionStore(db, event => options.onChange?.(event), now),
+    subagents: createSubagentStore(db, event => options.onChange?.(event), now),
     resources,
     reservePreparation(workspaceId, cwd, id, expectedId) {
       parse(identifier, workspaceId); parse(boundedText(4096).min(1), cwd); parse(uuid, id); if (expectedId) parse(uuid, expectedId);
@@ -625,6 +630,9 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
             AND (o.run_id IS NULL OR (o.run_id IS NOT json_extract(c.state_json,'$.runId') AND o.run_id IS NOT json_extract(c.state_json,'$.terminalRunId'))))
           OR EXISTS (SELECT 1 FROM workbench_queues q JOIN workbench_queue_entries e ON e.conversation_id=q.conversation_id
             WHERE q.conversation_id=c.id AND q.pause IS NULL AND e.content_json IS NOT NULL)
+          OR json_extract(c.subagents_json,'$.active') > 0
+          OR (c.archived = 0 AND json_extract(c.subagents_json,'$.verified') = 1 AND json_extract(c.subagents_json,'$.resultsPending') = 1)
+          OR EXISTS (SELECT 1 FROM workbench_subagent_stops s WHERE s.conversation_id=c.id AND s.status IN ('queued','dispatching','unknown'))
         ) ORDER BY c.id LIMIT 64`).all(after).map(row => String(row.id)));
     },
     queuedConversations(after) {
