@@ -198,6 +198,21 @@ export function createWorkbenchHttp(workbench: Workbench, input: Partial<z.input
         return json(reply, { conversations, olderBeforeId: values.length > 100 ? conversations.at(-1)!.id : null, revision: workbench.store.version() });
       });
       // Titles stay in the body, outside request URL logs.
+      privateApp.get('/conversation-defaults', async (request, reply) => {
+        const { workspaceId } = parse(z.object({ workspaceId: workspaceIdSchema.optional() }).strict(), request.query);
+        const conversation = workbench.conversationDefaults(workspaceId);
+        return json(reply, { conversation: conversation ? conversationView(conversation) : null });
+      });
+      privateApp.get('/draft-skills', async (request, reply) => {
+        const query = parse(z.object({ workspaceId: workspaceIdSchema, harnessId: z.enum(['codex', 'dsh']) }).strict(), request.query);
+        const result = await workbench.draftSkills(query.workspaceId, query.harnessId);
+        return json(reply, { ...result, ...skillCatalogSchema.parse({ skills: result.skills }) });
+      });
+      privateApp.get('/draft-files', async (request, reply) => {
+        const query = parse(z.object({ workspaceId: workspaceIdSchema, harnessId: z.enum(['codex', 'dsh']),
+          directory: z.string().max(1024).default('') }).strict(), request.query);
+        return json(reply, { files: await workbench.draftFiles(query.workspaceId, query.harnessId, query.directory) });
+      });
       privateApp.post('/conversation-search', { bodyLimit: 4096 }, async (request, reply) => {
         parse(noQuery, request.query);
         const { unregistered, ...query } = parse(conversationSearchSchema, request.body);

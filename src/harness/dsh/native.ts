@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { HarnessError } from '../types.ts';
-import type { Binding, NativeItem, NativeState } from '../types.ts';
+import type { Binding, Configuration, NativeItem, NativeState } from '../types.ts';
 import { editPath } from '../edit-paths.ts';
 import { revisionSchema, usageSchema } from '../../shared/workbench.ts';
 
@@ -51,6 +51,16 @@ export function modelId(model: Model): string { return Buffer.from(JSON.stringif
 export function decodeModel(id: string): Model {
   try { if (!/^[A-Za-z0-9_-]{1,2048}$/.test(id)) throw new Error(); return modelSchema.parse(JSON.parse(Buffer.from(id, 'base64url').toString('utf8'))); }
   catch { throw new HarnessError('DSH_MODEL_INVALID'); }
+}
+/** Legacy IDs retain their embedded effort; conflicting new fields are never accepted. */
+export function selectedModel(configuration: Configuration): Model {
+  const selected = decodeModel(configuration.modelId);
+  if (configuration.reasoningEffort !== undefined) {
+    const effort = identifier.parse(configuration.reasoningEffort);
+    if (selected.reasoningEffort !== undefined && selected.reasoningEffort !== effort) throw new HarnessError('DSH_MODEL_CONFLICT');
+    selected.reasoningEffort = effort;
+  }
+  return selected;
 }
 export function sameModel(left: Model | null | undefined, right: Model): boolean { return left?.provider === right.provider && left?.model === right.model && left?.reasoningEffort === right.reasoningEffort; }
 export const runId = (session: string, turn: number) => `dsh:${session}:turn:${turn}`;
@@ -121,7 +131,7 @@ export function textContent(content: unknown): string {
 }
 export function stateFrom(binding: Binding, snapshot: Snapshot): NativeState {
   if (snapshot.header.id !== binding.id || snapshot.header.cwd !== binding.cwd) throw new HarnessError('DSH_BINDING_MISMATCH');
-  const values = snapshot.projections.values; const selected = decodeModel(binding.configuration.modelId);
+  const values = snapshot.projections.values; const selected = selectedModel(binding.configuration);
   const configurationVerified = sameModel(values.modelSelection?.next, selected) && (!values.modelSelection?.lastUsed || sameModel(values.modelSelection.lastUsed, selected)) && values.permissions?.currentValue === binding.configuration.permissionId;
   const pendingInputs = (values.inbox?.['next-turn'].length ?? 0)
     + (values.inbox?.['next-step'].filter(input => !passiveApprovalContext.safeParse(input).success).length ?? 0);

@@ -95,12 +95,12 @@ export const Transcript = memo(function Transcript({ items, conversation, onQuot
   });
 });
 
-export function FilePicker({ conversation, onSelect, onClose }: { conversation: string; onSelect(ref: MessageReference): void; onClose(): void }) {
+export function FilePicker({ conversation, draftScope, onSelect, onClose }: { conversation?: string; draftScope?: {workspaceId: string; harnessId: string}; onSelect(ref: MessageReference): void; onClose(): void }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const [directory, setDirectory] = useState('');
   const [files, setFiles] = useState<{ name: string; path: string; directory: boolean }[]>([]);
   const [error, setError] = useState('');
   useEffect(() => { dialog.current?.showModal(); return () => dialog.current?.close(); }, []);
-  useEffect(() => { const controller = new AbortController(); setError(''); setFiles([]); void fetch(`/api/private/workbench/conversations/${conversation}/files?directory=${encodeURIComponent(directory)}`, { signal: controller.signal }).then(async r => { if (!r.ok) throw Error(); const value = await r.json(); setFiles(value.files); }).catch(() => { if (!controller.signal.aborted) setError('无法读取这个目录，请重新选择。'); }); return () => controller.abort(); }, [directory, conversation]);
+  useEffect(() => { const controller = new AbortController(); setError(''); setFiles([]); void fetch(draftScope ? `/api/private/workbench/draft-files?workspaceId=${encodeURIComponent(draftScope.workspaceId)}&harnessId=${encodeURIComponent(draftScope.harnessId)}&directory=${encodeURIComponent(directory)}` : `/api/private/workbench/conversations/${conversation}/files?directory=${encodeURIComponent(directory)}`, { signal: controller.signal }).then(async r => { if (!r.ok) throw Error(); const value = await r.json(); setFiles(value.files); }).catch(() => { if (!controller.signal.aborted) setError('无法读取这个目录，请重新选择。'); }); return () => controller.abort(); }, [directory, conversation, draftScope?.workspaceId, draftScope?.harnessId]);
   return <dialog ref={dialog} className="file-picker" onCancel={onClose}><header><h2>引用工作区文件</h2><button aria-label="关闭文件选择" onClick={onClose}><X size={18}/></button></header><p>Agent 读取时使用原文件的实际内容。</p><button className="file-parent" disabled={!directory} onClick={() => setDirectory(directory.split('/').slice(0,-1).join('/'))}>{directory ? '← ' + directory : '工作区'}</button>{error && <p role="alert">{error}</p>}<div className="file-list">{files.map(file => <button key={file.path} onClick={() => { if (file.directory) setDirectory(file.path); else { onSelect({ type: 'file', path: file.path }); onClose(); } }}><FileText size={16}/>{file.name}{file.directory && <span>›</span>}</button>)}</div></dialog>;
 }

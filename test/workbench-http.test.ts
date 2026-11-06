@@ -107,7 +107,7 @@ async function fixture(t: TestContext, limits: Parameters<typeof createWorkbench
     async function named(name: string) { while (true) { const event = await next(); if (!event || event.name === name) return event; } }
     return { response, next, named, reader, close: () => { controller.abort(); controllers.delete(controller); } };
   }
-  return { db, auth, store, workbench, transport, app, base, credentials, login, request, seed, stream, submissions, root, roots,
+  return { db, auth, store, workbench, transport, app, base, credentials, login, request, seed, stream, submissions, root, roots, adapter,
     setReceipt(value: Receipt) { receipt = value; }, setState(value: NativeState) { state = value; },
     setHistory(value: NativeItem[]) { historyItems = value; },
     pauseNextState() {
@@ -396,4 +396,81 @@ test('management filters before paging, preserves binding and guards archived su
   assert.equal((await setArchive(false)).body.conversation.archived, false);
   assert.deepEqual(f.store.getConversation(id)?.binding, binding);
   assert.deepEqual((await search({ archived: true })).body.conversations, []);
+});
+
+test('draft defaults are authenticated, exclude unsent conversations, and expose only public fields', async t => {
+  const f = await fixture(t); const id = f.seed();
+  assert.equal((await f.request('/conversation-defaults', { authenticated: false })).status, 401);
+  assert.deepEqual((await f.request('/conversation-defaults')).body, { conversation: null });
+  const operation = { id: randomUUID(), conversationId: id, type: 'message' as const, payload: { text: 'sent' } };
+  f.store.enqueueOperation(operation); f.store.claimOperation(operation.id); f.store.settleOperation(operation.id, { outcome: 'accepted' });
+  const result = await f.request('/conversation-defaults?workspaceId=fixture');
+  assert.equal(result.status, 200); assert.equal(result.body.conversation.id, id);
+  assert.equal(result.body.conversation.cwd, undefined); assert.equal(result.body.conversation.binding, undefined);
+  assert.equal((await f.request('/conversation-defaults?workspaceId=missing')).status, 404);
+  assert.equal((await f.request('/conversation-defaults?extra=1')).status, 400);
+  assert.equal((await f.request('/draft-files?workspaceId=fixture&harnessId=dsh', { authenticated: false })).status, 401);
+  assert.equal((await f.request('/draft-files?workspaceId=fixture&harnessId=other')).status, 400);
+  assert.equal((await f.request('/draft-files?workspaceId=fixture&harnessId=codex')).status, 409);
+});
+
+test('draft files stay within a registered workspace and do not create conversations', async t => {
+  const f = await fixture(t, {}, true); const folder = join(f.root, 'draft');
+  await mkdir(folder); await writeFile(join(folder, 'notes.md'), 'draft');
+  const registered = await f.request('/workspaces', { method: 'POST', body: { rootId: 'shared', path: ['draft'] } });
+  const id = registered.body.id;
+  const path = `/draft-files?workspaceId=${id}&harnessId=dsh`;
+  const result = await f.request(path);
+  assert.equal(result.status, 200); assert.ok(JSON.stringify(result.body.files).includes('notes.md'));
+  assert.deepEqual(f.store.listConversations(), []);
+  assert.notEqual((await f.request(path + '&directory=..')).status, 200);
+  await f.request(`/workspaces/${id}/manage`, { method: 'POST', body: { action: 'remove' } });
+  assert.notEqual((await f.request(path)).status, 200);
+});
+
+
+test('draft skills report capability without creating a conversation and preserve authentication', async t => {
+  const f = await fixture(t);
+  const path = '/draft-skills?workspaceId=fixture&harnessId=dsh';
+  assert.equal((await f.request(path, { authenticated: false })).status, 401);
+  assert.deepEqual((await f.request(path)).body, { supported: false, skills: [], reason: 'draft_skills_unavailable' });
+  assert.equal((await f.request('/draft-skills?workspaceId=fixture&harnessId=codex')).status, 409);
+  assert.equal((await f.request('/draft-skills?workspaceId=missing&harnessId=dsh')).status, 404);
+  assert.equal((await f.request(path + '&unexpected=1')).status, 400);
+  const skills = [{ id: 'b'.repeat(64), name: 'draft', label: 'Draft', description: 'Native skill' }];
+  f.adapter.draftSkills = async cwd => { assert.equal(cwd, '/operator-only/synthetic-workspace'); return skills; };
+  assert.deepEqual((await f.request(path)).body, { supported: true, skills });
+  assert.deepEqual(f.store.listConversations(), []);
+  f.adapter.draftSkills = async () => { throw new Error('native failure'); };
+  const failed = await f.request(path);
+  assert.equal(failed.status, 503); assert.equal(failed.body.error, 'skill_catalog_unavailable');
+});
+
+
+test('history defaults split legacy DSH model effort without changing persisted identity', async t => {
+  const f = await fixture(t);
+  const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
+  const model = { provider: 'deepseek', model: 'chat', reasoningEffort: 'high' };
+  f.adapter.normalizeConfiguration = configuration => {
+    const selected = JSON.parse(Buffer.from(configuration.modelId, 'base64url').toString('utf8'));
+    return { ...configuration, modelId: encode({ provider: selected.provider, model: selected.model }), reasoningEffort: selected.reasoningEffort };
+  };
+  const configuration = { modelId: encode(model), permissionId: 'workspace-write' };
+  const input = { id: randomUUID(), harnessId: 'dsh' as const, workspaceId: 'fixture',
+    cwd: '/operator-only/synthetic-workspace', configuration };
+  f.store.createConversation(input);
+  const binding = { id: 'legacy-binding', cwd: input.cwd, configuration, details: {} };
+  f.store.saveBinding(input.id, binding);
+  const op = { id: randomUUID(), conversationId: input.id, type: 'message' as const, payload: { text: 'legacy accepted' } };
+  f.store.enqueueOperation(op); f.store.claimOperation(op.id); f.store.settleOperation(op.id, { outcome: 'accepted' });
+  for (const path of ['/conversation-defaults', '/conversation-defaults?workspaceId=fixture']) {
+    const response = await f.request(path);
+    assert.equal(response.status, 200);
+    assert.deepEqual(response.body.conversation.configuration, {
+      modelId: encode({ provider: model.provider, model: model.model }), permissionId: 'workspace-write', reasoningEffort: 'high',
+    });
+  }
+  assert.deepEqual(f.store.getConversation(input.id)?.configuration, configuration);
+  assert.deepEqual(f.store.getConversation(input.id)?.binding, binding);
+  assert.equal(f.store.createConversation(input).created, false);
 });

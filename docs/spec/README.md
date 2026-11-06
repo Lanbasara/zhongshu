@@ -6,6 +6,7 @@ spec 是与用户讨论后确认的临时约定：它回答“接下来建什么
 
 | 切片 | 用户行为 | 状态 | 退出条件 | 证据 | 更新 |
 | --- | --- | --- | --- | --- | --- |
+| [新对话草稿与思考深度](draft-first-conversation.md) | 直接进入草稿，输入区配置 Power/模型/深度，首次发送才创建 | active | 两端真实路径、旧数据兼容与独立验收通过 | 实现及验证进行中 | 2026-11-06 |
 | 主界面与设计系统 | 用统一设计完成真实对话，隔离展示公共组件 | done | 本轮实现及已声明验证范围经用户认可；未覆盖项见 PR | [PR #18](https://github.com/Lanbasara/zhongshu/pull/18) | 2026-11-03 |
 | 首条 Agent 曳光弹 | 选 Codex 或 DSH，完成真实工作，关页后接续；必要时停止 | done | 本机两 Harness 完成真实工作、关页或应用中断后接续；目标设备与部署链路分别有证据 | PR #5、#6、#9；[发布检查](https://github.com/Lanbasara/zhongshu/actions/runs/41433423972)；目标设备与部署链路已由用户验收 | 2026-11-02 |
 | [对话基本可用性](conversation-usability.md) | 读正文与工具过程、收发图片，用顺手的输入框引用消息与工作区原文件 | active | 两端真实用户路径与恢复验收，用户试用确认 | [PR #13](https://github.com/Lanbasara/zhongshu/pull/13) | 2026-11-02 |
@@ -24,6 +25,8 @@ spec 是与用户讨论后确认的临时约定：它回答“接下来建什么
 Ledger 状态只允许 `next / active / blocked / done`；spec front matter 使用 `draft / active / blocked / done`。`done` 行在一轮发布后删除；耐久知识已经折入 feature map / ADR。
 
 ## 文件
+
+- [draft-first-conversation.md](draft-first-conversation.md) — 范围、默认、标题与草稿规则已确认；实现与真实路径验证进行中
 
 - [conversation-usability.md](conversation-usability.md) — 已授权实施；用户试用验收仍待完成
 - [workspace-conversation-management.md](workspace-conversation-management.md) — 已授权实施，待完成验收

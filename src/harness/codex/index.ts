@@ -9,7 +9,7 @@ import type { QueueDelivery } from '../../shared/workbench.ts';
 import { configuredThread, cursor, itemsPage, mapItem, nativeId, nativeItem, record, threadStatus, turn } from './protocol.ts';
 import { nativeSkill, resolveSkillInput, skillOptions, type NativeSkill } from '../skills.ts';
 
-const configuration = z.object({ modelId: nativeId, permissionId: nativeId });
+const configuration = z.object({ modelId: nativeId, permissionId: nativeId, reasoningEffort: z.string().min(1).max(240).optional() });
 const workspace = z.string().min(1).max(4096).refine(path => isAbsolute(path) && normalize(path) === path && !path.includes('\0'));
 const titleSchema = z.string().min(1).max(200).refine(value => Buffer.byteLength(value) <= 200);
 const bindingSchema = z.object({ id: nativeId, cwd: workspace, configuration, details: z.object({ version: z.literal(1), approvalPolicy: z.literal('never'), title: titleSchema.optional() }) });
@@ -39,7 +39,8 @@ function reason(error: unknown): string {
 }
 function matches(binding: Binding, native: z.infer<typeof configuredThread>): boolean {
   return native.thread.id === binding.id && native.cwd === binding.cwd && native.model === binding.configuration.modelId
-    && native.activePermissionProfile?.id === binding.configuration.permissionId && native.approvalPolicy === 'never';
+    && native.activePermissionProfile?.id === binding.configuration.permissionId && native.approvalPolicy === 'never'
+    && (binding.configuration.reasoningEffort === undefined || native.reasoningEffort === binding.configuration.reasoningEffort);
 }
 
 type Watch = { binding: Binding; listeners: Set<(change: NativeChange) => void>; verified: boolean };
@@ -136,10 +137,14 @@ class CodexAdapter implements HarnessAdapter {
       const account = parse(z.object({ account: z.object({ type: z.string().max(100) }).nullable() }), await this.rpc.request('account/read', { refreshToken: false }));
       if (!account.account) return { id: this.id, available: false, reason: 'codex_login_required', models: [], permissions: [] };
       const models: Catalog['models'] = []; const permissions: Catalog['permissions'] = [];
-      let next: string | undefined;
+      let next: string | undefined; let defaultModelId: string | undefined;
       for (let page = 0; page < 10; page++) {
-        const response = parse(z.object({ data: z.array(z.object({ model: nativeId, displayName: z.string().max(500), hidden: z.boolean() })).max(200), nextCursor: cursor.nullable() }), await this.rpc.request('model/list', { limit: 100, ...(next ? { cursor: next } : {}) }));
-        models.push(...response.data.filter(model => !model.hidden).map(model => ({ id: model.model, label: model.displayName })));
+        const response = parse(z.object({ data: z.array(z.object({ model: nativeId, displayName: z.string().max(500), hidden: z.boolean(), isDefault: z.boolean().optional(), defaultReasoningEffort: z.string().min(1).max(240).optional(), supportedReasoningEfforts: z.array(z.object({ reasoningEffort: z.string().min(1).max(240), description: z.string().max(500) })).max(32).optional() })).max(200), nextCursor: cursor.nullable() }), await this.rpc.request('model/list', { limit: 100, ...(next ? { cursor: next } : {}) }));
+        for (const model of response.data.filter(model => !model.hidden)) {
+          const efforts = model.supportedReasoningEfforts?.map(value => ({ id: value.reasoningEffort, label: value.reasoningEffort }));
+          models.push({ id: model.model, label: model.displayName, ...(efforts?.length ? { reasoningEfforts: efforts } : {}), ...(efforts?.some(value => value.id === model.defaultReasoningEffort) ? { defaultReasoningEffort: model.defaultReasoningEffort } : {}) });
+          if (model.isDefault) defaultModelId = model.model;
+        }
         next = response.nextCursor ?? undefined;
         if (!next) break;
       }
@@ -151,13 +156,17 @@ class CodexAdapter implements HarnessAdapter {
         if (!next) break;
       }
       if (next) throw new HarnessError('codex_catalog_limit');
-      return { id: this.id, available: models.length > 0 && permissions.length > 0, models, permissions };
+      return { id: this.id, available: models.length > 0 && permissions.length > 0, models, permissions, ...(defaultModelId ? { defaultModelId } : {}) };
     } catch (error) { return { id: this.id, available: false, reason: reason(error), models: [], permissions: [] }; }
   }
 
   async create(input: { cwd: string; configuration: Configuration; title?: string }, onBound: (binding: Binding) => void): Promise<Binding> {
     const selected = parse(z.object({ cwd: workspace, configuration, title: titleSchema.optional() }), input);
-    const response = await this.rpc.request('thread/start', { cwd: selected.cwd, model: selected.configuration.modelId, permissions: selected.configuration.permissionId, approvalPolicy: 'never', historyMode: 'paginated', ephemeral: false });
+    if (selected.configuration.reasoningEffort !== undefined) {
+      const model = (await this.catalog()).models.find(value => value.id === selected.configuration.modelId);
+      if (!model?.reasoningEfforts?.some(value => value.id === selected.configuration.reasoningEffort)) throw new HarnessError('codex_reasoning_effort_unavailable');
+    }
+    const response = await this.rpc.request('thread/start', { ...(selected.configuration.reasoningEffort ? { config: { model_reasoning_effort: selected.configuration.reasoningEffort } } : {}), cwd: selected.cwd, model: selected.configuration.modelId, permissions: selected.configuration.permissionId, approvalPolicy: 'never', historyMode: 'paginated', ephemeral: false });
     // Persist only identity and requested configuration before examining the remaining native response.
     const identity = parse(z.object({ thread: z.object({ id: nativeId }) }), response);
     const binding: Binding = { id: identity.thread.id, cwd: selected.cwd, configuration: selected.configuration, details: { version: 1, approvalPolicy: 'never', ...(selected.title ? { title: selected.title } : {}) } };
@@ -248,7 +257,7 @@ class CodexAdapter implements HarnessAdapter {
     const response = z.object({ dataBase64: z.string().max(8 * 1024 * 1024) }).parse(await this.rpc.request('fs/readFile', { path }));
     return response.dataBase64;
   }
-  private async skillCatalog(binding: Binding): Promise<NativeSkill[]> {
+  private async skillCatalog(binding: Pick<Binding, 'id' | 'cwd'>): Promise<NativeSkill[]> {
     const result = parse(skillsResponse, await this.rpc.request('skills/list', { cwds: [binding.cwd], forceReload: true }));
     const rows = result.data.find(entry => entry.cwd === binding.cwd)?.skills;
     if (!rows) throw new HarnessError('codex_skill_catalog_unavailable');
@@ -261,6 +270,10 @@ class CodexAdapter implements HarnessAdapter {
       if (skills.size === 500) break;
     }
     return [...skills.values()];
+  }
+  async draftSkills(cwd: string) {
+    const rows = await this.skillCatalog({ id: 'draft', cwd: parse(workspace, cwd) });
+    return skillOptions(rows.map(skill => ({ ...skill, id: skill.draftId! })));
   }
   async skills(binding: Binding) {
     return skillOptions(await this.skillCatalog(parse(bindingSchema, binding)));
@@ -281,7 +294,7 @@ class CodexAdapter implements HarnessAdapter {
       const nativeInput = await this.input(binding, operation).catch(() => undefined);
       if (!nativeInput) return { outcome: 'rejected', reason: 'skill_reference_unavailable' };
       // Every send pins the saved selection as well as checking the live native configuration.
-      const result = parse(z.object({ turn }), await this.rpc.request('turn/start', { threadId: binding.id, clientUserMessageId: operation.id, model: binding.configuration.modelId, permissions: binding.configuration.permissionId, approvalPolicy: 'never', input: nativeInput }));
+      const result = parse(z.object({ turn }), await this.rpc.request('turn/start', { threadId: binding.id, clientUserMessageId: operation.id, ...(binding.configuration.reasoningEffort ? { effort: binding.configuration.reasoningEffort } : {}), model: binding.configuration.modelId, permissions: binding.configuration.permissionId, approvalPolicy: 'never', input: nativeInput }));
       return { outcome: 'accepted', runId: result.turn.id };
     } catch (error) {
       if (error instanceof RpcError && error.nativeCode === -32602) return { outcome: 'rejected', reason: 'codex_native_rejected' };

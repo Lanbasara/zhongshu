@@ -37,7 +37,7 @@ const cliSchema = z.object({
 });
 const recordSchema = z.object({
   id: z.uuid(), title: z.string().max(200), harnessId: z.enum(['codex', 'dsh']),
-  cwd: z.string().max(4096), configuration: z.object({ modelId: z.string(), permissionId: z.string() }),
+  cwd: z.string().max(4096), configuration: z.object({ modelId: z.string(), permissionId: z.string(), reasoningEffort: z.string().optional() }),
   state: stateSchema, items: z.array(itemSchema).max(1000),
   submissions: z.array(z.object({ id: z.string(), text: z.string().max(16_000), runId: z.string() })).max(100),
   rejectedOperationIds: z.array(z.uuid()).max(100).default([]), rejectNext: z.boolean().default(false),
@@ -170,10 +170,11 @@ async function main() {
   const timers = new Set<NodeJS.Timeout>();
   function adapter(id: HarnessId): HarnessAdapter {
     const checked = (binding: Binding) => { const value = load(binding.id); if (value.offline) throw new Error('fixture_disconnected'); return value; };
+    const workspaceSkills = (binding: Pick<Binding, 'id' | 'cwd'>) => binding.cwd !== workspaces[0]!.directory ? []
+      : ['zhi-proof', 'zhi-secondary'].map(name => nativeSkill(binding, { name, description: '合成验证技能' })!);
     function skills(binding: Binding) {
       const value = checked(binding);
-      if (value.skillsDisabled || binding.cwd !== workspaces[0]!.directory) return [];
-      return ['zhi-proof', 'zhi-secondary'].map(name => nativeSkill(binding, { name, description: '合成验证技能' })!);
+      return value.skillsDisabled ? [] : workspaceSkills(binding);
     }
     async function submit(binding: Binding, operation: HarnessInput, delivery?: QueueDelivery): Promise<Receipt> {
       checked(binding);
@@ -202,7 +203,16 @@ async function main() {
     return {
       id, earlyInput: id === 'codex' ? 'current' : 'soon', submit, submitQueued: submit,
       async skills(binding) { return skillOptions(skills(binding)); },
-      async catalog() { return { id, available: true, models: [{ id: 'fixture-model', label: 'Fixture · 非真实模型' }], permissions: [{ id: 'fixture-write', label: 'Fixture write', description: 'Synthetic boundary; no actual agent execution.' }, { id: 'fixture-read', label: 'Fixture read', description: 'Synthetic configuration selection only.' }] }; },
+      // Codex can discover skills by cwd before a thread; the pinned DSH RPC requires a session.
+      ...(id === 'codex' ? { async draftSkills(cwd: string) {
+        return skillOptions(workspaceSkills({ id: 'draft', cwd }).map(skill => ({ ...skill, id: skill.draftId! })));
+      } } : {}),
+      async catalog() {
+        const reasoningEfforts = (id === 'codex' ? ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'] : ['off', 'low', 'high', 'max']).map(effort => ({ id: effort, label: effort }));
+        return { id, available: true, ...(id === 'codex' ? { defaultModelId: 'fixture-model' } : {}), models: [
+          { id: 'fixture-model', label: 'Fixture · 非真实模型', reasoningEfforts, ...(id === 'codex' ? { defaultReasoningEffort: 'medium' } : {}) },
+          { id: 'fixture-alternate', label: 'Fixture Alternate · 非真实模型', reasoningEfforts: reasoningEfforts.slice(0, 3), ...(id === 'codex' ? { defaultReasoningEffort: 'low' } : {}) },
+        ], permissions: [{ id: 'fixture-write', label: 'Fixture write', description: 'Synthetic boundary; no actual agent execution.' }, { id: 'fixture-read', label: 'Fixture read', description: 'Synthetic configuration selection only.' }] }; },
       async create(input, onBound) {
         const fail = native.prepare('SELECT fail_create FROM settings WHERE id = 1').get()!.fail_create === 1;
         native.prepare('UPDATE settings SET fail_create = 0 WHERE id = 1').run();

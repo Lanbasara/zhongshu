@@ -633,3 +633,20 @@ test('maintenance checks cold native sessions without fetching conversation hist
     assert.deepEqual(f.peer.historyCalls, []);
   }
 });
+
+test('prepare validates model effort before creating a native session', async t => {
+  const f = fixture(t);
+  f.peer.catalog = async () => ({ id: 'codex', available: true,
+    models: [{ id: 'model', label: 'Model', reasoningEfforts: [{ id: 'high', label: 'High' }] }],
+    permissions: [{ id: 'workspace', label: 'Workspace', description: '' }] });
+  const input = { id: randomUUID(), harnessId: 'codex' as const, workspaceId: 'fixture',
+    configuration: { modelId: 'model', permissionId: 'workspace', reasoningEffort: 'unsupported' } };
+  await f.service.create(input);
+  await until(() => f.store.getConversation(input.id)?.readiness === 'blocked');
+  assert.equal(f.peer.createCalls, 0);
+  const supported = { ...input, id: randomUUID(), configuration: { ...input.configuration, reasoningEffort: 'high' } };
+  await f.service.create(supported);
+  await until(() => f.store.getConversation(supported.id)?.readiness === 'ready');
+  assert.equal(f.peer.createCalls, 1);
+  assert.equal(f.store.getConversation(supported.id)?.binding?.configuration.reasoningEffort, 'high');
+});
