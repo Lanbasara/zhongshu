@@ -5,7 +5,7 @@
  * The fixture database outlives the app so a separate CLI can finish synthetic
  * work while the app is down. This does not prove native Harness execution.
  */
-import { randomBytes, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { constants, existsSync, lstatSync, mkdirSync, openSync, closeSync, readFileSync, readdirSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
@@ -18,6 +18,7 @@ import { HarnessError } from '../../src/harness/types.ts';
 import { nativeSkill, resolveSkillInput, skillOptions } from '../../src/harness/skills.ts';
 import type { QueueDelivery } from '../../src/shared/workbench.ts';
 import { buildApp } from '../../src/server/app.ts';
+import { localDefaultPassword } from '../../src/server/auth.ts';
 import { openDatabase } from '../../src/server/database.ts';
 import { productMigrations } from '../../src/server/migrations.ts';
 import { createWorkbenchStore } from '../../src/server/workbench-store.ts';
@@ -77,20 +78,17 @@ async function main() {
   if (!existsSync(marker)) {
     if (input.command !== 'serve' || readdirSync(root).length) throw new Error('first_serve_requires_empty_root');
     writeFileSync(marker, JSON.stringify({ format: 1, repository }), { flag: 'wx', mode: 0o600 });
-    mkdirSync(join(root, 'private'), { mode: 0o700 });
-    writeFileSync(join(root, 'private/password'), randomBytes(32).toString('base64url'), { flag: 'wx', mode: 0o600 });
   }
   privateFile(marker);
   const identity = z.object({ format: z.literal(1), repository: z.literal(repository) }).strict().parse(JSON.parse(readFileSync(marker, 'utf8')));
   void identity;
 
   if (input.command === 'init' || input.command === 'reset') {
-    const passwordFile = join(root, 'private/password'); privateFile(passwordFile);
-    const password = input.command === 'reset' ? randomBytes(32).toString('base64url') : readFileSync(passwordFile, 'utf8');
+    // Local instances use the published local password; reset switches to a second one so old sessions visibly end.
+    const password = input.command === 'reset' ? localDefaultPassword + '-reset' : localDefaultPassword;
     const result = spawnSync(process.execPath, [join(repository, 'src/server/admin.ts'), input.command, '--data-dir', join(root, 'data'), '--password-stdin'], { input: password, encoding: 'utf8', timeout: 20_000, env: { ...process.env, ZHONGSHU_HARNESS_CONFIG: '' } });
     if (result.error || result.status !== 0) throw new Error('fixture_admin_failed');
-    if (input.command === 'reset') writeFileSync(passwordFile, password, { mode: 0o600 });
-    console.log(JSON.stringify({ event: input.command, passwordFile }));
+    console.log(JSON.stringify({ event: input.command }));
     return;
   }
 

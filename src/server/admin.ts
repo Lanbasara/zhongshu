@@ -32,7 +32,7 @@ async function promptPassword(): Promise<string> {
   const interrupt = () => controller.abort();
   input.on('SIGINT', interrupt);
   try {
-    process.stdout.write('New administrator password (at least 12 characters): ');
+    process.stdout.write('New administrator password (at least 8 characters): ');
     const first = await input.question('', { signal: controller.signal });
     if (Buffer.byteLength(first) > 1024) throw new AuthError('password_input_too_large');
     process.stdout.write('\nConfirm password: ');

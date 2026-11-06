@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
 import { z } from 'zod';
 import { loadConfig } from './config.ts';
+import { createAuth } from './auth.ts';
 import { openDatabase } from './database.ts';
 import { buildApp } from './app.ts';
 import { productMigrations } from './migrations.ts';
@@ -17,10 +18,15 @@ const metadataSchema = z.object({ name: z.literal('zhongshu'), version: z.string
 
 async function main() {
   const config = loadConfig();
+  // The password lives in configuration only; children of this process never inherit it.
+  delete process.env.ZHONGSHU_ADMIN_PASSWORD;
   let metadata;
   try { metadata = metadataSchema.parse(JSON.parse(await readFile(new URL('../version.json', import.meta.url), 'utf8'))); }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error('invalid_build_metadata'); }
   const db = openDatabase(config.dataDirectory, productMigrations);
+  if (config.adminPassword) {
+    try { await createAuth(db).apply(config.adminPassword); } catch (error) { db.close(); throw error; }
+  }
   let workbench: Workbench | undefined;
   let transport: ReturnType<typeof createWorkbenchHttp> | undefined;
   let plugins: ReturnType<typeof createPluginManagement> | undefined;

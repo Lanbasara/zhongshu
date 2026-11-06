@@ -10,12 +10,11 @@ Use Node.js 24 (the exact version is in `.node-version`). Dependencies are pinne
 
 ```sh
 npm ci --ignore-scripts
-npm run admin -- init
 npm test
 npm run dev
 ```
 
-Open `http://127.0.0.1:3000` and sign in with the password entered during local initialization. The development launcher enables HTTP only on loopback. Data is stored outside this checkout; set `ZHONGSHU_DATA_DIR` for a separate instance. Local development needs no production credentials or server access.
+Open `http://127.0.0.1:3000` and sign in with `zhongshu-local`. The development launcher enables HTTP only on loopback. Data is stored outside this checkout; set `ZHONGSHU_DATA_DIR` for a separate instance. Local development needs no production credentials or server access.
 
 To execute agent tasks, configure an existing native host and an allowed workspace as described below. Without this operator configuration, sign-in works but no execution workspace is available.
 
@@ -49,6 +48,8 @@ Current compatibility is Codex CLI `0.166.0-alpha.5.1` and DSH `0.2.1-rc.4`. Re-
 To enable instance plugin management, see the [native connection setup](docs/features/plugin-management.md#准备原生连接).
 
 For a production build, run `npm run build`, set `ZHONGSHU_ORIGIN` to the public HTTPS origin, then `npm start`.
+
+The administrator password comes from `ZHONGSHU_ADMIN_PASSWORD` (at least 8 characters). It is applied at startup, and changing it signs out every session. A local instance (HTTP on loopback) without it uses `zhongshu-local`. A remote instance without it keeps the password set with `npm run admin -- init` or `reset`. Keep each instance's value in that instance's own configuration, never in this repository.
 
 ## UI development
 

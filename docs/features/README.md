@@ -63,7 +63,7 @@ node test/support/feature-fixture.ts serve --root "$zh_verify_root" --port 4391
 node test/support/feature-fixture.ts init --root "$zh_verify_root"
 ```
 
-随机密码只存在 root 下的 `private/password`（`0600`）。浏览器自动化从该文件读入密码字段，不把内容打印到工具输出、命令参数或截图；人工验证使用自己的私密输入通道。刷新后登录。在浏览器中完成用户动作；CLI 只准备边界、控制故障和独立读回。
+本地实例的管理员密码是 `zhongshu-local`，浏览器与人工验证直接输入；fixture 的 `reset` 把它改为 `zhongshu-local-reset`。规则见 [ADR 0006](../adr/0006-auth-session-data.md)。刷新后登录。在浏览器中完成用户动作；CLI 只准备边界、控制故障和独立读回。
 
 **浏览器前提**：任意能按可访问名称操作页面、读取 DOM、运行页面脚本、建立独立上下文的工具。仓库不绑定某个浏览器插件。不能建立两个独立上下文时，A03 的第二端记录 `BLOCKED`；两个普通标签页共享 Cookie，不能代替两个登录端。
 
@@ -121,11 +121,10 @@ export HOST=127.0.0.1 PORT=4392
 export ZHONGSHU_ORIGIN="http://127.0.0.1:$PORT"
 export ZHONGSHU_ALLOW_HTTP_LOOPBACK=true
 # ZHONGSHU_HARNESS_CONFIG 必须已指向本次操作者提供的绝对路径。
-node src/server/admin.ts init
 node dist/server/main.js
 ```
 
-先核对配置、Host/CLI 精确版本、原生目录、账户可用性和页面目录，再执行 C05/E05/R02 的 native 分支。Codex 与 DSH 分别记录结果；fixture 的权限与协议语义不外推到真实 Host。兼容版本声明见 README，升级后的首次真实工作属于重新核验。
+未设置 `ZHONGSHU_ADMIN_PASSWORD` 时，本地应用启动即以 `zhongshu-local` 初始化管理员。先核对配置、Host/CLI 精确版本、原生目录、账户可用性和页面目录，再执行 C05/E05/R02 的 native 分支。Codex 与 DSH 分别记录结果；fixture 的权限与协议语义不外推到真实 Host。兼容版本声明见 README，升级后的首次真实工作属于重新核验。
 
 ## Evidence：结果能追到对象与动作
 
@@ -142,7 +141,7 @@ node dist/server/main.js
 
 先恢复页面故障、关闭自己创建的浏览器上下文。在启动终端 Ctrl-C，等待 `stopped`；核对本次端口已释放。重启场景用相同 serve 命令、相同 root/port；应用停止时 `native.sqlite` 仍由独立控制命令读取，不代表真实 Host 存活。
 
-保留报告、截图和内容身份后，删除本次 root 下的 `private/`、`data/`、`native.sqlite*` 与合成工作区；不删不属于自己的资源。SIGKILL 后锁文件可能残留，serve 只在记录的 PID 已不存在时允许重启。真实工具的清理需另确认 PID、启动标记和目录归属；停止中书、原生轮中断、工具退出分别记录。
+保留报告、截图和内容身份后，删除本次 root 下的 `data/`、`native.sqlite*` 与合成工作区；不删不属于自己的资源。SIGKILL 后锁文件可能残留，serve 只在记录的 PID 已不存在时允许重启。真实工具的清理需另确认 PID、启动标记和目录归属；停止中书、原生轮中断、工具退出分别记录。
 
 ## 覆盖边界与维护
 

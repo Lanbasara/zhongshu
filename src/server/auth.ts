@@ -12,7 +12,9 @@ export class AuthError extends Error {
 }
 
 const passwordInput = z.string().min(1).max(1024).refine(value => Buffer.byteLength(value, 'utf8') <= 1024);
-const newPassword = passwordInput.refine(value => [...value].length >= 12);
+const newPassword = passwordInput.refine(value => [...value].length >= 8);
+/** Administrator password of a local (cleartext loopback) instance that configures none. */
+export const localDefaultPassword = 'zhongshu-local';
 const tokenInput = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
 const clientInput = z.string().min(1).max(256);
 const adminRow = z.object({ password_digest: z.string().regex(/^scrypt-v1\$[A-Za-z0-9_-]{22}\$[A-Za-z0-9_-]{86}$/), credential_version: z.number().int().positive() });
@@ -85,7 +87,7 @@ export function createAuth(db: DatabaseSync, options: AuthOptions = {}) {
 
   async function initialize(password: unknown): Promise<void> {
     const parsed = newPassword.safeParse(password);
-    if (!parsed.success) throw new AuthError('password_requires_12_to_1024_characters');
+    if (!parsed.success) throw new AuthError('password_requires_8_to_1024_characters');
     if (initialized()) throw new AuthError('admin_already_initialized');
     const encoded = await digest(parsed.data);
     const at = time();
@@ -98,7 +100,7 @@ export function createAuth(db: DatabaseSync, options: AuthOptions = {}) {
 
   async function reset(password: unknown): Promise<void> {
     const parsed = newPassword.safeParse(password);
-    if (!parsed.success) throw new AuthError('password_requires_12_to_1024_characters');
+    if (!parsed.success) throw new AuthError('password_requires_8_to_1024_characters');
     if (!initialized()) throw new AuthError('admin_not_initialized');
     const encoded = await digest(parsed.data);
     const at = time();
@@ -162,7 +164,24 @@ export function createAuth(db: DatabaseSync, options: AuthOptions = {}) {
     const result = db.prepare('DELETE FROM auth_sessions WHERE token_hash = ?').run(hashToken(parsed.data));
     if (result.changes) emit('session_revoked', time());
   }
-  return { initialized, initialize, reset, login, authenticate, logout };
+  async function matches(password: string): Promise<boolean> {
+    const admin = administrator();
+    if (!admin) return false;
+    const [, salt, expected] = admin.password_digest.split('$');
+    const key = await derive(password, Buffer.from(salt!, 'base64url'));
+    const expectedKey = Buffer.from(expected!, 'base64url');
+    try { return key.length === expectedKey.length && timingSafeEqual(key, expectedKey); }
+    finally { key.fill(0); expectedKey.fill(0); }
+  }
+  /** Makes a configured password the administrator password. A change revokes every session, like a reset. */
+  async function apply(password: unknown): Promise<'initialized' | 'reset' | 'unchanged'> {
+    const parsed = newPassword.safeParse(password);
+    if (!parsed.success) throw new AuthError('password_requires_8_to_1024_characters');
+    if (!initialized()) { await initialize(parsed.data); return 'initialized'; }
+    if (await matches(parsed.data)) return 'unchanged';
+    await reset(parsed.data); return 'reset';
+  }
+  return { initialized, initialize, reset, apply, login, authenticate, logout };
 }
 
 export type AuthService = ReturnType<typeof createAuth>;
