@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { DatabaseSync, StatementSync } from 'node:sqlite';
 import { z } from 'zod';
 import { conversationTitleSchema, identifierSchema, messagePayload, queueCommandSchema, queueDeliverySchema, queueLimit, queuePauseSchema, skillRequiresNextTurn, stateSchema, turnFileLimit, usageSchema, workspaceLimit } from '../shared/workbench.ts';
@@ -9,13 +9,14 @@ import type { Binding, Configuration, HarnessId, NativeItem, NativeState, Receip
 
 export type Readiness = 'preparing' | 'ready' | 'blocked';
 export type Conversation = {
+  nativePreparationId?: string;
   id: string; harnessId: HarnessId; workspaceId: string; cwd: string; title: string;
   configuration: Configuration; binding: Binding | null; readiness: Readiness;
   archived: boolean; state: NativeState; error: string | null; createdAt: number;
   usage?: ConversationUsage;
   historyLoaded: boolean; nativeOlderCursor: string | null; nativeOlderBeforeItemId: string | null;
 };
-export type CreateConversation = Pick<Conversation, 'id' | 'harnessId' | 'workspaceId' | 'cwd' | 'configuration'> & { title?: string };
+export type CreateConversation = Pick<Conversation, 'id' | 'harnessId' | 'workspaceId' | 'cwd' | 'configuration'> & { title?: string; preparationId?: string };
 export type OperationStatus = 'queued' | 'dispatching' | 'accepted' | 'unknown' | 'rejected';
 export type OperationInput = { id: string; conversationId: string } & (
   { type: 'message'; payload: InputContent; queuedInput?: { entryId: string; version: number; delivery: QueueDelivery } }
@@ -41,6 +42,8 @@ type ConversationList = {
 type StoredQueue = Omit<QueueView, 'mode'> & { afterRunId: string | null };
 export interface WorkbenchStore {
   resources: ReturnType<typeof createResourceStore>;
+  reservePreparation(workspaceId: string, cwd: string, id: string, expectedId?: string): { preparationId: string; nativeId: string };
+  completePreparation(id: string): void;
   createConversation(input: CreateConversation): { conversation: Conversation; created: boolean };
   getConversation(id: string): Conversation | null;
   listConversations(options?: ConversationList): Conversation[];
@@ -92,7 +95,7 @@ const configurationSchema = z.object({ modelId: identifier, permissionId: identi
 const nativeStateSchema = stateSchema;
 const itemSchema = z.object({
   id: identifier, kind: z.enum(['user', 'assistant', 'tool', 'notice']), text: boundedText(MAX_TEXT_BYTES),
-  status: z.enum(['running', 'completed', 'failed']), runId: identifier.optional(), operationId: identifier.optional(),
+  status: z.enum(['running', 'completed', 'failed', 'unknown']), runId: identifier.optional(), operationId: identifier.optional(),
   ...contentFields, tool: toolSchema.optional(),
 }).strict();
 const nativeItemSchema = itemSchema.extend({ fileEdits: z.array(recordedFilePath).max(400).optional() });
@@ -101,7 +104,7 @@ const bindingSchema = z.object({
 }).strict();
 const createConversationSchema = z.object({
   id: uuid, harnessId: z.enum(['codex', 'dsh']), workspaceId: identifier, cwd: boundedText(4096).min(1),
-  configuration: configurationSchema, title: boundedText(200).min(1).optional(),
+  configuration: configurationSchema, title: boundedText(200).min(1).optional(), preparationId: uuid.optional(),
 }).strict();
 const operationInputSchema = z.discriminatedUnion('type', [
   z.object({ id: uuid, conversationId: uuid, type: z.literal('message'), payload: z.object({ text: boundedText(MAX_TEXT_BYTES), ...inputFields }).strict().refine(v => v.text.trim() || v.images?.length || v.references?.length).refine(validSkillSpans),
@@ -167,6 +170,7 @@ function itemFromRow(row: Row): NativeItem {
 }
 function conversationFromRow(row: Row): Conversation {
   return {
+    ...(row.native_preparation_id == null ? {} : { nativePreparationId: String(row.native_preparation_id) }),
     id: String(row.id), harnessId: parse(z.enum(['codex', 'dsh']), row.harness_id, 'corrupt_workbench_data'),
     workspaceId: String(row.workspace_id), cwd: String(row.cwd), title: String(row.title), archived: row.archived === 1,
     configuration: parseJson(configurationSchema, row.configuration_json), binding: row.binding_json === null ? null : parseJson(bindingSchema, row.binding_json),
@@ -280,10 +284,26 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
   const metadata = (item: NativeItem) => JSON.stringify({ ...(item.images?.length ? { images: item.images } : {}), ...(item.references?.length ? { references: item.references } : {}), ...(item.tool ? { tool: item.tool } : {}) });
   const store: WorkbenchStore = {
     resources,
+    reservePreparation(workspaceId, cwd, id, expectedId) {
+      parse(identifier, workspaceId); parse(boundedText(4096).min(1), cwd); parse(uuid, id); if (expectedId) parse(uuid, expectedId);
+      return transaction(db, () => {
+        assertWorkspaceActive(workspaceId);
+        const row = db.prepare('SELECT * FROM workbench_draft_preparations WHERE workspace_id=?').get(workspaceId);
+        if (row && row.cwd !== cwd) throw new StoreError('draft_preparation_workspace_changed', 409);
+        if (expectedId && (!row || row.preparation_id !== expectedId || row.claimed_by !== null)) throw new StoreError('draft_preparation_claimed', 409);
+        if (row && row.claimed_by === null) return { preparationId: String(row.preparation_id), nativeId: String(row.native_id) };
+        if (!row && Number(db.prepare('SELECT COUNT(*) AS count FROM workbench_draft_preparations').get()!.count) >= workspaceLimit)
+          throw new StoreError('draft_preparation_capacity_reached', 409);
+        const nativeId = randomUUID();
+        db.prepare('INSERT INTO workbench_draft_preparations(workspace_id,cwd,preparation_id,native_id,claimed_by) VALUES(?,?,?,?,NULL) ON CONFLICT(workspace_id) DO UPDATE SET preparation_id=excluded.preparation_id,native_id=excluded.native_id,claimed_by=NULL').run(workspaceId,cwd,id,nativeId);
+        return { preparationId: id, nativeId };
+      });
+    },
+    completePreparation(id) { parse(uuid,id); storage(() => db.prepare('UPDATE workbench_conversations SET native_preparation_id=NULL WHERE id=?').run(id)); },
     createConversation(value) {
       const input = parse(createConversationSchema, value);
       const creationDigest = digest([input.harnessId, input.workspaceId, input.cwd, input.configuration.modelId, input.configuration.permissionId,
-        ...(input.configuration.reasoningEffort === undefined ? [] : [input.configuration.reasoningEffort])]);
+        ...(input.configuration.reasoningEffort === undefined ? [] : [input.configuration.reasoningEffort]), ...(input.preparationId ? ['prepared', input.preparationId] : [])]);
       return mutate(changed => {
         const existing = conversationRow(input.id);
         if (existing) {
@@ -293,10 +313,19 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
         assertWorkspaceActive(input.workspaceId);
         const count = Number(db.prepare('SELECT COUNT(*) AS count FROM workbench_conversations').get()!.count);
         if (count >= 10_000) throw new StoreError('conversation_capacity_reached', 409);
+        let nativePreparationId: string | undefined;
+        if (input.preparationId) {
+          const row = db.prepare('SELECT * FROM workbench_draft_preparations WHERE workspace_id=?').get(input.workspaceId);
+          if (input.harnessId !== 'dsh' || !row || row.cwd !== input.cwd || row.preparation_id !== input.preparationId || row.claimed_by !== null)
+            throw new StoreError('draft_preparation_claimed', 409);
+          nativePreparationId = String(row.native_id);
+          db.prepare('UPDATE workbench_draft_preparations SET claimed_by=? WHERE workspace_id=?').run(input.id,input.workspaceId);
+        }
         const initial: NativeState = { status: 'unknown', pendingInputs: 0, configurationVerified: false };
         db.prepare(`INSERT INTO workbench_conversations(id,harness_id,workspace_id,cwd,title,configuration_json,creation_digest,
           readiness,state_json,created_at) VALUES(?,?,?,?,?,?,?,'preparing',?,?)`).run(input.id, input.harnessId, input.workspaceId,
           input.cwd, input.title ?? '新对话', JSON.stringify(input.configuration), creationDigest, JSON.stringify(initial), now());
+        if (nativePreparationId) db.prepare('UPDATE workbench_conversations SET native_preparation_id=? WHERE id=?').run(nativePreparationId,input.id);
         changed(input.id);
         return { conversation: requireConversation(input.id), created: true };
       });

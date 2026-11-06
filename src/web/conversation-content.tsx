@@ -54,6 +54,7 @@ export function Message({ item, conversation, onQuote }: { item: WorkbenchItem; 
     {item.references?.length ? <div className="message-references">{item.references.map((reference, index) => <div key={index} className="reference-card">{reference.type === 'file' ? <><FileText size={14}/><span>{reference.path}<small>工作区原文件</small></span></> : <><Quote size={14}/><blockquote>{reference.text}<small>引用消息片段</small></blockquote></>}</div>)}</div> : null}
     {item.text && item.kind !== 'notice' && <div className="message-actions"><button type="button" aria-label="复制消息" onClick={() => { void navigator.clipboard.writeText(item.text).then(() => { setCopied(true); setTimeout(() => setCopied(false),1500); }).catch(() => {}); }}>{copied ? <Check size={14}/> : <Copy size={14}/>}</button><button type="button" aria-label="引用所选文字" onClick={quote}><Quote size={14}/></button></div>}
     {item.status === 'failed' && <small className="quiet">此项未完成</small>}
+    {item.status === 'unknown' && <small className="quiet">原生状态未提供</small>}
     {quoteHint && <small className="quiet" role="status">选中这条消息中的文字后，再点引用。</small>}
   </article>;
 }
@@ -61,8 +62,9 @@ export function Message({ item, conversation, onQuote }: { item: WorkbenchItem; 
 export function ToolGroup({ items }: { items: WorkbenchItem[] }) {
   const running = items.some(i => i.status === 'running');
   const failed = items.filter(i => i.status === 'failed').length;
-  const summary = running ? '正在执行' : failed ? `执行结束 · ${failed} 项未完成` : '已完成';
-  return <details className={`tool-group ${running ? 'is-running' : ''}`}><summary><span className="activity-dot"/>{summary}<span className="activity-count">{items.length} 项操作</span><ChevronDown size={14}/></summary><div className="tool-timeline">{items.map(item => <details key={item.id} className="tool-message"><summary><Terminal size={14}/><span>{item.tool?.name ?? '工具执行'}</span><small>{item.status === 'running' ? '进行中' : item.status === 'failed' ? '未完成' : '已完成'}</small></summary>{item.tool?.input && <pre className="tool-input">{item.tool.input}</pre>}<pre>{item.tool?.output || item.text || '暂无输出'}</pre></details>)}</div></details>;
+  const unknown = items.filter(i => i.status === 'unknown').length;
+  const summary = running ? '正在执行' : unknown ? `状态未明 · ${unknown} 项待核对${failed ? ` · ${failed} 项未完成` : ''}` : failed ? `执行结束 · ${failed} 项未完成` : '已完成';
+  return <details className={`tool-group ${running ? 'is-running' : ''}`}><summary><span className="activity-dot"/>{summary}<span className="activity-count">{items.length} 项操作</span><ChevronDown size={14}/></summary><div className="tool-timeline">{items.map(item => <details key={item.id} className="tool-message"><summary><Terminal size={14}/><span>{item.tool?.name ?? '工具执行'}</span><small>{item.status === 'running' ? '进行中' : item.status === 'failed' ? '未完成' : item.status === 'unknown' ? '状态未明' : '已完成'}</small></summary>{item.tool?.input && <pre className="tool-input">{item.tool.input}</pre>}<pre>{item.tool?.output || item.text || '暂无输出'}</pre></details>)}</div></details>;
 }
 
 /** Group tools without reordering text or merging actions from separate native turns. */

@@ -208,6 +208,12 @@ export function createWorkbenchHttp(workbench: Workbench, input: Partial<z.input
         const result = await workbench.draftSkills(query.workspaceId, query.harnessId);
         return json(reply, { ...result, ...skillCatalogSchema.parse({ skills: result.skills }) });
       });
+      privateApp.post('/draft-preparation', { bodyLimit: 4096 }, async (request, reply) => {
+        parse(noQuery, request.query);
+        const input = parse(z.object({ workspaceId: workspaceIdSchema, harnessId: z.literal('dsh'), preparationId: z.uuid().optional() }).strict(), request.body);
+        const result = await workbench.prepareDraft(input.workspaceId, input.harnessId, input.preparationId);
+        return json(reply, { preparationId: result.preparationId, ...skillCatalogSchema.parse({ skills: result.skills }) });
+      });
       privateApp.get('/draft-files', async (request, reply) => {
         const query = parse(z.object({ workspaceId: workspaceIdSchema, harnessId: z.enum(['codex', 'dsh']),
           directory: z.string().max(1024).default('') }).strict(), request.query);

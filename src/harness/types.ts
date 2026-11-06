@@ -22,7 +22,7 @@ export type NativeItem = {
   id: string;
   kind: 'user' | 'assistant' | 'tool' | 'notice';
   text: string;
-  status: 'running' | 'completed' | 'failed';
+  status: 'running' | 'completed' | 'failed' | 'unknown';
   runId?: string;
   operationId?: string;
   images?: ImageAttachment[];
@@ -72,8 +72,10 @@ export interface HarnessAdapter {
   skills?(binding: Binding): Promise<SkillOption[]>;
   /** Read native workspace capabilities without creating a conversation. */
   draftSkills?(cwd: string): Promise<SkillOption[]>;
+  /** Prepare or recover a caller-named empty native session without submitting work. */
+  prepareDraft?(input: { id: string; cwd: string }): Promise<SkillOption[]>;
   /** Persist the identity immediately, before later model/permission setup can fail. */
-  create(input: { cwd: string; configuration: Configuration; title?: string }, onBound: (binding: Binding) => void): Promise<Binding>;
+  create(input: { cwd: string; configuration: Configuration; title?: string; preparedId?: string }, onBound: (binding: Binding) => void): Promise<Binding>;
   /** A target may precede the current/latest run (for example a later native notification turn). Never infer its terminal result from that ordering. */
   state(binding: Binding, targetRunId?: string): Promise<NativeState>;
   history(binding: Binding, olderCursor?: string, limit?: number): Promise<HistoryPage>;

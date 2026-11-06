@@ -380,6 +380,28 @@ test('v3 conversation history upgrades to active and management metadata survive
   assert.equal(store.readHistory(input.id).items[0]?.text, '旧库原文');
 });
 
+test('v10 history and live metadata survive unknown-status migration and reopen', t => {
+  const f = fixture(t); const input = conversation();
+  const legacy = openDatabase(f.directory, productMigrations.filter(migration => migration.version <= 10));
+  const oldItem: NativeItem = { id: 'old-tool', kind: 'tool', text: 'old result', status: 'completed', runId: 'run', tool: { name: 'read', input: 'sample.txt', output: 'old result' } };
+  try {
+    const store = createWorkbenchStore(legacy);
+    store.createConversation(input);
+    store.mergeHistory(input.id, [oldItem]);
+    store.saveLiveItem(input.id, { ...oldItem, id: 'old-live', status: 'running' });
+  } finally { legacy.close(); }
+  let db = f.open(); let store = createWorkbenchStore(db);
+  assert.deepEqual(store.getItem(input.id, 'old-tool'), oldItem);
+  assert.equal(store.getItem(input.id, 'old-live')?.tool?.output, 'old result');
+  store.mergeHistory(input.id, [{ ...oldItem, id: 'unknown-tool', status: 'unknown' }]);
+  store.saveLiveItem(input.id, { ...oldItem, id: 'unknown-live', status: 'unknown' });
+  f.close(db); db = f.open(); store = createWorkbenchStore(db);
+  assert.equal(store.getItem(input.id, 'unknown-tool')?.status, 'unknown');
+  assert.equal(store.getItem(input.id, 'unknown-live')?.status, 'unknown');
+  assert.equal(store.getItem(input.id, 'old-live')?.status, 'running');
+  assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []);
+});
+
 test('reasoning effort is immutable and optional legacy identities remain retryable', t => {
   const f = fixture(t); const store = createWorkbenchStore(f.open()); const legacy = conversation();
   store.createConversation(legacy); assert.equal(store.createConversation(legacy).created, false);

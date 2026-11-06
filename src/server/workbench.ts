@@ -37,6 +37,7 @@ export class Workbench {
   private readonly maintenancePhases = new Map<string, HostPhase | 'transition'>();
   private readonly savingDirectories = new Set<string>();
   private readonly preparing = new Set<string>();
+  private readonly draftPreparations = new Map<string, Promise<{ preparationId: string; skills: import('../shared/content.ts').SkillOption[] }>>();
   private readonly removing = new Set<string>();
   private closed = false;
   private closing?: Promise<void>;
@@ -79,7 +80,7 @@ export class Workbench {
     }
     if (input.action === 'rename') { registry.rename(id, input.label); return; }
     if (input.action === 'pin') { registry.pin(id, input.pinned); return; }
-    if (this.executionBlocked(entry.directory)) throw new StoreError('workspace_remove_busy', 409);
+    if (this.executionBlocked(entry.directory) || this.draftPreparations.has(id)) throw new StoreError('workspace_remove_busy', 409);
     this.removing.add(id);
     try {
       await this.task(async () => {
@@ -194,6 +195,25 @@ export class Workbench {
     });
   }
 
+  async prepareDraft(workspaceId: string, harnessId: HarnessId, expectedId?: string): Promise<{ preparationId: string; skills: import('../shared/content.ts').SkillOption[] }> {
+    const workspace = this.workspace(workspaceId);
+    const adapter = this.adapters.get(harnessId);
+    if (harnessId !== 'dsh' || !adapter?.prepareDraft) throw new StoreError('draft_skills_unavailable', 409);
+    if (this.removing.has(workspaceId) || this.executionBlocked(workspace.directory)) throw new StoreError('workspace_execution_blocked', 409);
+    const active = this.draftPreparations.get(workspaceId);
+    if (active) { await active; return this.prepareDraft(workspaceId, harnessId, expectedId); }
+    const slot = this.store.reservePreparation(workspaceId, workspace.directory, randomUUID(), expectedId);
+    const promise = this.task(async () => {
+      const skills = await adapter.prepareDraft!({ id: slot.nativeId, cwd: workspace.directory }).catch(() => { throw new StoreError('draft_preparation_unavailable', 503); });
+      this.assertOpen(); this.assertWorkspaceAvailable(workspaceId);
+      if (this.executionBlocked(workspace.directory)) throw new StoreError('workspace_execution_blocked', 409);
+      this.store.reservePreparation(workspaceId, workspace.directory, randomUUID(), slot.preparationId);
+      return { preparationId: slot.preparationId, skills };
+    });
+    this.draftPreparations.set(workspaceId, promise);
+    try { return await promise; } finally { this.draftPreparations.delete(workspaceId); }
+  }
+
   async draftFiles(workspaceId: string, harnessId: HarnessId, directory = '') {
     const workspace = this.workspace(workspaceId);
     if (!this.adapters.has(harnessId)) throw new StoreError('harness_unavailable', 409);
@@ -267,6 +287,7 @@ export class Workbench {
   // Maintenance owns the execution gate while reading native state. History
   // delivery and observation-slot eviction do not participate in this proof.
   private async confirmWorkspaceIdle(directory: string, publish = false, removingId?: string): Promise<boolean> {
+    if (this.workspaces.some(workspace => this.draftPreparations.has(workspace.id) && this.overlaps(directory, workspace.directory))) return false;
     const check = async (conversation: Conversation) => {
       if (!conversation.binding || !this.configured(conversation) ||
         this.preparing.has(conversation.id) || this.busyConversations.has(conversation.id)) return false;
@@ -458,11 +479,16 @@ export class Workbench {
     const workspace = this.workspaces.find(item => item.id === input.workspaceId);
     if (!workspace || this.adapters.get(input.harnessId)?.id !== input.harnessId) throw new StoreError('configuration_unavailable', 400);
     if (!this.store.getConversation(input.id) && this.executionBlocked(workspace.directory)) throw new StoreError('workspace_execution_blocked', 409);
+    if (input.preparationId && this.draftPreparations.has(input.workspaceId)) await this.draftPreparations.get(input.workspaceId);
+    this.assertOpen(); this.assertWorkspaceAvailable(input.workspaceId);
+    if (this.removing.has(input.workspaceId)) throw new StoreError('workspace_remove_busy', 409);
+    if (!this.store.getConversation(input.id) && this.executionBlocked(workspace.directory)) throw new StoreError('workspace_execution_blocked', 409);
     const result = this.store.createConversation({ ...input, cwd: workspace.directory });
     if (result.created) this.launch(this.prepare(result.conversation));
     return result.conversation;
   }
   private prepare(conversation: Conversation): Promise<void> {
+    if (this.preparing.has(conversation.id)) return Promise.resolve();
     this.preparing.add(conversation.id);
     return this.task(async () => {
       let acceptingBinding = true;
@@ -477,11 +503,12 @@ export class Workbench {
         if (!catalog?.available || !model || (effort !== undefined && !model.reasoningEfforts?.some(item => item.id === effort)) ||
           !catalog.permissions.some(item => item.id === conversation.configuration.permissionId))
           throw new StoreError('configuration_unavailable', 409);
-        const binding = await adapter.create({ cwd: conversation.cwd, configuration: conversation.configuration, title: conversation.title }, value => {
+        const binding = await adapter.create({ cwd: conversation.cwd, configuration: conversation.configuration, title: conversation.title, ...(conversation.nativePreparationId ? { preparedId: conversation.nativePreparationId } : {}) }, value => {
           // During shutdown this task remains tracked: a native identity already created must still be saved.
           if (acceptingBinding) this.store.saveBinding(conversation.id, value);
         });
         this.store.saveBinding(conversation.id, binding);
+        this.store.completePreparation(conversation.id);
         if (this.closed) throw new StoreError('workbench_closed', 503);
         await this.observe(conversation.id); await this.sync(conversation.id);
       } catch {
@@ -505,7 +532,7 @@ export class Workbench {
       for (const conversation of this.store.listConversations({ limit: 16, archived: false })) {
         if (this.workspaceUnavailable(conversation.workspaceId)) continue;
         if (!this.configured(conversation)) { try { this.adapter(conversation); } catch { /* durable blocked state */ } continue; }
-        if (conversation.binding && !this.executionBlocked(conversation.cwd)) this.launch(this.restoreConversation(conversation.id));
+        if ((conversation.binding || conversation.nativePreparationId) && !this.executionBlocked(conversation.cwd)) this.launch(this.restoreConversation(conversation.id));
         else if (!conversation.binding && conversation.readiness === 'preparing') this.store.setConversationState(conversation.id, { readiness: 'blocked', error: 'native_creation_result_unknown' });
       }
     });
@@ -524,6 +551,8 @@ export class Workbench {
     }
   }
   private restoreConversation(id: string): Promise<void> {
+    const conversation = this.conversation(id);
+    if (conversation.nativePreparationId) return this.prepare(conversation);
     return this.task(async () => {
       try { await this.observe(id); await this.sync(id); }
       catch { if (!this.closed) this.unknown(id, 'native_observation_unavailable'); }
@@ -531,7 +560,7 @@ export class Workbench {
   }
   async open(id: string) {
     this.assertOpen(); const conversation = this.conversation(id);
-    if (conversation.binding && !this.workspaceUnavailable(conversation.workspaceId) && !this.executionBlocked(conversation.cwd)) this.launch(this.restoreConversation(id));
+    if ((conversation.binding || conversation.nativePreparationId) && !this.workspaceUnavailable(conversation.workspaceId) && !this.executionBlocked(conversation.cwd)) this.launch(this.restoreConversation(id));
     return this.snapshot(id);
   }
   async skills(id: string) {
