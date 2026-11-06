@@ -75,7 +75,7 @@ test('the native tree becomes an index with ownership, nesting and conversation 
   await assert.rejects(f.service.subagentHistory(f.id, 'other-conversation-agent'), { code: 'subagent_not_found' });
   await assert.rejects(f.service.subagentHistory(f.id, '../escape'), { code: 'invalid_request' });
   await assert.rejects(f.service.subagentHistory(f.id, 'a..b'), { code: 'invalid_request' }, 'dot segments are refused even without a slash');
-  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM workbench_items').get()?.n, 0, 'child transcripts are never stored');
+  assert.ok((['workbench_items', 'workbench_live_items'].every(name => !f.db.prepare("SELECT 1 FROM sqlite_schema WHERE name=?").get(name))), 'child transcripts are never stored');
 });
 
 test('lost observation downgrades every surface to unverified and refuses stops until a verified read', async t => {
@@ -187,7 +187,7 @@ test('collaboration records read from native history and live events replay into
   await f.service.reading(f.id, randomUUID());
   f.peer.emit({ type: 'item', item: { id: 'collab-live', kind: 'notice', text: '子 Agent 已完成', status: 'completed', runId: 'run', collaboration: { action: 'completed', agentIds: ['child-a'] } } });
   assert.deepEqual(f.service.liveItem(f.id, 'collab-live')!.collaboration, { action: 'completed', agentIds: ['child-a'] });
-  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM workbench_live_items').get()?.n, 0, 'live bodies stay in memory');
+  assert.ok((['workbench_items', 'workbench_live_items'].every(name => !f.db.prepare("SELECT 1 FROM sqlite_schema WHERE name=?").get(name))), 'live bodies stay in memory');
 });
 test('a later verified read settles an unknown stop whose target no longer runs, without another native call', async t => {
   const f = fixture(t);

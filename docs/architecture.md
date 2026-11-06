@@ -130,6 +130,6 @@ Store 的最近接收消息提交时序支持侧栏分页，游标独立保存�
 | --- | --- |
 | 接入 | `history(binding, cursor, limit)` 返回原生页与不透明游标。[Codex](../src/harness/codex/index.ts) 直接调用 `thread/items/list`（分页线程有索引，读取不 `resume`），按条目大小增减每次条数；旧格式线程报 `codex_history_unsupported`。[DSH](../src/harness/dsh/index.ts) 最新页来自快照，旧页只用不激活 Agent 的 `session/page`，游标携带边界轮次，用页内 `turn/start` 推算条目所属轮次 |
 | 服务 | [Workbench](../src/server/workbench.ts) 在运行时内存中保持最新页与实时条目：相邻两次读取有重叠时拼接（上限 200 条），早于读取且已结束的实时副本退场；状态与最新页一同读取，历史读取失败只标记可读性，不改变执行核实。旧页由服务端签发、绑定对话身份的游标读取；只含隐藏事件的页向前跳过，超出序列化预算的页以更少条目重读。引用与工作区图片核验先查内存中的近期条目，再从最新页向前有界查找 |
-| 数据 | Store 只记录变更提示（可带条目身份）与本轮文件路径；`workbench_items`、`workbench_live_items` 为退役表，不再读写，待验证后由迁移删除。[存储预算](../src/server/storage.ts)按数据库在用页面计量（退役表单独统计、不计入），达到预算拒绝上传与新建对话，原生图片副本可淘汰 |
+| 数据 | Store 只记录变更提示（可带条目身份）与本轮文件路径；原正文投影表已由迁移 16 删除。[存储预算](../src/server/storage.ts)按数据库在用页面计量，达到预算拒绝上传与新建对话，原生图片副本可淘汰 |
 | 接口 | 快照返回最新页、实时条目、`olderCursor` 与可选 `error`；`GET /conversations/:id/history?cursor=` 返回一页；`GET /storage`、`POST /storage/clear-cache` 提供用量与缓存清理 |
 | 界面 | [历史窗口](../src/web/history-window.ts)按页组成窗口（≤500 条/8 MiB），每页记住读回它的游标；向上超出时最新端的页带游标离开，向下逐页读回，最后拼回最新页。[工作台](../src/web/workbench.tsx)滚动到两端时自动读取，并以首个可见条目固定阅读位置；[存储入口](../src/web/storage-status.tsx)显示用量与清理 |
