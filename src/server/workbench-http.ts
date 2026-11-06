@@ -6,7 +6,7 @@ import { conversationManagementSchema, conversationSearchSchema, createConversat
 import type { Conversation as ConversationView, WorkbenchOperation, WorkbenchSnapshot } from '../shared/workbench.ts';
 import type { PrivateContext } from './app.ts';
 import type { Workbench } from './workbench.ts';
-import { StoreError, type Conversation, type Operation, type WorkbenchChange } from './workbench-store.ts';
+import { conversationCursor, StoreError, type Conversation, type Operation, type WorkbenchChange } from './workbench-store.ts';
 import { decodeImage, ResourceError } from './resources.ts';
 import { textLimit } from './workspace-documents.ts';
 import { imageSchema, skillCatalogSchema } from '../shared/content.ts';
@@ -15,7 +15,7 @@ const uuidParams = z.object({ id: z.uuid() }).strict();
 const workspaceParams = z.object({ id: workspaceIdSchema }).strict();
 const documentPath = z.string().min(1).max(1024);
 const noQuery = z.object({}).strict();
-const listQuery = z.object({ beforeId: z.uuid().optional() }).strict();
+const listQuery = z.object({ beforeId: z.string().min(1).max(512).optional() }).strict();
 const olderQuery = z.object({ beforeItemId: identifierSchema.optional() }).strict();
 const cursorSchema = z.string().regex(/^(0|[1-9][0-9]{0,15})$/).transform(Number).refine(Number.isSafeInteger);
 const eventsQuery = z.object({ cursor: cursorSchema.optional() }).strict();
@@ -128,10 +128,11 @@ export function createWorkbenchHttp(workbench: Workbench, input: Partial<z.input
         return;
       }
       for (const change of batch.events) {
-        const value: { type: 'change'; revision: number; conversationId: string; item?: ReturnType<Workbench['store']['getItem']> } = {
+        const value: { type: 'change'; revision: number; conversationId: string; deleted?: boolean; item?: ReturnType<Workbench['store']['getItem']> } = {
           type: 'change', revision: change.sequence, conversationId: change.conversationId,
         };
-        if (change.itemId) {
+        if (workbench.store.deletions.get(change.conversationId)?.status === 'completed') value.deleted = true;
+        if (change.itemId && !value.deleted) {
           const item = workbench.store.getItem(change.conversationId, change.itemId);
           // Large bodies use the same invalidation + snapshot path, never fragmented deltas.
           if (item && Buffer.byteLength(item.text) <= MAX_FRAME_BYTES) {
@@ -195,7 +196,7 @@ export function createWorkbenchHttp(workbench: Workbench, input: Partial<z.input
         const query = parse(listQuery, request.query);
         const values = workbench.store.listConversations({ ...query, limit: 101 });
         const conversations = values.slice(0, 100).map(conversationView);
-        return json(reply, { conversations, olderBeforeId: values.length > 100 ? conversations.at(-1)!.id : null, revision: workbench.store.version() });
+        return json(reply, { conversations, olderBeforeId: values.length > 100 ? conversationCursor(values[99]!, query) : null, revision: workbench.store.version() });
       });
       // Titles stay in the body, outside request URL logs.
       privateApp.get('/conversation-defaults', async (request, reply) => {
@@ -224,18 +225,34 @@ export function createWorkbenchHttp(workbench: Workbench, input: Partial<z.input
         const { unregistered, ...query } = parse(conversationSearchSchema, request.body);
         const limit = query.workspaceId || unregistered ? 6 : 30;
         const workspaces = unregistered ? workbench.workspaceView() : undefined;
-        const values = workbench.store.listConversations({
-          ...query, limit: limit + 1,
+        const scope = { ...query,
           ...(workspaces ? { excludeWorkspaces: [...workspaces.workspaces, ...(workspaces.removedWorkspaces ?? [])].map(workspace => workspace.id) } : {}),
-        });
+        };
+        const values = workbench.store.listConversations({ ...scope, limit: limit + 1 });
         const conversations = values.slice(0, limit).map(conversationView);
-        return json(reply, { conversations, olderBeforeId: values.length > limit ? conversations.at(-1)!.id : null, revision: workbench.store.version() });
+        return json(reply, { conversations, olderBeforeId: values.length > limit ? conversationCursor(values[limit - 1]!, scope) : null, revision: workbench.store.version() });
+      });
+      privateApp.post('/conversations/:id/reading', { bodyLimit: 4096 }, async (request, reply) => {
+        parse(noQuery, request.query);
+        const { id } = parse(uuidParams, request.params);
+        const input = parse(z.object({ readerId: z.uuid(), active: z.boolean() }).strict(), request.body);
+        if (input.active) await workbench.reading(id, input.readerId);
+        else workbench.releaseReading(id, input.readerId);
+        return json(reply, { ok: true });
+      });
+      privateApp.post('/conversations/:id/delete', { bodyLimit: 4096 }, async (request, reply) => {
+        parse(noQuery, request.query);
+        const { id } = parse(uuidParams, request.params);
+        parse(z.object({ confirm: z.literal(true) }).strict(), request.body);
+        await workbench.deleteConversation(id);
+        privateApp.log.info({ event: 'conversation_deleted' });
+        return json(reply, { status: 'completed' });
       });
       privateApp.post('/conversations/:id/manage', { bodyLimit: 4096 }, async (request, reply) => {
         parse(noQuery, request.query);
         const { id } = parse(uuidParams, request.params);
         const body = parse(conversationManagementSchema, request.body);
-        const conversation = body.action === 'rename' ? workbench.store.renameConversation(id, body.title) :
+        const conversation = body.action === 'rename' ? workbench.renameConversation(id, body.title) :
           await workbench.setArchived(id, body.archived);
         return json(reply, { conversation: conversationView(conversation) });
       });

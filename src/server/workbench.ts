@@ -19,7 +19,8 @@ const HISTORY_MAX_ITEMS = 1000;
 const HISTORY_MAX_BYTES = 16 * 1024 * 1024;
 type Runtime = {
   stop?: () => void; watching?: Promise<void>; syncing?: Promise<void>; older?: Promise<void>;
-  timer?: NodeJS.Timeout; poll?: NodeJS.Timeout; flush?: NodeJS.Timeout;
+  timer?: NodeJS.Timeout; retry?: NodeJS.Timeout; flush?: NodeJS.Timeout; release?: NodeJS.Timeout;
+  retryAttempt: number;
   live: Map<string, NativeItem>; generation: number; stateGeneration: number; dirty: boolean;
 };
 type HistoryRead = { items: NativeItem[]; cursor: string | null; establishCursor: boolean; usage?: HistoryPage['usage'] };
@@ -46,10 +47,16 @@ export class Workbench {
   private catalogLoading?: Promise<Catalog[]>;
   private queueRecovery?: NodeJS.Timeout;
   private queueRecoveryCursor = '';
+  private recoveryComplete = false;
+  private readonly readers = new Map<string, Map<string, number>>();
+  private readonly deleting = new Set<string>();
+  private deletionGuard: (id: string) => boolean = () => false;
+  private readonly deletionTasks = new Map<string, Promise<void>>();
 
   constructor(store: WorkbenchStore, initialWorkspaces: Workspace[], adapters: Map<HarnessId, HarnessAdapter>, registry?: WorkspaceRegistry) {
     this.store = store; this.adapters = adapters;
     this.initialWorkspaces = initialWorkspaces; this.registry = registry;
+    this.deletionGuard = id => this.store.deletions.get(id) !== null;
   }
   get workspaces(): Workspace[] { return this.registry?.active() ?? this.initialWorkspaces; }
   workspaceView(): Omit<WorkbenchConfiguration, 'harnesses'> {
@@ -473,7 +480,7 @@ export class Workbench {
   }
 
   async create(input: Omit<CreateConversation, 'cwd'>): Promise<Conversation> {
-    this.assertOpen();
+    this.assertOpen(); this.assertNotDeleting(input.id);
     if (this.removing.has(input.workspaceId)) throw new StoreError('workspace_remove_busy', 409);
     this.assertWorkspaceAvailable(input.workspaceId);
     const workspace = this.workspaces.find(item => item.id === input.workspaceId);
@@ -488,6 +495,7 @@ export class Workbench {
     return result.conversation;
   }
   private prepare(conversation: Conversation): Promise<void> {
+    this.assertNotDeleting(conversation.id);
     if (this.preparing.has(conversation.id)) return Promise.resolve();
     this.preparing.add(conversation.id);
     return this.task(async () => {
@@ -513,7 +521,7 @@ export class Workbench {
         await this.observe(conversation.id); await this.sync(conversation.id);
       } catch {
         this.store.setConversationState(conversation.id, { readiness: 'blocked', error: 'conversation_preparation_incomplete' });
-      } finally { acceptingBinding = false; this.preparing.delete(conversation.id); }
+      } finally { acceptingBinding = false; this.preparing.delete(conversation.id); this.releaseIdle(conversation.id); }
     });
   }
 
@@ -523,46 +531,157 @@ export class Workbench {
       for (const workspace of this.workspaces) {
         if (workspace.maintenance) this.maintenancePhases.set(workspace.id, await workspace.maintenance('status'));
       }
+      this.restoreDeletions();
       this.store.recoverDispatching();
       this.restoreQueuedConversations();
-      this.queueRecovery ??= setInterval(() => {
-        try { this.restoreQueuedConversations(); } catch { /* Retry on the next recovery pass. */ }
-      }, 5000).unref();
-      // The most recent bounded set restores eagerly. Other conversations restore when opened.
-      for (const conversation of this.store.listConversations({ limit: 16, archived: false })) {
-        if (this.workspaceUnavailable(conversation.workspaceId)) continue;
-        if (!this.configured(conversation)) { try { this.adapter(conversation); } catch { /* durable blocked state */ } continue; }
-        if ((conversation.binding || conversation.nativePreparationId) && !this.executionBlocked(conversation.cwd)) this.launch(this.restoreConversation(conversation.id));
-        else if (!conversation.binding && conversation.readiness === 'preparing') this.store.setConversationState(conversation.id, { readiness: 'blocked', error: 'native_creation_result_unknown' });
-      }
+      this.ensureRecoveryTimer();
     });
+  }
+  private ensureRecoveryTimer(): void {
+    this.queueRecovery ??= setInterval(() => {
+      if (this.closed) return;
+      for (const [id, readers] of this.readers) {
+        for (const [reader, expiry] of readers) if (expiry <= Date.now()) readers.delete(reader);
+        if (!readers.size) { this.readers.delete(id); this.releaseIdle(id); }
+      }
+      this.restoreDeletions();
+      try { this.restoreQueuedConversations(); } catch { /* Durable recovery resumes on the next bounded pass. */ }
+    }, 5000).unref();
   }
   private restoreQueuedConversations() {
     if (this.closed) return;
-    const pending = this.store.queuedConversations(this.queueRecoveryCursor);
-    this.queueRecoveryCursor = pending.length === 64 ? pending.at(-1)! : '';
+    // Sweep durable execution responsibility once at startup; idle history is never restored.
+    // Subsequent scans are limited to the durable queue, not the whole conversation catalogue.
+    const pending = this.recoveryComplete
+      ? this.store.queuedConversations(this.queueRecoveryCursor)
+      : this.store.recoverableConversations(this.queueRecoveryCursor);
     for (const id of pending) {
-      if (this.runtimes.has(id)) continue;
+      if (this.runtimes.has(id) || this.isDeleting(id)) { this.queueRecoveryCursor = id; continue; }
       const conversation = this.conversation(id);
-      if (!conversation.binding || !this.configured(conversation) || this.workspaceUnavailable(conversation.workspaceId) ||
-        this.executionBlocked(conversation.cwd)) continue;
-      try { this.runtime(id); } catch { this.queueRecoveryCursor = ''; break; }
+      if (!conversation.binding && !conversation.nativePreparationId && conversation.readiness === 'preparing') {
+        this.store.setConversationState(id, { readiness: 'blocked', error: 'native_creation_result_unknown' });
+        this.queueRecoveryCursor = id; continue;
+      }
+      if (!this.configured(conversation)) { try { this.adapter(conversation); } catch { /* saved blocked state */ } this.queueRecoveryCursor = id; continue; }
+      if ((!conversation.binding && !conversation.nativePreparationId) || this.workspaceUnavailable(conversation.workspaceId) ||
+        this.executionBlocked(conversation.cwd)) { this.queueRecoveryCursor = id; continue; }
+      try { this.runtime(id); } catch { return; }
+      this.queueRecoveryCursor = id;
       this.launch(this.restoreConversation(id));
     }
+    if (pending.length < 64) { this.queueRecoveryCursor = ''; this.recoveryComplete = true; }
   }
   private restoreConversation(id: string): Promise<void> {
+    if (this.isDeleting(id)) return Promise.resolve();
     const conversation = this.conversation(id);
     if (conversation.nativePreparationId) return this.prepare(conversation);
     return this.task(async () => {
       try { await this.observe(id); await this.sync(id); }
-      catch { if (!this.closed) this.unknown(id, 'native_observation_unavailable'); }
+      catch { if (!this.closed) { this.unknown(id, 'native_observation_unavailable'); const runtime = this.runtimes.get(id); if (runtime) this.retryUnknown(id, runtime); } }
     });
   }
   async open(id: string) {
     this.assertOpen(); const conversation = this.conversation(id);
-    if ((conversation.binding || conversation.nativePreparationId) && !this.workspaceUnavailable(conversation.workspaceId) && !this.executionBlocked(conversation.cwd)) this.launch(this.restoreConversation(id));
+    this.assertNotDeleting(id);
+    if ((conversation.binding || conversation.nativePreparationId) && !this.workspaceUnavailable(conversation.workspaceId) && !this.executionBlocked(conversation.cwd)) {
+      const runtime = this.runtimes.get(id);
+      if (this.hasExecutionResponsibility(id)) {
+        if (!runtime?.stop && !runtime?.watching && !runtime?.syncing) this.launch(this.restoreConversation(id));
+      } else if (!conversation.historyLoaded && !runtime?.syncing) this.launch(this.sync(id));
+    }
     return this.snapshot(id);
   }
+  /** Reading leases belong to authenticated browser pages, never to native execution. */
+  async reading(id: string, readerId: string): Promise<void> {
+    this.assertOpen(); this.assertNotDeleting(id);
+    if (!/^[a-zA-Z0-9-]{1,80}$/.test(readerId)) throw new StoreError('invalid_reader', 400);
+    const conversation = this.conversation(id);
+    if (!this.configured(conversation)) return;
+    let readers = this.readers.get(id);
+    if (!readers) {
+      if (this.readers.size >= 16) throw new StoreError('reader_limit', 429);
+      readers = new Map(); this.readers.set(id, readers);
+    }
+    if (!readers.has(readerId) && readers.size >= 32) throw new StoreError('reader_limit', 429);
+    const first = readers.size === 0;
+    readers.set(readerId, Date.now() + 45_000);
+    this.ensureRecoveryTimer();
+    if ((first || !this.runtimes.get(id)?.stop) && conversation.binding && !this.executionBlocked(conversation.cwd)) {
+      await this.observe(id); await this.sync(id);
+    }
+  }
+  releaseReading(id: string, readerId: string): void {
+    const readers = this.readers.get(id);
+    readers?.delete(readerId);
+    if (!readers?.size) this.readers.delete(id);
+    this.releaseIdle(id);
+  }
+  setDeletionGuard(guard: (id: string) => boolean): void { this.deletionGuard = guard; }
+  private isDeleting(id: string): boolean { return this.deleting.has(id) || this.deletionGuard(id); }
+  private assertNotDeleting(id: string): void { if (this.isDeleting(id)) throw new StoreError('conversation_deleting', 409); }
+  /** Caller persists the deletion intent before cleaning native data. No new work can enter this fence. */
+  async quiesceForDeletion(id: string): Promise<Conversation> {
+    this.assertOpen();
+    if (this.preparing.has(id) || this.busyConversations.has(id)) throw new StoreError('conversation_busy', 409);
+    this.deleting.add(id);
+    try {
+      const conversation = this.conversation(id);
+      if (!conversation.binding && (conversation.nativePreparationId || conversation.error === 'native_creation_result_unknown' || conversation.error === 'conversation_preparation_incomplete'))
+        throw new StoreError('conversation_preparation_incomplete', 409);
+      const runtime = this.runtimes.get(id);
+      await runtime?.watching; await runtime?.older?.catch(() => {});
+      if (conversation.binding) await this.sync(id);
+      await this.runtimes.get(id)?.older?.catch(() => {});
+      const current = this.conversation(id);
+      if (this.preparing.has(id) || this.busyConversations.has(id) ||
+        (current.binding ? !this.messageAllowed(current) : current.readiness === 'preparing') || this.store.readQueue(id).entries.length)
+        throw new StoreError('conversation_busy', 409);
+      this.readers.delete(id); this.disposeRuntime(id);
+      return current;
+    } catch (error) { this.deleting.delete(id); throw error; }
+  }
+  private restoreDeletions(): void {
+    if (this.closed) return;
+    for (const id of this.store.deletions.listPending(8)) this.launch(this.deleteConversation(id));
+  }
+  deleteConversation(id: string): Promise<void> {
+    this.assertOpen();
+    const existing = this.deletionTasks.get(id);
+    if (existing) return existing;
+    if (this.store.deletions.get(id)?.status === 'completed') return Promise.resolve();
+    const pending = this.task(async () => {
+      try {
+        const record = this.store.deletions.get(id);
+        if (record?.status !== 'native_done') {
+          const conversation = this.conversation(id);
+          if (conversation.harnessId === 'dsh') throw new StoreError('conversation_delete_unsupported', 409);
+          const adapter = conversation.binding ? this.adapter(conversation) : undefined;
+          if (conversation.binding && !adapter?.delete) throw new StoreError('native_deletion_unavailable', 409);
+          if (!record) {
+            await this.quiesceForDeletion(id);
+            this.store.deletions.begin(id);
+          } else {
+            // A persisted intent has already passed quiescence. A missing native identity
+            // must reach the idempotent delete, not fail a new state/history preflight.
+            this.deleting.add(id); this.readers.delete(id); this.disposeRuntime(id);
+            this.store.deletions.begin(id);
+          }
+          if (conversation.binding) await adapter!.delete!(conversation.binding);
+          this.store.deletions.nativeDone(id);
+        }
+        this.readers.delete(id); this.disposeRuntime(id);
+        this.store.deletions.complete(id);
+      } catch (error) {
+        if (this.store.deletions.get(id)) this.store.deletions.fail(id, 'conversation_deletion_failed');
+        else this.deleting.delete(id);
+        throw error;
+      }
+    });
+    this.deletionTasks.set(id, pending);
+    void pending.then(() => { this.deletionTasks.delete(id); this.deleting.delete(id); }, () => this.deletionTasks.delete(id));
+    return pending;
+  }
+  releaseDeletion(id: string): void { this.deleting.delete(id); }
   async skills(id: string) {
     this.assertOpen();
     const conversation = this.conversation(id);
@@ -593,10 +712,10 @@ export class Workbench {
   }
 
   older(id: string, beforeItemId?: string) {
-    this.assertOpen();
+    this.assertOpen(); this.assertNotDeleting(id);
     if (this.workspaceUnavailable(this.conversation(id).workspaceId)) return Promise.resolve(this.snapshot(id, beforeItemId));
     return this.task(async () => {
-      await this.sync(id); this.assertOpen();
+      await this.sync(id); this.assertOpen(); this.assertNotDeleting(id);
       const runtime = this.runtime(id);
       if (!runtime.older) {
         runtime.older = this.task(async () => {
@@ -607,13 +726,17 @@ export class Workbench {
           let cursor = local.nativeOlderCursor; const seen = new Set([cursor]);
           for (let number = 0; number < HISTORY_MAX_PAGES; number++) {
             const page = await adapter.history(conversation.binding, cursor, HISTORY_PAGE_SIZE);
-            this.assertOpen();
+            this.assertOpen(); this.assertNotDeleting(id);
+            if (this.runtimes.get(id) !== runtime) throw new StoreError('history_changed_retry', 409);
             if (runtime.generation !== generation) { this.scheduleSync(id); throw new StoreError('history_changed_retry', 409); }
             if (page.items.length > HISTORY_PAGE_SIZE || page.items.reduce((total, item) => total + Buffer.byteLength(item.text), 0) > HISTORY_MAX_BYTES)
               throw new StoreError('native_history_page_limit', 502);
             if (page.olderCursor && seen.has(page.olderCursor)) throw new StoreError('history_no_progress', 502);
             if (page.items.length || !page.olderCursor) {
-              this.store.mergeHistory(id, await this.materialize(conversation, page.items), local.nativeOlderBeforeItemId);
+              const items = await this.materialize(conversation, page.items);
+              this.assertOpen(); this.assertNotDeleting(id);
+              if (this.runtimes.get(id) !== runtime || runtime.generation !== generation) throw new StoreError('history_changed_retry', 409);
+              this.store.mergeHistory(id, items, local.nativeOlderBeforeItemId);
               this.store.setHistoryCursor(id, { loaded: true, olderCursor: page.olderCursor, beforeItemId: page.olderCursor ? (page.items[0]?.id ?? local.nativeOlderBeforeItemId) : null });
               return;
             }
@@ -622,7 +745,7 @@ export class Workbench {
           }
           throw new StoreError('history_gap_limit', 502);
         });
-        void runtime.older.then(() => { runtime.older = undefined; }, () => { runtime.older = undefined; });
+        void runtime.older.then(() => { runtime.older = undefined; this.releaseIdle(id); }, () => { runtime.older = undefined; this.releaseIdle(id); });
       }
       await runtime.older; return this.snapshot(id, beforeItemId);
     });
@@ -638,7 +761,7 @@ export class Workbench {
     return { entries, pause, version, mode };
   }
   async changeQueue(id: string, command: QueueCommand): Promise<QueueView> {
-    this.assertOpen();
+    this.assertOpen(); this.assertNotDeleting(id);
     const conversation = this.conversation(id);
     this.assertWorkspaceAvailable(conversation.workspaceId);
     if (command.action === 'send') {
@@ -669,12 +792,14 @@ export class Workbench {
         if (conversation.state.status === 'unknown' || !conversation.state.configurationVerified)
           throw new StoreError('operation_needs_reconciliation', 409);
       }
+      this.assertNotDeleting(id);
       this.store.changeQueue(id, command);
       if (!this.executionBlocked(conversation.cwd)) this.launch(this.restoreConversation(id));
     }
     return this.queue(id);
   }
   private assertQueueDispatchable(conversation: Conversation) {
+    this.assertNotDeleting(conversation.id);
     this.assertWorkspaceAvailable(conversation.workspaceId);
     if (!conversation.binding || conversation.readiness !== 'ready') throw new StoreError('conversation_not_ready', 409);
     if (conversation.archived) throw new StoreError('conversation_archived', 409);
@@ -732,21 +857,26 @@ export class Workbench {
     const previous = this.latestAcceptedMessage(conversation.id);
     return !previous || (previous.runId !== null && (previous.runId === conversation.state.runId || previous.runId === conversation.state.terminalRunId));
   }
+  renameConversation(id: string, title: string): Conversation {
+    this.assertOpen(); this.assertNotDeleting(id);
+    return this.store.renameConversation(id, title);
+  }
   async setArchived(id: string, archived: boolean) {
-    this.assertOpen();
+    this.assertOpen(); this.assertNotDeleting(id);
     const current = this.conversation(id);
     if (archived && !current.archived && current.binding) {
       await this.observe(id);
       await this.sync(id);
       this.assertOpen();
     }
+    this.assertNotDeleting(id);
     return this.store.setArchived(id, archived, conversation =>
       conversation.binding ? this.messageAllowed(conversation) :
         conversation.readiness === 'blocked' && conversation.state.pendingInputs === 0 &&
         !['running', 'waiting'].includes(conversation.state.status));
   }
   async enqueue(input: OperationInput) {
-    this.assertOpen();
+    this.assertOpen(); this.assertNotDeleting(input.conversationId);
     if (this.store.getOperation(input.id)) return this.store.enqueueOperation(input).operation;
     const { cwd: directory, workspaceId } = this.conversation(input.conversationId);
     if (this.removing.has(workspaceId)) throw new StoreError('workspace_remove_busy', 409);
@@ -766,6 +896,7 @@ export class Workbench {
     if (input.type === 'message' && !this.messageAllowed(this.conversation(conversation.id))) throw new StoreError('operation_needs_reconciliation', 409);
     if (this.saving(conversation.cwd)) throw new StoreError('workspace_save_in_progress', 409);
     if (this.executionBlocked(conversation.cwd)) throw new StoreError('workspace_execution_blocked', 409);
+    this.assertNotDeleting(input.conversationId);
     const result = this.store.enqueueOperation(input);
     if (result.created) this.launch(this.dispatch(result.operation.id));
     return result.operation;
@@ -809,12 +940,13 @@ export class Workbench {
       this.processing.delete(id);
       const count = (this.busyConversations.get(queued.conversationId) ?? 1) - 1;
       if (count) this.busyConversations.set(queued.conversationId, count); else this.busyConversations.delete(queued.conversationId);
+      this.releaseIdle(queued.conversationId);
     };
     void task.then(settled, settled);
     return task;
   }
   private drain(id: string): void {
-    if (this.closed || this.executionBlocked(this.conversation(id).cwd)) return;
+    if (this.closed || this.isDeleting(id) || this.executionBlocked(this.conversation(id).cwd)) return;
     for (const operation of this.store.listOperations({ conversationId: id, status: 'queued', limit: 100 })) {
       if (!this.processing.has(operation.id)) this.launch(this.dispatch(operation.id));
     }
@@ -849,18 +981,19 @@ export class Workbench {
     }
   }
   reconcile(id: string): Promise<void> {
-    this.assertOpen();
+    this.assertOpen(); this.assertNotDeleting(id);
     return this.task(async () => {
       let conversation = this.conversation(id); const adapter = this.adapter(conversation); if (!conversation.binding) return;
-      await this.observe(id); await this.sync(id); this.assertOpen(); conversation = this.conversation(id);
+      await this.observe(id); await this.sync(id); this.assertOpen(); this.assertNotDeleting(id); conversation = this.conversation(id);
       for (const operation of this.store.listOperations({ conversationId: id, status: 'unknown', order: 'desc', limit: 100 })) {
-        this.assertOpen(); this.adapter(this.conversation(id));
+        this.assertOpen(); this.assertNotDeleting(id); this.adapter(this.conversation(id));
         if (operation.type === 'message') {
           const runId = this.store.operationRunId(id, operation.id);
           const receipt = runId ? { outcome: 'accepted' as const, runId } : await adapter.reconcile(conversation.binding!, operation.id);
+          this.assertOpen(); this.assertNotDeleting(id);
           this.store.settleOperation(operation.id, receipt);
         } else {
-          await this.sync(id); this.assertOpen();
+          await this.sync(id); this.assertOpen(); this.assertNotDeleting(id);
           const current = this.conversation(id);
           if (current.state.configurationVerified && TERMINAL.has(current.state.status) && current.state.runId === operation.payload.runId)
             this.store.settleOperation(operation.id, { outcome: 'accepted', runId: operation.payload.runId });
@@ -868,8 +1001,9 @@ export class Workbench {
       }
       const latest = this.store.listOperations({ conversationId: id, status: 'accepted', type: 'message', order: 'desc', limit: 1 })[0];
       if (latest?.runId === null) {
-        this.assertOpen(); this.adapter(this.conversation(id));
+        this.assertOpen(); this.assertNotDeleting(id); this.adapter(this.conversation(id));
         const receipt = await adapter.reconcile(conversation.binding!, latest.id);
+        this.assertOpen(); this.assertNotDeleting(id);
         // An inconclusive lookup cannot revoke an already established acceptance.
         if (receipt.outcome === 'accepted' && receipt.runId) this.store.settleOperation(latest.id, receipt);
         else if (receipt.outcome === 'accepted' && latest.type === 'message' && latest.queuedInput?.delivery.mode === 'next' &&
@@ -886,16 +1020,54 @@ export class Workbench {
     });
   }
 
+  private hasExecutionResponsibility(id: string): boolean {
+    const conversation = this.store.getConversation(id);
+    if (!conversation) return false;
+    if ([...(this.runtimes.get(id)?.live.values() ?? [])].some(item => item.status === 'running')) return true;
+    if (this.preparing.has(id) || this.busyConversations.has(id) || conversation.state.pendingInputs ||
+      ['running', 'waiting', 'unknown'].includes(conversation.state.status)) return true;
+    for (const status of ['queued', 'dispatching', 'unknown'] as const)
+      if (this.store.listOperations({ conversationId: id, status, limit: 1 }).length) return true;
+    const latest = this.latestAcceptedMessage(id);
+    if (latest && (!latest.runId || (latest.runId !== conversation.state.runId && latest.runId !== conversation.state.terminalRunId))) return true;
+    const queue = this.store.readQueue(id);
+    return !queue.pause && queue.entries.length > 0;
+  }
+  private releaseIdle(id: string): void {
+    const runtime = this.runtimes.get(id);
+    if (!runtime || this.closed || runtime.release || this.isDeleting(id)) return;
+    if (runtime.syncing || runtime.watching || runtime.older || runtime.dirty || this.readers.has(id) || this.hasExecutionResponsibility(id)) return;
+    runtime.release = setTimeout(() => {
+      runtime.release = undefined;
+      if (this.runtimes.get(id) !== runtime || runtime.syncing || runtime.watching || runtime.older || runtime.dirty || this.readers.has(id) || this.hasExecutionResponsibility(id)) return;
+      this.flushLive(id, runtime);
+      this.disposeRuntime(id);
+    }, 250);
+    runtime.release.unref();
+  }
+  private retryUnknown(id: string, runtime: Runtime): void {
+    if (this.closed || this.isDeleting(id) || this.runtimes.get(id) !== runtime || runtime.retry) return;
+    const current = this.store.getConversation(id);
+    // Recovery only: ordinary live execution relies on native events, never timer silence.
+    if (!current || (!this.hasExecutionResponsibility(id) && current.state.status !== 'unknown') || ['running', 'waiting'].includes(current.state.status)) return;
+    runtime.retry = setTimeout(() => {
+      runtime.retry = undefined;
+      if (this.runtimes.get(id) === runtime && !this.isDeleting(id)) this.launch(this.reconcile(id).catch(() => {
+        if (!this.closed && this.runtimes.get(id) === runtime) { this.unknown(id, 'native_observation_unavailable'); this.retryUnknown(id, runtime); }
+      }));
+    }, Math.min(60_000, 1000 * 2 ** Math.min(runtime.retryAttempt++, 6)));
+    runtime.retry.unref();
+  }
   private runtime(id: string): Runtime {
     let runtime = this.runtimes.get(id);
     if (!runtime) {
-      if (this.runtimes.size >= 16) {
+      if (this.runtimes.size >= 64) {
         const idle = [...this.runtimes].find(([key, value]) => !value.syncing && !value.watching && !value.older && !this.preparing.has(key) && !this.busyConversations.has(key) &&
-          !['running', 'waiting', 'unknown'].includes(this.conversation(key).state.status));
+          !this.readers.has(key) && !this.hasExecutionResponsibility(key));
         if (!idle) throw new StoreError('active_conversation_limit', 429);
         this.disposeRuntime(idle[0]);
       }
-      runtime = { live: new Map(), generation: 0, stateGeneration: 0, dirty: false }; this.runtimes.set(id, runtime);
+      runtime = { live: new Map(), generation: 0, stateGeneration: 0, dirty: false, retryAttempt: 0 }; this.runtimes.set(id, runtime);
     }
     return runtime;
   }
@@ -910,10 +1082,11 @@ export class Workbench {
     if (this.closed) return Promise.resolve();
     const conversation = this.conversation(id); const adapter = this.adapter(conversation); if (!conversation.binding) return Promise.resolve();
     const runtime = this.runtime(id);
+    if (runtime.release) { clearTimeout(runtime.release); runtime.release = undefined; }
     if (runtime.stop) return Promise.resolve(); if (runtime.watching) return runtime.watching;
     runtime.watching = this.task(async () => {
       const stop = await adapter.watch(conversation.binding!, change => {
-        if (this.closed || this.runtimes.get(id) !== runtime) return;
+        if (this.closed || this.isDeleting(id) || this.runtimes.get(id) !== runtime) return;
         try {
           if (change.type === 'usage') { this.store.setUsage(id, change.usage); return; }
           runtime.generation++;
@@ -935,7 +1108,10 @@ export class Workbench {
             if (runtime.syncing) runtime.dirty = true;
           } else {
             runtime.stateGeneration++;
-            if (change.type === 'state') this.store.setConversationState(id, { state: change.state });
+            if (change.type === 'state') {
+              this.store.setConversationState(id, { state: change.state });
+              if (change.state.configurationVerified && ['running', 'waiting'].includes(change.state.status)) return;
+            }
             // Transport loss is a fact, not a hint to wait for a successful read.
             // Keep saved history/identity while fencing reads from before loss.
             if (change.type === 'unavailable') this.unknown(id, change.reason);
@@ -944,13 +1120,13 @@ export class Workbench {
         } catch { this.unknown(id, 'native_update_requires_sync'); this.scheduleSync(id); }
       });
       if (this.closed || this.runtimes.get(id) !== runtime) stop();
-      else { runtime.stop = stop; runtime.poll = setInterval(() => this.scheduleSync(id), 5000); runtime.poll.unref(); }
+      else { runtime.stop = stop; }
     });
     void runtime.watching.then(() => { runtime.watching = undefined; }, () => { runtime.watching = undefined; });
     return runtime.watching;
   }
   private scheduleSync(id: string): void {
-    if (this.closed) return;
+    if (this.closed || this.isDeleting(id)) return;
     const runtime = this.runtime(id); runtime.dirty = true;
     if (runtime.syncing || runtime.timer) return;
     runtime.timer = setTimeout(() => { runtime.timer = undefined; this.launch(this.sync(id)); }, 120); runtime.timer.unref();
@@ -1016,7 +1192,7 @@ export class Workbench {
             const live = runtime.live.get(item.id);
             if (!live) return item;
             const sameBody = item.kind === live.kind && item.text === live.text && item.runId === live.runId && item.operationId === live.operationId;
-            if (sameBody && (item.status === live.status || item.status === 'completed')) { runtime.live.delete(item.id); return item; }
+            if ((live.status === 'running' && item.status === 'completed') || (sameBody && (item.status === live.status || item.status === 'completed'))) { runtime.live.delete(item.id); return item; }
             if (item.fileEdits && live.runId === item.runId && live.status === 'completed') return { ...live, fileEdits: item.fileEdits };
             return live;
           });
@@ -1027,6 +1203,7 @@ export class Workbench {
           for (const item of runtime.live.values()) this.store.saveLiveItem(id, item);
           if (runtime.flush) { clearTimeout(runtime.flush); runtime.flush = undefined; }
           this.enrichReceipts(id);
+          if (state.value.status !== 'unknown' && !this.hasExecutionResponsibility(id)) runtime.retryAttempt = 0;
         } catch (error) {
           if (!this.closed && this.runtimes.get(id) === runtime) this.unknown(id, error instanceof StoreError ? error.code : 'native_state_unavailable');
         }
@@ -1037,12 +1214,14 @@ export class Workbench {
       runtime.syncing = undefined;
       if (this.closed || this.runtimes.get(id) !== runtime) return;
       if (runtime.dirty) this.scheduleSync(id); else this.drain(id);
+      this.releaseIdle(id);
+      this.retryUnknown(id, runtime);
     }, () => { runtime.syncing = undefined; if (!this.closed) this.scheduleSync(id); }));
     return result;
   }
   private disposeRuntime(id: string): void {
     const runtime = this.runtimes.get(id); if (!runtime) return;
-    if (runtime.timer) clearTimeout(runtime.timer); if (runtime.poll) clearInterval(runtime.poll); if (runtime.flush) clearTimeout(runtime.flush);
+    if (runtime.timer) clearTimeout(runtime.timer); if (runtime.retry) clearTimeout(runtime.retry); if (runtime.release) clearTimeout(runtime.release); if (runtime.flush) clearTimeout(runtime.flush);
     try { runtime.stop?.(); } finally { this.runtimes.delete(id); }
   }
   close(): Promise<void> {

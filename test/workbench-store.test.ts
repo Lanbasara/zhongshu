@@ -10,7 +10,7 @@ import { test, type TestContext } from 'node:test';
 import type { Binding, NativeItem } from '../src/harness/types.ts';
 import { backupDatabase, openDatabase, restoreDatabase } from '../src/server/database.ts';
 import { afterProductRestore, productMigrations } from '../src/server/migrations.ts';
-import { createWorkbenchStore, type CreateConversation, type OperationInput, type WorkbenchChange } from '../src/server/workbench-store.ts';
+import { conversationCursor, createWorkbenchStore, type CreateConversation, type OperationInput, type WorkbenchChange } from '../src/server/workbench-store.ts';
 import { stateSchema } from '../src/shared/workbench.ts';
 
 function fixture(t: TestContext) {
@@ -352,16 +352,25 @@ test('large history and live reads have byte bounds before HTTP serialization an
   assert(live.liveItems.every(entry => entry.text === body));
 });
 
+// Seed the historical format directly: migration evidence must not rely on today's Store
+// being able to write a schema that predates its requirements.
+function seedLegacyConversation(db: DatabaseSync, input: CreateConversation, at = 100, native: Binding | null = null) {
+  db.prepare(`INSERT INTO workbench_conversations(id,harness_id,workspace_id,cwd,title,configuration_json,
+    creation_digest,binding_json,readiness,state_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run(
+    input.id, input.harnessId, input.workspaceId, input.cwd, input.title ?? '旧对话', JSON.stringify(input.configuration),
+    'historical-fixture', native ? JSON.stringify(native) : null, 'ready',
+    JSON.stringify({ status: 'idle', pendingInputs: 0, configurationVerified: true }), at);
+}
+
 test('v3 conversation history upgrades to active and management metadata survives reopen', t => {
   const f = fixture(t);
   const input = { ...conversation(), title: '旧库原始标题' };
   const native = binding(input);
   const legacy = openDatabase(f.directory, productMigrations.filter(migration => migration.version < 4));
   try {
-    const store = createWorkbenchStore(legacy);
-    store.createConversation(input);
-    store.saveBinding(input.id, native);
-    store.mergeHistory(input.id, [item('legacy-entry', '旧库原文')]);
+    seedLegacyConversation(legacy, input, 100, native);
+    legacy.prepare('INSERT INTO workbench_items(conversation_id,id,position,kind,text,status) VALUES(?,?,?,?,?,?)')
+      .run(input.id, 'legacy-entry', 1024, 'assistant', '旧库原文', 'completed');
   } finally { legacy.close(); }
 
   let db = f.open();
@@ -385,10 +394,12 @@ test('v10 history and live metadata survive unknown-status migration and reopen'
   const legacy = openDatabase(f.directory, productMigrations.filter(migration => migration.version <= 10));
   const oldItem: NativeItem = { id: 'old-tool', kind: 'tool', text: 'old result', status: 'completed', runId: 'run', tool: { name: 'read', input: 'sample.txt', output: 'old result' } };
   try {
-    const store = createWorkbenchStore(legacy);
-    store.createConversation(input);
-    store.mergeHistory(input.id, [oldItem]);
-    store.saveLiveItem(input.id, { ...oldItem, id: 'old-live', status: 'running' });
+    seedLegacyConversation(legacy, input);
+    const metadata = JSON.stringify({ tool: oldItem.tool });
+    legacy.prepare('INSERT INTO workbench_items(conversation_id,id,position,kind,text,status,run_id,metadata_json) VALUES(?,?,?,?,?,?,?,?)')
+      .run(input.id, oldItem.id, 1024, oldItem.kind, oldItem.text, oldItem.status, oldItem.runId!, metadata);
+    legacy.prepare('INSERT INTO workbench_live_items(conversation_id,id,kind,text,status,run_id,updated_at,metadata_json) VALUES(?,?,?,?,?,?,?,?)')
+      .run(input.id, 'old-live', oldItem.kind, oldItem.text, 'running', oldItem.runId!, 100, metadata);
   } finally { legacy.close(); }
   let db = f.open(); let store = createWorkbenchStore(db);
   assert.deepEqual(store.getItem(input.id, 'old-tool'), oldItem);
@@ -433,4 +444,65 @@ test('conversation defaults use accepted messages and exclude archived or stale 
   assert.equal(store.recentAcceptedConversation(eligible, ['codex'])?.id, b.id);
   assert.equal(store.recentAcceptedConversation([{ id: a.workspaceId, directory: '/moved' }], ['codex']), null);
   assert.equal(store.recentAcceptedConversation(eligible, ['dsh']), null);
+});
+
+
+test('conversation activity changes only on accepted messages using submission time, not late receipt time', t => {
+  const db = fixture(t).open(); let clock = 100;
+  const store = createWorkbenchStore(db, { now: () => clock });
+  const a = conversation(); const b = conversation();
+  store.createConversation(a); clock = 200; store.createConversation(b);
+  const ids = () => store.listConversations().map(value => value.id);
+  assert.deepEqual(ids(), [b.id, a.id]);
+  clock = 300; store.getConversation(a.id); store.readHistory(a.id); store.renameConversation(a.id, 'renamed');
+  store.setArchived(a.id, true, () => true); store.setArchived(a.id, false, () => true);
+  assert.deepEqual(ids(), [b.id, a.id]);
+  const failed = message(a.id); store.enqueueOperation(failed); store.claimOperation(failed.id);
+  store.settleOperation(failed.id, { outcome: 'rejected', reason: 'native rejected' });
+  assert.deepEqual(ids(), [b.id, a.id]);
+  clock = 400; const old = message(a.id); store.enqueueOperation(old); store.claimOperation(old.id);
+  store.settleOperation(old.id, { outcome: 'unknown', reason: 'connection lost' });
+  assert.deepEqual(ids(), [b.id, a.id]);
+  clock = 500; const newer = message(b.id); store.enqueueOperation(newer); store.claimOperation(newer.id);
+  store.settleOperation(newer.id, { outcome: 'accepted' });
+  clock = 900; store.settleOperation(old.id, { outcome: 'accepted' });
+  assert.equal(store.getConversation(a.id)?.lastActivityAt, 400);
+  assert.deepEqual(ids(), [b.id, a.id]);
+  clock = 1000; const last = message(a.id); store.enqueueOperation(last); store.claimOperation(last.id);
+  store.settleOperation(last.id, { outcome: 'accepted' });
+  assert.deepEqual(ids(), [a.id, b.id]);
+  clock = 2000; store.settleOperation(last.id, { outcome: 'accepted' });
+  assert.equal(store.getConversation(a.id)?.lastActivityAt, 1000);
+});
+
+test('conversation cursor survives anchor deletion and rejects a different query scope', t => {
+  const db = fixture(t).open(); let clock = 10;
+  const store = createWorkbenchStore(db, { now: () => clock });
+  const values = Array.from({ length: 9 }, () => conversation());
+  for (const value of values) { store.createConversation(value); clock += 10; }
+  const query = { workspaceId: 'fixture', archived: false };
+  const first = store.listConversations({ ...query, limit: 3 });
+  const cursor = conversationCursor(first.at(-1)!, query);
+  // A separate deletion removes the boundary row, including the old revision events.
+  db.prepare('DELETE FROM workbench_conversations WHERE id=?').run(first.at(-1)!.id);
+  const rest = store.listConversations({ ...query, beforeId: cursor });
+  assert.deepEqual(rest.map(value => value.id), values.slice(0, 6).reverse().map(value => value.id));
+  assert.throws(() => store.listConversations({ ...query, title: 'changed', beforeId: cursor }), { code: 'conversation_cursor_scope_changed' });
+  assert.throws(() => store.listConversations({ ...query, beforeId: 'not-a-cursor' }), { code: 'invalid_conversation_cursor' });
+});
+
+test('activity migration uses accepted submission timestamps and equal-time pages have a stable tie break', t => {
+  const f = fixture(t); const a = conversation(); const b = conversation(); const c = conversation();
+  const legacy = openDatabase(f.directory, productMigrations.filter(migration => migration.version < 13));
+  try {
+    seedLegacyConversation(legacy, a, 100); seedLegacyConversation(legacy, b, 200); seedLegacyConversation(legacy, c, 200);
+    legacy.prepare(`INSERT INTO workbench_operations(id,conversation_id,type,payload_json,digest,status,created_at,updated_at)
+      VALUES(?,?,'message',?,'historical-fixture','accepted',300,900)`).run(randomUUID(), a.id, JSON.stringify({ text: 'accepted old message' }));
+  } finally { legacy.close(); }
+  const store = createWorkbenchStore(f.open());
+  assert.equal(store.getConversation(a.id)?.lastActivityAt, 300);
+  assert.equal(store.getConversation(b.id)?.lastActivityAt, 200);
+  const first = store.listConversations({ limit: 2 });
+  const second = store.listConversations({ beforeId: conversationCursor(first.at(-1)!) });
+  assert.deepEqual([...first, ...second].map(value => value.id), [a.id, ...[b.id, c.id].sort().reverse()]);
 });

@@ -189,6 +189,29 @@ export const productMigrations: Migration[] = [{ version: 2, sql: `
     claimed_by TEXT
   ) STRICT;
   ALTER TABLE workbench_conversations ADD COLUMN native_preparation_id TEXT;
+` }, { version: 13, sql: `
+  ALTER TABLE workbench_conversations ADD COLUMN last_activity_at INTEGER NOT NULL DEFAULT 0;
+  UPDATE workbench_conversations SET last_activity_at = COALESCE(
+    (SELECT MAX(created_at) FROM workbench_operations WHERE conversation_id=workbench_conversations.id AND type='message' AND status='accepted'), created_at);
+  CREATE INDEX workbench_conversations_activity ON workbench_conversations(last_activity_at,id);
+  CREATE INDEX workbench_conversations_workspace_activity ON workbench_conversations(workspace_id,archived,last_activity_at,id);
+  CREATE INDEX workbench_conversations_archive_activity ON workbench_conversations(archived,last_activity_at,id);
+` }, { version: 14, sql: `
+  CREATE TABLE workbench_deletions (
+    id TEXT PRIMARY KEY,
+    status TEXT NOT NULL CHECK(status IN ('pending','native_done','failed','completed')),
+    reason TEXT,
+    updated_at INTEGER NOT NULL
+  ) STRICT;
+  CREATE TABLE workbench_changes_independent (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    conversation_id TEXT NOT NULL,
+    item_id TEXT,
+    created_at INTEGER NOT NULL
+  ) STRICT;
+  INSERT INTO workbench_changes_independent SELECT * FROM workbench_changes;
+  DROP TABLE workbench_changes;
+  ALTER TABLE workbench_changes_independent RENAME TO workbench_changes;
 ` }];
 
 /** Runs inside restoreDatabase's private staging transaction, before the database is published. */

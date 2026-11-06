@@ -1,3 +1,4 @@
+import { z } from 'zod';
 import { FolderOpen, LogOut, Plus, RefreshCw, X, ChevronRight, Puzzle } from 'lucide-react';
 import { BrandMark, Button, IconButton } from './ui/controls.tsx';
 import { WorkbenchFrame } from './patterns/workbench-frame.tsx';
@@ -108,6 +109,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
   const [pickingFile, setPickingFile] = useState(false);
   const [navigation, setNavigation] = useState(false);
   const [error, setError] = useState('');
+  const [unavailableNotice, setUnavailableNotice] = useState('');
   const [sending, setSending] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [connection, setConnection] = useState('正在连接');
@@ -180,7 +182,15 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
           setError('');
         } else if (operation?.status === 'rejected') setError(operation.reason ? failures[operation.reason] ?? operation.reason : '本次发送未被接受，输入已保留。');
       }
-    } catch (reason) { if (gen === generation.current) report(reason); }
+    } catch (reason) {
+      if (gen === generation.current) {
+        if (reason instanceof RequestError && reason.status === 404) {
+          saveDraft(id, { text: '' }); setSnapshot(undefined); setItems([]); setDraft({ text: '' }); draftRef.current = { text: '' };
+          setSelected(undefined); history.replaceState(null, '', location.pathname + location.search);
+          setUnavailableNotice('对话已不可用。'); refreshList(value => value + 1);
+        } else report(reason);
+      }
+    }
     })().finally(() => {
       if (activeRead.current === job) activeRead.current = undefined;
       if (job.dirty && alive.current && generation.current === gen && selectedRef.current === id) {
@@ -205,9 +215,29 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
     generation.current++; requestSerial.current++; viewController.current?.abort(); viewController.current = new AbortController();
     setSnapshot(undefined); snapshotRef.current = undefined; setItems([]); setUnavailableFiles(new Set()); setError(''); setMoreOutput(false); setWindowed(false); setBefore(null); setHasOlder(false); atBottom.current = true;
     const next = selected ? readDraft(selected) : { text: '' }; draftRef.current = next; setDraft(next);
-    if (selected) void loadRef.current(selected, true);
+    if (selected) { setUnavailableNotice(''); void loadRef.current(selected, true); }
     return () => viewController.current?.abort();
   }, [selected]);
+  useEffect(() => {
+    if (!selected) return;
+    const readerId = crypto.randomUUID();
+    const renew = () => {
+      const active = document.visibilityState === 'visible';
+      void request(`/conversations/${selected}/reading`, z.object({ ok: z.literal(true) }), {
+        csrf, body: { readerId, active },
+      }).catch(() => { /* The displayed snapshot and connection state retain recovery feedback. */ });
+    };
+    const release = () => {
+      void request(`/conversations/${selected}/reading`, z.object({ ok: z.literal(true) }), {
+        csrf, body: { readerId, active: false },
+      }).catch(() => { /* Server lease expiration covers abrupt page loss. */ });
+    };
+    renew();
+    const timer = setInterval(renew, 15_000);
+    document.addEventListener('visibilitychange', renew);
+    window.addEventListener('pagehide', release);
+    return () => { clearInterval(timer); document.removeEventListener('visibilitychange', renew); window.removeEventListener('pagehide', release); release(); };
+  }, [selected, csrf]);
   useEffect(() => {
     let source: EventSource | undefined; let timer: ReturnType<typeof setTimeout> | undefined; let heartbeat: ReturnType<typeof setInterval> | undefined;
     let stopped = false; let cursor = 0; let delay = 500; let lastMessage = Date.now();
@@ -230,6 +260,16 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
         try {
           const change = changeEventSchema.parse(JSON.parse((event as MessageEvent).data));
           if (change.revision <= cursor) return; cursor = change.revision;
+          if (change.deleted) {
+            saveDraft(change.conversationId, { text: '' });
+            if (change.conversationId === selectedRef.current) {
+              history.replaceState(null, '', location.pathname + location.search);
+              setSelected(undefined); setSnapshot(undefined); setItems([]); setDraft({ text: '' }); draftRef.current = { text: '' };
+              setUnavailableNotice('对话已删除。');
+            }
+            refreshList(value => value + 1);
+            return;
+          }
           if (change.item && change.conversationId === selectedRef.current) {
             const item = change.item;
             setSnapshot(current => current ? { ...current, history: { ...current.history, liveItems: [...current.history.liveItems.filter(old => old.id !== item.id), item].slice(-100) } } : current);
@@ -253,7 +293,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
     else setMoreOutput(true);
   }, [items, snapshot?.history.liveItems]);
   const choose = useCallback((id: string) => { history.replaceState(null, '', `#${id}`); setSelected(id); setCreating(undefined); setManagingPlugins(false); setNavigation(false); }, []);
-  const startDraft = useCallback((id?:string) => { history.replaceState(null,'','#new:'+encodeURIComponent(id??''));setSelected(undefined);setCreating(id||true);setManagingPlugins(false);setReader(false);setNavigation(false); },[]);
+  const startDraft = useCallback((id?:string) => { setUnavailableNotice(''); history.replaceState(null,'','#new:'+encodeURIComponent(id??''));setSelected(undefined);setCreating(id||true);setManagingPlugins(false);setReader(false);setNavigation(false); },[]);
   const createInWorkspace = useCallback((id:string)=>startDraft(id),[startDraft]);
   const refreshNavigation = useCallback(() => {
     refreshList(value => value + 1);
@@ -457,7 +497,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
             model={configurationLabel.model} reasoningEffort={configurationLabel.reasoningEffort}/>}
         </div>
       </>}
-      {(error || authError) && <div className="workbench-error" role="alert"><span>{error || authError}</span><button className="text-button" onClick={() => setError('')}>关闭</button></div>}
+      {(error || authError || unavailableNotice) && <div className="workbench-error" role="alert"><span>{error || authError || unavailableNotice}</span><button className="text-button" onClick={() => { setError(''); setUnavailableNotice(''); }}>关闭</button></div>}
     </WorkbenchFrame>
 
     {pickingFile && selected && !workspaceRemoved && <FilePicker conversation={selected} onClose={() => setPickingFile(false)} onSelect={(reference: MessageReference) => { const next = { ...draft, text: draft.text.endsWith('@') ? draft.text.slice(0,-1) : draft.text, references: [...(draft.references ?? []), reference].slice(0,8) }; updateDraft(next); }}/ >}

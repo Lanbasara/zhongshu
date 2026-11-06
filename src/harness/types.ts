@@ -87,6 +87,10 @@ export interface HarnessAdapter {
   readImage?(binding: Binding, path: string): Promise<string>;
   reconcile(binding: Binding, operationId: string): Promise<Receipt>;
   stop(binding: Binding, runId: string): Promise<Receipt>;
+  /** Caller fences new work and releases observation first. Resolves only after native
+   * deletion is confirmed (including a verified already-absent identity). Rejections,
+   * partial cleanup and unknown transport outcomes must remain retryable operations. */
+  delete?(binding: Binding): Promise<void>;
   /** Changes are hints/live items; history and state are re-read on reconnect. */
   watch(binding: Binding, listener: (change: NativeChange) => void): Promise<() => void>;
   /** Close app-owned connections only; native hosts and their work have independent lifetimes. */

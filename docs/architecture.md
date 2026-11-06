@@ -103,3 +103,9 @@ DSH 原地保存要求专用 Host 和操作者提供的维护控制器。工作�
 工作台私有路由和 SQLite 持有操作身份、回执和核实状态；安装、版本、启用状态以选定 Harness 的原生清单为准。每端一次只受理一个未决变更；请求丢失后按原操作 ID 读回，不自动重发。
 
 Codex 经专用 Unix socket 管理进程调用固定 CLI 和同一实例的 App Server；管理进程核对连接身份、实例状态目录和操作者固定的 Git 市场。DSH 在该实例的 Web Host 上调用原生目录和包管理 API，并按市场核对包来源。中书管理员添加公开 GitHub 来源时，Codex 管理进程持有市场提交和身份，DSH Web Host 持有索引设置；来源变更与同端安装操作互斥。两个 Harness 保留各自的来源、标识和加载语义。长期取舍见 [ADR 0009](adr/0009-instance-plugin-scope.md)，原生连接配置和复验入口见[插件管理功能地图](features/plugin-management.md)。
+
+## 对话观察与删除协调
+
+会话管理边界依据 [ADR 0012](adr/0012-conversation-lifecycle.md)。Workbench 按持久化执行责任恢复，浏览器当前阅读通过有期限的租约共享观察；冷历史投影读取不建立永久订阅。事件驱动核对与有界未知状态补偿替代曾打开对话的固定正文轮询。原生驻留仍由 Harness 管理。
+
+Store 的最近接收消息提交时序支持侧栏分页，游标独立保存排序边界。独立删除日志记录目标身份与清理阶段，变更流记录不再随对话级联消失。Workbench 隔离新提交并核实可删除条件，adapter 执行原生删除，之后事务清理本地内容。Codex 已接入原生删除；DSH 按已确认产品边界仅归档恢复，界面不提供删除且服务端拒绝请求，不维护修改版 Host。当前用户路径与验证方法见[对话管理](features/conversation-management.md)。

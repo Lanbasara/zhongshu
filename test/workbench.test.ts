@@ -611,7 +611,7 @@ test('maintenance checks cold native sessions without fetching conversation hist
   const service = new Workbench(f.store, [workspace], new Map([['codex', f.peer]]));
   t.after(() => service.close());
   await service.start();
-  await until(() => f.peer.historyCalls.length > 0);
+  assert.deepEqual(f.peer.historyCalls, []); // Completed history is cold at startup.
   const configuration = { modelId: 'model', permissionId: 'workspace' };
   f.peer.historyCalls.length = 0;
   f.peer.current = { status: 'waiting', pendingInputs: 1, configurationVerified: true };
@@ -649,4 +649,204 @@ test('prepare validates model effort before creating a native session', async t 
   await until(() => f.store.getConversation(supported.id)?.readiness === 'ready');
   assert.equal(f.peer.createCalls, 1);
   assert.equal(f.store.getConversation(supported.id)?.binding?.configuration.reasoningEffort, 'high');
+});
+
+test('cold completed histories neither restore at startup nor acquire observers when read', async t => {
+  const f = fixture(t);
+  for (let index = 0; index < 80; index++) {
+    const id = randomUUID();
+    f.store.createConversation({ id, harnessId: 'codex', workspaceId: 'fixture', cwd: '/synthetic/workspace', configuration: { modelId: 'model', permissionId: 'workspace' } });
+    f.store.saveBinding(id, { id: 'cold-' + index, cwd: '/synthetic/workspace', configuration: { modelId: 'model', permissionId: 'workspace' }, details: {} });
+    f.store.setConversationState(id, { readiness: 'ready', state: terminal() });
+    f.store.setHistoryCursor(id, { loaded: true, olderCursor: null, beforeItemId: null });
+    await f.service.open(id);
+  }
+  await f.service.start();
+  assert.equal(f.peer.stateCalls, 0);
+  assert.deepEqual(f.peer.historyCalls, []);
+  assert.equal(f.peer.listener, undefined);
+});
+
+test('reading leases share observation, never poll idle history, and release after the last reader leaves', async t => {
+  const f = fixture(t);
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+  await f.service.reading(f.id, 'page-one');
+  const listener = f.peer.listener;
+  const reads = f.peer.stateCalls;
+  await f.service.reading(f.id, 'page-two');
+  assert.equal(f.peer.listener, listener);
+  assert.equal(f.peer.stateCalls, reads);
+  t.mock.timers.tick(6000);
+  await Promise.resolve();
+  assert.equal(f.peer.stateCalls, reads);
+  assert.equal(f.peer.historyCalls.length, reads);
+  f.service.releaseReading(f.id, 'page-one');
+  t.mock.timers.tick(300);
+  assert.equal(f.peer.unwatchCount, 0);
+  f.service.releaseReading(f.id, 'page-two');
+  t.mock.timers.tick(300);
+  assert.equal(f.peer.unwatchCount, 1);
+  assert.equal(f.peer.listener, undefined);
+});
+
+test('lost browser readers expire without a disconnect message', async t => {
+  const f = fixture(t);
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+  await f.service.reading(f.id, 'lost-page');
+  const calls = f.peer.stateCalls;
+  t.mock.timers.tick(46_000);
+  t.mock.timers.tick(300);
+  assert.equal(f.peer.listener, undefined);
+  assert.equal(f.peer.unwatchCount, 1);
+  assert.equal(f.peer.stateCalls, calls);
+});
+
+test('closing every reader retains execution observation until canonical terminal history is saved', async t => {
+  const f = fixture(t);
+  f.peer.current = { ...terminal('active-run'), status: 'running' };
+  f.store.setConversationState(f.id, { state: f.peer.current });
+  await f.service.reading(f.id, 'page');
+  f.service.releaseReading(f.id, 'page');
+  await delay(300);
+  assert.equal(f.peer.unwatchCount, 0);
+  f.peer.records = [{ ...nativeItem('final'), runId: 'active-run' }];
+  f.peer.current = terminal('active-run');
+  f.peer.emit({ type: 'state', state: f.peer.current });
+  await until(() => f.peer.unwatchCount === 1);
+  assert.equal(f.store.getItem(f.id, 'final')?.text, 'full-final');
+  assert.equal(f.peer.stopCalls.length, 0);
+});
+
+test('startup restores an old running conversation even outside the newest sixteen histories', async t => {
+  const f = fixture(t);
+  f.store.setConversationState(f.id, { state: { ...terminal('old-run'), status: 'running' } });
+  const observed: string[] = [];
+  const watch = f.peer.watch.bind(f.peer);
+  f.peer.watch = async (binding, listener) => { observed.push(binding.id); return watch(binding, listener); };
+  for (let index = 0; index < 25; index++) {
+    const id = randomUUID();
+    f.store.createConversation({ id, harnessId: 'codex', workspaceId: 'fixture', cwd: '/synthetic/workspace', configuration: { modelId: 'model', permissionId: 'workspace' } });
+    f.store.saveBinding(id, { id: 'cold-' + index, cwd: '/synthetic/workspace', configuration: { modelId: 'model', permissionId: 'workspace' }, details: {} });
+    f.store.setConversationState(id, { readiness: 'ready', state: terminal() });
+  }
+  await f.service.start();
+  await until(() => observed.length > 0);
+  assert.deepEqual(observed, ['native-fixture']);
+});
+
+test('deletion fences new work and retries partial native success without restoring the deleted identity', async t => {
+  const f = fixture(t);
+  const deleting = deferred<void>();
+  let calls = 0;
+  const peer = f.peer as Peer & { delete: (binding: Binding) => Promise<void> };
+  peer.delete = async () => { calls++; if (calls === 1) await deleting.promise; };
+  await f.service.reading(f.id, 'page');
+  const deletion = f.service.deleteConversation(f.id);
+  const rejected = assert.rejects(deletion, /lost_reply/);
+  await until(() => calls === 1);
+  assert.equal(f.peer.listener, undefined);
+  await assert.rejects(f.service.enqueue(operation(f.id)), { code: 'conversation_deleting' });
+  await assert.rejects(f.service.reading(f.id, 'other-page'), { code: 'conversation_deleting' });
+  deleting.reject(new Error('lost_reply'));
+  await rejected;
+  assert.equal(f.store.deletions.get(f.id)?.status, 'failed');
+  const reads = f.peer.stateCalls;
+  await f.service.deleteConversation(f.id);
+  assert.equal(f.peer.stateCalls, reads);
+  assert.equal(calls, 2);
+  assert.equal(f.store.deletions.get(f.id)?.status, 'completed');
+  assert.equal(f.store.getConversation(f.id), null);
+  await f.service.deleteConversation(f.id);
+  assert.equal(calls, 2);
+});
+
+test('startup finishes already verified native deletion without reading or deleting native data again', async t => {
+  const f = fixture(t);
+  f.store.deletions.begin(f.id); f.store.deletions.nativeDone(f.id);
+  await f.service.start();
+  await until(() => f.store.deletions.get(f.id)?.status === 'completed');
+  assert.equal(f.store.getConversation(f.id), null);
+  assert.equal(f.peer.stateCalls, 0);
+  assert.deepEqual(f.peer.historyCalls, []);
+});
+
+
+test('startup marks interrupted creation without a saved native identity as unresolved instead of creating again', async t => {
+  const f = fixture(t);
+  const id = randomUUID();
+  f.store.createConversation({ id, harnessId: 'codex', workspaceId: 'fixture', cwd: '/synthetic/workspace', configuration: { modelId: 'model', permissionId: 'workspace' } });
+  await f.service.start();
+  assert.equal(f.store.getConversation(id)?.readiness, 'blocked');
+  assert.equal(f.store.getConversation(id)?.error, 'native_creation_result_unknown');
+  assert.equal(f.peer.createCalls, 0);
+});
+
+test('deletion fences an older-page request suspended in its initial shared sync', async t => {
+  const f = fixture(t);
+  const state = deferred<NativeState>();
+  f.peer.stateRead = async () => state.promise;
+  const older = f.service.older(f.id);
+  const olderRejected = assert.rejects(older, { code: 'conversation_deleting' });
+  await until(() => f.peer.stateCalls > 0);
+  const peer = f.peer as Peer & { delete: (binding: Binding) => Promise<void> };
+  let deleted = 0; peer.delete = async () => { deleted++; };
+  const deletion = f.service.deleteConversation(f.id);
+  assert.throws(() => f.service.renameConversation(f.id, 'cannot race deletion'), { code: 'conversation_deleting' });
+  state.resolve(terminal());
+  await Promise.all([olderRejected, deletion]);
+  assert.equal(deleted, 1);
+  assert.equal(f.store.getConversation(f.id), null);
+  assert.equal(f.peer.historyCalls.some(cursor => cursor !== undefined), false);
+});
+
+test('startup recovery retains its cursor when 64 execution slots are occupied and admits the next after release', async t => {
+  const f = fixture(t);
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+  const listeners = new Map<string, (change: NativeChange) => void>();
+  let finished = false;
+  f.peer.watch = async (binding, listener) => { listeners.set(binding.id, listener); return () => { listeners.delete(binding.id); }; };
+  f.peer.state = async binding => binding.id === 'recovery-0' && finished ? terminal('run-0') : { ...terminal('run-' + binding.id), status: 'running' };
+  for (let index = 0; index < 65; index++) {
+    const id = '00000000-0000-4000-8000-' + String(index).padStart(12, '0');
+    f.store.createConversation({ id, harnessId: 'codex', workspaceId: 'fixture', cwd: '/synthetic/workspace', configuration: { modelId: 'model', permissionId: 'workspace' } });
+    f.store.saveBinding(id, { id: 'recovery-' + index, cwd: '/synthetic/workspace', configuration: { modelId: 'model', permissionId: 'workspace' }, details: {} });
+    f.store.setConversationState(id, { readiness: 'ready', state: { ...terminal('run-' + index), status: 'running' } });
+  }
+  const flush = async () => { for (let index = 0; index < 40; index++) await Promise.resolve(); };
+  await f.service.start(); await flush();
+  assert.equal(listeners.size, 64);
+  t.mock.timers.tick(5000); await flush();
+  assert.equal(listeners.has('recovery-64'), false);
+  finished = true;
+  listeners.get('recovery-0')!({ type: 'state', state: terminal('run-0') });
+  t.mock.timers.tick(125); await flush();
+  t.mock.timers.tick(300); await flush();
+  assert.equal(listeners.has('recovery-0'), false);
+  t.mock.timers.tick(5000); await flush();
+  assert.equal(listeners.has('recovery-64'), true);
+  assert.equal(listeners.size, 64);
+});
+
+test('unknown native creation cannot be reported as fully deleted without its native identity', async t => {
+  const f = fixture(t);
+  const id = randomUUID();
+  f.store.createConversation({ id, harnessId: 'codex', workspaceId: 'fixture', cwd: '/synthetic/workspace', configuration: { modelId: 'model', permissionId: 'workspace' } });
+  await f.service.start();
+  await assert.rejects(f.service.deleteConversation(id), { code: 'conversation_preparation_incomplete' });
+  assert.equal(f.store.deletions.get(id), null);
+  assert.ok(f.store.getConversation(id));
+});
+
+test('a terminal canonical item closes an interrupted live delta even when the final event was missed', async t => {
+  const f = fixture(t);
+  f.peer.current = { ...terminal('run'), status: 'running' };
+  await f.service.reading(f.id, 'page');
+  f.peer.emit({ type: 'item', item: { ...nativeItem('reply'), runId: 'run', text: 'partial', status: 'running' } });
+  f.peer.records = [{ ...nativeItem('reply'), runId: 'run', text: 'canonical complete response' }];
+  f.peer.current = terminal('run');
+  f.peer.emit({ type: 'invalidate' });
+  f.service.releaseReading(f.id, 'page');
+  await until(() => f.peer.unwatchCount === 1);
+  assert.equal(f.store.getItem(f.id, 'reply')?.text, 'canonical complete response');
+  assert.equal(f.store.getItem(f.id, 'reply')?.status, 'completed');
 });
