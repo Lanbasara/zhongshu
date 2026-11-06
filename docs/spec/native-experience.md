@@ -2,7 +2,7 @@
 status: active
 started: 2026-11-06
 exit: 原生工具展示、DSH 默认值及首发技能的真实路径与恢复反例经独立验收，用户确认体验；未覆盖能力明确列出
-evidence: 实现与自动检查已完成，独立路径证据随 PR 交付；用户试用及未覆盖分支待验收
+evidence: https://github.com/Lanbasara/zhongshu/pull/35
 ---
 
 # 原生工具展示、DSH 默认值与首发技能
