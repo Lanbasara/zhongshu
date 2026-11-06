@@ -41,12 +41,10 @@ test('image resources are scoped, pinned with immutable operations and included 
   store.resources.put(id,'new.png',Buffer.concat([png,Buffer.from('new')]));
   assert.throws(()=>store.resources.get(id,unused.id));
   assert.deepEqual(store.resources.get(id,image.id).data,png);
-  store.mergeHistory(id,[{id:'native-image',kind:'assistant',text:'',status:'completed',images:[image]}]);
-  assert.deepEqual(store.readHistory(id).items[0]?.images,[image]);
   const backup=join(root,'backup.sqlite');await backupDatabase(db,backup);
   const target=join(root,'restored');await restoreDatabase(backup,target,afterProductRestore);
   const restored=openDatabase(target,productMigrations);
-  try{const read=createWorkbenchStore(restored);assert.deepEqual(read.resources.get(id,image.id).data,png);assert.deepEqual(read.readHistory(id).items[0]?.images,[image]);}finally{restored.close();}
+  try{const read=createWorkbenchStore(restored);assert.deepEqual(read.resources.get(id,image.id).data,png);}finally{restored.close();}
 });
 
 test('resource HTTP keeps authentication, CSRF, content limits and conversation ownership',async t=>{
@@ -88,14 +86,15 @@ test('Markdown workspace images use the native reader and pin per-message snapsh
   const {root,store,id}=await fixture(t);await writeFile(join(root,'plot.png'),png);
   const config={modelId:'model',permissionId:'write'};
   store.saveBinding(id,{id:'native-test',cwd:root,configuration:config,details:{}});
-  store.mergeHistory(id,[{id:'plot-message',kind:'assistant',text:'![Plot](plot.png)',status:'completed'}]);
+  // Messages are verified against native history (ADR 0014); the application keeps no body copy.
+  const nativeItems=[{id:'plot-message',kind:'assistant' as const,text:'![Plot](plot.png)',status:'completed' as const}];
   let reads=0;
   const canonicalImage = await realpath(join(root,'plot.png'));
-  const adapter: HarnessAdapter={id:'codex',catalog:async()=>({id:'codex',available:true,models:[],permissions:[]}),create:async()=>{throw Error('unused');},state:async()=>({status:'idle',pendingInputs:0,configurationVerified:true}),history:async()=>({items:[],olderCursor:null}),submit:async()=>({outcome:'unknown',reason:'unused'}),reconcile:async()=>({outcome:'unknown',reason:'unused'}),stop:async()=>({outcome:'unknown',reason:'unused'}),watch:async()=>()=>{},close:async()=>{},readImage:async(_binding,path)=>{assert.equal(path,canonicalImage);reads++;return png.toString('base64');}};
+  const adapter: HarnessAdapter={id:'codex',catalog:async()=>({id:'codex',available:true,models:[],permissions:[]}),create:async()=>{throw Error('unused');},state:async()=>({status:'idle',pendingInputs:0,configurationVerified:true}),history:async()=>({items:nativeItems,olderCursor:null}),submit:async()=>({outcome:'unknown',reason:'unused'}),reconcile:async()=>({outcome:'unknown',reason:'unused'}),stop:async()=>({outcome:'unknown',reason:'unused'}),watch:async()=>()=>{},close:async()=>{},readImage:async(_binding,path)=>{assert.equal(path,canonicalImage);reads++;return png.toString('base64');}};
   const workbench=new Workbench(store,[{id:'test',label:'Test',directory:root}],new Map([['codex',adapter]]));t.after(()=>workbench.close());
   const image=await workbench.workspaceImage(id,'plot-message','plot.png');assert.deepEqual(image.data,png);assert.equal(reads,1);
   await rm(join(root,'plot.png'));assert.deepEqual((await workbench.workspaceImage(id,'plot-message','plot.png')).data,png);assert.equal(reads,1);
-  store.mergeHistory(id,[{id:'bad-message',kind:'assistant',text:'![Bad](../outside.png)',status:'completed'}]);
+  nativeItems.push({id:'bad-message',kind:'assistant',text:'![Bad](../outside.png)',status:'completed'});
   await assert.rejects(workbench.workspaceImage(id,'bad-message','../outside.png'));assert.equal(reads,1);
   await assert.rejects(workbench.workspaceImage(id,'plot-message','another.png'));assert.equal(reads,1);
 });

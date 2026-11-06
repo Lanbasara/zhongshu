@@ -54,24 +54,24 @@ class Peer implements HarnessAdapter {
   async close() { this.closed = true; this.listener = undefined; await this.closeRead?.(); }
 }
 
-test('turn files survive replay and remain visible when the original edit scrolls off the history page', t => {
+test('turn files keep edited paths from live items and native pages after the edit leaves the latest page', async t => {
   const f = fixture(t);
   const edit: NativeItem = { ...nativeItem('edit'), kind: 'tool', runId: 'first', fileEdits: ['a.tsx', 'b/a.tsx'] };
-  f.store.saveLiveItem(f.id, edit);
-  f.store.mergeHistory(f.id, [
-    edit, { ...edit, id: 'failed', status: 'failed', fileEdits: ['failed.ts'] },
-    ...Array.from({ length: 105 }, (_, index) => ({ ...nativeItem('step-' + index), runId: 'first' })),
-    { ...edit, id: 'next-edit', runId: 'second', fileEdits: ['a.tsx'] },
-  ]);
-  f.store.mergeHistory(f.id, [{ ...edit, fileEdits: undefined }]);
+  await f.service.reading(f.id, 'page');
+  f.peer.emit({ type: 'item', item: edit });
+  f.peer.emit({ type: 'item', item: { ...edit, id: 'failed', status: 'failed', fileEdits: ['failed.ts'] } });
+  await until(() => f.store.readTurnFiles(f.id, ['first']).length === 1);
+  f.peer.records = [edit, ...Array.from({ length: 105 }, (_, index) => ({ ...nativeItem('step-' + index), runId: 'first' })), { ...edit, id: 'next-edit', runId: 'second', fileEdits: ['a.tsx'] }];
+  await f.service.reconcile(f.id);
   const snapshot = f.service.snapshot(f.id);
   assert.equal(snapshot.history.items.some(item => item.id === edit.id), false);
+  assert.equal(snapshot.history.liveItems.some(item => item.id === edit.id), false, 'a settled live copy retires once older than the latest page');
   assert.deepEqual(snapshot.turnFiles, [
     { runId: 'second', paths: ['a.tsx'], limited: false },
     { runId: 'first', paths: ['a.tsx', 'b/a.tsx'], limited: false },
   ]);
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM workbench_items').get()?.n, 0);
 });
-
 test('one immutable queue claim wins edit, manual send and automatic dispatch; lost receipt resolves from original history', async t => {
   const f = fixture(t);
   const active = { ...terminal('original-run'), status: 'running' as const };
@@ -182,7 +182,7 @@ function fixture(t: TestContext) {
   const id = randomUUID(); const configuration = { modelId: 'model', permissionId: 'workspace' };
   store.createConversation({ id, harnessId: 'codex', workspaceId: 'fixture', cwd: workspaces[0]!.directory, configuration });
   store.saveBinding(id, { id: 'native-fixture', cwd: workspaces[0]!.directory, configuration, details: {} });
-  store.setConversationState(id, { readiness: 'ready', state: terminal() }); store.setHistoryCursor(id, { loaded: true, olderCursor: null, beforeItemId: null });
+  store.setConversationState(id, { readiness: 'ready', state: terminal() });
   let databaseClosed = false;
   const closeDatabase = () => { if (!databaseClosed) { db.close(); databaseClosed = true; } };
   t.after(async () => { await service.close(); closeDatabase(); rmSync(directory, { recursive: true, force: true }); });
@@ -279,8 +279,11 @@ test('unique user operationId evidence fills accepted runId and reconciles unkno
   f.peer.records.push({ ...user, id: 'user-unknown', operationId: unknown.id, runId: 'turn-2' }); f.peer.current = terminal('turn-2');
   await f.service.reconcile(f.id); assert.equal(f.store.getOperation(unknown.id)?.status, 'accepted'); assert.equal(f.store.getOperation(unknown.id)?.runId, 'turn-2');
   assert.equal(f.peer.submitCalls.length, 0); assert.equal(f.peer.reconcileCalls.length, 0);
-  f.store.saveLiveItem(f.id, { ...user, id: 'ambiguous', runId: 'other-run' });
-  assert.equal(f.store.operationRunId(f.id, accepted.id), null);
+  // Evidence naming two runs is ambiguous: the receipt is reconciled natively instead of guessed.
+  const ambiguous = operation(f.id); f.store.enqueueOperation(ambiguous); f.store.claimOperation(ambiguous.id); f.store.settleOperation(ambiguous.id, { outcome: 'unknown', reason: 'reply_lost' });
+  f.peer.records.push({ ...user, id: 'ambiguous-1', operationId: ambiguous.id, runId: 'turn-3' }, { ...user, id: 'ambiguous-2', operationId: ambiguous.id, runId: 'turn-4' });
+  await f.service.reconcile(f.id);
+  assert.equal(f.store.getOperation(ambiguous.id)?.status, 'unknown'); assert.deepEqual(f.peer.reconcileCalls, [ambiguous.id]);
 });
 
 test('snapshots show the latest 100 operations, while older unresolved operations still block sending', async t => {
@@ -292,25 +295,35 @@ test('snapshots show the latest 100 operations, while older unresolved operation
   await assert.rejects(f.service.enqueue(operation(f.id)), { code: 'operation_needs_reconciliation' }); assert.equal(f.peer.submitCalls.length, 0);
 });
 
-test('a disconnected gap larger than one page is bridged to canonical history; live IDs are not false intersections', async t => {
-  const f = fixture(t); const records = Array.from({ length: 251 }, (_, index) => nativeItem('item-' + index));
-  f.store.mergeHistory(f.id, [records[0]!]); f.store.saveLiveItem(f.id, records[250]!); f.peer.records = records;
+test('a gap of any size opens at the latest native page, stays sendable, and older pages read through to the first item', async t => {
+  const f = fixture(t); const records = Array.from({ length: 5000 }, (_, index) => nativeItem('item-' + index));
+  f.peer.records = records;
   await f.service.reconcile(f.id);
-  assert.deepEqual(f.peer.historyCalls.slice(0, 3), [undefined, '151', '51']);
-  assert.equal(f.db.prepare('SELECT COUNT(*) AS count FROM workbench_items WHERE conversation_id=?').get(f.id)?.count, 251);
-  assert.equal(f.store.hasHistoryItem(f.id, 'item-100'), true); assert.equal(f.store.readHistory(f.id).liveItems.length, 0);
-  const snapshot = f.service.snapshot(f.id); assert.equal(snapshot.history.items[0]?.id, 'item-151'); assert.equal(snapshot.history.items.at(-1)?.id, 'item-250');
+  assert.deepEqual([...new Set(f.peer.historyCalls)], [undefined], 'opening never walks back to fill a gap');
+  const snapshot = f.service.snapshot(f.id);
+  assert.equal(snapshot.conversation.state.status, 'idle'); assert.equal(snapshot.conversation.error, null);
+  assert.equal(snapshot.history.items.length, 50); assert.equal(snapshot.history.items.at(-1)?.id, 'item-4999');
+  const seen = snapshot.history.items.map(item => item.id); let cursor = snapshot.history.olderCursor;
+  while (cursor) { const page = await f.service.history(f.id, cursor); seen.unshift(...page.items.map(item => item.id)); cursor = page.olderCursor; }
+  assert.deepEqual(seen, records.map(item => item.id));
+  for (const table of ['workbench_items', 'workbench_live_items']) assert.equal(f.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get()?.n, 0);
+  const next = operation(f.id); await f.service.enqueue(next); await until(() => f.peer.submitCalls.length === 1);
 });
-
-test('gap bounds and cursor cycles retain explicit unknown state rather than committing a discontinuous latest page', async t => {
-  const f = fixture(t); f.store.mergeHistory(f.id, [nativeItem('old-anchor')]); f.peer.records = Array.from({ length: 1100 }, (_, index) => nativeItem('new-' + index));
-  await f.service.reconcile(f.id); assert.equal(f.store.getConversation(f.id)?.state.status, 'unknown'); assert.equal(f.store.getConversation(f.id)?.error, 'history_gap_limit');
-  assert.equal(f.db.prepare('SELECT COUNT(*) AS count FROM workbench_items').get()?.count, 1); assert.equal(f.store.hasHistoryItem(f.id, 'new-1099'), false);
-  f.peer.historyRead = async () => ({ items: [nativeItem('new-page')], olderCursor: 'cycle' });
-  await f.service.reconcile(f.id); assert.equal(f.store.getConversation(f.id)?.error, 'history_no_progress');
-  await assert.rejects(f.service.enqueue(operation(f.id)), { code: 'operation_needs_reconciliation' });
+test('cursors are bound to their conversation and native page faults stay reading problems, not execution fences', async t => {
+  const f = fixture(t); f.peer.records = Array.from({ length: 120 }, (_, index) => nativeItem('item-' + index));
+  const opened = await f.service.open(f.id); assert.equal(opened.history.items.length, 50);
+  const foreign = Buffer.from(JSON.stringify({ c: randomUUID(), n: '70' })).toString('base64url');
+  await assert.rejects(f.service.history(f.id, foreign), { code: 'history_cursor_invalid', statusCode: 400 });
+  await assert.rejects(f.service.history(f.id, 'not-a-cursor'), { code: 'history_cursor_invalid' });
+  f.peer.historyRead = async () => ({ items: [], olderCursor: 'cycle' });
+  await f.service.reconcile(f.id);
+  const cycled = f.service.snapshot(f.id);
+  assert.equal(cycled.history.error, 'history_no_progress'); assert.equal(cycled.history.items.length, 50, 'already loaded content is kept');
+  assert.equal(cycled.conversation.state.status, 'idle');
+  f.peer.historyRead = async () => { throw new Error('native_down'); };
+  await assert.rejects(f.service.history(f.id, opened.history.olderCursor!), { code: 'native_history_unavailable', statusCode: 502 });
+  const next = operation(f.id); await f.service.enqueue(next); await until(() => f.peer.submitCalls.length === 1);
 });
-
 test('invalidate during sync forces another read, and a late state result cannot overwrite a newer native event', async t => {
   const f = fixture(t); const old = deferred<NativeState>(); let first = true;
   f.peer.stateRead = async () => { if (first) { first = false; return old.promise; } return f.peer.current; };
@@ -395,7 +408,7 @@ test('continuous text during every read cannot starve running state or cancellat
   await f.service.enqueue(stop); await until(() => f.store.getOperation(stop.id)?.status === 'accepted');
   assert.deepEqual(f.peer.stopCalls, ['streaming-run']);
   f.peer.stateRead = undefined; await f.service.reconcile(f.id);
-  assert.equal(f.store.getItem(f.id, 'streaming-body')?.text, 'partial-' + updates);
+  assert.equal(f.service.liveItem(f.id, 'streaming-body')?.text, 'partial-' + updates);
 });
 
 test('a dirty history read is repeated and does not overwrite a later complete live body', async t => {
@@ -405,9 +418,11 @@ test('a dirty history read is repeated and does not overwrite a later complete l
   f.peer.emit({ type: 'item', item: { ...nativeItem('same-id'), text: 'new complete body' } }); f.peer.emit({ type: 'invalidate' });
   old.resolve({ items: [{ ...nativeItem('same-id'), text: 'old body' }], olderCursor: null });
   await syncing;
-  assert.ok(f.peer.historyCalls.length >= 2); assert.equal(f.store.getItem(f.id, 'same-id')?.text, 'new complete body');
+  assert.ok(f.peer.historyCalls.length >= 2); assert.equal(f.service.liveItem(f.id, 'same-id')?.text, 'new complete body');
+  assert.equal(f.service.snapshot(f.id).history.liveItems.find(item => item.id === 'same-id')?.text, 'new complete body');
   f.peer.historyRead = async () => ({ items: [{ ...nativeItem('same-id'), text: 'new complete body' }], olderCursor: null });
-  await f.service.reconcile(f.id); assert.equal(f.store.getItem(f.id, 'same-id')?.text, 'new complete body');
+  await f.service.reconcile(f.id); assert.equal(f.service.liveItem(f.id, 'same-id')?.text, 'new complete body');
+  assert.equal(f.service.snapshot(f.id).history.liveItems.length, 0, 'the canonical body retires the live copy');
 });
 
 test('a saved workspace drift blocks both startup queued work and new dispatch', async t => {
@@ -450,7 +465,7 @@ test('close waits for both sides of a sync even when one request has already fai
   const before = f.store.version(); let complete = false; const closing = f.service.close().then(() => { complete = true; });
   state.reject(new Error('connection_closed')); await delay(1); const observed = complete;
   history.resolve({ items: [nativeItem('late-history')], olderCursor: null }); await Promise.all([closing, syncing]);
-  assert.equal(observed, false); assert.equal(f.store.version(), before); assert.equal(f.store.hasHistoryItem(f.id, 'late-history'), false); f.closeDatabase();
+  assert.equal(observed, false); assert.equal(f.store.version(), before); f.closeDatabase();
 });
 
 
@@ -479,25 +494,23 @@ test('stop preflight rejects a changed native run before invoking the adapter ca
   assert.equal(f.peer.stopCalls.length, 0); assert.equal(f.store.getOperation(stop.id)?.reason, 'native_run_changed');
 });
 
-test('shutdown persists the latest complete live item even before its batching timer fires', async t => {
+test('shutdown keeps live bodies out of the database; the native Harness stays authoritative', async t => {
   const f = fixture(t); await f.service.reconcile(f.id);
   f.peer.emit({ type: 'item', item: { ...nativeItem('pending-live'), text: 'latest complete live body' } });
-  await f.service.close(); assert.equal(f.store.getItem(f.id, 'pending-live')?.text, 'latest complete live body');
+  await f.service.close();
+  for (const table of ['workbench_items', 'workbench_live_items']) assert.equal(f.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get()?.n, 0);
   f.closeDatabase(); await delay(45);
 });
-
-
 test('older paging crosses an empty native record page when its cursor advances', async t => {
-  const f = fixture(t); f.store.mergeHistory(f.id, [nativeItem('known')]);
-  f.store.setHistoryCursor(f.id, { loaded: true, olderCursor: 'empty-record-page', beforeItemId: 'known' });
+  const f = fixture(t);
   f.peer.historyRead = async cursor => cursor === undefined ? { items: [nativeItem('known')], olderCursor: 'empty-record-page' }
     : cursor === 'empty-record-page' ? { items: [], olderCursor: 'older-body-page' }
       : { items: [nativeItem('older')], olderCursor: null };
-  const snapshot = await f.service.older(f.id, 'known'); assert.deepEqual(snapshot.history.items.map(item => item.id), ['older']);
-  assert.equal(snapshot.history.nativeOlderCursor, null);
+  const opened = await f.service.open(f.id); assert.deepEqual(opened.history.items.map(item => item.id), ['known']);
+  const page = await f.service.history(f.id, opened.history.olderCursor!);
+  assert.deepEqual(page.items.map(item => item.id), ['older']); assert.equal(page.olderCursor, null);
   assert.deepEqual(f.peer.historyCalls, [undefined, 'empty-record-page', 'older-body-page']);
 });
-
 test('accepted messages without a run ID can reconcile evidence outside the locally loaded page', async t => {
   const f = fixture(t); const sent = operation(f.id);
   f.store.enqueueOperation(sent); f.store.claimOperation(sent.id); f.store.settleOperation(sent.id, { outcome: 'accepted' });
@@ -658,12 +671,13 @@ test('cold completed histories neither restore at startup nor acquire observers 
     f.store.createConversation({ id, harnessId: 'codex', workspaceId: 'fixture', cwd: '/synthetic/workspace', configuration: { modelId: 'model', permissionId: 'workspace' } });
     f.store.saveBinding(id, { id: 'cold-' + index, cwd: '/synthetic/workspace', configuration: { modelId: 'model', permissionId: 'workspace' }, details: {} });
     f.store.setConversationState(id, { readiness: 'ready', state: terminal() });
-    f.store.setHistoryCursor(id, { loaded: true, olderCursor: null, beforeItemId: null });
     await f.service.open(id);
   }
+  // Opening reads exactly one native page; it never restores execution or acquires an observer.
+  assert.equal(f.peer.historyCalls.length, 80);
   await f.service.start();
   assert.equal(f.peer.stateCalls, 0);
-  assert.deepEqual(f.peer.historyCalls, []);
+  assert.equal(f.peer.historyCalls.length, 80);
   assert.equal(f.peer.listener, undefined);
 });
 
@@ -709,11 +723,12 @@ test('closing every reader retains execution observation until canonical termina
   f.service.releaseReading(f.id, 'page');
   await delay(300);
   assert.equal(f.peer.unwatchCount, 0);
-  f.peer.records = [{ ...nativeItem('final'), runId: 'active-run' }];
+  const order: string[] = [];
+  f.peer.historyRead = async () => { order.push('history'); return { items: [{ ...nativeItem('final'), runId: 'active-run' }], olderCursor: null }; };
   f.peer.current = terminal('active-run');
   f.peer.emit({ type: 'state', state: f.peer.current });
   await until(() => f.peer.unwatchCount === 1);
-  assert.equal(f.store.getItem(f.id, 'final')?.text, 'full-final');
+  assert.ok(order.includes('history'), 'the terminal native page is read before observation ends');
   assert.equal(f.peer.stopCalls.length, 0);
 });
 
@@ -781,24 +796,24 @@ test('startup marks interrupted creation without a saved native identity as unre
   assert.equal(f.peer.createCalls, 0);
 });
 
-test('deletion fences an older-page request suspended in its initial shared sync', async t => {
+test('deletion fences an older-page request suspended in its native read', async t => {
   const f = fixture(t);
-  const state = deferred<NativeState>();
-  f.peer.stateRead = async () => state.promise;
-  const older = f.service.older(f.id);
+  const page = deferred<HistoryPage>();
+  f.peer.historyRead = async cursor => cursor === undefined ? { items: [nativeItem('latest')], olderCursor: '1' } : page.promise;
+  const opened = await f.service.open(f.id);
+  const older = f.service.history(f.id, opened.history.olderCursor!);
   const olderRejected = assert.rejects(older, { code: 'conversation_deleting' });
-  await until(() => f.peer.stateCalls > 0);
+  await until(() => f.peer.historyCalls.includes('1'));
   const peer = f.peer as Peer & { delete: (binding: Binding) => Promise<void> };
-  let deleted = 0; peer.delete = async () => { deleted++; };
+  const nativeDelete = deferred<void>(); let deleted = 0; peer.delete = async () => { deleted++; await nativeDelete.promise; };
   const deletion = f.service.deleteConversation(f.id);
   assert.throws(() => f.service.renameConversation(f.id, 'cannot race deletion'), { code: 'conversation_deleting' });
-  state.resolve(terminal());
-  await Promise.all([olderRejected, deletion]);
-  assert.equal(deleted, 1);
+  await until(() => deleted === 1);
+  page.resolve({ items: [nativeItem('older')], olderCursor: null });
+  await olderRejected;
+  nativeDelete.resolve(); await deletion;
   assert.equal(f.store.getConversation(f.id), null);
-  assert.equal(f.peer.historyCalls.some(cursor => cursor !== undefined), false);
 });
-
 test('startup recovery retains its cursor when 64 execution slots are occupied and admits the next after release', async t => {
   const f = fixture(t);
   t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
@@ -845,8 +860,9 @@ test('a terminal canonical item closes an interrupted live delta even when the f
   f.peer.records = [{ ...nativeItem('reply'), runId: 'run', text: 'canonical complete response' }];
   f.peer.current = terminal('run');
   f.peer.emit({ type: 'invalidate' });
+  await until(() => f.service.liveItem(f.id, 'reply')?.status === 'completed');
+  assert.equal(f.service.liveItem(f.id, 'reply')?.text, 'canonical complete response');
+  assert.equal(f.service.snapshot(f.id).history.liveItems.length, 0);
   f.service.releaseReading(f.id, 'page');
   await until(() => f.peer.unwatchCount === 1);
-  assert.equal(f.store.getItem(f.id, 'reply')?.text, 'canonical complete response');
-  assert.equal(f.store.getItem(f.id, 'reply')?.status, 'completed');
 });

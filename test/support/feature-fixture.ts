@@ -22,6 +22,7 @@ import { localDefaultPassword } from '../../src/server/auth.ts';
 import { openDatabase } from '../../src/server/database.ts';
 import { productMigrations } from '../../src/server/migrations.ts';
 import { createWorkbenchStore } from '../../src/server/workbench-store.ts';
+import { parseStorageBudget } from '../../src/server/storage.ts';
 import { Workbench } from '../../src/server/workbench.ts';
 import { createWorkbenchHttp } from '../../src/server/workbench-http.ts';
 import { WorkspaceRegistry } from '../../src/server/workspace-registry.ts';
@@ -31,17 +32,18 @@ process.umask(0o077);
 const repository = fileURLToPath(new URL('../../', import.meta.url));
 const cliSchema = z.object({
   command: z.enum(['serve', 'init', 'reset', 'inspect', 'inspect-deletions', 'reject-delete-next', 'complete', 'prove', 'seed', 'disconnect', 'reconnect', 'unknown-receipt', 'reject-next', 'fail-create', 'repair', 'disable-skills', 'usage-full', 'usage-compact', 'usage-total-only',
-    'spawn-subagents', 'complete-subagents', 'subagent-team', 'unknown-subagent-stop']),
+    'spawn-subagents', 'complete-subagents', 'subagent-team', 'unknown-subagent-stop', 'append']),
   root: z.string().min(1).max(4096).refine(isAbsolute),
   port: z.coerce.number().int().min(1024).max(65535).default(4391),
   title: z.string().min(1).max(200).optional(),
-  count: z.coerce.number().int().min(1).max(700).default(650),
+  count: z.coerce.number().int().min(1).max(200_000).default(650),
   chars: z.coerce.number().int().min(32).max(80_000).default(80),
+  storageBudget: z.string().max(32).optional(),
 });
 const recordSchema = z.object({
   id: z.uuid(), title: z.string().max(200), harnessId: z.enum(['codex', 'dsh']),
   cwd: z.string().max(4096), configuration: z.object({ modelId: z.string(), permissionId: z.string(), reasoningEffort: z.string().optional() }),
-  state: stateSchema, items: z.array(itemSchema).max(1000),
+  state: stateSchema, items: z.array(itemSchema).max(200_000),
   submissions: z.array(z.object({ id: z.string(), text: z.string().max(16_000), runId: z.string() })).max(100),
   rejectedOperationIds: z.array(z.uuid()).max(100).default([]), rejectNext: z.boolean().default(false),
   submitCalls: z.number().int().min(0), stopCalls: z.number().int().min(0),
@@ -64,13 +66,14 @@ function privateFile(path: string): void {
 }
 
 async function main() {
-  const args = parseArgs({ options: { root: { type: 'string' }, port: { type: 'string' }, title: { type: 'string' }, count: { type: 'string' }, chars: { type: 'string' }, help: { type: 'boolean' } }, allowPositionals: true, strict: true });
+  const args = parseArgs({ options: { root: { type: 'string' }, port: { type: 'string' }, title: { type: 'string' }, count: { type: 'string' }, chars: { type: 'string' }, 'storage-budget': { type: 'string' }, help: { type: 'boolean' } }, allowPositionals: true, strict: true });
   if (args.values.help) {
-    console.log(`node test/support/feature-fixture.ts <${cliSchema.shape.command.options.join('|')}> --root ABSOLUTE_DIRECTORY [--port 4391] [--title TITLE] [--count 650 --chars 80]`);
+    console.log(`node test/support/feature-fixture.ts <${cliSchema.shape.command.options.join('|')}> --root ABSOLUTE_DIRECTORY [--port 4391] [--title TITLE] [--count 650 --chars 80] [--storage-budget 16GiB]`);
     return;
   }
   if (args.positionals.length !== 1) throw new Error('one_command_required');
-  const input = cliSchema.parse({ command: args.positionals[0], ...args.values });
+  const { 'storage-budget': storageBudget, ...values } = args.values;
+  const input = cliSchema.parse({ command: args.positionals[0], ...values, ...(storageBudget === undefined ? {} : { storageBudget }) });
   const info = lstatSync(input.root);
   if (!info.isDirectory() || info.isSymbolicLink() || (info.mode & 0o077) || (process.getuid && info.uid !== process.getuid())) throw new Error('root_must_be_owned_private_directory');
   const root = realpathSync(input.root);
@@ -181,6 +184,16 @@ async function main() {
             const runId = value.state.runId!;
             value.items.push({ id: 'assistant:' + runId, kind: 'assistant', text: 'FIXTURE COMPLETED ' + runId, status: 'completed', runId });
             value.state = { ...idle(), runId };
+          }
+          if (input.command === 'append') {
+            // Native history that grows while the application may not be observing (gaps, very long conversations).
+            if (value.items.length + input.count > 200_000) throw new Error('fixture_append_limit');
+            if (input.count * input.chars > 64 * 1024 * 1024) throw new Error('fixture_append_byte_budget');
+            const start = value.items.length;
+            for (let offset = 0; offset < input.count; offset++) {
+              const number = (start + offset).toString().padStart(6, '0');
+              value.items.push({ id: 'append:' + number, kind: 'assistant', status: 'completed', text: ('APPEND ' + number + ' ').padEnd(input.chars, 'x') });
+            }
           }
           if (input.command === 'seed') {
             if (value.items.length || value.submissions.length) throw new Error('seed_requires_empty_conversation');
@@ -360,7 +373,7 @@ async function main() {
   mkdirSync(join(directory, 'existing'), { recursive: true, mode: 0o700 });
   const registry = new WorkspaceRegistry(db, workspaces, [{ id: 'fixture-root', label: 'Fixture directories', directory }]);
   let transport: ReturnType<typeof createWorkbenchHttp> | undefined;
-  const store = createWorkbenchStore(db, { onChange: event => transport?.changed(event) });
+  const store = createWorkbenchStore(db, { onChange: event => transport?.changed(event), storageBudget: parseStorageBudget(input.storageBudget) });
   const workbench = new Workbench(store, workspaces, new Map<HarnessId, HarnessAdapter>([['codex', adapter('codex')], ['dsh', adapter('dsh')]]), registry);
   transport = createWorkbenchHttp(workbench);
   const origin = 'http://127.0.0.1:' + input.port;

@@ -162,10 +162,23 @@ export const operationResponseSchema = z.object({ operation: operationSchema }).
 export const turnFileLimit = 500;
 const turnFilesSchema = z.object({ runId: identifierSchema, paths: z.array(recordedFilePath).max(turnFileLimit), limited: z.boolean() }).strict();
 export type TurnFileSummary = z.infer<typeof turnFilesSchema>;
+/** Opaque, conversation-bound position in native history (ADR 0014). */
+export const historyCursorSchema = z.string().regex(/^[A-Za-z0-9_-]{1,8192}$/);
+export const historyPageItemLimit = 400;
 export const snapshotSchema = z.object({
   conversation: conversationSchema,
-  history: z.object({ items: z.array(itemSchema).max(100), liveItems: z.array(itemSchema).max(100), liveItemsLimited: z.boolean(), olderBeforeItemId: identifierSchema.nullable(), hasOlder: z.boolean(), loaded: z.boolean() }).strict(),
+  /** The native latest page plus in-flight items; `error` keeps already loaded content readable when native reads fail. */
+  history: z.object({ items: z.array(itemSchema).max(historyPageItemLimit), liveItems: z.array(itemSchema).max(100), liveItemsLimited: z.boolean(),
+    olderCursor: historyCursorSchema.nullable(), loaded: z.boolean(), error: z.string().regex(/^[a-z][a-z0-9_]{0,99}$/).optional() }).strict(),
   operations: z.array(operationSchema).max(100), queue: queueViewSchema.optional(), turnFiles: z.array(turnFilesSchema).max(200).optional(), usage: usageSchema.optional(), revision: revisionSchema,
+}).strict();
+/** One older native page. `olderCursor` is null at the first message of the conversation. */
+export const historyPageSchema = z.object({
+  items: z.array(itemSchema).max(historyPageItemLimit), olderCursor: historyCursorSchema.nullable(), turnFiles: z.array(turnFilesSchema).max(200),
+}).strict();
+export const storageSchema = z.object({
+  used: revisionSchema, budget: revisionSchema.min(1), warning: z.boolean(), full: z.boolean(),
+  images: z.object({ owned: revisionSchema, cache: revisionSchema }).strict(), legacy: revisionSchema,
 }).strict();
 export const changeEventSchema = z.object({ type: z.literal('change'), revision: revisionSchema, conversationId: z.uuid(), deleted: z.boolean().optional(), item: itemSchema.optional() }).strict();
 export const resetEventSchema = z.object({ type: z.literal('reset'), revision: revisionSchema }).strict();
@@ -173,6 +186,8 @@ export const readyEventSchema = z.object({ type: z.literal('ready'), revision: r
 export type WorkbenchConfiguration = z.infer<typeof workbenchConfigurationSchema>;
 export type Conversation = z.infer<typeof conversationSchema>;
 export type WorkbenchSnapshot = z.infer<typeof snapshotSchema>;
+export type HistoryPageView = z.infer<typeof historyPageSchema>;
+export type StorageView = z.infer<typeof storageSchema>;
 export type WorkbenchItem = z.infer<typeof itemSchema>;
 export type WorkbenchOperation = z.infer<typeof operationSchema>;
 export type ChangeEvent = z.infer<typeof changeEventSchema>;

@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { ServerResponse } from 'node:http';
 import { z } from 'zod';
-import { conversationManagementSchema, conversationSearchSchema, createConversationSchema, enqueueOperationSchema, identifierSchema, queueCommandSchema, workbenchConfigurationSchema,
+import { conversationManagementSchema, conversationSearchSchema, createConversationSchema, enqueueOperationSchema, historyCursorSchema, historyPageSchema, identifierSchema, queueCommandSchema, storageSchema, workbenchConfigurationSchema,
   subagentHistorySchema, subagentIdSchema, subagentListSchema, subagentStopResponseSchema,
   workspaceAddSchema, workspaceBrowseSchema, workspaceDirectoryListSchema, workspaceIdSchema, workspaceManagementSchema } from '../shared/workbench.ts';
 import type { Conversation as ConversationView, WorkbenchOperation, WorkbenchSnapshot } from '../shared/workbench.ts';
@@ -10,6 +10,7 @@ import type { Workbench } from './workbench.ts';
 import { conversationCursor, StoreError, type Conversation, type Operation, type WorkbenchChange } from './workbench-store.ts';
 import { decodeImage, ResourceError } from './resources.ts';
 import { SubagentStoreError, type SubagentStop } from './subagent-store.ts';
+import { StorageBudgetError } from './storage.ts';
 import { textLimit } from './workspace-documents.ts';
 import { imageSchema, skillCatalogSchema } from '../shared/content.ts';
 
@@ -18,7 +19,7 @@ const workspaceParams = z.object({ id: workspaceIdSchema }).strict();
 const documentPath = z.string().min(1).max(1024);
 const noQuery = z.object({}).strict();
 const listQuery = z.object({ beforeId: z.string().min(1).max(512).optional() }).strict();
-const olderQuery = z.object({ beforeItemId: identifierSchema.optional() }).strict();
+const historyQuery = z.object({ cursor: historyCursorSchema }).strict();
 const cursorSchema = z.string().regex(/^(0|[1-9][0-9]{0,15})$/).transform(Number).refine(Number.isSafeInteger);
 const eventsQuery = z.object({ cursor: cursorSchema.optional() }).strict();
 const optionsSchema = z.object({
@@ -62,16 +63,15 @@ function snapshotView(value: ReturnType<Workbench['snapshot']>): WorkbenchSnapsh
   const { history } = value;
   const conversation = conversationView(value.conversation);
   const operations = newestWithin(value.operations.map(operationView), 1024 * 1024, true);
-  // Keep a contiguous latest suffix, preserving whole messages and a usable older-page anchor.
-  // A single maximum-size native message (including JSON escaping) fits this budget.
-  const items = newestWithin(history.items, 7 * 1024 * 1024);
   const { queue, turnFiles } = value;
+  // A native latest page is whole: if it cannot fit, the older cursor still addresses everything before it.
+  const items = newestWithin(history.items, 7 * 1024 * 1024);
   const liveItems = newestWithin(history.liveItems, MAX_RESPONSE_BYTES - size({ conversation, operations, items, queue, turnFiles }) - 4096);
   const trimmed = items.length < history.items.length;
-  const hasOlder = trimmed || Boolean(history.olderBeforeItemId || history.nativeOlderCursor);
   return { conversation, history: {
-    items, liveItems, liveItemsLimited: history.liveItemsLimited || liveItems.length < history.liveItems.length, loaded: history.historyLoaded,
-    olderBeforeItemId: hasOlder ? (trimmed ? items[0]?.id : history.olderBeforeItemId) ?? items[0]?.id ?? null : null, hasOlder,
+    items: trimmed ? [] : items, liveItems, liveItemsLimited: history.liveItemsLimited || liveItems.length < history.liveItems.length,
+    olderCursor: history.olderCursor, loaded: history.loaded && !trimmed,
+    ...(trimmed ? { error: 'native_history_page_limit' } : history.error ? { error: history.error } : {}),
   }, operations, queue, ...(turnFiles.length ? { turnFiles } : {}), ...(value.conversation.usage ? { usage: value.conversation.usage } : {}), revision: value.revision };
 }
 function json(reply: FastifyReply, value: unknown): FastifyReply {
@@ -135,12 +135,13 @@ export function createWorkbenchHttp(workbench: Workbench, input: Partial<z.input
         return;
       }
       for (const change of batch.events) {
-        const value: { type: 'change'; revision: number; conversationId: string; deleted?: boolean; item?: ReturnType<Workbench['store']['getItem']> } = {
+        const value: { type: 'change'; revision: number; conversationId: string; deleted?: boolean; item?: ReturnType<Workbench['liveItem']> } = {
           type: 'change', revision: change.sequence, conversationId: change.conversationId,
         };
         if (workbench.store.deletions.get(change.conversationId)?.status === 'completed') value.deleted = true;
         if (change.itemId && !value.deleted) {
-          const item = workbench.store.getItem(change.conversationId, change.itemId);
+          // Live bodies live in memory only; a settled item falls back to the snapshot read.
+          const item = workbench.liveItem(change.conversationId, change.itemId);
           // Large bodies use the same invalidation + snapshot path, never fragmented deltas.
           if (item && Buffer.byteLength(item.text) <= MAX_FRAME_BYTES) {
             value.item = item;
@@ -170,6 +171,7 @@ export function createWorkbenchHttp(workbench: Workbench, input: Partial<z.input
       privateApp.setErrorHandler((error, _request, reply) => {
         if ((error instanceof StoreError || error instanceof SubagentStoreError) && /^[a-z][a-z0-9_]{0,99}$/.test(error.code)) return reply.code(error.statusCode).send({ error: error.code });
         if (error instanceof ResourceError) return reply.code(error.statusCode).send({ error: error.message });
+        if (error instanceof StorageBudgetError) return reply.code(error.statusCode).send({ error: error.code });
         const code = typeof error === 'object' && error !== null && 'statusCode' in error ? error.statusCode : undefined;
         const status = typeof code === 'number' && code >= 400 && code < 500 ? code : 500;
         if (status === 500) privateApp.log.error({ event: 'workbench_request_failed' });
@@ -361,9 +363,20 @@ export function createWorkbenchHttp(workbench: Workbench, input: Partial<z.input
         const { id, resource } = parse(resourceParams, request.params); parse(noQuery, request.query);
         workbench.store.resources.remove(id, resource); return reply.code(204).send();
       });
-      privateApp.get('/conversations/:id/older', async (request, reply) => {
-        const { id } = parse(uuidParams, request.params); const { beforeItemId } = parse(olderQuery, request.query);
-        return json(reply, snapshotView(await workbench.older(id, beforeItemId)));
+      privateApp.get('/conversations/:id/history', async (request, reply) => {
+        const { id } = parse(uuidParams, request.params); const { cursor } = parse(historyQuery, request.query);
+        return json(reply, historyPageSchema.parse(await workbench.history(id, cursor)));
+      });
+      privateApp.get('/storage', async (request, reply) => {
+        parse(noQuery, request.query);
+        return json(reply, storageSchema.parse(workbench.store.storage.usage()));
+      });
+      // Only regenerable native image copies are removed; uploads, snapshots and history stay intact.
+      privateApp.post('/storage/clear-cache', { bodyLimit: 1024 }, async (request, reply) => {
+        parse(noQuery, request.query); parse(noQuery, request.body ?? {});
+        workbench.store.storage.clearCache();
+        privateApp.log.info({ event: 'storage_cache_cleared' });
+        return json(reply, storageSchema.parse(workbench.store.storage.usage()));
       });
       privateApp.post('/conversations/:id/operations', async (request, reply) => {
         parse(noQuery, request.query); const { id } = parse(uuidParams, request.params);

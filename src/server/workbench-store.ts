@@ -7,6 +7,7 @@ import { collaborationSchema, conversationTitleSchema, identifierSchema, message
 import type { ConversationUsage, QueueCommand, QueueDelivery, QueuePause, QueueView, SubagentSummary, TurnFileSummary } from '../shared/workbench.ts';
 import { contentFields, inputFields, recordedFilePath, toolSchema, validSkillSpans, type InputContent } from '../shared/content.ts';
 import { createResourceStore } from './resources.ts';
+import { createStorageAccounting, type StorageAccounting } from './storage.ts';
 import type { Binding, Configuration, HarnessId, NativeItem, NativeState, Receipt } from '../harness/types.ts';
 
 export type Readiness = 'preparing' | 'ready' | 'blocked';
@@ -17,7 +18,6 @@ export type Conversation = {
   archived: boolean; state: NativeState; error: string | null; createdAt: number; lastActivityAt: number;
   usage?: ConversationUsage;
   subagents?: SubagentSummary;
-  historyLoaded: boolean; nativeOlderCursor: string | null; nativeOlderBeforeItemId: string | null;
 };
 export type CreateConversation = Pick<Conversation, 'id' | 'harnessId' | 'workspaceId' | 'cwd' | 'configuration'> & { title?: string; preparationId?: string };
 export type OperationStatus = 'queued' | 'dispatching' | 'accepted' | 'unknown' | 'rejected';
@@ -31,12 +31,6 @@ export type Operation = OperationInput & {
   createdAt: number; updatedAt: number;
 };
 export type WorkbenchChange = { sequence: number; conversationId: string; itemId?: string };
-export type HistorySnapshot = {
-  revision: number;
-  items: NativeItem[]; liveItems: NativeItem[]; olderBeforeItemId: string | null;
-  liveItemsLimited: boolean;
-  historyLoaded: boolean; nativeOlderCursor: string | null; nativeOlderBeforeItemId: string | null;
-};
 export type ListOperations = { conversationId?: string; status?: OperationStatus; type?: 'message' | 'stop'; order?: 'asc' | 'desc'; afterId?: string; limit?: number };
 export type ConversationList = {
   beforeId?: string; limit?: number; workspaceId?: string; archived?: boolean;
@@ -68,7 +62,6 @@ export interface WorkbenchStore {
   saveBinding(id: string, binding: Binding): Conversation;
   setConversationState(id: string, change: { readiness?: Readiness; state?: NativeState; error?: string | null }): Conversation;
   setUsage(id: string, value: ConversationUsage): void;
-  setHistoryCursor(id: string, cursor: { loaded: boolean; olderCursor: string | null; beforeItemId: string | null }): Conversation;
   enqueueOperation(input: OperationInput): { operation: Operation; created: boolean };
   getOperation(id: string): Operation | null;
   listOperations(options?: ListOperations): Operation[];
@@ -84,12 +77,11 @@ export interface WorkbenchStore {
   pauseQueue(id: string, reason: QueuePause): void;
   changes(after: number, limit?: number): { events: WorkbenchChange[]; latest: number; reset: boolean };
   version(): number;
-  mergeHistory(conversationId: string, items: NativeItem[], beforeItemId?: string): void;
-  saveLiveItem(conversationId: string, item: NativeItem): void;
-  getItem(conversationId: string, itemId: string): NativeItem | null;
-  hasHistoryItem(conversationId: string, itemId: string): boolean;
-  operationRunId(conversationId: string, operationId: string): string | null;
-  readHistory(conversationId: string, options?: { beforeItemId?: string; limit?: number }): HistorySnapshot;
+  /** Record a change hint (optionally naming a live item) without persisting any history body (ADR 0014). */
+  touch(conversationId: string, itemId?: string): void;
+  /** Keep the per-turn edited-path index; paths only, never message bodies. */
+  recordTurnFiles(conversationId: string, items: NativeItem[]): void;
+  storage: StorageAccounting;
   readTurnFiles(conversationId: string, runIds: readonly string[]): TurnFileSummary[];
 }
 
@@ -99,11 +91,7 @@ export class StoreError extends Error {
   constructor(code: string, statusCode = 500) { super(code); this.name = 'StoreError'; this.code = code; this.statusCode = statusCode; }
 }
 
-const MAX_ITEMS = 50_000;
-const MAX_LIVE_ITEMS = 100;
 const MAX_TEXT_BYTES = 1_048_576;
-const POSITION_STEP = 1024;
-const POSITION_BOUND = Math.floor(Number.MAX_SAFE_INTEGER / 2);
 const boundedText = (bytes: number) => z.string().max(bytes).refine(value => Buffer.byteLength(value, 'utf8') <= bytes);
 const identifier = boundedText(1024).min(1).refine(value => !value.includes('\0'));
 const uuid = z.uuid();
@@ -114,6 +102,7 @@ const itemSchema = z.object({
   status: z.enum(['running', 'completed', 'failed', 'unknown']), runId: identifier.optional(), operationId: identifier.optional(),
   ...contentFields, tool: toolSchema.optional(), collaboration: collaborationSchema.optional(),
 }).strict();
+const turnFileItemSchema = z.object({ kind: z.literal('tool'), status: z.literal('completed'), runId: identifier, fileEdits: z.array(recordedFilePath).min(1).max(400) }).strict();
 const nativeItemSchema = itemSchema.extend({ fileEdits: z.array(recordedFilePath).max(400).optional() });
 const bindingSchema = z.object({
   id: identifier, cwd: boundedText(4096).min(1), configuration: configurationSchema, details: z.record(z.string(), z.unknown()),
@@ -177,13 +166,6 @@ function bindingJson(value: Binding): string {
   if (Buffer.byteLength(json) > 65_536) throw new StoreError('binding_too_large', 413);
   return json;
 }
-function itemFromRow(row: Row): NativeItem {
-  return parse(itemSchema, {
-    ...JSON.parse(String(row.metadata_json ?? '{}')),
-    id: row.id, kind: row.kind, text: row.text, status: row.status,
-    ...(row.run_id === null ? {} : { runId: row.run_id }), ...(row.operation_id === null ? {} : { operationId: row.operation_id }),
-  }, 'corrupt_workbench_data');
-}
 function conversationFromRow(row: Row): Conversation {
   return {
     ...(row.native_preparation_id == null ? {} : { nativePreparationId: String(row.native_preparation_id) }),
@@ -194,8 +176,6 @@ function conversationFromRow(row: Row): Conversation {
     state: parseJson(nativeStateSchema, row.state_json), error: row.error === null ? null : String(row.error), createdAt: Number(row.created_at), lastActivityAt: Number(row.last_activity_at ?? row.created_at),
     ...(row.usage_json == null ? {} : { usage: parseJson(usageSchema, row.usage_json) }),
     ...(summarizeSubagents(row.subagents_json) ? { subagents: summarizeSubagents(row.subagents_json)! } : {}),
-    historyLoaded: row.history_loaded === 1, nativeOlderCursor: row.native_older_cursor === null ? null : String(row.native_older_cursor),
-    nativeOlderBeforeItemId: row.native_older_before_item_id === null ? null : String(row.native_older_before_item_id),
   };
 }
 function operationFromRow(row: Row): Operation {
@@ -209,7 +189,7 @@ function operationFromRow(row: Row): Operation {
 }
 
 /** Local durable facts; this module never calls a native Harness or retries an operation. */
-export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => number; onChange?: (event: WorkbenchChange) => void } = {}): WorkbenchStore {
+export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => number; onChange?: (event: WorkbenchChange) => void; storageBudget?: number } = {}): WorkbenchStore {
   const now = options.now ?? Date.now;
   const version = (): number => Number(db.prepare('SELECT COALESCE(MAX(sequence),0) AS version FROM workbench_changes').get()!.version);
   const mutate = <T>(action: (changed: (conversationId: string, itemId?: string) => void) => T): T => {
@@ -244,13 +224,6 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
   const requireOperation = (id: string): Operation => {
     const row = operationRow(id); if (!row) throw new StoreError('operation_not_found', 404); return operationFromRow(row);
   };
-  const upsertItem = db.prepare(`INSERT INTO workbench_items(conversation_id,id,position,kind,text,status,run_id,operation_id,metadata_json)
-    VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(conversation_id,id) DO UPDATE SET kind=excluded.kind,text=excluded.text,
-    status=excluded.status,run_id=excluded.run_id,operation_id=excluded.operation_id,metadata_json=excluded.metadata_json
-    WHERE workbench_items.kind IS NOT excluded.kind OR workbench_items.text IS NOT excluded.text
-      OR workbench_items.status IS NOT excluded.status OR workbench_items.run_id IS NOT excluded.run_id
-      OR workbench_items.operation_id IS NOT excluded.operation_id OR workbench_items.metadata_json IS NOT excluded.metadata_json`);
-  const deleteLive = db.prepare('DELETE FROM workbench_live_items WHERE conversation_id = ? AND id = ?');
   let insertTurnFile: StatementSync | undefined;
   let countTurnFiles: StatementSync | undefined;
   let selectTurnFiles: StatementSync | undefined;
@@ -267,7 +240,8 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
     }
     return count !== before;
   }
-  const resources = createResourceStore(db);
+  const accounting = createStorageAccounting(db, options.storageBudget);
+  const resources = createResourceStore(db, accounting);
   const queueRow = (id: string) => db.prepare('SELECT * FROM workbench_queues WHERE conversation_id=?').get(id);
   const hasQueue = (id: string) => !!db.prepare('SELECT 1 FROM workbench_queue_entries WHERE conversation_id=? AND content_json IS NOT NULL LIMIT 1').get(id);
   const bumpQueue = (id: string) => db.prepare('UPDATE workbench_queues SET version=version+1 WHERE conversation_id=?').run(id);
@@ -298,7 +272,6 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
       throw new StoreError('queue_entry_changed', 409);
     return row;
   };
-  const metadata = (item: NativeItem) => JSON.stringify({ ...(item.images?.length ? { images: item.images } : {}), ...(item.references?.length ? { references: item.references } : {}), ...(item.tool ? { tool: item.tool } : {}), ...(item.collaboration ? { collaboration: item.collaboration } : {}) });
   const store: WorkbenchStore = {
     deletions: createDeletionStore(db, event => options.onChange?.(event), now),
     subagents: createSubagentStore(db, event => options.onChange?.(event), now),
@@ -479,21 +452,6 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
         if (json === JSON.stringify(current)) return;
         db.prepare('UPDATE workbench_conversations SET usage_json=? WHERE id=?').run(json, id);
         changed(id);
-      });
-    },
-    setHistoryCursor(id, value) {
-      parse(uuid, id);
-      const cursor = parse(z.object({ loaded: z.boolean(), olderCursor: boundedText(8192).min(1).nullable(), beforeItemId: identifier.nullable() }).strict(), value);
-      return mutate(changed => {
-        const conversation = requireConversation(id);
-        if (cursor.olderCursor !== null && (!cursor.loaded || cursor.beforeItemId === null)) throw new StoreError('history_cursor_requires_anchor', 409);
-        if (cursor.beforeItemId !== null && !db.prepare('SELECT id FROM workbench_items WHERE conversation_id=? AND id=?').get(id, cursor.beforeItemId))
-          throw new StoreError('history_anchor_not_found', 409);
-        if (conversation.historyLoaded === cursor.loaded && conversation.nativeOlderCursor === cursor.olderCursor && conversation.nativeOlderBeforeItemId === cursor.beforeItemId) return conversation;
-        changed(id);
-        db.prepare('UPDATE workbench_conversations SET history_loaded=?,native_older_cursor=?,native_older_before_item_id=? WHERE id=?')
-          .run(cursor.loaded ? 1 : 0, cursor.olderCursor, cursor.beforeItemId, id);
-        return requireConversation(id);
       });
     },
     enqueueOperation(value) {
@@ -732,126 +690,23 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
         return { events, latest, reset };
       }, 'read');
     },
-    mergeHistory(conversationId, value, beforeItemId) {
-      parse(uuid, conversationId); if (beforeItemId !== undefined) parse(identifier, beforeItemId);
-      const items = parse(z.array(nativeItemSchema).max(1000), value);
-      // Duplicate native IDs carry the final body in the page, retaining their first order.
-      const incoming = new Map(items.map(item => [item.id, item]));
-      return mutate(changed => {
+    touch(conversationId, itemId) {
+      parse(uuid, conversationId); if (itemId !== undefined) parse(identifier, itemId);
+      mutate(changed => { requireConversation(conversationId); changed(conversationId, itemId); });
+    },
+    recordTurnFiles(conversationId, value) {
+      parse(uuid, conversationId);
+      const candidates = value.filter(item => item.kind === 'tool' && item.status === 'completed' && item.runId && item.fileEdits?.length);
+      if (!candidates.length) return;
+      const items = parse(z.array(turnFileItemSchema).max(1000), candidates.map(item => ({ kind: item.kind, status: item.status, runId: item.runId, fileEdits: item.fileEdits })));
+      mutate(changed => {
         requireConversation(conversationId);
-        const find = db.prepare('SELECT id,position FROM workbench_items WHERE conversation_id=? AND id=?');
-        const anchor = beforeItemId === undefined ? null : find.get(conversationId, beforeItemId) as PositionedId | undefined;
-        if (beforeItemId !== undefined && !anchor) throw new StoreError('history_anchor_not_found', 409);
-        const known = new Map<string, number>();
-        for (const id of incoming.keys()) { const row = find.get(conversationId, id) as PositionedId | undefined; if (row) known.set(id, row.position); }
-        const newCount = incoming.size - known.size;
-        const positions = new Map(known);
-        if (newCount > 0) {
-          // Reordering reads at most the bounded ID index, never historical message bodies.
-          const current = db.prepare('SELECT id,position FROM workbench_items WHERE conversation_id=? ORDER BY position LIMIT ?').all(conversationId, MAX_ITEMS + 1) as PositionedId[];
-          if (current.length + newCount > MAX_ITEMS) throw new StoreError('history_capacity_reached', 409);
-          let lastPosition = -Infinity;
-          for (const id of incoming.keys()) {
-            const position = known.get(id);
-            if (position !== undefined) {
-              if (position < lastPosition || (anchor && position > anchor.position)) throw new StoreError('history_order_conflict', 409);
-              lastPosition = position;
-            }
-          }
-          const before = new Map<string | null, string[]>();
-          let pending: string[] = [];
-          for (const id of incoming.keys()) {
-            if (known.has(id)) { if (pending.length) { before.set(id, pending); pending = []; } }
-            else pending.push(id);
-          }
-          if (pending.length) {
-            const boundary = beforeItemId ?? null;
-            if (boundary !== null && incoming.has(boundary)) throw new StoreError('history_order_conflict', 409);
-            before.set(boundary, [...(before.get(boundary) ?? []), ...pending]);
-          }
-          const ordered: string[] = [];
-          for (const row of current) { ordered.push(...(before.get(row.id) ?? []), row.id); positions.set(row.id, row.position); }
-          ordered.push(...(before.get(null) ?? []));
-          let compact = false;
-          for (let start = 0; start < ordered.length;) {
-            if (positions.has(ordered[start]!)) { start++; continue; }
-            let end = start;
-            while (end < ordered.length && !positions.has(ordered[end]!)) end++;
-            const left = start === 0 ? undefined : positions.get(ordered[start - 1]!);
-            const right = end === ordered.length ? undefined : positions.get(ordered[end]!);
-            const count = end - start;
-            const step = left === undefined || right === undefined ? POSITION_STEP : Math.floor((right - left) / (count + 1));
-            const first = left === undefined ? (right === undefined ? 0 : right - step * count) : left + step;
-            if (step < 1 || Math.abs(first) > POSITION_BOUND || Math.abs(first + step * (count - 1)) > POSITION_BOUND) { compact = true; break; }
-            for (let offset = 0; offset < count; offset++) positions.set(ordered[start + offset]!, first + step * offset);
-            start = end;
-          }
-          if (compact) {
-            const finalPositions = new Map(ordered.map((id, index) => [id, index * POSITION_STEP]));
-            const reordered = current.filter(row => row.position !== finalPositions.get(row.id));
-            const move = db.prepare('UPDATE workbench_items SET position=? WHERE conversation_id=? AND id=?');
-            // Temporary reserved negative positions avoid UNIQUE collisions during the atomic compaction.
-            for (let index = 0; index < reordered.length; index++) move.run(Number.MIN_SAFE_INTEGER + index, conversationId, reordered[index]!.id);
-            for (const row of reordered) move.run(finalPositions.get(row.id)!, conversationId, row.id);
-            for (const [id, position] of finalPositions) positions.set(id, position);
-          }
-        }
-        for (const item of incoming.values()) {
-          const written = upsertItem.run(conversationId, item.id, positions.get(item.id)!, item.kind, item.text, item.status, item.runId ?? null, item.operationId ?? null, metadata(item));
-          const removed = deleteLive.run(conversationId, item.id);
-          const recorded = recordTurnFiles(conversationId, item);
-          if (recorded || Number(written.changes) + Number(removed.changes) > 0) changed(conversationId);
-        }
+        let recorded = false;
+        for (const item of items) recorded = recordTurnFiles(conversationId, item as NativeItem) || recorded;
+        if (recorded) changed(conversationId);
       });
     },
-    saveLiveItem(conversationId, value) {
-      parse(uuid, conversationId); const item = parse(nativeItemSchema, value);
-      return mutate(changed => {
-        requireConversation(conversationId);
-        if (recordTurnFiles(conversationId, item)) changed(conversationId);
-        const canonical = db.prepare('SELECT position FROM workbench_items WHERE conversation_id=? AND id=?').get(conversationId, item.id);
-        if (canonical) {
-          const written = upsertItem.run(conversationId, item.id, Number(canonical.position), item.kind, item.text, item.status, item.runId ?? null, item.operationId ?? null, metadata(item));
-          const removed = deleteLive.run(conversationId, item.id);
-          if (Number(written.changes) + Number(removed.changes) > 0) changed(conversationId, item.id);
-          return;
-        }
-        const existing = db.prepare('SELECT id FROM workbench_live_items WHERE conversation_id=? AND id=?').get(conversationId, item.id);
-        if (!existing && Number(db.prepare('SELECT COUNT(*) AS count FROM workbench_live_items WHERE conversation_id=?').get(conversationId)!.count) >= MAX_LIVE_ITEMS)
-          throw new StoreError('live_history_capacity_reached', 409);
-        const written = db.prepare(`INSERT INTO workbench_live_items(conversation_id,id,kind,text,status,run_id,operation_id,updated_at,metadata_json) VALUES(?,?,?,?,?,?,?,?,?)
-          ON CONFLICT(conversation_id,id) DO UPDATE SET kind=excluded.kind,text=excluded.text,status=excluded.status,
-          run_id=excluded.run_id,operation_id=excluded.operation_id,updated_at=excluded.updated_at,metadata_json=excluded.metadata_json
-          WHERE workbench_live_items.kind IS NOT excluded.kind OR workbench_live_items.text IS NOT excluded.text
-            OR workbench_live_items.status IS NOT excluded.status OR workbench_live_items.run_id IS NOT excluded.run_id
-            OR workbench_live_items.operation_id IS NOT excluded.operation_id OR workbench_live_items.metadata_json IS NOT excluded.metadata_json`)
-          .run(conversationId, item.id, item.kind, item.text, item.status, item.runId ?? null, item.operationId ?? null, now(), metadata(item));
-        if (Number(written.changes) > 0) changed(conversationId, item.id);
-      });
-    },
-    hasHistoryItem(conversationId, itemId) {
-      parse(uuid, conversationId); parse(identifier, itemId);
-      return storage(() => Boolean(db.prepare('SELECT id FROM workbench_items WHERE conversation_id=? AND id=?').get(conversationId, itemId)));
-    },
-    operationRunId(conversationId, operationId) {
-      parse(uuid, conversationId); parse(uuid, operationId);
-      return storage(() => {
-        const rows = db.prepare(`SELECT DISTINCT run_id FROM (
-          SELECT run_id FROM workbench_items WHERE conversation_id=? AND kind='user' AND operation_id=?
-          UNION ALL SELECT run_id FROM workbench_live_items WHERE conversation_id=? AND kind='user' AND operation_id=?
-        ) WHERE run_id IS NOT NULL LIMIT 2`).all(conversationId, operationId, conversationId, operationId);
-        return rows.length === 1 ? String(rows[0]!.run_id) : null;
-      });
-    },
-    getItem(conversationId, itemId) {
-      parse(uuid, conversationId); parse(identifier, itemId);
-      return storage(() => {
-        const row = db.prepare(`SELECT id,kind,text,status,run_id,operation_id,metadata_json FROM workbench_live_items WHERE conversation_id=? AND id=?
-          UNION ALL SELECT id,kind,text,status,run_id,operation_id,metadata_json FROM workbench_items WHERE conversation_id=? AND id=? LIMIT 1`)
-          .get(conversationId, itemId, conversationId, itemId);
-        return row ? itemFromRow(row) : null;
-      });
-    },
+    storage: accounting,
     readTurnFiles(conversationId, runIds) {
       if (!runIds.length) return [];
       return storage(() => {
@@ -868,36 +723,6 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
         }
         return summaries;
       });
-    },
-    readHistory(conversationId, value = {}) {
-      parse(uuid, conversationId);
-      const input = parse(z.object({ beforeItemId: identifier.optional(), limit: z.number().int().min(1).max(100).default(100) }).strict(), value);
-      return transaction(db, () => {
-        const conversation = requireConversation(conversationId);
-        const before = input.beforeItemId === undefined ? null : db.prepare('SELECT position FROM workbench_items WHERE conversation_id=? AND id=?').get(conversationId, input.beforeItemId);
-        if (input.beforeItemId !== undefined && !before) throw new StoreError('history_anchor_not_found', 404);
-        // Iterate rows so a valid page of many maximum-size bodies cannot allocate them all
-        // before the HTTP layer applies its wire budget. Every returned body remains complete.
-        const rows = before
-          ? db.prepare('SELECT * FROM workbench_items WHERE conversation_id=? AND position<? ORDER BY position DESC LIMIT ?').iterate(conversationId, Number(before.position), input.limit + 1)
-          : db.prepare('SELECT * FROM workbench_items WHERE conversation_id=? ORDER BY position DESC LIMIT ?').iterate(conversationId, input.limit + 1);
-        const items: NativeItem[] = []; let bytes = 0; let hasOlder = false;
-        for (const row of rows) {
-          const item = itemFromRow(row); bytes += Buffer.byteLength(item.text) + 2048;
-          if (items.length >= input.limit || bytes > 8 * 1024 * 1024) { hasOlder = true; break; }
-          items.push(item);
-        }
-        items.reverse();
-        const liveItems: NativeItem[] = []; let liveBytes = 0; let liveItemsLimited = false;
-        for (const row of db.prepare('SELECT * FROM workbench_live_items WHERE conversation_id=? ORDER BY updated_at DESC,id DESC LIMIT ?').iterate(conversationId, MAX_LIVE_ITEMS)) {
-          const item = itemFromRow(row); liveBytes += Buffer.byteLength(item.text) + 2048;
-          if (liveBytes > 4 * 1024 * 1024) { liveItemsLimited = true; break; }
-          liveItems.push(item);
-        }
-        liveItems.reverse();
-        return { revision: version(), items, liveItems, liveItemsLimited, olderBeforeItemId: hasOlder ? items[0]!.id : null, historyLoaded: conversation.historyLoaded,
-          nativeOlderCursor: conversation.nativeOlderCursor, nativeOlderBeforeItemId: conversation.nativeOlderBeforeItemId };
-      }, 'read');
     },
   };
   return store;

@@ -8,6 +8,7 @@ services:
     environment:
       ZHONGSHU_ORIGIN: ${ZHONGSHU_ORIGIN:-https://localhost}
       ZHONGSHU_ADMIN_PASSWORD: ${ZHONGSHU_ADMIN_PASSWORD:-}
+      ZHONGSHU_STORAGE_BUDGET: ${ZHONGSHU_STORAGE_BUDGET:-}
     volumes:
       - state:/data
     cap_drop: [ALL]

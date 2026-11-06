@@ -8,7 +8,8 @@ import { HarnessError } from '../types.ts';
 
 // The operator owns the launch file. The browser never supplies a URL or sees its token.
 // Plain HTTP is allowed only for the native Host's loopback transport, never a remote origin.
-const MAX_BODY = 8 * 1024 * 1024;
+// Long sessions send whole snapshot projections (turn outline) and uncounted tool events per page.
+const MAX_BODY = 32 * 1024 * 1024;
 const code = z.string().regex(/^[a-zA-Z0-9_/-]{1,120}$/);
 const responseSchema = z.object({ type: z.literal('server-response'), rpcId: z.string(), result: z.discriminatedUnion('ok', [z.object({ ok: z.literal(true), value: z.unknown().optional() }), z.object({ ok: z.literal(false), error: z.object({ code }) })]) });
 const frameSchema = z.object({ type: z.enum(['item', 'error', 'end']), streamId: z.string().max(200), value: z.unknown().optional(), error: z.object({ code }).optional() });

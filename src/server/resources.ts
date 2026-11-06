@@ -5,6 +5,7 @@ import { lstat, open, opendir, realpath } from 'node:fs/promises';
 import { join, relative, isAbsolute } from 'node:path';
 import { z } from 'zod';
 import { imageSchema, referenceSchema } from '../shared/content.ts';
+import { createStorageAccounting, type StorageAccounting } from './storage.ts';
 
 export const MAX_IMAGE_BYTES = 6 * 1024 * 1024;
 export class ResourceError extends Error {
@@ -25,7 +26,9 @@ export function decodeImage(value: string, limit = MAX_IMAGE_BYTES): Buffer {
   if (data.length > limit || data.toString('base64') !== value) throw new ResourceError('invalid_image_data');
   imageType(data); return data;
 }
-export function createResourceStore(db: DatabaseSync) {
+/** `upload` is application-owned and stops at the storage budget; `copy` is a regenerable native or workspace image copy. */
+export type ResourceKind = 'upload' | 'copy';
+export function createResourceStore(db: DatabaseSync, accounting: StorageAccounting = createStorageAccounting(db)) {
   function get(conversationId: string, id: string) {
     const row = db.prepare('SELECT * FROM workbench_resources WHERE conversation_id=? AND id=?').get(z.uuid().parse(conversationId), z.uuid().parse(id));
     if (!row) throw new ResourceError('image_unavailable', 404);
@@ -37,14 +40,15 @@ export function createResourceStore(db: DatabaseSync) {
       const row = db.prepare('SELECT r.id FROM workbench_resources r JOIN workbench_resource_refs f ON f.resource_id=r.id WHERE r.conversation_id=? AND f.owner_id=? LIMIT 1').get(conversationId, owner);
       return row ? get(conversationId, String(row.id)) : undefined;
     },
-    put(conversationId: string, name: string, data: Buffer) {
+    put(conversationId: string, name: string, data: Buffer, kind: ResourceKind = 'upload') {
       z.uuid().parse(conversationId); z.string().min(1).max(120).parse(name);
       const mediaType = imageType(data); const digest = createHash('sha256').update(data).digest('hex');
       const old = db.prepare('SELECT id FROM workbench_resources WHERE conversation_id=? AND digest=?').get(conversationId, digest);
       if (old) { const resource = get(conversationId, String(old.id)); return { id: resource.id, name: resource.name, mediaType: resource.mediaType }; }
       // Only unattached uploads expire. Pending operations and history pin resources durably.
       db.prepare('DELETE FROM workbench_resources WHERE created_at<? AND NOT EXISTS(SELECT 1 FROM workbench_resource_refs WHERE resource_id=workbench_resources.id)').run(Date.now() - 7 * 86400_000);
-      if (Number(db.prepare('SELECT COALESCE(SUM(length(data)),0) n FROM workbench_resources').get()!.n) + data.length > 512 * 1024 * 1024) throw new ResourceError('image_storage_full', 409);
+      // The instance budget replaces the former fixed image quota (ADR 0014).
+      if (kind === 'upload') accounting.assertRoom(data.length); else accounting.makeRoom(data.length);
       const id = randomUUID();
       db.prepare('INSERT INTO workbench_resources(id,conversation_id,name,media_type,data,digest,created_at) VALUES(?,?,?,?,?,?,?)').run(id, conversationId, name, mediaType, data, digest, Date.now());
       return { id, name, mediaType };

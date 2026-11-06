@@ -220,41 +220,62 @@ test('Codex history requests latest native page and preserves stable older curso
   assert.equal(reads[1]?.params.cursor, 'opaque-native-older');
 });
 
-test('Concurrent state and history share resume and neither unsubscribes while the other is reading', async t => {
-  const p = await peer(t, request => ['thread/resume', 'thread/items/list'].includes(request.method) ? NO_RESPONSE : undefined);
+test('Codex history widens requests for small items, narrows for large inline images, and reports unsupported legacy threads', async t => {
+  // A synthetic native list: item N is large when N is in the large set; cursors are positions.
+  const total = 60; const large = new Set([40, 41, 42]);
+  const item = (n: number) => ({ turnId: 'run-1', item: { id: `item-${n}`, type: 'userMessage', clientId: `item-${n}`,
+    content: [{ type: 'text', text: large.has(n) ? 'x'.repeat(400 * 1024) : `item ${n}` }] }, completedAtMs: 1 });
+  const p = await peer(t, (request, socket) => {
+    if (request.method !== 'thread/items/list') return undefined;
+    if (request.params.threadId === 'legacy-thread') { socket.send(JSON.stringify({ id: request.id, error: { code: -32601, message: 'thread/items/list is not supported yet' } })); return NO_RESPONSE; }
+    const end = request.params.cursor ? Number(request.params.cursor) : total; const start = Math.max(0, end - Number(request.params.limit));
+    return { data: Array.from({ length: end - start }, (_, index) => item(end - 1 - index)), nextCursor: start ? String(start) : null };
+  });
+  const page = await p.adapter.history(saved, undefined, 50);
+  assert.deepEqual(page.items.map(value => value.id), Array.from({ length: 50 }, (_, index) => `item-${10 + index}`));
+  assert.equal(page.olderCursor, '10');
+  const limits = p.calls.filter(call => call.method === 'thread/items/list').map(call => Number(call.params.limit));
+  assert.equal(limits[0], 2); assert.ok(limits.length < 25, 'small items widen later requests'); assert.ok(limits.some((limit, index) => index > 0 && limit < limits[index - 1]! && limits[index - 1]! >= 8), 'large inline items narrow the next request');
+  assert.equal(p.calls.some(call => call.method === 'thread/resume'), false);
+  await assert.rejects(p.adapter.history({ ...saved, id: 'legacy-thread' }), { code: 'codex_history_unsupported' });
+});
+
+test('History reads never resume or unsubscribe, even beside a concurrent state read (ADR 0014)', async t => {
+  let held = 0;
+  const p = await peer(t, request => request.method === 'thread/resume' || (request.method === 'thread/items/list' && held++ === 0) ? NO_RESPONSE : undefined);
   const state = p.adapter.state(saved); const history = p.adapter.history(saved);
-  await until(() => p.calls.some(call => call.method === 'thread/resume'));
-  assert.equal(p.calls.filter(call => call.method === 'thread/resume').length, 1);
-  const resume = p.calls.find(call => call.method === 'thread/resume')!;
-  for (const socket of p.sockets) socket.send(JSON.stringify({ id: resume.id, result: nativeConfiguration() }));
-  await until(() => p.calls.some(call => call.method === 'thread/items/list'));
-  assert.equal((await state).status, 'idle');
-  assert.equal(p.calls.filter(call => call.method === 'thread/unsubscribe').length, 0);
+  await until(() => p.calls.some(call => call.method === 'thread/resume') && p.calls.some(call => call.method === 'thread/items/list'));
+  assert.equal(p.calls.filter(call => call.method === 'thread/resume').length, 1, 'only the state read loads the thread');
   const items = p.calls.find(call => call.method === 'thread/items/list')!;
   for (const socket of p.sockets) socket.send(JSON.stringify({ id: items.id, result: { data: [], nextCursor: null } }));
   assert.deepEqual(await history, { items: [], olderCursor: null });
+  assert.equal(p.calls.filter(call => call.method === 'thread/unsubscribe').length, 0);
+  const resume = p.calls.find(call => call.method === 'thread/resume')!;
+  for (const socket of p.sockets) socket.send(JSON.stringify({ id: resume.id, result: nativeConfiguration() }));
+  assert.equal((await state).status, 'idle');
+  await until(() => p.calls.filter(call => call.method === 'thread/unsubscribe').length === 1);
+  await p.adapter.history(saved);
+  assert.equal(p.calls.filter(call => call.method === 'thread/resume').length, 1);
   assert.equal(p.calls.filter(call => call.method === 'thread/unsubscribe').length, 1);
 });
-
 test('A new observer waits for an earlier unsubscribe before resuming the same native thread', async t => {
   let firstUnsubscribe = true;
   const p = await peer(t, request => {
     if (request.method === 'thread/unsubscribe' && firstUnsubscribe) { firstUnsubscribe = false; return NO_RESPONSE; }
     return undefined;
   });
-  const history = p.adapter.history(saved);
+  const state = p.adapter.state(saved);
   await until(() => p.calls.some(call => call.method === 'thread/unsubscribe'));
   const observed = p.adapter.watch(saved, () => {});
   await delay(20);
   assert.equal(p.calls.filter(call => call.method === 'thread/resume').length, 1);
   const releaseRequest = p.calls.find(call => call.method === 'thread/unsubscribe')!;
   for (const socket of p.sockets) socket.send(JSON.stringify({ id: releaseRequest.id, result: { status: 'unsubscribed' } }));
-  await history; const release = await observed;
+  await state; const release = await observed;
   assert.equal(p.calls.filter(call => call.method === 'thread/resume').length, 2);
   release();
   await until(() => p.calls.filter(call => call.method === 'thread/unsubscribe').length === 2);
 });
-
 test('Permission labels translate known native profiles and retain custom names without narrowing their permissions', async t => {
   const p = await peer(t, request => request.method === 'permissionProfile/list' ? { data: [':read-only', ':workspace', ':danger-full-access', 'custom-profile'].map(id => ({ id, allowed: true, description: 'Native permission definition.' })), nextCursor: null } : undefined);
   const catalog = await p.adapter.catalog();
@@ -385,17 +406,17 @@ test('Oversized live accumulation falls back to invalidation instead of growing 
 });
 
 test('Concurrent calls share one bounded connection and close rejects outstanding requests promptly', async t => {
-  const p = await peer(t, request => request.method === 'thread/resume' ? NO_RESPONSE : undefined);
+  const p = await peer(t, request => request.method === 'thread/items/list' ? NO_RESPONSE : undefined);
   const pending = Promise.allSettled(Array.from({ length: 70 }, (_, index) => p.adapter.history({ ...saved, id: `thread-${index}` })));
-  await until(() => p.calls.filter(call => call.method === 'thread/resume').length === 64);
+  await until(() => p.calls.filter(call => call.method === 'thread/items/list').length === 64);
   assert.equal(p.calls.filter(call => call.method === 'initialize').length, 1);
+  assert.equal(p.calls.filter(call => call.method === 'thread/resume').length, 0);
   await p.adapter.close();
   const settled = await pending;
   assert.equal(settled.length, 70);
   assert.equal(settled.every(result => result.status === 'rejected'), true);
-  assert.equal(p.calls.filter(call => call.method === 'thread/resume').length, 64);
+  assert.equal(p.calls.filter(call => call.method === 'thread/items/list').length, 64);
 });
-
 test('Invalid native frames revoke observation without exposing the malformed payload', async t => {
   const p = await peer(t); const changes: NativeChange[] = [];
   const release = await p.adapter.watch(saved, change => changes.push(change));

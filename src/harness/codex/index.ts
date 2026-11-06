@@ -252,24 +252,31 @@ class CodexAdapter implements HarnessAdapter {
     const binding = parse(bindingSchema, input);
     const size = parse(z.number().int().min(1).max(100), limit);
     const after = olderCursor === undefined ? undefined : parse(cursor, olderCursor);
-    this.retain(binding.id);
-    try {
-      await this.load(binding);
-      // Native pages include image bytes. Keep transport reads small while combining
-      // ordinary text entries into the existing public history page.
-      const entries: z.infer<typeof itemsPage>['data'] = [];
-      let next = after; let bytes = 0;
-      const seen = new Set<string>();
-      do {
-        const page = parse(itemsPage, await this.rpc.request('thread/items/list', { threadId: binding.id, limit: Math.min(size - entries.length, 2), sortDirection: 'desc', ...(next ? { cursor: next } : {}) }));
-        entries.push(...page.data);
-        bytes += page.data.reduce((n, entry) => n + Buffer.byteLength(JSON.stringify(entry.item)), 0);
-        next = page.nextCursor ?? undefined;
-        if (next && seen.has(next)) throw new HarnessError('codex_history_no_progress');
-        if (next) seen.add(next);
-      } while (next && entries.length < size && bytes < 8 * 1024 * 1024);
-      return { items: entries.reverse().map(entry => mapItem(entry.item, entry.turnId, binding.cwd, entry.completedAtMs === null && entry.item.type !== 'userMessage', typeof entry.completedAtMs === 'number')), olderCursor: next ?? null };
-    } finally { await this.release(binding.id); }
+    // Paginated threads keep an indexed history that is readable without resuming (App Server docs:
+    // thread/items/list). Reading history therefore never loads or subscribes the thread.
+    const entries: z.infer<typeof itemsPage>['data'] = [];
+    let next = after; let bytes = 0; let perCall = 2;
+    const seen = new Set<string>();
+    do {
+      let page: z.infer<typeof itemsPage>;
+      try {
+        page = parse(itemsPage, await this.rpc.request('thread/items/list', { threadId: binding.id, limit: Math.min(size - entries.length, perCall), sortDirection: 'desc', ...(next ? { cursor: next } : {}) }));
+      } catch (error) {
+        if (error instanceof RpcError && error.nativeCode === -32601) throw new HarnessError('codex_history_unsupported');
+        if (error instanceof RpcError && error.nativeCode === -32602 && next) throw new HarnessError('codex_history_cursor_invalid');
+        throw error;
+      }
+      entries.push(...page.data);
+      const pageBytes = page.data.reduce((n, entry) => n + Buffer.byteLength(JSON.stringify(entry.item)), 0);
+      bytes += pageBytes;
+      // Items carry inline image bytes. Grow the request while items stay small; shrink it for large ones.
+      const average = page.data.length ? pageBytes / page.data.length : 0;
+      perCall = average > 256 * 1024 ? 1 : average > 32 * 1024 ? 2 : Math.min(25, perCall * 2);
+      next = page.nextCursor ?? undefined;
+      if (next && seen.has(next)) throw new HarnessError('codex_history_no_progress');
+      if (next) seen.add(next);
+    } while (next && entries.length < size && bytes < 8 * 1024 * 1024);
+    return { items: entries.reverse().map(entry => mapItem(entry.item, entry.turnId, binding.cwd, entry.completedAtMs === null && entry.item.type !== 'userMessage', typeof entry.completedAtMs === 'number')), olderCursor: next ?? null };
   }
 
   async readImage(_binding: Binding, path: string): Promise<string> {

@@ -16,8 +16,9 @@ test('native deletion checkpoint survives restart; local cleanup and notificatio
   const input = { id: randomUUID(), harnessId: 'codex' as const, workspaceId: 'fixture', cwd: '/synthetic', configuration: { modelId: 'fixture', permissionId: 'readonly' } };
   const survivor = { ...input, id: randomUUID() };
   store.createConversation(input); store.createConversation(survivor);
-  store.mergeHistory(input.id, [{ id: 'private-body', kind: 'assistant', text: 'synthetic secret body', status: 'completed' }]);
-  store.mergeHistory(survivor.id, [{ id: 'keep-body', kind: 'assistant', text: 'keep', status: 'completed' }]);
+  // Retired projection rows (ADR 0014) are still removed with the conversation that owned them.
+  const legacy = db.prepare("INSERT INTO workbench_items(conversation_id,id,position,kind,text,status) VALUES(?,?,?,'assistant',?,'completed')");
+  legacy.run(input.id, 'private-body', 1024, 'synthetic secret body'); legacy.run(survivor.id, 'keep-body', 1024, 'keep');
   const resource = randomUUID();
   db.prepare('INSERT INTO workbench_resources(id,conversation_id,name,media_type,data,digest,created_at) VALUES(?,?,?,?,?,?,?)').run(resource, input.id, 'synthetic', 'image/png', Buffer.from('synthetic'), 'hash', 1);
   db.prepare('INSERT INTO workbench_resource_refs(resource_id,owner_id) VALUES(?,?)').run(resource, 'private-body');
@@ -30,7 +31,7 @@ test('native deletion checkpoint survives restart; local cleanup and notificatio
   store.deletions.complete(input.id); store.deletions.complete(input.id);
   assert.equal(store.getConversation(input.id), null);
   assert.equal(store.deletions.get(input.id)?.status, 'completed');
-  assert.equal(store.readHistory(survivor.id).items[0]?.text, 'keep');
+  assert.equal(db.prepare('SELECT text FROM workbench_items WHERE conversation_id=?').get(survivor.id)?.text, 'keep');
   assert.equal(Number(db.prepare('SELECT COUNT(*) AS count FROM workbench_resources').get()!.count), 0);
   assert.equal(Number(db.prepare('SELECT COUNT(*) AS count FROM workbench_resource_refs').get()!.count), 0);
   assert.equal(Number(db.prepare('SELECT COUNT(*) AS count FROM workbench_items').get()!.count), 1);

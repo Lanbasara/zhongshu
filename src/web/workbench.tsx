@@ -6,7 +6,7 @@ import { WorkspaceReader } from './workspace-reader.tsx';
 import { useCallback, useEffect, useMemo, useLayoutEffect, useRef, useState } from 'react';
 import {
   workbenchConfigurationSchema, conversationResponseSchema, operationResponseSchema,
-  snapshotSchema, changeEventSchema, resetEventSchema, queueViewSchema,
+  snapshotSchema, historyPageSchema, changeEventSchema, resetEventSchema, queueViewSchema,
   type WorkbenchConfiguration, type Conversation, type WorkbenchSnapshot, type WorkbenchItem, type QueueCommand, type TurnFileSummary,
 } from '../shared/workbench.ts';
 import { request, RequestError, readDraft, sameInput, saveDraft, type Draft } from './workbench-client.ts';
@@ -20,6 +20,8 @@ import type { MessageReference } from '../shared/content.ts';
 import { WorkspaceManagement, type WorkspaceAction } from './workspace-management.tsx';
 import { InputQueue } from './input-queue.tsx';
 import { NewConversation } from './new-conversation.tsx';
+import { StorageStatus } from './storage-status.tsx';
+import { appendNewer, joinLatest, pageItems, preparePage, prependOlder, touchesWindow, trimOldest, type Page } from './history-window.ts';
 import { rememberConversation } from './conversation-preferences.ts';
 import { PluginManagement } from './plugin-management.tsx';
 import { SubagentActivity, SubagentTrigger } from './patterns/subagents.tsx';
@@ -50,6 +52,16 @@ const failures: Record<string, string> = {
   subagents_running: '仍有子 Agent 在运行或停止结果待核实。请等它们结束或先停止，再归档或删除。',
   subagents_unverified: '暂时无法核对子 Agent 状态，请重新连接后再试。',
   subagent_not_found: '这个子 Agent 不属于当前对话，或已无法读取。',
+  storage_budget_reached: '存储已达到预算上限，暂时不能上传图片或新建对话。阅读和发送文字不受影响；可以在侧栏“存储”中清理。',
+  native_history_unavailable: '原生历史暂时无法读取；已加载的内容仍然保留。',
+  history_cursor_invalid: '这段历史的位置已经变化，已回到最新内容。',
+  native_history_page_limit: '这一页原生内容过大，暂时无法显示。',
+  history_no_progress: '原生历史暂时无法继续读取；已加载的内容仍然保留。',
+};
+const historyNotes: Record<string, string> = {
+  native_history_unavailable: '原生暂时不可用：已加载的内容仍然保留，恢复后可以继续阅读。',
+  native_history_page_limit: '最新一页原生内容过大，暂时无法显示。',
+  conversation_not_ready: '原生会话尚未就绪，暂时没有可读取的历史。',
 };
 const stateReasons: Record<string, string> = {
   workspace_removed: failures.workspace_removed!,
@@ -61,38 +73,11 @@ const stateReasons: Record<string, string> = {
   conversation_preparation_incomplete: '原生对话尚未准备完成；已有绑定已保留。',
   native_creation_result_unknown: '应用在创建过程中中断，创建结果仍待核实。',
   native_configuration_unverified: '还无法核实这段对话的模型与权限配置。',
-  history_gap_limit: '离线期间产生的历史较多，本次尚未补齐，请再次查询原生结果。',
-  native_history_diverged: '原生历史与已保存内容存在差异，需要核对后继续。',
   native_receipt_unknown: '原生接收结果暂时无法确认，本次操作不会自动重发。',
   native_run_changed: '当前运行已经变化，请先刷新状态。',
 };
 const explain = (value: string) => stateReasons[value] ?? (/^[a-z0-9_]+$/.test(value) ? '暂时无法核对原生状态；已有内容保留，任务不会自动重发。' : value);
-type PageItem = WorkbenchItem & { turnFiles?: TurnFileSummary };
 type ReaderTarget = { conversationId: string; runId: string; workspaceId: string; path: string };
-const mergeItems = (older: PageItem[], newer: PageItem[]): PageItem[] => {
-  const incoming = new Map(newer.map(item => [item.id, item]));
-  return [...older.filter(item => !incoming.has(item.id)), ...newer];
-};
-// Bound both the number of DOM entries and retained UTF-16 text, including long replies.
-const itemWeight = (item: PageItem) => item.text.length * 2 + 2048 +
-  (item.turnFiles?.paths.reduce((bytes, path) => bytes + path.length * 2 + 16, 0) ?? 0);
-const fitsWindow = (items: PageItem[]) => items.length <= 500 && items.reduce((bytes, item) => bytes + itemWeight(item), 0) <= 8 * 1024 * 1024;
-const boundedPage = (items: WorkbenchItem[], turnFiles: TurnFileSummary[] = []): PageItem[] => {
-  const summaries = new Map(turnFiles.map(summary => [summary.runId, summary]));
-  const page: PageItem[] = [];
-  let bytes = 0; let start = items.length;
-  while (start > 0 && items.length - start < 500) {
-    const item = items[start - 1]!;
-    const summary = item.runId ? summaries.get(item.runId) : undefined;
-    const next = summary ? { ...item, turnFiles: summary } : item;
-    bytes += itemWeight(next);
-    if (bytes > 8 * 1024 * 1024) break;
-    if (summary) summaries.delete(summary.runId);
-    page.push(next);
-    start--;
-  }
-  return page.reverse();
-};
 
 export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf: string; logout(): void; expired(): void; busy: boolean; authError: string }) {
   const [configuration, setConfiguration] = useState<WorkbenchConfiguration>();
@@ -113,7 +98,10 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
   const readerOrigin = useRef<{ button: HTMLButtonElement; row: HTMLLIElement | null }>(null);
   const [selected, setSelected] = useState<string | undefined>(() => /^#[0-9a-f-]{36}$/i.test(location.hash) ? location.hash.slice(1) : undefined);
   const [snapshot, setSnapshot] = useState<WorkbenchSnapshot>();
-  const [items, setItems] = useState<PageItem[]>([]);
+  const [pages, setPages] = useState<Page[]>([]);
+  /** Cursors of pages dropped from the newer end, nearest last; empty means the window ends at the latest page. */
+  const [newer, setNewer] = useState<(string | null)[]>([]);
+  const items = useMemo(() => pageItems(pages), [pages]);
   const [draft, setDraft] = useState<Draft>({ text: '' });
   const [creating, setCreating] = useState<string | true | undefined>(() => location.hash.startsWith('#new:') ? decodeURIComponent(location.hash.slice(5)) || true : undefined);
   const [addedWorkspace,setAddedWorkspace]=useState<string>();
@@ -123,12 +111,14 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
   const [unavailableNotice, setUnavailableNotice] = useState('');
   const [sending, setSending] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
+  const [loadingNewer, setLoadingNewer] = useState(false);
   const [connection, setConnection] = useState('正在连接');
   const [moreOutput, setMoreOutput] = useState(false);
-  const [before, setBefore] = useState<string | null>(null);
-  const [hasOlder, setHasOlder] = useState(false);
-  const [windowed, setWindowed] = useState(false);
-  const windowedRef = useRef(windowed); windowedRef.current = windowed;
+  const pagesRef = useRef(pages); pagesRef.current = pages;
+  const newerRef = useRef(newer); newerRef.current = newer;
+  const loadingOlderRef = useRef(false);
+  const loadingNewerRef = useRef(false);
+  const windowed = newer.length > 0;
   const selectedRef = useRef(selected); selectedRef.current = selected;
   const snapshotRef = useRef(snapshot); snapshotRef.current = snapshot;
   const draftRef = useRef(draft); draftRef.current = draft;
@@ -139,7 +129,17 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
   const viewController = useRef<AbortController | undefined>(undefined);
   const scroll = useRef<HTMLDivElement>(null);
   const atBottom = useRef(true);
-  const anchor = useRef<{ height: number; top: number } | null>(null);
+  const anchor = useRef<{ key: string; offset: number } | { height: number; top: number } | null>(null);
+  /** Pin the first visible entry, so adding or dropping pages above or below never moves the reader. */
+  const keepAnchor = () => {
+    const node = scroll.current; if (!node) return;
+    const top = node.getBoundingClientRect().top;
+    for (const element of node.querySelectorAll<HTMLElement>('[data-message-id],[data-anchor]')) {
+      const box = element.getBoundingClientRect();
+      if (box.bottom > top) { anchor.current = { key: element.dataset.messageId ?? element.dataset.anchor!, offset: box.top - top }; return; }
+    }
+    anchor.current = { height: node.scrollHeight, top: node.scrollTop };
+  };
   const sendingRef = useRef(false);
   const alive = useRef(true);
   const refreshTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -169,21 +169,20 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
       if (!alive.current || gen !== generation.current || serial !== requestSerial.current || id !== selectedRef.current) return;
       if (snapshotRef.current && result.revision < snapshotRef.current.revision) return;
       const first = !snapshotRef.current || snapshotRef.current.conversation.id !== id;
-      const pageItems = boundedPage(result.history.items, result.turnFiles);
-      const pageTrimmed = pageItems.length < result.history.items.length;
-      const pageBefore = pageTrimmed ? pageItems[0]?.id ?? null : result.history.olderBeforeItemId ?? pageItems[0]?.id ?? null;
-      setSnapshot({ ...result, history: { ...result.history, items: pageItems } });
-      setItems(previous => {
-        if (latest || first) return pageItems;
-        if (windowedRef.current) return previous;
-        const merged = mergeItems(previous, pageItems);
-        const next = fitsWindow(merged) ? merged : pageItems;
-        // Pagination belongs to the displayed left edge. Keep an earlier loaded
-        // anchor only while those earlier items remain in the current window.
-        if (next[0]?.id === pageItems[0]?.id) { setBefore(pageBefore); setHasOlder(pageTrimmed || result.history.hasOlder); }
-        return next;
-      });
-      if (latest || first) { setBefore(pageBefore); setHasOlder(pageTrimmed || result.history.hasOlder); setWindowed(false); }
+      const latestPage = preparePage(null, result.history.items, result.history.olderCursor, result.turnFiles);
+      setSnapshot(result);
+      // A failed native read keeps whatever is already loaded (ADR 0014: no local copy to fall back on).
+      const failed = !!result.history.error;
+      if (latest || first) {
+        if (!failed || first || !pagesRef.current.length) { setPages([latestPage]); setNewer([]); }
+      } else if (!failed && !newerRef.current.length) {
+        const current = pagesRef.current;
+        const joined = joinLatest(current, latestPage);
+        if (joined) setPages(trimOldest(joined));
+        else if (atBottom.current || !current.length) setPages([latestPage]);
+        // The reader is in older content and new output no longer touches the window: keep it and offer the way back.
+        else setNewer([null]);
+      }
       const pending = draftRef.current.pending;
       if (pending && !pending.queued) {
         const operation = result.operations.find(op => op.id === pending.id);
@@ -196,7 +195,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
     } catch (reason) {
       if (gen === generation.current) {
         if (reason instanceof RequestError && reason.status === 404) {
-          saveDraft(id, { text: '' }); setSnapshot(undefined); setItems([]); setDraft({ text: '' }); draftRef.current = { text: '' };
+          saveDraft(id, { text: '' }); setSnapshot(undefined); setPages([]); setNewer([]); setDraft({ text: '' }); draftRef.current = { text: '' };
           setSelected(undefined); history.replaceState(null, '', location.pathname + location.search);
           setUnavailableNotice('对话已不可用。'); refreshList(value => value + 1);
         } else report(reason);
@@ -231,7 +230,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
   }, []);
   useEffect(() => {
     generation.current++; requestSerial.current++; viewController.current?.abort(); viewController.current = new AbortController();
-    setSnapshot(undefined); snapshotRef.current = undefined; setItems([]); setUnavailableFiles(new Set()); setError(''); setMoreOutput(false); setWindowed(false); setBefore(null); setHasOlder(false); atBottom.current = true;
+    setSnapshot(undefined); snapshotRef.current = undefined; setPages([]); setNewer([]); pagesRef.current = []; newerRef.current = []; setUnavailableFiles(new Set()); setError(''); setMoreOutput(false); atBottom.current = true;
     const next = selected ? readDraft(selected) : { text: '' }; draftRef.current = next; setDraft(next);
     if (selected) { setUnavailableNotice(''); void loadRef.current(selected, true); }
     return () => viewController.current?.abort();
@@ -282,7 +281,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
             saveDraft(change.conversationId, { text: '' });
             if (change.conversationId === selectedRef.current) {
               history.replaceState(null, '', location.pathname + location.search);
-              setSelected(undefined); setSnapshot(undefined); setItems([]); setDraft({ text: '' }); draftRef.current = { text: '' };
+              setSelected(undefined); setSnapshot(undefined); setPages([]); setNewer([]); setDraft({ text: '' }); draftRef.current = { text: '' };
               setUnavailableNotice('对话已删除。');
             }
             refreshList(value => value + 1);
@@ -306,10 +305,16 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
   }, [csrf]);
   useLayoutEffect(() => {
     const node = scroll.current; if (!node) return;
-    if (anchor.current) { node.scrollTop = anchor.current.top + node.scrollHeight - anchor.current.height; anchor.current = null; }
+    if (anchor.current) {
+      const saved = anchor.current; anchor.current = null;
+      if ('key' in saved) {
+        const element = node.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(saved.key)}"],[data-anchor="${CSS.escape(saved.key)}"]`);
+        if (element) node.scrollTop += element.getBoundingClientRect().top - node.getBoundingClientRect().top - saved.offset;
+      } else node.scrollTop = saved.top + node.scrollHeight - saved.height;
+    }
     else if (atBottom.current) { node.scrollTop = node.scrollHeight; setMoreOutput(false); }
     else setMoreOutput(true);
-  }, [items, snapshot?.history.liveItems]);
+  }, [pages, snapshot?.history.liveItems]);
   const choose = useCallback((id: string) => { history.replaceState(null, '', `#${id}`); setSelected(id); setCreating(undefined); setManagingPlugins(false); setNavigation(false); }, []);
   const startDraft = useCallback((id?:string) => { setUnavailableNotice(''); history.replaceState(null,'','#new:'+encodeURIComponent(id??''));setSelected(undefined);setCreating(id||true);setManagingPlugins(false);setReader(false);setNavigation(false); },[]);
   const createInWorkspace = useCallback((id:string)=>startDraft(id),[startDraft]);
@@ -352,7 +357,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
         const reason = result.operation.reason;
         setError(reason ? failures[reason] ?? reason : '操作结果待核实。');
       }
-      atBottom.current = true; await load(id);
+      atBottom.current = true; await load(id, newerRef.current.length > 0);
     } catch (reason) {
       if (gen === generation.current && reason instanceof RequestError && ([400, 413].includes(reason.status) || ['conversation_archived','workspace_save_in_progress','workspace_execution_blocked','workspace_removed','workspace_remove_busy','workspace_directory_changed','workspace_directory_unavailable','workspace_identity_unavailable','operation_needs_reconciliation','file_reference_unavailable','file_reference_forbidden','quote_source_changed','image_reference_changed','image_unavailable','queue_full','queue_mode_unavailable'].includes(reason.code))) {
         setDraft(current => { const { pending: _pending, ...editable } = current; saveDraft(id, editable); return editable; });
@@ -389,21 +394,57 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
     try { await request(`/conversations/${selected}/reconcile`, snapshotSchema, { csrf, body: {} }); await load(selected); setError(''); }
     catch (reason) { report(reason); }
   };
+  const backToLatest = () => { if (!selected) return; atBottom.current = true; void load(selected, true); };
+  /** Prepend one older native page; beyond the window limit, pages leave from the newer end with their cursors. */
   const older = async () => {
-    if (!selected || !before || loadingOlder) return;
-    const id = selected; const gen = generation.current; setLoadingOlder(true);
+    const cursor = pagesRef.current[0]?.olderCursor;
+    if (!selected || !cursor || loadingOlderRef.current) return;
+    const id = selected; const gen = generation.current; loadingOlderRef.current = true; setLoadingOlder(true);
     try {
-      const result = await request(`/conversations/${id}/older?beforeItemId=${encodeURIComponent(before)}`, snapshotSchema, { signal: viewController.current?.signal });
-      if (!alive.current || gen !== generation.current) return;
-      if (scroll.current) anchor.current = { height: scroll.current.scrollHeight, top: scroll.current.scrollTop };
-      atBottom.current = false;
-      const pageItems = boundedPage(result.history.items, result.turnFiles);
-      const trimmed = pageItems.length < result.history.items.length;
-      setItems(current => { const merged = mergeItems(pageItems, current); if (!fitsWindow(merged)) { anchor.current = null; setWindowed(true); return pageItems; } return merged; });
-      setBefore(trimmed ? pageItems[0]?.id ?? null : result.history.olderBeforeItemId ?? pageItems[0]?.id ?? null); setHasOlder(trimmed || result.history.hasOlder);
-    } catch (reason) { report(reason); }
-    finally { if (alive.current) setLoadingOlder(false); }
+      const result = await request(`/conversations/${id}/history?cursor=${encodeURIComponent(cursor)}`, historyPageSchema, { signal: viewController.current?.signal });
+      if (!alive.current || gen !== generation.current || pagesRef.current[0]?.olderCursor !== cursor) return;
+      keepAnchor(); atBottom.current = false;
+      const { pages: next, dropped } = prependOlder(pagesRef.current, preparePage(cursor, result.items, result.olderCursor, result.turnFiles));
+      if (dropped.length) setNewer(stack => [...stack, ...dropped]);
+      setPages(next);
+    } catch (reason) {
+      if (gen !== generation.current) return;
+      if (reason instanceof RequestError && reason.code === 'history_cursor_invalid') { setError(failures.history_cursor_invalid!); backToLatest(); }
+      else report(reason);
+    } finally { loadingOlderRef.current = false; if (alive.current) setLoadingOlder(false); }
   };
+  /** Re-read the nearest page dropped from the newer end; at the latest page the window returns to live output. */
+  const loadNewer = async () => {
+    const stack = newerRef.current;
+    if (!selected || !stack.length || loadingNewerRef.current) return;
+    const id = selected; const gen = generation.current; const cursor = stack.at(-1)!;
+    loadingNewerRef.current = true; setLoadingNewer(true);
+    try {
+      let page: Page;
+      if (cursor === null) {
+        const result = await request(`/conversations/${id}`, snapshotSchema, { signal: viewController.current?.signal });
+        if (!alive.current || gen !== generation.current || newerRef.current.at(-1) !== cursor) return;
+        if (snapshotRef.current && result.revision < snapshotRef.current.revision) return;
+        setSnapshot(result);
+        page = preparePage(null, result.history.items, result.history.olderCursor, result.turnFiles);
+        // The latest page joins when it is adjacent (its older cursor reads the window's newest page) or overlaps it.
+        // Output may have moved past the dropped latest page; then the latest page starts a new window.
+        if (result.history.error || !touchesWindow(pagesRef.current, page)) { backToLatest(); return; }
+      } else {
+        const result = await request(`/conversations/${id}/history?cursor=${encodeURIComponent(cursor)}`, historyPageSchema, { signal: viewController.current?.signal });
+        if (!alive.current || gen !== generation.current || newerRef.current.at(-1) !== cursor) return;
+        page = preparePage(cursor, result.items, result.olderCursor, result.turnFiles);
+      }
+      keepAnchor();
+      setPages(appendNewer(pagesRef.current, page)); setNewer(stack.slice(0, -1));
+    } catch (reason) {
+      if (gen !== generation.current) return;
+      if (reason instanceof RequestError && reason.code === 'history_cursor_invalid') { setError(failures.history_cursor_invalid!); backToLatest(); }
+      else report(reason);
+    } finally { loadingNewerRef.current = false; if (alive.current) setLoadingNewer(false); }
+  };
+  const olderRef = useRef(older); olderRef.current = older;
+  const newerLoadRef = useRef(loadNewer); newerLoadRef.current = loadNewer;
   const conversation = snapshot?.conversation;
   const unresolved = snapshot?.operations.some(op => ['queued', 'dispatching', 'unknown'].includes(op.status));
   const latestMessage = snapshot?.operations.find(op => op.type === 'message' && op.status === 'accepted');
@@ -490,6 +531,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
       <div className="sidebar-bottom">
         <button className="sidebar-files" aria-current={managingPlugins ? 'page' : undefined} onClick={() => { setManagingPlugins(true); setReader(false); setNavigation(false); }}><Puzzle size={16}/><span>插件管理</span><ChevronRight size={13}/></button>
         <button className="sidebar-files" aria-expanded={reader} disabled={!configuration?.workspaces.length} onClick={() => { setSubagentPanel(undefined); setReader(true); setNavigation(false); }}><FolderOpen size={16}/><span>工作区文件</span><ChevronRight size={13}/></button>
+        <StorageStatus csrf={csrf} report={report} signal={listRevision}/>
         <div className="sidebar-account"><span className="network" role="status"><span className="network-dot"/>{connection}</span><IconButton label="退出登录" onClick={logout} disabled={busy}><LogOut size={15}/></IconButton></div>
       </div>
     </>}
@@ -504,15 +546,24 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
       csrf={csrf} editStatusSignal={JSON.stringify([conversation?.id, conversation?.state.status, conversation?.state.pendingInputs, unresolved])} expanded={readerExpanded} onExpand={setReaderExpanded} onClose={closeReader}/>}>
 
       {managingPlugins ? <PluginManagement csrf={csrf} report={report}/> : creating ? configuration ? <NewConversation key={String(creating)} configuration={configuration} initialWorkspace={typeof creating==='string'?creating:undefined} addedWorkspace={addedWorkspace} csrf={csrf} onWorkspace={startDraft} onAddWorkspace={()=>setWorkspaceAction({kind:'add'})} onCreated={c=>{refreshList(value=>value+1);choose(c.id);}} report={report}/> : <p role="status">正在读取工作区与配置…</p> : !selected ? <section className="empty-workbench"><p className="eyebrow">A PLACE TO CONTINUE</p><h2>把想法，往前推进一步。</h2><p>选择一个工作区和 Agent，开始一件具体的工作。<br />离开页面后，可以回来继续。</p><button onClick={() => startDraft()}>开始新对话 ↗</button>{configuration?.workspaces.length === 0 && <p className="quiet">工作区与原生服务尚未由管理员连接。</p>}</section> : <>
-        <div className="message-scroll" ref={scroll} onScroll={() => { const node = scroll.current!; atBottom.current = node.scrollHeight - node.scrollTop - node.clientHeight < 80; if (atBottom.current) setMoreOutput(false); }}>
+        <div className="message-scroll" ref={scroll} onScroll={() => {
+          const node = scroll.current!; const remaining = node.scrollHeight - node.scrollTop - node.clientHeight;
+          atBottom.current = remaining < 80 && !newerRef.current.length; if (atBottom.current) setMoreOutput(false);
+          // Scrolling near either edge keeps reading native pages, without a fixed history limit.
+          if (node.scrollTop < 400 && pagesRef.current[0]?.olderCursor) void olderRef.current();
+          if (newerRef.current.length && remaining < 400) void newerLoadRef.current();
+        }}>
           <div className="message-column">
-            {hasOlder && <button className="load-history" disabled={loadingOlder} onClick={() => void older()}>{loadingOlder ? '正在读取…' : '查看更早的内容'}</button>}
-            {windowed && <p className="history-note">正在阅读较早的一页。<button className="text-button" onClick={() => { if (selected) { atBottom.current = true; void load(selected, true); } }}>回到最新内容</button></p>}
+            {pages[0]?.olderCursor && <button className="load-history" disabled={loadingOlder} onClick={() => void older()}>{loadingOlder ? '正在读取…' : '查看更早的内容'}</button>}
+            {snapshot && pages.length > 0 && !pages[0]!.olderCursor && items.length > 0 && <p className="history-note">这是对话的开头。</p>}
+            {windowed && <p className="history-note">正在阅读较早的内容。<button className="text-button" onClick={backToLatest}>回到最新内容</button></p>}
+            {snapshot?.history.error && <p className="history-note" role="status">{historyNotes[snapshot.history.error] ?? failures[snapshot.history.error] ?? historyNotes.native_history_unavailable}<button className="text-button" onClick={() => { if (selected) void load(selected); }}>重试</button></p>}
             {!snapshot && <p role="status" className="quiet">正在核对远端状态与历史…</p>}
-            {snapshot && visible.length === 0 && <p className="quiet conversation-start">{conversation?.readiness === 'ready' ? '对话已准备好。说说你希望完成什么。' : '正在准备原生会话…'}</p>}
+            {snapshot && visible.length === 0 && !snapshot.history.error && <p className="quiet conversation-start">{conversation?.readiness !== 'ready' ? '正在准备原生会话…' : snapshot.history.loaded ? '对话已准备好。说说你希望完成什么。' : '正在读取原生历史…'}</p>}
             <Transcript items={visible} conversation={selected} onQuote={quote} turnFiles={turnFiles} renderCollaboration={collaboration}
               activeRun={running ? conversation?.state.runId : undefined} activeFile={readerTarget?.conversationId === selected ? readerTarget : undefined}
               workspaceUnavailable={workspaceRemoved} unavailableFiles={unavailableFiles} onOpenFile={openTurnFile}/>
+            {windowed && <button className="load-history" disabled={loadingNewer} onClick={() => void loadNewer()}>{loadingNewer ? '正在读取…' : '查看更新的内容'}</button>}
           </div>
         </div>
         <div className="composer-region">

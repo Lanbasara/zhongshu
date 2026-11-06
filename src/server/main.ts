@@ -34,7 +34,7 @@ async function main() {
   try {
     const harnesses = await loadHarnesses(process.env.ZHONGSHU_HARNESS_CONFIG, config.dataDirectory);
     plugins = createPluginManagement(db, harnesses.plugins);
-    const store = createWorkbenchStore(db, { onChange: (change: WorkbenchChange) => transport?.changed(change) });
+    const store = createWorkbenchStore(db, { onChange: (change: WorkbenchChange) => transport?.changed(change), storageBudget: config.storageBudget });
     const registry = new WorkspaceRegistry(db, harnesses.workspaces, harnesses.workspaceRoots);
     workbench = new Workbench(store, harnesses.workspaces, harnesses.adapters, registry);
     transport = createWorkbenchHttp(workbench);

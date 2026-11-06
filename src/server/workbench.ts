@@ -2,6 +2,7 @@ import type { HostPhase } from './workspace-maintenance.ts';
 import { HarnessError, type Catalog, type HarnessAdapter, type HarnessId, type HistoryPage, type NativeItem, type NativeState, type Receipt } from '../harness/types.ts';
 import type { Workspace } from './harness-config.ts';
 import { decodeImage, ResourceError, workspacePath, workspaceFiles } from './resources.ts';
+import { NATIVE_IMAGE_OWNER } from './storage.ts';
 import { nativeText } from '../shared/content.ts';
 import { referenceSchema } from '../shared/content.ts';
 import { isAbsolute, relative } from 'node:path';
@@ -9,26 +10,71 @@ import { listWorkspaceDocuments, openWorkspaceDocument, saveWorkspaceDocument } 
 import { createHash, randomUUID } from 'node:crypto';
 import { StoreError, type WorkbenchStore, type CreateConversation, type OperationInput, type Conversation, type Operation } from './workbench-store.ts';
 import type { WorkspaceRegistry } from './workspace-registry.ts';
-import type { QueueCommand, QueueView, SubagentList, WorkbenchConfiguration, WorkbenchItem, workspaceAddSchema, workspaceManagementSchema } from '../shared/workbench.ts';
+import type { ConversationUsage, QueueCommand, QueueView, SubagentList, WorkbenchConfiguration, WorkbenchItem, workspaceAddSchema, workspaceManagementSchema } from '../shared/workbench.ts';
 import { itemSchema, subagentIdSchema } from '../shared/workbench.ts';
 import { SubagentStoreError, type SubagentStop } from './subagent-store.ts';
-import type { z } from 'zod';
+import { z } from 'zod';
 
 const TERMINAL = new Set<NativeState['status']>(['idle', 'interrupted', 'failed']);
-const HISTORY_PAGE_SIZE = 100;
-const HISTORY_MAX_PAGES = 250;
-const HISTORY_MAX_ITEMS = 1000;
-const HISTORY_MAX_BYTES = 16 * 1024 * 1024;
+/** Target items per native history page; adapters translate it into their own page unit. */
+const HISTORY_PAGE_SIZE = 50;
+/** Hard bounds on what one native page may contribute to a response. */
+const HISTORY_PAGE_ITEMS = 400;
+/** Serialized bytes, so escaping cannot push a whole page past the response budget. */
+const HISTORY_PAGE_BYTES = 6 * 1024 * 1024;
+const NATIVE_CURSOR_LENGTH = 4096;
+/** Live items beyond this count prompt a fresh latest-page read; the hard limit drops settled copies. */
+const LIVE_SYNC_THRESHOLD = 64;
+const LIVE_LIMIT = 256;
+const LIVE_VIEW_LIMIT = 100;
+/** Consecutive latest pages that overlap are joined in memory up to this many items. */
+const TAIL_LIMIT = 200;
+/** An unobserved latest page is reused only briefly; observed pages follow native events. */
+const TAIL_FRESH_MS = 2000;
+/** Recently served native items, kept in memory to verify quotes and workspace images. */
+const SERVED_ITEMS_BYTES = 32 * 1024 * 1024;
+const LOOKUP_PAGES = 5;
+/** Native pages may hold only non-display events; skip at most this many to reach visible content. */
+const EMPTY_PAGE_SKIP = 20;
+/** The latest native page and in-flight items live only in memory (ADR 0014). */
+type Tail = { items: NativeItem[]; olderCursor: string | null; at: number; error?: string };
+type TailRead = { items: NativeItem[]; olderCursor: string | null; startedAt: number; usage?: ConversationUsage };
 type Runtime = {
-  stop?: () => void; watching?: Promise<void>; syncing?: Promise<void>; older?: Promise<void>;
+  stop?: () => void; watching?: Promise<void>; syncing?: Promise<void>; reading?: Promise<void>;
   timer?: NodeJS.Timeout; retry?: NodeJS.Timeout; flush?: NodeJS.Timeout; release?: NodeJS.Timeout;
   retryAttempt: number;
   live: Map<string, NativeItem>; generation: number; stateGeneration: number; dirty: boolean;
+  /** Last body mark announced for each live item, so unchanged items are not re-announced. */
+  flushed: Map<string, string>;
+  /** When each live item last changed; settled copies older than a latest-page read retire. */
+  liveAt: Map<string, number>;
+  tail?: Tail;
   /** The native sub-agent tree may differ from the saved index. */
   subagentsDirty: boolean;
 };
 type SubagentLease = { readers: Map<string, number>; dispose?: () => void; opening?: Promise<void> };
-type HistoryRead = { items: NativeItem[]; cursor: string | null; establishCursor: boolean; usage?: HistoryPage['usage'] };
+const cursorEnvelope = z.object({ c: z.uuid(), n: z.string().min(1).max(NATIVE_CURSOR_LENGTH) }).strict();
+const UNDISPLAYABLE = '这条原生内容超出显示限制，未能展示。';
+/** Strip adapter-only fields and keep the public item contract strict. */
+function viewItem(item: NativeItem): WorkbenchItem {
+  const { fileEdits: _edits, imageSources: _sources, ...rest } = item;
+  const parsed = itemSchema.safeParse(rest);
+  if (parsed.success) return parsed.data;
+  return { id: item.id, kind: 'notice', text: UNDISPLAYABLE, status: 'unknown', ...(item.runId ? { runId: item.runId } : {}) };
+}
+const tailMark = (items: NativeItem[], cursor: string | null) => items.map(item => `${item.id}\u0000${item.status}\u0000${item.text.length}`).join('\u0001') + '\u0002' + (cursor ?? '');
+const liveMark = (item: NativeItem) => `${item.status}\u0000${item.text.length}\u0000${item.text.slice(-32)}\u0000${item.tool?.exitCode ?? ''}\u0000${item.tool?.output?.length ?? ''}\u0000${item.fileEdits?.length ?? ''}`;
+/** Serialized size of the displayable part of a native page; transient image sources are excluded. */
+function pageBytes(page: HistoryPage): number {
+  let bytes = 0;
+  for (const item of page.items) { const { imageSources: _sources, fileEdits: _edits, ...view } = item; bytes += Buffer.byteLength(JSON.stringify(view)); }
+  return bytes;
+}
+function historyErrorCode(error: unknown): string {
+  if (error instanceof StoreError) return error.code;
+  if (error instanceof HarnessError && /cursor/i.test(error.code)) return 'history_cursor_invalid';
+  return 'native_history_unavailable';
+}
 
 /** One application writer. Native execution outlives browser observers and application connections. */
 export class Workbench {
@@ -58,6 +104,8 @@ export class Workbench {
   private deletionGuard: (id: string) => boolean = () => false;
   private readonly deletionTasks = new Map<string, Promise<void>>();
   private readonly subagentRefreshes = new Map<string, { task: Promise<void>; again: boolean }>();
+  private readonly served = new Map<string, { item: NativeItem; bytes: number }>();
+  private servedBytes = 0;
   private readonly subagentTimers = new Map<string, NodeJS.Timeout>();
   private readonly subagentTouches = new Map<string, Set<string>>();
   private readonly subagentLeases = new Map<string, SubagentLease>();
@@ -279,10 +327,7 @@ export class Workbench {
         if (action === 'pause') {
           for (const conversation of this.workspaceConversations(directory)) {
             const runtime = this.runtimes.get(conversation.id);
-            if (runtime) {
-              for (const item of runtime.live.values()) this.store.saveLiveItem(conversation.id, item);
-              this.disposeRuntime(conversation.id);
-            }
+            if (runtime) this.disposeRuntime(conversation.id);
           }
         }
         if (action === 'resume' && !await this.confirmWorkspaceIdle(directory, true) &&
@@ -427,10 +472,11 @@ export class Workbench {
   }
   async workspaceImage(id: string, itemId: string, source: string) {
     const conversation = this.conversation(id);
-    const item = this.store.getItem(id, itemId);
-    if (!item || !item.text.includes(source)) throw new StoreError('image_unavailable', 404);
     const owner = 'markdown:' + createHash('sha256').update(itemId + '\0' + source).digest('hex');
+    // A saved first-readable snapshot was verified against its message when it was created.
     const cached = this.store.resources.owned(id, owner); if (cached) return cached;
+    const item = await this.locateItem(id, itemId);
+    if (!item || !item.text.includes(source)) throw new StoreError('image_unavailable', 404);
     const reference = referenceSchema.parse({ type: 'file', path: decodeURIComponent(source).replace(/^\.\//, '') });
     if (reference.type !== 'file') throw new StoreError('invalid_request', 400);
     const adapter = this.adapter(conversation);
@@ -439,7 +485,7 @@ export class Workbench {
     // Read in the native Host, never turn Markdown into a host-user filesystem proxy.
     const data = decodeImage(await adapter.readImage(conversation.binding, path));
     this.assertWorkspaceAvailable(conversation.workspaceId);
-    const image = this.store.resources.put(id, reference.path.split('/').at(-1)!.slice(0,120), data);
+    const image = this.store.resources.put(id, reference.path.split('/').at(-1)!.slice(0,120), data, 'copy');
     this.store.resources.pin(id, image.id, owner);
     return this.store.resources.get(id, image.id);
   }
@@ -448,7 +494,7 @@ export class Workbench {
     for (const ref of input.payload.references ?? []) {
       if (ref.type === 'file') await workspacePath(conversation.cwd, ref.path);
       else {
-        const item = this.store.getItem(conversation.id, ref.itemId);
+        const item = await this.locateItem(conversation.id, ref.itemId).catch(() => undefined);
         if (!item) throw new StoreError('quote_source_changed', 409);
       }
     }
@@ -461,7 +507,8 @@ export class Workbench {
     if (totalImageBytes > 4 * 1024 * 1024) throw new StoreError('message_images_too_large', 413);
   }
   private async materialize(conversation: Conversation, items: NativeItem[]): Promise<NativeItem[]> {
-    const adapter = this.adapter(conversation);
+    // Native image reads do not touch the workspace, so history stays readable after a workspace is removed.
+    const adapter = this.historyAdapter(conversation);
     const output: NativeItem[] = [];
     for (const raw of items) {
       const { imageSources, ...item } = raw;
@@ -469,12 +516,14 @@ export class Workbench {
         const images = [];
         for (const [index, source] of imageSources.slice(0,4).entries()) {
           try {
-            const old = this.store.getItem(conversation.id, item.id)?.images?.[index];
-            if (old) { this.store.resources.get(conversation.id, old.id); images.push(old); continue; }
-            const encoded = source.data ?? (source.path && adapter.readImage ? await adapter.readImage(conversation.binding, source.path) : undefined);
+            // Native image copies are regenerable and may be evicted under the storage budget.
+            const owner = `${NATIVE_IMAGE_OWNER}${item.id}:${index}`;
+            const old = this.store.resources.owned(conversation.id, owner);
+            if (old) { images.push({ id: old.id, name: old.name, mediaType: old.mediaType }); continue; }
+            const encoded = source.data ?? (source.path && adapter?.readImage ? await adapter.readImage(conversation.binding, source.path) : undefined);
             if (!encoded) throw new Error('image_unavailable');
-            const image = this.store.resources.put(conversation.id, 'Agent 图片 ' + (index + 1), decodeImage(encoded.replace(/^data:image\/[a-z]+;base64,/, '')));
-            this.store.resources.pin(conversation.id, image.id, item.id); images.push(image);
+            const image = this.store.resources.put(conversation.id, 'Agent 图片 ' + (index + 1), decodeImage(encoded.replace(/^data:image\/[a-z]+;base64,/, '')), 'copy');
+            this.store.resources.pin(conversation.id, image.id, owner); images.push(image);
           } catch { item.text = (item.text || '图片') + '\n图片暂时无法读取，请重新查询原生结果。'; }
         }
         if (images.length) item.images = images;
@@ -503,6 +552,8 @@ export class Workbench {
     this.assertOpen(); this.assertWorkspaceAvailable(input.workspaceId);
     if (this.removing.has(input.workspaceId)) throw new StoreError('workspace_remove_busy', 409);
     if (!this.store.getConversation(input.id) && this.executionBlocked(workspace.directory)) throw new StoreError('workspace_execution_blocked', 409);
+    // A full storage budget stops new conversations; retries of an existing one stay idempotent.
+    if (!this.store.getConversation(input.id)) this.store.storage.assertRoom();
     const result = this.store.createConversation({ ...input, cwd: workspace.directory });
     if (result.created) this.launch(this.prepare(result.conversation));
     return result.conversation;
@@ -606,11 +657,15 @@ export class Workbench {
     this.assertNotDeleting(id);
     if ((conversation.binding || conversation.nativePreparationId) && !this.workspaceUnavailable(conversation.workspaceId) && !this.executionBlocked(conversation.cwd)) {
       const runtime = this.runtimes.get(id);
-      if (this.hasExecutionResponsibility(id)) {
-        if (!runtime?.stop && !runtime?.watching && !runtime?.syncing) this.launch(this.restoreConversation(id));
-      } else if (!conversation.historyLoaded && !runtime?.syncing) this.launch(this.sync(id));
+      if (this.hasExecutionResponsibility(id) && !runtime?.stop && !runtime?.watching && !runtime?.syncing) this.launch(this.restoreConversation(id));
     }
-    return this.snapshot(id);
+    // The first screen is the native latest page; no local copy is consulted (ADR 0014).
+    await this.ensureTail(id).catch(() => {});
+    if (this.runtimes.get(id)?.tail || !this.historyAdapter(this.conversation(id))) return this.snapshot(id);
+    // No memory slot for this conversation (every slot is busy): still serve one native page directly.
+    const direct: Tail = await this.readTail(id).then(read => ({ items: read.items, olderCursor: read.olderCursor, at: Date.now() }),
+      error => ({ items: [], olderCursor: null, at: Date.now(), error: historyErrorCode(error) }));
+    return this.snapshot(id, direct);
   }
   /** Reading leases belong to authenticated browser pages, never to native execution. */
   async reading(id: string, readerId: string): Promise<void> {
@@ -650,16 +705,16 @@ export class Workbench {
       if (!conversation.binding && (conversation.nativePreparationId || conversation.error === 'native_creation_result_unknown' || conversation.error === 'conversation_preparation_incomplete'))
         throw new StoreError('conversation_preparation_incomplete', 409);
       const runtime = this.runtimes.get(id);
-      await runtime?.watching; await runtime?.older?.catch(() => {});
+      await runtime?.watching; await runtime?.reading?.catch(() => {});
       if (conversation.binding) await this.sync(id);
-      await this.runtimes.get(id)?.older?.catch(() => {});
+      await this.runtimes.get(id)?.reading?.catch(() => {});
       const current = this.conversation(id);
       if (this.preparing.has(id) || this.busyConversations.has(id) ||
         (current.binding ? !this.messageAllowed(current) : current.readiness === 'preparing') || this.store.readQueue(id).entries.length)
         throw new StoreError('conversation_busy', 409);
       // Native deletion cascades to the spawn tree; running sub-agents keep the conversation busy.
       if (current.binding) await this.assertSubagentsSettled(id);
-      this.readers.delete(id); this.disposeRuntime(id);
+      this.readers.delete(id); this.disposeRuntime(id); this.forget(id);
       return current;
     } catch (error) { this.deleting.delete(id); throw error; }
   }
@@ -718,60 +773,183 @@ export class Workbench {
       return skills;
     });
   }
-  snapshot(id: string, beforeItemId?: string) {
+  snapshot(id: string, direct?: Tail) {
     this.assertOpen(); let conversation = this.conversation(id);
     const unavailable = this.workspaceUnavailable(conversation.workspaceId);
     if (unavailable) conversation = { ...conversation, readiness: 'blocked', error: unavailable,
       state: { ...conversation.state, configurationVerified: false } };
     else if (!this.configured(conversation)) { try { this.adapter(conversation); } catch { conversation = this.conversation(id); } }
-    const history = this.store.readHistory(id, { limit: 100, ...(beforeItemId ? { beforeItemId } : {}) });
-    if (unavailable) history.nativeOlderCursor = null;
+    const runtime = this.runtimes.get(id); const tail = runtime?.tail ?? direct;
+    const items = (tail?.items ?? []).map(viewItem);
+    const live = [...(runtime?.live.values() ?? [])];
+    const liveItems = live.slice(-LIVE_VIEW_LIMIT).map(viewItem);
     const runIds = new Set<string>();
-    for (const item of [...history.items, ...history.liveItems].reverse()) {
-      if (item.runId) runIds.add(item.runId);
-    }
+    for (const item of [...items, ...liveItems].reverse()) if (item.runId) runIds.add(item.runId);
+    const history = { items, liveItems, liveItemsLimited: live.length > LIVE_VIEW_LIMIT,
+      olderCursor: this.wrapCursor(id, tail?.olderCursor ?? null), loaded: !!tail && !tail.error, ...(tail?.error ? { error: tail.error } : {}) };
     return { conversation, history, turnFiles: this.store.readTurnFiles(id, [...runIds]),
-      operations: this.store.listOperations({ conversationId: id, order: 'desc', limit: 100 }), queue: this.queue(id), revision: history.revision };
+      operations: this.store.listOperations({ conversationId: id, order: 'desc', limit: 100 }), queue: this.queue(id), revision: this.store.version() };
   }
-
-  older(id: string, beforeItemId?: string) {
+  /** One older native page, addressed by a cursor the server issued for this conversation. Nothing is persisted. */
+  async history(id: string, cursor: string) {
     this.assertOpen(); this.assertNotDeleting(id);
-    if (this.workspaceUnavailable(this.conversation(id).workspaceId)) return Promise.resolve(this.snapshot(id, beforeItemId));
+    const conversation = this.conversation(id); const adapter = this.historyAdapter(conversation);
+    if (!adapter) throw new StoreError('conversation_not_ready', 409);
+    const native = this.unwrapCursor(id, cursor);
     return this.task(async () => {
-      await this.sync(id); this.assertOpen(); this.assertNotDeleting(id);
-      const runtime = this.runtime(id);
-      if (!runtime.older) {
-        runtime.older = this.task(async () => {
-          const conversation = this.conversation(id); const adapter = this.adapter(conversation);
-          const local = this.store.readHistory(id, { ...(beforeItemId ? { beforeItemId } : {}), limit: 100 });
-          if (local.items.length >= 100 || !conversation.binding || !local.nativeOlderCursor || !local.nativeOlderBeforeItemId) return;
-          const generation = runtime.generation;
-          let cursor = local.nativeOlderCursor; const seen = new Set([cursor]);
-          for (let number = 0; number < HISTORY_MAX_PAGES; number++) {
-            const page = await adapter.history(conversation.binding, cursor, HISTORY_PAGE_SIZE);
-            this.assertOpen(); this.assertNotDeleting(id);
-            if (this.runtimes.get(id) !== runtime) throw new StoreError('history_changed_retry', 409);
-            if (runtime.generation !== generation) { this.scheduleSync(id); throw new StoreError('history_changed_retry', 409); }
-            if (page.items.length > HISTORY_PAGE_SIZE || page.items.reduce((total, item) => total + Buffer.byteLength(item.text), 0) > HISTORY_MAX_BYTES)
-              throw new StoreError('native_history_page_limit', 502);
-            if (page.olderCursor && seen.has(page.olderCursor)) throw new StoreError('history_no_progress', 502);
-            if (page.items.length || !page.olderCursor) {
-              const items = await this.materialize(conversation, page.items);
-              this.assertOpen(); this.assertNotDeleting(id);
-              if (this.runtimes.get(id) !== runtime || runtime.generation !== generation) throw new StoreError('history_changed_retry', 409);
-              this.store.mergeHistory(id, items, local.nativeOlderBeforeItemId);
-              this.store.setHistoryCursor(id, { loaded: true, olderCursor: page.olderCursor, beforeItemId: page.olderCursor ? (page.items[0]?.id ?? local.nativeOlderBeforeItemId) : null });
-              return;
-            }
-            // Native record pages can contain only non-display events; an advancing cursor is still progress.
-            cursor = page.olderCursor; seen.add(cursor);
-          }
-          throw new StoreError('history_gap_limit', 502);
-        });
-        void runtime.older.then(() => { runtime.older = undefined; this.releaseIdle(id); }, () => { runtime.older = undefined; this.releaseIdle(id); });
-      }
-      await runtime.older; return this.snapshot(id, beforeItemId);
+      let page: HistoryPage;
+      try { page = await this.readPage(conversation, adapter, native); }
+      catch (error) { const code = historyErrorCode(error); throw new StoreError(code, code === 'history_cursor_invalid' ? 409 : 502); }
+      this.assertOpen(); this.assertNotDeleting(id);
+      const items = (await this.present(conversation, page.items)).map(viewItem);
+      const runIds = [...new Set(items.flatMap(item => item.runId ? [item.runId] : []))];
+      return { items, olderCursor: this.wrapCursor(id, page.olderCursor), turnFiles: this.store.readTurnFiles(id, runIds.reverse()) };
     });
+  }
+  /** The newest version of a live or latest-page item, for change frames. */
+  liveItem(id: string, itemId: string): WorkbenchItem | null {
+    const runtime = this.runtimes.get(id);
+    const item = runtime?.live.get(itemId) ?? runtime?.tail?.items.find(value => value.id === itemId);
+    return item ? viewItem(item) : null;
+  }
+  private historyAdapter(conversation: Conversation): HarnessAdapter | undefined {
+    const adapter = this.adapters.get(conversation.harnessId);
+    return conversation.binding && adapter?.id === conversation.harnessId ? adapter : undefined;
+  }
+  private wrapCursor(id: string, native: string | null): string | null {
+    if (native === null) return null;
+    if (typeof native !== 'string' || !native || native.length > NATIVE_CURSOR_LENGTH) throw new StoreError('native_history_page_limit', 502);
+    return Buffer.from(JSON.stringify({ c: id, n: native })).toString('base64url');
+  }
+  private unwrapCursor(id: string, cursor: string): string {
+    try {
+      const value = cursorEnvelope.parse(JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')));
+      if (value.c === id) return value.n;
+    } catch { /* rejected below */ }
+    throw new StoreError('history_cursor_invalid', 400);
+  }
+  /** One native page with visible content (or the beginning). An advancing cursor over hidden events is progress. */
+  private async readPage(conversation: Conversation, adapter: HarnessAdapter, cursor: string | undefined): Promise<HistoryPage> {
+    const seen = new Set<string>();
+    for (let skipped = 0; ; skipped++) {
+      // A page too large to serialize is asked for again with fewer items from the same cursor.
+      let limit = HISTORY_PAGE_SIZE; let page: HistoryPage;
+      for (;;) {
+        page = await adapter.history(conversation.binding!, cursor, limit);
+        // A single oversized item is still returned; its view is replaced by an explicit notice when it cannot display.
+        this.checkPage(page, true);
+        if (pageBytes(page) <= HISTORY_PAGE_BYTES || limit === 1) break;
+        limit = Math.ceil(limit / 2);
+      }
+      if (page.items.length || !page.olderCursor || skipped >= EMPTY_PAGE_SKIP) return page;
+      if (seen.has(page.olderCursor)) throw new StoreError('history_no_progress', 502);
+      seen.add(page.olderCursor); cursor = page.olderCursor;
+    }
+  }
+  private checkPage(page: HistoryPage, shrinkable = false): void {
+    if (!page || !Array.isArray(page.items) || page.items.length > HISTORY_PAGE_ITEMS ||
+      (page.olderCursor !== null && (typeof page.olderCursor !== 'string' || !page.olderCursor || page.olderCursor.length > NATIVE_CURSOR_LENGTH)))
+      throw new StoreError('native_history_page_limit', 502);
+    if (!shrinkable && pageBytes(page) > HISTORY_PAGE_BYTES) throw new StoreError('native_history_page_limit', 502);
+  }
+  private async present(conversation: Conversation, items: NativeItem[]): Promise<NativeItem[]> {
+    const presented = await this.materialize(conversation, items);
+    try { this.store.recordTurnFiles(conversation.id, presented); } catch { /* the edited-path index is a hint, never a reading failure */ }
+    this.remember(conversation.id, presented);
+    return presented;
+  }
+  private remember(id: string, items: NativeItem[]): void {
+    for (const value of items) {
+      const { imageSources: _sources, ...item } = value;
+      const key = `${id}\u0000${item.id}`; const bytes = Buffer.byteLength(item.text) + 512;
+      const old = this.served.get(key); if (old) { this.served.delete(key); this.servedBytes -= old.bytes; }
+      if (bytes > SERVED_ITEMS_BYTES / 4) continue;
+      this.served.set(key, { item, bytes }); this.servedBytes += bytes;
+    }
+    for (const [key, entry] of this.served) { if (this.servedBytes <= SERVED_ITEMS_BYTES) break; this.served.delete(key); this.servedBytes -= entry.bytes; }
+  }
+  private forget(id: string): void {
+    for (const [key, entry] of this.served) if (key.startsWith(`${id}\u0000`)) { this.served.delete(key); this.servedBytes -= entry.bytes; }
+  }
+  private findItem(id: string, itemId: string): NativeItem | undefined {
+    const runtime = this.runtimes.get(id);
+    return runtime?.live.get(itemId) ?? runtime?.tail?.items.find(item => item.id === itemId) ?? this.served.get(`${id}\u0000${itemId}`)?.item;
+  }
+  /** Verify against native history: memory first, then a bounded walk back from the latest page. */
+  private async locateItem(id: string, itemId: string): Promise<NativeItem | undefined> {
+    const found = this.findItem(id, itemId); if (found) return found;
+    const conversation = this.conversation(id); const adapter = this.historyAdapter(conversation);
+    if (!adapter) return undefined;
+    let cursor: string | undefined;
+    for (let number = 0; number < LOOKUP_PAGES; number++) {
+      const page = await this.readPage(conversation, adapter, cursor);
+      const item = page.items.find(value => value.id === itemId);
+      if (item) { this.remember(id, [item]); return item; }
+      if (!page.olderCursor) return undefined;
+      cursor = page.olderCursor;
+    }
+    return undefined;
+  }
+  private ensureTail(id: string): Promise<void> {
+    const conversation = this.conversation(id);
+    if (!this.historyAdapter(conversation) || this.isDeleting(id) || this.closed) return Promise.resolve();
+    let runtime: Runtime;
+    try { runtime = this.runtime(id); } catch { return Promise.resolve(); }
+    const tail = runtime.tail;
+    if (tail && !tail.error && (runtime.stop || Date.now() - tail.at < TAIL_FRESH_MS)) return Promise.resolve();
+    if (runtime.syncing) return runtime.syncing.catch(() => {});
+    if (!runtime.reading) {
+      const reading = this.task(async () => {
+        try { this.applyTail(id, runtime, await this.readTail(id)); }
+        catch (error) { this.failTail(id, runtime, error); }
+      });
+      runtime.reading = reading;
+      void reading.finally(() => { if (runtime.reading === reading) runtime.reading = undefined; this.releaseIdle(id); });
+    }
+    return runtime.reading;
+  }
+  private async readTail(id: string): Promise<TailRead> {
+    const conversation = this.conversation(id); const adapter = this.historyAdapter(conversation);
+    if (!adapter) throw new StoreError('conversation_not_ready', 409);
+    const startedAt = Date.now();
+    const page = await this.readPage(conversation, adapter, undefined);
+    this.assertOpen();
+    return { items: await this.present(conversation, page.items), olderCursor: page.olderCursor, startedAt, ...(page.usage ? { usage: page.usage } : {}) };
+  }
+  private applyTail(id: string, runtime: Runtime, read: TailRead): void {
+    if (this.closed || this.runtimes.get(id) !== runtime || this.isDeleting(id)) return;
+    const previous = runtime.tail;
+    let items = read.items; let olderCursor = read.olderCursor;
+    // Join an overlapping previous latest page so items that scrolled out of the newest page stay contiguous.
+    if (previous && !previous.error && items.length) {
+      const overlap = previous.items.findIndex(item => item.id === items[0]!.id);
+      if (overlap > 0 && overlap + items.length <= TAIL_LIMIT) { items = [...previous.items.slice(0, overlap), ...items]; olderCursor = previous.olderCursor; }
+    }
+    const present = new Map(items.map(item => [item.id, item]));
+    for (const [key, live] of runtime.live) {
+      const item = present.get(key);
+      if (!item) {
+        // A settled copy that predates this read and is absent from the contiguous latest page is older history now.
+        if (live.status !== 'running' && (runtime.liveAt.get(key) ?? 0) < read.startedAt) this.retireLive(runtime, key);
+        continue;
+      }
+      // A completed canonical item retires its live copy; a newer live body otherwise keeps precedence by identity.
+      const sameBody = item.kind === live.kind && item.text === live.text && item.runId === live.runId && item.operationId === live.operationId;
+      if ((live.status === 'running' && item.status === 'completed') || (sameBody && (item.status === live.status || item.status === 'completed'))) this.retireLive(runtime, key);
+      else if (item.fileEdits && live.runId === item.runId && live.status === 'completed') runtime.live.set(key, { ...live, fileEdits: item.fileEdits });
+    }
+    runtime.tail = { items, olderCursor, at: Date.now() };
+    if (!previous || previous.error || tailMark(previous.items, previous.olderCursor) !== tailMark(items, olderCursor)) this.store.touch(id);
+    this.enrichReceipts(id);
+  }
+  private retireLive(runtime: Runtime, key: string): void { runtime.live.delete(key); runtime.flushed.delete(key); runtime.liveAt.delete(key); }
+  private failTail(id: string, runtime: Runtime, error: unknown): void {
+    if (this.closed || this.runtimes.get(id) !== runtime || this.isDeleting(id)) return;
+    // Reading failures keep already loaded content and never fence execution by themselves.
+    const code = historyErrorCode(error);
+    if (runtime.tail?.error === code) { runtime.tail.at = Date.now(); return; }
+    runtime.tail = { items: runtime.tail?.items ?? [], olderCursor: runtime.tail?.olderCursor ?? null, at: Date.now(), error: code };
+    this.store.touch(id);
   }
 
   private latestAcceptedMessage(id: string): Operation | undefined {
@@ -1001,9 +1179,17 @@ export class Workbench {
     const latest = this.store.listOperations({ conversationId: id, status: 'accepted', type: 'message', order: 'desc', limit: 1 })[0];
     if (latest?.runId === null) pending.push(latest);
     for (const operation of pending) if (operation.type === 'message') {
-      const runId = this.store.operationRunId(id, operation.id);
+      const runId = this.runIdForOperation(id, operation.id);
       if (runId) this.store.settleOperation(operation.id, { outcome: 'accepted', runId });
     }
+  }
+  /** The native run that received an operation, as seen in the latest page or live items. Older evidence is reconciled natively. */
+  private runIdForOperation(id: string, operationId: string): string | null {
+    const runtime = this.runtimes.get(id); if (!runtime) return null;
+    const runs = new Set<string>();
+    for (const item of [...(runtime.tail?.items ?? []), ...runtime.live.values()])
+      if (item.kind === 'user' && item.operationId === operationId && item.runId) runs.add(item.runId);
+    return runs.size === 1 ? [...runs][0]! : null;
   }
   reconcile(id: string): Promise<void> {
     this.assertOpen(); this.assertNotDeleting(id);
@@ -1013,7 +1199,7 @@ export class Workbench {
       for (const operation of this.store.listOperations({ conversationId: id, status: 'unknown', order: 'desc', limit: 100 })) {
         this.assertOpen(); this.assertNotDeleting(id); this.adapter(this.conversation(id));
         if (operation.type === 'message') {
-          const runId = this.store.operationRunId(id, operation.id);
+          const runId = this.runIdForOperation(id, operation.id);
           const receipt = runId ? { outcome: 'accepted' as const, runId } : await adapter.reconcile(conversation.binding!, operation.id);
           this.assertOpen(); this.assertNotDeleting(id);
           this.store.settleOperation(operation.id, receipt);
@@ -1288,10 +1474,10 @@ export class Workbench {
   private releaseIdle(id: string): void {
     const runtime = this.runtimes.get(id);
     if (!runtime || this.closed || runtime.release || this.isDeleting(id)) return;
-    if (runtime.syncing || runtime.watching || runtime.older || runtime.dirty || this.readers.has(id) || this.hasSubagentReaders(id) || this.subagentRefreshes.has(id) || this.hasExecutionResponsibility(id)) return;
+    if (runtime.syncing || runtime.watching || runtime.reading || runtime.dirty || this.readers.has(id) || this.hasSubagentReaders(id) || this.subagentRefreshes.has(id) || this.hasExecutionResponsibility(id)) return;
     runtime.release = setTimeout(() => {
       runtime.release = undefined;
-      if (this.runtimes.get(id) !== runtime || runtime.syncing || runtime.watching || runtime.older || runtime.dirty || this.readers.has(id) || this.hasSubagentReaders(id) || this.subagentRefreshes.has(id) || this.hasExecutionResponsibility(id)) return;
+      if (this.runtimes.get(id) !== runtime || runtime.syncing || runtime.watching || runtime.reading || runtime.dirty || this.readers.has(id) || this.hasSubagentReaders(id) || this.subagentRefreshes.has(id) || this.hasExecutionResponsibility(id)) return;
       this.flushLive(id, runtime);
       this.disposeRuntime(id);
     }, 250);
@@ -1314,21 +1500,34 @@ export class Workbench {
     let runtime = this.runtimes.get(id);
     if (!runtime) {
       if (this.runtimes.size >= 64) {
-        const idle = [...this.runtimes].find(([key, value]) => !value.syncing && !value.watching && !value.older && !this.preparing.has(key) && !this.busyConversations.has(key) &&
+        const idle = [...this.runtimes].find(([key, value]) => !value.syncing && !value.watching && !value.reading && !this.preparing.has(key) && !this.busyConversations.has(key) &&
           !this.readers.has(key) && !this.hasExecutionResponsibility(key));
         if (!idle) throw new StoreError('active_conversation_limit', 429);
         this.disposeRuntime(idle[0]);
       }
-      runtime = { live: new Map(), generation: 0, stateGeneration: 0, dirty: false, retryAttempt: 0, subagentsDirty: true }; this.runtimes.set(id, runtime);
+      runtime = { live: new Map(), flushed: new Map(), liveAt: new Map(), generation: 0, stateGeneration: 0, dirty: false, retryAttempt: 0, subagentsDirty: true }; this.runtimes.set(id, runtime);
     }
     return runtime;
   }
   private flushLive(id: string, runtime: Runtime): void {
     if (this.closed || this.runtimes.get(id) !== runtime) return;
     runtime.flush = undefined;
-    try { for (const item of runtime.live.values()) this.store.saveLiveItem(id, item); this.enrichReceipts(id); }
-    catch { this.scheduleSync(id); }
-    // Keep the last complete live body until a canonical read acknowledges it. A lagging read must not regress it.
+    // Live bodies stay in memory; only change hints (and edited paths) are persisted (ADR 0014).
+    try {
+      const changed: NativeItem[] = [];
+      for (const item of runtime.live.values()) {
+        const mark = liveMark(item);
+        if (runtime.flushed.get(item.id) === mark) continue;
+        runtime.flushed.set(item.id, mark); changed.push(item);
+      }
+      if (changed.length) {
+        this.store.recordTurnFiles(id, changed);
+        // A few items travel inside their change frames; a larger batch asks pages to re-read the snapshot.
+        if (changed.length <= 4) for (const item of changed) this.store.touch(id, item.id);
+        else this.store.touch(id);
+      }
+      this.enrichReceipts(id);
+    } catch { this.scheduleSync(id); }
   }
   private observe(id: string): Promise<void> {
     if (this.closed) return Promise.resolve();
@@ -1355,8 +1554,13 @@ export class Workbench {
             }
             const prior = runtime.live.get(change.item.id);
             if (change.item.tool && prior?.tool) { change.item.tool = { ...prior.tool, ...change.item.tool, name: prior.tool.name }; if (!change.item.text) change.item.text = prior.text; if (change.item.tool.exitCode !== undefined && change.item.tool.exitCode !== 0) change.item.status = 'failed'; }
-            if (runtime.live.size >= 64 && !runtime.live.has(change.item.id)) throw new StoreError('live_item_limit', 429);
-            runtime.live.set(change.item.id, change.item);
+            runtime.live.set(change.item.id, change.item); runtime.liveAt.set(change.item.id, Date.now());
+            // Many in-flight items prompt a fresh latest page, which retires settled live copies.
+            if (runtime.live.size >= LIVE_SYNC_THRESHOLD) this.scheduleSync(id);
+            if (runtime.live.size > LIVE_LIMIT) for (const [key, value] of runtime.live) {
+              if (runtime.live.size <= LIVE_LIMIT) break;
+              if (value.status !== 'running') this.retireLive(runtime, key);
+            }
             if (!runtime.flush) { runtime.flush = setTimeout(() => this.flushLive(id, runtime), 40); runtime.flush.unref(); }
             if (runtime.syncing) runtime.dirty = true;
           } else {
@@ -1386,50 +1590,28 @@ export class Workbench {
     if (runtime.syncing || runtime.timer) return;
     runtime.timer = setTimeout(() => { runtime.timer = undefined; this.launch(this.sync(id)); }, 120); runtime.timer.unref();
   }
-  private async readHistory(conversation: Conversation, adapter: HarnessAdapter): Promise<HistoryRead> {
-    const existing = this.store.readHistory(conversation.id, { limit: 1 }).items.length > 0;
-    const establishCursor = !conversation.historyLoaded || !existing;
-    let cursor: string | undefined; let lastCursor: string | null = null; let bytes = 0;
-    let usage: HistoryPage['usage'];
-    const seenCursors = new Set<string>(); const pages: NativeItem[][] = []; let count = 0;
-    for (let number = 0; number < HISTORY_MAX_PAGES; number++) {
-      const page: HistoryPage = await adapter.history(conversation.binding!, cursor, HISTORY_PAGE_SIZE);
-      if (!cursor) usage = page.usage;
-      this.assertOpen();
-      if (!Array.isArray(page.items) || page.items.length > HISTORY_PAGE_SIZE) throw new StoreError('native_history_page_limit', 502);
-      bytes += page.items.reduce((total, item) => total + Buffer.byteLength(JSON.stringify(item)), 0); count += page.items.length;
-      if (bytes > HISTORY_MAX_BYTES || count > HISTORY_MAX_ITEMS) throw new StoreError('history_gap_limit', 502);
-      pages.push(await this.materialize(conversation, page.items)); lastCursor = page.olderCursor;
-      const intersects = page.items.some(item => this.store.hasHistoryItem(conversation.id, item.id));
-      if (intersects || (establishCursor && (count > 0 || !page.olderCursor))) return { items: pages.reverse().flat(), cursor: lastCursor, establishCursor, usage };
-      if (!page.olderCursor) {
-        if (!existing) return { items: pages.reverse().flat(), cursor: null, establishCursor: true, usage };
-        throw new StoreError('native_history_diverged', 502);
-      }
-      if (seenCursors.has(page.olderCursor)) throw new StoreError('history_no_progress', 502);
-      seenCursors.add(page.olderCursor); cursor = page.olderCursor;
-    }
-    throw new StoreError('history_gap_limit', 502);
-  }
   private sync(id: string): Promise<void> {
     if (this.closed) return Promise.resolve();
     const conversation = this.conversation(id); if (!conversation.binding) return Promise.resolve();
     const runtime = this.runtime(id); runtime.dirty = true;
     if (runtime.syncing) return runtime.syncing;
     runtime.syncing = this.task(async () => {
-      if (runtime.older) await runtime.older.catch(() => {});
+      if (runtime.reading) await runtime.reading.catch(() => {});
       for (let pass = 0; pass < 3 && runtime.dirty && !this.closed; pass++) {
-        runtime.dirty = false; const generation = runtime.generation; const stateGeneration = runtime.stateGeneration;
+        runtime.dirty = false; const stateGeneration = runtime.stateGeneration;
         try {
           const current = this.conversation(id); const adapter = this.adapter(current);
           const target = this.observationTarget(id);
-          const results = await Promise.allSettled([adapter.state(current.binding!, target), this.readHistory(current, adapter)]);
+          // Execution state and the latest native page are read together; there is no gap to fill (ADR 0014).
+          const [state, history] = await Promise.allSettled([adapter.state(current.binding!, target), this.readTail(id)]);
           if (this.closed || this.runtimes.get(id) !== runtime) return;
+          if (history.status === 'fulfilled') this.applyTail(id, runtime, history.value); else this.failTail(id, runtime, history.reason);
           const currentTarget = this.observationTarget(id);
           if (runtime.stateGeneration !== stateGeneration || currentTarget !== target) { runtime.dirty = true; continue; }
-          const [state, history] = results;
           if (state.status === 'rejected') throw state.reason;
-          if (history.status === 'rejected') throw history.reason;
+          // An unverified unknown read never erases last-known run and pending facts; it takes the recovery path.
+          if (state.value.status === 'unknown' && !state.value.configurationVerified)
+            throw new StoreError(/^[a-z][a-z0-9_]{0,99}$/.test(state.value.reason ?? '') ? state.value.reason! : 'native_state_unavailable', 502);
           this.adapter(this.conversation(id));
           // Text can arrive faster than native reads. It invalidates history, not a
           // verified state read; newer state/invalidate events still fence both.
@@ -1441,25 +1623,10 @@ export class Workbench {
             if (outcome === 'failed' || state.value.status === 'failed') this.store.pauseQueue(id, 'failed');
             else if (outcome === 'interrupted' || state.value.status === 'interrupted') this.store.pauseQueue(id, 'stopped');
           }
-          if (runtime.generation !== generation) { runtime.dirty = true; continue; }
-          if (state.value.configurationVerified && history.value.usage) this.store.setUsage(id, history.value.usage);
-          const items = history.value.items.map(item => {
-            const live = runtime.live.get(item.id);
-            if (!live) return item;
-            const sameBody = item.kind === live.kind && item.text === live.text && item.runId === live.runId && item.operationId === live.operationId;
-            if ((live.status === 'running' && item.status === 'completed') || (sameBody && (item.status === live.status || item.status === 'completed'))) { runtime.live.delete(item.id); return item; }
-            if (item.fileEdits && live.runId === item.runId && live.status === 'completed') return { ...live, fileEdits: item.fileEdits };
-            return live;
-          });
-          this.store.mergeHistory(id, items);
-          if (history.value.establishCursor) this.store.setHistoryCursor(id, { loaded: true, olderCursor: history.value.cursor,
-            beforeItemId: history.value.cursor ? history.value.items[0]?.id ?? null : null });
-          // A newer complete live projection must win over an older history body captured before this sync.
-          for (const item of runtime.live.values()) this.store.saveLiveItem(id, item);
-          if (runtime.flush) { clearTimeout(runtime.flush); runtime.flush = undefined; }
-          this.enrichReceipts(id);
+          if (state.value.configurationVerified && history.status === 'fulfilled' && history.value.usage) this.store.setUsage(id, history.value.usage);
+          if (runtime.flush) { clearTimeout(runtime.flush); this.flushLive(id, runtime); }
           if (state.value.configurationVerified && (runtime.subagentsDirty || this.store.subagents.get(id)?.verified === false ||
-            history.value.items.some(item => item.collaboration))) { runtime.subagentsDirty = false; this.launch(this.refreshSubagents(id)); }
+            (runtime.tail?.items ?? []).some(item => item.collaboration))) { runtime.subagentsDirty = false; this.launch(this.refreshSubagents(id)); }
           if (state.value.status !== 'unknown' && !this.hasExecutionResponsibility(id)) runtime.retryAttempt = 0;
         } catch (error) {
           if (!this.closed && this.runtimes.get(id) === runtime) this.unknown(id, error instanceof StoreError ? error.code : 'native_state_unavailable');
@@ -1488,9 +1655,8 @@ export class Workbench {
     this.closed = true;
     if (this.queueRecovery) clearInterval(this.queueRecovery);
     this.closing = (async () => {
-      for (const [id, runtime] of this.runtimes) {
-        try { for (const item of runtime.live.values()) this.store.saveLiveItem(id, item); }
-        catch { /* shutdown still closes connections and waits for tasks; no persistence success is reported */ }
+      // In-flight bodies are memory only; the native Harness keeps the authoritative history (ADR 0014).
+      for (const id of [...this.runtimes.keys()]) {
         try { this.disposeRuntime(id); } catch { /* adapter.close still runs */ }
       }
       // Closing connections first unblocks pending RPCs. The database owner may close it only after every task settles.

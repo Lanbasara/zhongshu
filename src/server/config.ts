@@ -2,6 +2,7 @@ import { homedir } from 'node:os';
 import { resolve, join } from 'node:path';
 import { z } from 'zod';
 import { localDefaultPassword } from './auth.ts';
+import { parseStorageBudget } from './storage.ts';
 
 const environment = z.object({
   HOST: z.string().min(1).default('127.0.0.1'),
@@ -10,6 +11,7 @@ const environment = z.object({
   ZHONGSHU_DATA_DIR: z.string().min(1).optional(),
   ZHONGSHU_ALLOW_HTTP_LOOPBACK: z.enum(['true', 'false']).default('false'),
   ZHONGSHU_ADMIN_PASSWORD: z.string().optional(),
+  ZHONGSHU_STORAGE_BUDGET: z.string().max(32).optional(),
 });
 
 export function validOrigin(value: string, allowHttpLoopback: boolean): string {
@@ -37,6 +39,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     host: parsed.HOST,
     port: parsed.PORT,
     origin,
+    storageBudget: parseStorageBudget(parsed.ZHONGSHU_STORAGE_BUDGET),
     dataDirectory: resolve(parsed.ZHONGSHU_DATA_DIR ?? join(homedir(), '.local/share/zhongshu')),
   };
 }

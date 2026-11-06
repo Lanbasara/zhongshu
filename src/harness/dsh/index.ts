@@ -16,7 +16,30 @@ const permissionCatalog = z.object({ options: z.array(z.object({ value: z.string
 const permissionNames: Record<string, string> = { 'read-only': '只读', 'workspace-write': '工作区读写', 'danger-full-access': '完全访问' };
 const nativeSkillRow = z.object({ name: z.string().min(1).max(120).regex(/^[a-z0-9][a-z0-9-]*$/), description: z.string().max(16_000), path: z.string().max(4096).optional() });
 const skillsResponse = z.object({ skills: z.array(z.unknown()).max(2000) });
-const cursorSchema = z.object({ session: identifier, through: z.number().int().nonnegative(), before: z.number().int().nonnegative() }).strict();
+// `turn` is the native turn of the events just before `before`, so older pages need no snapshot (follow) to number turns.
+const cursorSchema = z.object({ session: identifier, through: z.number().int().nonnegative(), before: z.number().int().nonnegative(), turn: z.number().int().nonnegative() }).strict();
+/** Messages per native page: DSH counts only user/assistant messages, while tool events ride along uncounted. */
+const PAGE_MESSAGES = 25;
+const turnStart = z.object({ turn: z.number().int().positive() });
+/** Turn numbering for one contiguous older page, from its `turn/start` events and the newer page boundary. */
+function pageOutline(events: Event[], turnBefore: number): TurnOutline {
+  const starts = events.filter(event => event.type === 'turn/start').map(event => {
+    const parsed = turnStart.safeParse(event.data); if (!parsed.success) throw new HarnessError('DSH_HISTORY_INVALID');
+    return { turn: parsed.data.turn, seq: event.seq };
+  });
+  const newest = starts.at(-1)?.turn ?? turnBefore;
+  if (newest !== turnBefore) throw new HarnessError('DSH_HISTORY_INVALID');
+  const first = events[0]?.seq; const leading = starts.length ? starts[0]!.turn - 1 : turnBefore;
+  const outline: TurnOutline = [];
+  if (first !== undefined && leading > 0 && (!starts.length || starts[0]!.seq > first)) outline.push({ turn: leading, seq: first });
+  return [...outline, ...starts];
+}
+/** The turn that events before this page's first event belong to. */
+function turnBeforeFirst(events: Event[], outline: TurnOutline): number {
+  const first = events[0]; if (!first) return 0;
+  const turn = turnAt(outline, first.seq) ?? 0;
+  return first.type === 'turn/start' ? Math.max(0, turn - 1) : turn;
+}
 const bindingSchema = z.object({ id: identifier, cwd: z.string().min(1).max(4096), configuration: z.object({ modelId: z.string().max(2048), permissionId: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/), reasoningEffort: identifier.optional() }), details: z.record(z.string(), z.unknown()) });
 const unknown = (reason = 'DSH 连接中断，需要重新核对原生状态。'): NativeState => ({ status: 'unknown', pendingInputs: 0, configurationVerified: false, reason });
 const nativeError = (error: unknown): HarnessError => error instanceof HarnessError ? error : new HarnessError('DSH_PROTOCOL_INVALID');
@@ -176,26 +199,30 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
   async function history(binding: Binding, olderCursor?: string, limit = 30): Promise<HistoryPage> {
     try {
       checkBinding(binding); z.number().int().min(1).max(100).parse(limit);
-      let records: z.infer<typeof pageSchema>['records']; let hasMore: boolean; let through: number; let activeTurn: number | undefined; let outline: TurnOutline = [];
+      const maxMessages = Math.min(limit, PAGE_MESSAGES);
+      let events: Event[]; let hasMore: boolean; let through: number; let activeTurn: number | undefined; let outline: TurnOutline;
       let usage: HistoryPage['usage'];
       if (olderCursor) {
         if (!/^[A-Za-z0-9_-]{1,1024}$/.test(olderCursor)) throw new HarnessError('DSH_CURSOR_INVALID');
-        const cursor = cursorSchema.parse(JSON.parse(Buffer.from(olderCursor, 'base64url').toString()));
-        if (cursor.session !== binding.id || cursor.before > cursor.through) throw new HarnessError('DSH_CURSOR_INVALID');
-        const page = pageSchema.parse(await connection.call('session/page', request(binding, { throughSeq: cursor.through, beforeSeq: cursor.before, maxMessages: limit })));
-        records = page.records; hasMore = page.hasMore; through = cursor.through;
-        const current = await snapshot(binding, 1); if (current.cursor < through) throw new HarnessError('DSH_HISTORY_CHANGED');
-        outline = current.projections.values.turnOutline ?? [];
+        const cursor = cursorSchema.safeParse((() => { try { return JSON.parse(Buffer.from(olderCursor, 'base64url').toString()); } catch { return undefined; } })());
+        if (!cursor.success || cursor.data.session !== binding.id || cursor.data.before > cursor.data.through) throw new HarnessError('DSH_CURSOR_INVALID');
+        // session/page reads one message-aligned page without activating the Agent.
+        const page = pageSchema.parse(await connection.call('session/page', request(binding, { throughSeq: cursor.data.through, beforeSeq: cursor.data.before, maxMessages })));
+        events = page.records.map(record => record.event).sort((a, b) => a.seq - b.seq); hasMore = page.hasMore; through = cursor.data.through;
+        if (events.some(event => event.seq >= cursor.data.before)) throw new HarnessError('DSH_HISTORY_INVALID');
+        outline = pageOutline(events, cursor.data.turn);
       } else {
-        const current = await snapshot(binding, limit); records = current.records; hasMore = current.hasMore; through = current.cursor;
+        const current = await snapshot(binding, maxMessages);
+        events = current.records.map(record => record.event).sort((a, b) => a.seq - b.seq); hasMore = current.hasMore; through = current.cursor;
         usage = usageFrom(current);
         outline = current.projections.values.turnOutline ?? [];
         const boundary = boundaryFrom(current); if (boundary?.openTurnStartSeq !== null) activeTurn = boundary?.lastTurn;
       }
-      const first = records.length ? Math.min(...records.map(record => record.event.seq)) : undefined;
+      const first = events[0]?.seq;
       if (hasMore && (first === undefined || first === 0)) throw new HarnessError('DSH_HISTORY_NO_PROGRESS');
-      if (records.some(record => record.event.seq > through) || new Set(records.map(record => record.event.seq)).size !== records.length) throw new HarnessError('DSH_HISTORY_INVALID');
-      return { items: historyItems(binding.id, records.map(record => record.event), activeTurn, outline, binding.cwd), olderCursor: hasMore ? Buffer.from(JSON.stringify({ session: binding.id, through, before: first })).toString('base64url') : null, ...(usage ? { usage } : {}) };
+      if (events.some(event => event.seq > through) || new Set(events.map(event => event.seq)).size !== events.length) throw new HarnessError('DSH_HISTORY_INVALID');
+      const next = hasMore ? Buffer.from(JSON.stringify({ session: binding.id, through, before: first, turn: turnBeforeFirst(events, outline) })).toString('base64url') : null;
+      return { items: historyItems(binding.id, events, activeTurn, outline, binding.cwd), olderCursor: next, ...(usage ? { usage } : {}) };
     } catch (error) { throw nativeError(error); }
   }
 
