@@ -63,3 +63,8 @@ test('missing and future web results remain distinct, bounded plain text', () =>
   assert.ok(long.tool!.output!.length <= 128000);
   assert.match(long.tool!.output!, /仅显示前部内容/);
 });
+
+test('reasoning without a readable summary reads as thinking instead of a blank status row', () => {
+  const reasoning = (summary?: string[]) => mapItem(nativeItem.parse({ id: 'r', type: 'reasoning', ...(summary ? { summary } : {}) }), 'turn', '/workspace').text;
+  assert.deepEqual([reasoning([]), reasoning(), reasoning(['', '']), reasoning(['Checked the gate'])], ['思考', '思考', '思考', 'Checked the gate']);
+});

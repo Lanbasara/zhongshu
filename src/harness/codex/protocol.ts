@@ -109,7 +109,8 @@ export function mapItem(input: z.infer<typeof nativeItem>, runId: string, cwd: s
       return { ...base, kind: 'notice', text: activityText[input.kind ?? ''] ?? '子 Agent 活动', status: 'completed',
         ...(action && valid ? { collaboration: { action, agentIds: [input.agentThreadId!] } } : {}) };
     }
-    case 'reasoning': return { ...base, kind: 'notice', text: input.summary?.join('\n') ?? '思考', status: running ? 'running' : 'completed' };
+    // Reasoning without a readable summary arrives as an empty list; it still reads as thinking, never as a blank row.
+    case 'reasoning': return { ...base, kind: 'notice', text: input.summary?.filter(Boolean).join('\n') || '思考', status: running ? 'running' : 'completed' };
     case 'plan': return { ...base, kind: 'notice', text: input.text ?? '更新计划', status: running ? 'running' : 'completed' };
     default: return { ...base, kind: 'notice', text: `此原生条目的详情尚未适配展示：${input.type}。这不表示原生能力不可用。`, status: observedStatus };
   }
