@@ -69,7 +69,7 @@ export const conversationManagementSchema = z.discriminatedUnion('action', [
 export const conversationSearchSchema = z.object({
   workspaceId: identifierSchema.optional(), unregistered: z.literal(true).optional(),
   title: boundedText(800).max(200).optional(), archived: z.boolean().default(false),
-  beforeId: z.uuid().optional(),
+  beforeId: z.string().min(1).max(512).optional(),
 }).strict().refine(query => !(query.workspaceId && query.unregistered));
 export const messagePayload = z.object({ text: boundedText(48 * 1024).max(16_000), ...inputFields }).strict()
   .refine(v => v.text.trim() || v.images?.length || v.references?.length).refine(validSkillSpans);
@@ -116,7 +116,7 @@ const operationFields = {
 };
 export const operationSchema = z.object({ ...operationFields, type: z.enum(['message', 'stop']), delivery: queueDeliverySchema.optional() }).strict();
 export const conversationListSchema = z.object({
-  conversations: z.array(conversationSchema).max(100), olderBeforeId: z.uuid().nullable(), revision: revisionSchema,
+  conversations: z.array(conversationSchema).max(100), olderBeforeId: z.string().min(1).max(512).nullable(), revision: revisionSchema,
 }).strict();
 export const conversationResponseSchema = z.object({ conversation: conversationSchema }).strict();
 export const operationResponseSchema = z.object({ operation: operationSchema }).strict();
@@ -128,7 +128,7 @@ export const snapshotSchema = z.object({
   history: z.object({ items: z.array(itemSchema).max(100), liveItems: z.array(itemSchema).max(100), liveItemsLimited: z.boolean(), olderBeforeItemId: identifierSchema.nullable(), hasOlder: z.boolean(), loaded: z.boolean() }).strict(),
   operations: z.array(operationSchema).max(100), queue: queueViewSchema.optional(), turnFiles: z.array(turnFilesSchema).max(200).optional(), usage: usageSchema.optional(), revision: revisionSchema,
 }).strict();
-export const changeEventSchema = z.object({ type: z.literal('change'), revision: revisionSchema, conversationId: z.uuid(), item: itemSchema.optional() }).strict();
+export const changeEventSchema = z.object({ type: z.literal('change'), revision: revisionSchema, conversationId: z.uuid(), deleted: z.boolean().optional(), item: itemSchema.optional() }).strict();
 export const resetEventSchema = z.object({ type: z.literal('reset'), revision: revisionSchema }).strict();
 export const readyEventSchema = z.object({ type: z.literal('ready'), revision: revisionSchema }).strict();
 export type WorkbenchConfiguration = z.infer<typeof workbenchConfigurationSchema>;

@@ -28,7 +28,7 @@ import { itemSchema, stateSchema, usageSchema } from '../../src/shared/workbench
 process.umask(0o077);
 const repository = fileURLToPath(new URL('../../', import.meta.url));
 const cliSchema = z.object({
-  command: z.enum(['serve', 'init', 'reset', 'inspect', 'complete', 'prove', 'seed', 'disconnect', 'reconnect', 'unknown-receipt', 'reject-next', 'fail-create', 'repair', 'disable-skills', 'usage-full', 'usage-compact', 'usage-total-only']),
+  command: z.enum(['serve', 'init', 'reset', 'inspect', 'inspect-deletions', 'reject-delete-next', 'complete', 'prove', 'seed', 'disconnect', 'reconnect', 'unknown-receipt', 'reject-next', 'fail-create', 'repair', 'disable-skills', 'usage-full', 'usage-compact', 'usage-total-only']),
   root: z.string().min(1).max(4096).refine(isAbsolute),
   port: z.coerce.number().int().min(1024).max(65535).default(4391),
   title: z.string().min(1).max(200).optional(),
@@ -44,6 +44,7 @@ const recordSchema = z.object({
   submitCalls: z.number().int().min(0), stopCalls: z.number().int().min(0),
   offline: z.boolean(), unknownReceipt: z.boolean(), hidden: z.boolean(), revision: z.number().int().min(0),
   skillsDisabled: z.boolean().optional(), usage: usageSchema.optional(),
+  rejectDeleteNext: z.boolean().optional(),
 });
 type Native = z.infer<typeof recordSchema>;
 const idle = (): NativeState => ({ status: 'idle', pendingInputs: 0, configurationVerified: true });
@@ -93,6 +94,7 @@ async function main() {
   privateFile(nativePath);
   const native = new DatabaseSync(nativePath);
   native.exec('PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, body TEXT NOT NULL) STRICT; CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY, fail_create INTEGER NOT NULL) STRICT; INSERT OR IGNORE INTO settings VALUES (1, 0)');
+  native.exec('CREATE TABLE IF NOT EXISTS deletion_calls (id TEXT PRIMARY KEY, harness_id TEXT NOT NULL, calls INTEGER NOT NULL, outcome TEXT NOT NULL) STRICT');
   const all = (): Native[] => native.prepare('SELECT body FROM sessions ORDER BY rowid').all().map(row => recordSchema.parse(JSON.parse(String(row.body))));
   const load = (id: string): Native => {
     const row = native.prepare('SELECT body FROM sessions WHERE id = ?').get(id);
@@ -114,13 +116,17 @@ async function main() {
   if (input.command !== 'serve') {
     try {
       if (input.command === 'fail-create') { native.prepare('UPDATE settings SET fail_create = 1 WHERE id = 1').run(); }
-      else if (input.command === 'inspect') {
+      else if (input.command === 'inspect-deletions') {
+        console.log(JSON.stringify(native.prepare('SELECT id,harness_id AS harnessId,calls,outcome FROM deletion_calls ORDER BY id').all()));
+        return;
+      } else if (input.command === 'inspect') {
         console.log(JSON.stringify(all().filter(value => !input.title || value.title === input.title).map(value => ({ id: value.id, title: value.title, harnessId: value.harnessId, configuration: value.configuration, state: value.state, submitCalls: value.submitCalls, stopCalls: value.stopCalls, operationIds: value.submissions.map(item => item.id), rejectedOperationIds: value.rejectedOperationIds, nextReceipt: value.rejectNext ? 'rejected' : value.unknownReceipt ? 'unknown' : 'accepted', revision: value.revision, historyCount: value.items.length, offline: value.offline }))));
         return;
       } else {
         const matches = all().filter(value => value.title === input.title);
         if (matches.length !== 1) throw new Error('title_must_select_exactly_one_fixture_session');
         change(matches[0]!.id, value => {
+          if (input.command === 'reject-delete-next') value.rejectDeleteNext = true;
           if (input.command === 'disable-skills') value.skillsDisabled = true;
           if (input.command === 'usage-full' || input.command === 'usage-compact') {
             value.usage = { total: 176_222_262, context: { used: input.command === 'usage-full' ? 188_743 : 83_886, capacity: 1_048_576, estimated: true } };
@@ -146,7 +152,7 @@ async function main() {
           }
         // Arming a future receipt does not change observed native state. An
         // invalidation here would briefly fence the very send being tested.
-        }, !['unknown-receipt', 'reject-next'].includes(input.command));
+        }, !['unknown-receipt', 'reject-next', 'reject-delete-next'].includes(input.command));
       }
       console.log(JSON.stringify({ event: input.command, title: input.title }));
     } finally { native.close(); }
@@ -250,6 +256,25 @@ async function main() {
         checked(binding);
         change(binding.id, value => { if (value.state.runId !== runId) throw new Error('fixture_wrong_stop_target'); value.stopCalls++; prove(value); value.state = { ...idle(), status: 'interrupted', runId }; });
         return { outcome: 'accepted', runId };
+      },
+      async delete(binding) {
+        z.uuid().parse(binding.id);
+        let outcome = 'completed';
+        native.exec('BEGIN IMMEDIATE');
+        try {
+          const row = native.prepare('SELECT body FROM sessions WHERE id=?').get(binding.id);
+          if (row) {
+            const value = recordSchema.parse(JSON.parse(String(row.body)));
+            if (value.harnessId !== id || value.cwd !== binding.cwd) throw new Error('fixture_binding_mismatch');
+            if (value.offline) outcome = 'offline';
+            else if (value.rejectDeleteNext) { outcome = 'rejected'; value.rejectDeleteNext = false; save(value); }
+            else if (['running', 'waiting', 'unknown'].includes(value.state.status) || value.state.pendingInputs) outcome = 'busy';
+            else native.prepare('DELETE FROM sessions WHERE id=?').run(binding.id);
+          }
+          native.prepare('INSERT INTO deletion_calls(id,harness_id,calls,outcome) VALUES(?,?,1,?) ON CONFLICT(id) DO UPDATE SET calls=calls+1,outcome=excluded.outcome').run(binding.id, id, outcome);
+          native.exec('COMMIT');
+        } catch (error) { native.exec('ROLLBACK'); throw error; }
+        if (outcome !== 'completed') throw new Error('fixture_delete_' + outcome);
       },
       async watch(binding, listener) {
         let revision = load(binding.id).revision;

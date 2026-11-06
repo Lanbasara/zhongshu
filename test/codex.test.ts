@@ -442,3 +442,43 @@ test('Codex draft skill discovery creates no thread and selected references surv
   enabled = false;
   assert.deepEqual(await p.adapter.submit(saved, { ...operation, id: 'removed-draft-skill' }), { outcome: 'rejected', reason: 'skill_reference_unavailable' });
 });
+
+test('Codex deletion does not resume history and accepts only exact native absence on retry', async t => {
+  let deleted = false;
+  const p = await peer(t, (request, socket) => {
+    if (request.method !== 'thread/delete') return undefined;
+    assert.deepEqual(request.params, { threadId: saved.id });
+    if (!deleted) { deleted = true; return {}; }
+    socket.send(JSON.stringify({ id: request.id, error: { code: -32600, message: `thread not found: ${saved.id}` } }));
+    return NO_RESPONSE;
+  });
+  await p.adapter.delete!(saved);
+  await p.adapter.delete!(saved);
+  assert.deepEqual(p.calls.map(call => call.method), ['initialize', 'thread/delete', 'thread/delete']);
+});
+
+test('Codex deletion retains native rejection, unrelated absence and malformed success as failures', async t => {
+  for (const message of ['thread another-thread already has an active writer', 'thread not found: another-thread', 'no rollout found for thread id thread-1']) {
+    await t.test(message, async t => {
+      const p = await peer(t, (request, socket) => {
+        if (request.method !== 'thread/delete') return undefined;
+        socket.send(JSON.stringify({ id: request.id, error: { code: -32600, message } }));
+        return NO_RESPONSE;
+      });
+      await assert.rejects(p.adapter.delete!(saved), { message: 'codex_native_error' });
+    });
+  }
+  const p = await peer(t, request => request.method === 'thread/delete' ? { deleted: false } : undefined);
+  await assert.rejects(p.adapter.delete!(saved), { message: 'codex_invalid_data' });
+});
+
+test('Codex deletion requires observation release and never deletes through a live watcher', async t => {
+  const p = await peer(t, request => request.method === 'thread/delete' ? {} : undefined);
+  const stop = await p.adapter.watch(saved, () => {});
+  await assert.rejects(p.adapter.delete!(saved), { message: 'codex_delete_observation_active' });
+  assert.equal(p.calls.some(call => call.method === 'thread/delete'), false);
+  stop();
+  await p.adapter.delete!(saved);
+  const methods = p.calls.map(call => call.method);
+  assert.ok(methods.indexOf('thread/unsubscribe') < methods.indexOf('thread/delete'));
+});

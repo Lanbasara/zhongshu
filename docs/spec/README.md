@@ -18,7 +18,7 @@ spec 是与用户讨论后确认的临时约定：它回答“接下来建什么
 | [工作区文件阅读与编辑](workspace-file-reading-editing.md) | 查阅工作区文件，阅读 HTML 并跳转底稿，Agent 空闲时编辑并保存纯文本 | active | 桌面和手机走通阅读与返回，验证空闲保存及冲突保稿 | 见切片 PR | 2026-11-03 |
 | 本轮文件 | 从对话轮末查看文件清单并打开工作区原文件 | done | 两个真实 Harness 的归轮、历史回看和文件打开通过独立验收 | [PR #19](https://github.com/Lanbasara/zhongshu/pull/19) · [对话验收 U11](../features/conversation-usability.md#u11-本轮文件) · [Storybook 交互入口](../features/interface.md#driving-it-with-harness) | 2026-11-03 |
 | 通用文档附件 | 在图片之外上传常见文档交给 Agent，并能回看；图片归对话基本可用性 | next | 文档生命周期、真实原生输入、失败与清理验收 | none yet | 2026-11-02 |
-| [工作区与对话管理](workspace-conversation-management.md) | 按工作区组织、搜索、重命名、归档和恢复对话 | active | 桌面和手机用户路径、持久化与原生接续验收见工作单 | none yet | 2026-11-03 |
+| [会话生命周期与对话管理](workspace-conversation-management.md) | 按需导航与搜索，执行观察与释放，归档恢复和 Codex 完整删除 | active | 完整生命周期、两端真实路径、性能边界及独立浏览器验收见工作单 | 204 项自动化、两名独立 fixture/真实两端核心旅程通过；Codex 原生删除和重启读回、DSH 归档释放已核验 | 2026-11-06 |
 | 实例级插件管理 | 在中书分别添加市场、发现和管理 Codex 与 DSH 插件 | done | 两端原生读回与界面一致，目标实例隔离与本地人工试用已验收 | [PR #20](https://github.com/Lanbasara/zhongshu/pull/20) · [插件管理地图](../features/plugin-management.md) | 2026-11-04 |
 | 输入区技能引用与对话用量 | 用 `/` 查找并选用技能，查看当前对话的 Token 与上下文占用 | done | 两端原生技能调用与用量已独立核对，缺容量行为由 fixture 验证，DSH 测试实例已获用户验收 | [PR #21](https://github.com/Lanbasara/zhongshu/pull/21) · [U12 技能引用](../features/conversation-usability.md#u12-技能引用) · [U13 对话用量](../features/conversation-usability.md#u13-对话用量) | 2026-11-04 |
 | 语音与安装后恢复 | 语音转文字、安装后恢复工作 | next | 分成独立小切片，各自有真实证据 | none yet | 2026-10-31 |

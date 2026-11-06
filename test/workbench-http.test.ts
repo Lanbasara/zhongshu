@@ -231,6 +231,8 @@ test('workspace registration gates real HTTP and retains disk files, history and
   assert.equal((await manage({ action: 'restore' })).status, 200);
   assert.equal(f.store.getConversation(id)?.state.configurationVerified, false);
   await f.request(`/conversations/${id}`);
+  assert.equal(f.store.getConversation(id)?.state.configurationVerified, false);
+  assert.equal((await post(`/conversations/${id}/reading`, { readerId: randomUUID(), active: true })).status, 200);
   await eventually(() => f.store.getConversation(id)?.state.configurationVerified === true);
   assert.deepEqual(f.store.getConversation(id)?.binding, binding);
   assert.equal((await manage({ action: 'remove' })).status, 200);

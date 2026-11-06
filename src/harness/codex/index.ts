@@ -391,6 +391,25 @@ class CodexAdapter implements HarnessAdapter {
     finally { await this.release(binding.id); }
   }
 
+  async delete(input: Binding): Promise<void> {
+    const binding = parse(bindingSchema, input);
+    if (this.closed) throw new HarnessError('codex_adapter_closed');
+    // Never resume a deleted identity to reconcile a lost deletion response. The
+    // native deletion endpoint also checks external writers and fork references.
+    if (this.watches.has(binding.id) || this.readers.has(binding.id) || this.loading.has(binding.id))
+      throw new HarnessError('codex_delete_observation_active');
+    await this.releasing.get(binding.id);
+    if (this.watches.has(binding.id) || this.readers.has(binding.id) || this.loading.has(binding.id))
+      throw new HarnessError('codex_delete_observation_active');
+    try {
+      parse(z.object({}).strict(), await this.rpc.request('thread/delete', { threadId: binding.id }));
+    } catch (error) {
+      if (error instanceof RpcError && error.nativeKind === 'deleted_thread_absent') return;
+      if (error instanceof RpcError && error.nativeCode === -32601) throw new HarnessError('codex_delete_unsupported');
+      throw new HarnessError(error instanceof HarnessError ? error.code : 'codex_delete_unknown');
+    }
+  }
+
   async watch(input: Binding, listener: (change: NativeChange) => void): Promise<() => void> {
     const binding = parse(bindingSchema, input);
     if (this.closed) throw new HarnessError('codex_adapter_closed');

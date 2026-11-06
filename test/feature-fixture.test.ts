@@ -98,6 +98,46 @@ test('permanent E04 controls reject once, preserve native state and reach real H
     }
   });
 
+  await t.test('fixture deletion removes native content, preserves files and supports a rejected-attempt retry', async () => {
+    for (const harness of ['codex', 'dsh']) {
+      const { id, title } = await create(harness);
+      const operation = message();
+      await post(`/conversations/${id}/operations`, operation);
+      await until(async () => (await snapshot(id)).operations.some((value: { id: string; status: string }) => value.id === operation.id && value.status === 'accepted'));
+      control('complete', title);
+      await until(async () => (await snapshot(id)).conversation.state.status === 'idle');
+      const before = control('inspect', title)[0];
+      assert.equal(before.historyCount, 2);
+      if (harness === 'dsh') {
+        const rejected = await post(`/conversations/${id}/delete`, { confirm: true });
+        assert.equal(rejected.status, 409);
+        assert.equal((await rejected.json()).error, 'conversation_delete_unsupported');
+        assert.equal(control('inspect', title)[0].id, before.id);
+        assert.equal(control('inspect-deletions').some((value: { id: string }) => value.id === before.id), false);
+        assert.equal((await post(`/conversations/${id}/manage`, { action: 'archive', archived: true })).status, 200);
+        assert.equal((await snapshot(id)).conversation.archived, true);
+        assert.equal((await post(`/conversations/${id}/manage`, { action: 'archive', archived: false })).status, 200);
+        continue;
+      }
+      const file = join(runtime, 'workspace-a', 'retain-' + id + '.txt');
+      writeFileSync(file, 'synthetic workspace file');
+      control('reject-delete-next', title);
+      const rejected = await post(`/conversations/${id}/delete`, { confirm: true });
+      assert.equal(rejected.ok, false);
+      assert.equal(control('inspect', title)[0].id, before.id);
+      assert.deepEqual(control('inspect-deletions').find((value: { id: string }) => value.id === before.id),
+        { id: before.id, harnessId: harness, calls: 1, outcome: 'rejected' });
+      assert.equal((await post(`/conversations/${id}/delete`, { confirm: true })).status, 200);
+      assert.deepEqual(control('inspect', title), []);
+      assert.equal(readFileSync(file, 'utf8'), 'synthetic workspace file');
+      assert.deepEqual(control('inspect-deletions').find((value: { id: string }) => value.id === before.id),
+        { id: before.id, harnessId: harness, calls: 2, outcome: 'completed' });
+      // Product deletion replay is settled without calling the boundary again.
+      assert.equal((await post(`/conversations/${id}/delete`, { confirm: true })).status, 200);
+      assert.equal(control('inspect-deletions').find((value: { id: string }) => value.id === before.id).calls, 2);
+    }
+  });
+
   await t.test('page request faults cause real 400/413 once and leave ordinary requests and receipts intact', async () => {
     const saved = new Map(['window', 'location', 'Storage'].map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
     class SyntheticStorage { setItem() {} }

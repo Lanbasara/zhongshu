@@ -1,3 +1,4 @@
+import { createDeletionStore, type DeletionStore } from './conversation-deletions.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import type { DatabaseSync, StatementSync } from 'node:sqlite';
 import { z } from 'zod';
@@ -12,7 +13,7 @@ export type Conversation = {
   nativePreparationId?: string;
   id: string; harnessId: HarnessId; workspaceId: string; cwd: string; title: string;
   configuration: Configuration; binding: Binding | null; readiness: Readiness;
-  archived: boolean; state: NativeState; error: string | null; createdAt: number;
+  archived: boolean; state: NativeState; error: string | null; createdAt: number; lastActivityAt: number;
   usage?: ConversationUsage;
   historyLoaded: boolean; nativeOlderCursor: string | null; nativeOlderBeforeItemId: string | null;
 };
@@ -35,12 +36,23 @@ export type HistorySnapshot = {
   historyLoaded: boolean; nativeOlderCursor: string | null; nativeOlderBeforeItemId: string | null;
 };
 export type ListOperations = { conversationId?: string; status?: OperationStatus; type?: 'message' | 'stop'; order?: 'asc' | 'desc'; afterId?: string; limit?: number };
-type ConversationList = {
+export type ConversationList = {
   beforeId?: string; limit?: number; workspaceId?: string; archived?: boolean;
   title?: string; excludeWorkspaces?: string[];
 };
+// The cursor owns its ordering boundary, so deleting or moving the anchor does not invalidate it.
+// It contains no title: the query fingerprint binds a cursor to its authorized query scope.
+const conversationPageCursor = z.object({ time: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER), id: z.uuid(), scope: z.string().regex(/^[a-f0-9]{64}$/) }).strict();
+function conversationScope(query: ConversationList): string {
+  return createHash('sha256').update(JSON.stringify([query.workspaceId ?? null, query.archived ?? null,
+    query.title ?? '', [...(query.excludeWorkspaces ?? [])].sort()])).digest('hex');
+}
+export function conversationCursor(conversation: Conversation, query: ConversationList = {}): string {
+  return Buffer.from(JSON.stringify({ time: conversation.lastActivityAt, id: conversation.id, scope: conversationScope(query) })).toString('base64url');
+}
 type StoredQueue = Omit<QueueView, 'mode'> & { afterRunId: string | null };
 export interface WorkbenchStore {
+  deletions: DeletionStore;
   resources: ReturnType<typeof createResourceStore>;
   reservePreparation(workspaceId: string, cwd: string, id: string, expectedId?: string): { preparationId: string; nativeId: string };
   completePreparation(id: string): void;
@@ -62,6 +74,7 @@ export interface WorkbenchStore {
   recoverDispatching(): number;
   readQueue(id: string): StoredQueue;
   queuedConversations(after: string): string[];
+  recoverableConversations(after: string): string[];
   queueAdmissionExists(id: string, entryId: string, content: InputContent): boolean;
   changeQueue(id: string, command: Exclude<QueueCommand, { action: 'send' }>): void;
   claimQueue(id: string, entryId: string, version: number, operationId: string, delivery: QueueDelivery): Operation;
@@ -175,7 +188,7 @@ function conversationFromRow(row: Row): Conversation {
     workspaceId: String(row.workspace_id), cwd: String(row.cwd), title: String(row.title), archived: row.archived === 1,
     configuration: parseJson(configurationSchema, row.configuration_json), binding: row.binding_json === null ? null : parseJson(bindingSchema, row.binding_json),
     readiness: parse(z.enum(['preparing', 'ready', 'blocked']), row.readiness, 'corrupt_workbench_data'),
-    state: parseJson(nativeStateSchema, row.state_json), error: row.error === null ? null : String(row.error), createdAt: Number(row.created_at),
+    state: parseJson(nativeStateSchema, row.state_json), error: row.error === null ? null : String(row.error), createdAt: Number(row.created_at), lastActivityAt: Number(row.last_activity_at ?? row.created_at),
     ...(row.usage_json == null ? {} : { usage: parseJson(usageSchema, row.usage_json) }),
     historyLoaded: row.history_loaded === 1, nativeOlderCursor: row.native_older_cursor === null ? null : String(row.native_older_cursor),
     nativeOlderBeforeItemId: row.native_older_before_item_id === null ? null : String(row.native_older_before_item_id),
@@ -283,6 +296,7 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
   };
   const metadata = (item: NativeItem) => JSON.stringify({ ...(item.images?.length ? { images: item.images } : {}), ...(item.references?.length ? { references: item.references } : {}), ...(item.tool ? { tool: item.tool } : {}) });
   const store: WorkbenchStore = {
+    deletions: createDeletionStore(db, event => options.onChange?.(event), now),
     resources,
     reservePreparation(workspaceId, cwd, id, expectedId) {
       parse(identifier, workspaceId); parse(boundedText(4096).min(1), cwd); parse(uuid, id); if (expectedId) parse(uuid, expectedId);
@@ -305,6 +319,7 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
       const creationDigest = digest([input.harnessId, input.workspaceId, input.cwd, input.configuration.modelId, input.configuration.permissionId,
         ...(input.configuration.reasoningEffort === undefined ? [] : [input.configuration.reasoningEffort]), ...(input.preparationId ? ['prepared', input.preparationId] : [])]);
       return mutate(changed => {
+        if (db.prepare('SELECT 1 FROM workbench_deletions WHERE id=?').get(input.id)) throw new StoreError('conversation_deleted', 409);
         const existing = conversationRow(input.id);
         if (existing) {
           if (existing.creation_digest !== creationDigest) throw new StoreError('conversation_id_conflict', 409);
@@ -325,6 +340,7 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
         db.prepare(`INSERT INTO workbench_conversations(id,harness_id,workspace_id,cwd,title,configuration_json,creation_digest,
           readiness,state_json,created_at) VALUES(?,?,?,?,?,?,?,'preparing',?,?)`).run(input.id, input.harnessId, input.workspaceId,
           input.cwd, input.title ?? '新对话', JSON.stringify(input.configuration), creationDigest, JSON.stringify(initial), now());
+        db.prepare('UPDATE workbench_conversations SET last_activity_at=created_at WHERE id=?').run(input.id);
         if (nativePreparationId) db.prepare('UPDATE workbench_conversations SET native_preparation_id=? WHERE id=?').run(nativePreparationId,input.id);
         changed(input.id);
         return { conversation: requireConversation(input.id), created: true };
@@ -342,43 +358,56 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
             AND EXISTS (SELECT 1 FROM json_each(?) w
               WHERE json_extract(w.value, '$.id') = c.workspace_id
                 AND json_extract(w.value, '$.directory') = c.cwd)
-          ORDER BY o.updated_at DESC, o.sequence DESC LIMIT 1`).get(JSON.stringify(harnesses), JSON.stringify(eligible));
+          ORDER BY o.created_at DESC, o.sequence DESC LIMIT 1`).get(JSON.stringify(harnesses), JSON.stringify(eligible));
         return row ? conversationFromRow(row) : null;
       });
     },
     listConversations(value = {}) {
       const input = parse(z.object({
-        beforeId: uuid.optional(), limit: z.number().int().min(1).max(1000).default(100),
+        beforeId: z.string().min(1).max(512).optional(), limit: z.number().int().min(1).max(1000).default(100),
         workspaceId: identifierSchema.optional(), archived: z.boolean().optional(),
         title: z.string().max(200).optional(), excludeWorkspaces: z.array(identifierSchema).max(workspaceLimit).optional(),
       }).strict(), value);
       return storage(() => {
-        const before = input.beforeId ? requireConversation(input.beforeId) : null;
-        const cursor = [before?.createdAt ?? 9223372036854775807n, before?.id ?? ''] as const;
+        let cursor: readonly [number | bigint, string] = [9223372036854775807n, ''];
+        if (input.beforeId) {
+          if (uuid.safeParse(input.beforeId).success) {
+            // Compatibility for a page opened before an application upgrade.
+            const before = requireConversation(input.beforeId);
+            cursor = [before.lastActivityAt, before.id];
+          } else {
+            let raw: unknown;
+            try { raw = JSON.parse(Buffer.from(input.beforeId, 'base64url').toString('utf8')); }
+            catch { throw new StoreError('invalid_conversation_cursor', 400); }
+            const before = parse(conversationPageCursor, raw, 'invalid_conversation_cursor');
+            if (before.scope !== conversationScope(input)) throw new StoreError('conversation_cursor_scope_changed', 400);
+            cursor = [before.time, before.id];
+          }
+        }
         const title = input.title ?? '';
         const exclusions = JSON.stringify(input.excludeWorkspaces ?? []);
         const rows = input.workspaceId !== undefined && input.archived !== undefined
           ? db.prepare(`
               SELECT * FROM workbench_conversations
-              WHERE workspace_id = ? AND archived = ? AND (created_at,id) < (?,?)
+              WHERE workspace_id = ? AND archived = ? AND (last_activity_at,id) < (?,?)
                 AND workspace_id NOT IN (SELECT value FROM json_each(?))
                 AND instr(lower(title), lower(?)) > 0
-              ORDER BY created_at DESC,id DESC LIMIT ?
+              ORDER BY last_activity_at DESC,id DESC LIMIT ?
             `).all(input.workspaceId, Number(input.archived), ...cursor, exclusions, title, input.limit)
           : input.archived !== undefined && input.workspaceId === undefined
             ? db.prepare(`
                 SELECT * FROM workbench_conversations
-                WHERE archived = ? AND (created_at,id) < (?,?)
+                WHERE archived = ? AND (last_activity_at,id) < (?,?)
                   AND workspace_id NOT IN (SELECT value FROM json_each(?))
                   AND instr(lower(title), lower(?)) > 0
-                ORDER BY created_at DESC,id DESC LIMIT ?
+                ORDER BY last_activity_at DESC,id DESC LIMIT ?
               `).all(Number(input.archived), ...cursor, exclusions, title, input.limit)
             : db.prepare(`
                 SELECT * FROM workbench_conversations
-                WHERE (created_at,id) < (?,?) AND (? IS NULL OR workspace_id = ?)
+                WHERE (last_activity_at,id) < (?,?) AND (? IS NULL OR workspace_id = ?)
                   AND workspace_id NOT IN (SELECT value FROM json_each(?))
                   AND instr(lower(title), lower(?)) > 0
-                ORDER BY created_at DESC,id DESC LIMIT ?
+                ORDER BY last_activity_at DESC,id DESC LIMIT ?
               `).all(...cursor, input.workspaceId ?? null, input.workspaceId ?? null, exclusions, title, input.limit);
         return rows.map(conversationFromRow);
       });
@@ -536,6 +565,10 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
         if (operation.status === receipt.outcome && operation.runId === runId && operation.reason === reason) return operation;
         changed(operation.conversationId);
         db.prepare('UPDATE workbench_operations SET status=?,run_id=?,reason=?,updated_at=? WHERE id=?').run(receipt.outcome, runId, reason, now(), id);
+        if (operation.type === 'message' && receipt.outcome === 'accepted') {
+          db.prepare('UPDATE workbench_conversations SET last_activity_at=MAX(last_activity_at,?) WHERE id=?')
+            .run(operation.createdAt, operation.conversationId);
+        }
         if (operation.type === 'message' && operation.queuedInput) {
           const entryId = operation.queuedInput.entryId;
           if (receipt.outcome === 'accepted' && runId) {
@@ -579,6 +612,20 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
           version: Number(state?.version ?? 0),
         };
       });
+    },
+    recoverableConversations(after) {
+      if (after) parse(uuid, after);
+      return storage(() => db.prepare(`SELECT c.id FROM workbench_conversations c
+        WHERE c.id > ? AND (c.binding_json IS NOT NULL OR c.native_preparation_id IS NOT NULL OR c.readiness='preparing') AND (
+          c.readiness='preparing' OR json_extract(c.state_json,'$.status') IN ('running','waiting','unknown')
+          OR json_extract(c.state_json,'$.pendingInputs') > 0
+          OR EXISTS (SELECT 1 FROM workbench_operations o WHERE o.conversation_id=c.id AND o.status IN ('queued','dispatching','unknown'))
+          OR EXISTS (SELECT 1 FROM workbench_operations o WHERE o.conversation_id=c.id AND o.type='message' AND o.status='accepted'
+            AND o.sequence=(SELECT MAX(last.sequence) FROM workbench_operations last WHERE last.conversation_id=c.id AND last.type='message' AND last.status='accepted')
+            AND (o.run_id IS NULL OR (o.run_id IS NOT json_extract(c.state_json,'$.runId') AND o.run_id IS NOT json_extract(c.state_json,'$.terminalRunId'))))
+          OR EXISTS (SELECT 1 FROM workbench_queues q JOIN workbench_queue_entries e ON e.conversation_id=q.conversation_id
+            WHERE q.conversation_id=c.id AND q.pause IS NULL AND e.content_json IS NOT NULL)
+        ) ORDER BY c.id LIMIT 64`).all(after).map(row => String(row.id)));
     },
     queuedConversations(after) {
       if (after) parse(uuid, after);

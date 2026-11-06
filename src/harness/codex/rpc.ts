@@ -15,8 +15,8 @@ const MAX_PENDING = 64;
 
 export class RpcError extends HarnessError {
   readonly nativeCode: number | undefined;
-  readonly nativeKind: 'missing_rollout' | undefined;
-  constructor(code: string, nativeCode?: number, nativeKind?: 'missing_rollout') { super(code); this.nativeCode = nativeCode; this.nativeKind = nativeKind; }
+  readonly nativeKind: 'missing_rollout' | 'deleted_thread_absent' | undefined;
+  constructor(code: string, nativeCode?: number, nativeKind?: 'missing_rollout' | 'deleted_thread_absent') { super(code); this.nativeCode = nativeCode; this.nativeKind = nativeKind; }
 }
 
 type Hooks = {
@@ -33,7 +33,7 @@ export class CodexRpc {
   private connecting: Promise<void> | undefined;
   private permanentlyClosed = false;
   private sequence = 0;
-  private pending = new Map<number, { resolve(value: unknown): void; reject(error: Error): void; timer: NodeJS.Timeout }>();
+  private pending = new Map<number, { resolve(value: unknown): void; reject(error: Error): void; timer: NodeJS.Timeout; deleteThreadId?: string }>();
   private heartbeat: NodeJS.Timeout | undefined;
   private awaitingPong = false;
   private home: string | undefined;
@@ -100,7 +100,9 @@ export class CodexRpc {
           if (!request) return;
           this.pending.delete(data.id); clearTimeout(request.timer);
           if (data.error) request.reject(new RpcError('codex_native_error', data.error.code,
-            data.error.code === -32600 && /^no rollout found for thread id [a-zA-Z0-9_-]{1,512}$/.test(data.error.message) ? 'missing_rollout' : undefined));
+            data.error.code === -32600 && request.deleteThreadId && data.error.message === `thread not found: ${request.deleteThreadId}`
+              ? 'deleted_thread_absent'
+              : data.error.code === -32600 && /^no rollout found for thread id [a-zA-Z0-9_-]{1,512}$/.test(data.error.message) ? 'missing_rollout' : undefined));
           else request.resolve(data.result);
         } else throw new RpcError('codex_invalid_frame');
       } catch { disconnect(); ws.terminate(); }
@@ -148,7 +150,8 @@ export class CodexRpc {
         this.pending.delete(id);
         reject(new RpcError('codex_request_timeout'));
       }, 20_000);
-      this.pending.set(id, { resolve, reject, timer });
+      const deletion = method === 'thread/delete' ? z.object({ threadId: z.string().min(1).max(512) }).safeParse(params) : undefined;
+      this.pending.set(id, { resolve, reject, timer, ...(deletion?.success ? { deleteThreadId: deletion.data.threadId } : {}) });
       ws.send(payload, error => {
         if (!error) return;
         const request = this.pending.get(id);
