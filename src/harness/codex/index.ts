@@ -1,10 +1,10 @@
 import { basename, isAbsolute, normalize } from 'node:path';
 import { z } from 'zod';
 import { HarnessError } from '../types.ts';
-import type { Binding, Catalog, Configuration, HarnessAdapter, HarnessInput, HistoryPage, NativeChange, NativeItem, NativeState, Receipt } from '../types.ts';
+import type { Binding, Catalog, Configuration, HarnessAdapter, HarnessInput, HistoryPage, NativeChange, NativeItem, NativeState, NativeSubagent, Receipt, SubagentHistory, SubagentSnapshot } from '../types.ts';
 import { CodexRpc, RpcError } from './rpc.ts';
 import { inputFields } from '../../shared/content.ts';
-import { revisionSchema, skillRequiresNextTurn } from '../../shared/workbench.ts';
+import { revisionSchema, skillRequiresNextTurn, subagentIdSchema, subagentLimit } from '../../shared/workbench.ts';
 import type { QueueDelivery } from '../../shared/workbench.ts';
 import { configuredThread, cursor, itemsPage, mapItem, nativeId, nativeItem, record, threadStatus, turn } from './protocol.ts';
 import { nativeSkill, resolveSkillInput, skillOptions, type NativeSkill } from '../skills.ts';
@@ -22,6 +22,18 @@ const skillsResponse = z.object({ data: z.array(z.object({ cwd: workspace, skill
 const tokenUsage = z.object({ total: z.object({ totalTokens: revisionSchema }), last: z.object({ totalTokens: revisionSchema }),
   modelContextWindow: revisionSchema.min(1).nullish() });
 const queuedMessage = z.object({ id: nativeId, clientUserMessageId: nativeId });
+const seconds = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER / 1000);
+const spawnSource = z.object({ subAgent: z.object({ thread_spawn: z.object({ parent_thread_id: nativeId, agent_path: z.string().max(4096).nullish(),
+  agent_nickname: z.string().max(400).nullish(), agent_role: z.string().max(400).nullish() }).passthrough() }).passthrough() }).passthrough();
+/** A spawned descendant as returned by thread/list and thread/read; unrelated fields are ignored. */
+const childThread = z.object({
+  id: nativeId, parentThreadId: nativeId.nullish(), agentNickname: z.string().max(400).nullish(), agentRole: z.string().max(400).nullish(),
+  preview: z.string().max(1024 * 1024).nullish(), createdAt: seconds.nullish(), updatedAt: seconds.nullish(), status: threadStatus.nullish(),
+  model: z.string().max(400).nullish(), reasoningEffort: z.string().max(240).nullish(), source: z.unknown().optional(),
+});
+const threadPage = z.object({ data: z.array(childThread).max(100), nextCursor: cursor.nullable() });
+const timedTurn = turn.extend({ startedAt: seconds.nullish(), completedAt: seconds.nullish() });
+const firstLine = (value: string, bytes: number) => { const line = value.trim().split('\n')[0] ?? ''; return Buffer.byteLength(line) <= bytes ? line : line.slice(0, Math.floor(bytes / 3)) + '…'; };
 const queuePage = z.object({ data: z.array(queuedMessage).max(100) });
 const userInput = (operation: z.infer<typeof operationSchema>) => [
   ...(operation.text ? [{ type: 'text', text: operation.text, text_elements: [] }] : []),
@@ -65,6 +77,13 @@ class CodexAdapter implements HarnessAdapter {
   private reconnectTimer: NodeJS.Timeout | undefined;
   private reconnectAttempts = 0;
   private closed = false;
+  /** Child thread -> conversation root it belongs to; filled from verified reads and native collaboration records. */
+  private childRoots = new Map<string, string>();
+  /** Threads already checked and not part of any observed conversation. */
+  private foreignThreads = new Set<string>();
+  private discovering = new Set<string>();
+  /** Children resumed after a reconnect. They are never unsubscribed: releasing a v1 child could shut it down natively. */
+  private attachedChildren = new Set<string>();
 
   constructor(socketPath: string) {
     this.rpc = new CodexRpc(socketPath, {
@@ -76,7 +95,7 @@ class CodexAdapter implements HarnessAdapter {
         for (const id of targets) this.emit(id, { type: 'state', state: { status: 'waiting', pendingInputs: 0, configurationVerified: this.watches.get(id)?.verified ?? false, reason: 'codex_interaction_unsupported' } });
       },
       disconnected: () => {
-        this.live.clear(); this.liveBytes = 0;
+        this.live.clear(); this.liveBytes = 0; this.attachedChildren.clear();
         for (const [id, watch] of this.watches) { watch.verified = false; this.emit(id, { type: 'unavailable', reason: 'codex_disconnected' }); }
         this.scheduleReconnect();
       },
@@ -410,6 +429,162 @@ class CodexAdapter implements HarnessAdapter {
     }
   }
 
+  private rememberChild(childId: string, rootId: string): void {
+    if (!subagentIdSchema.safeParse(childId).success) return;
+    if (!this.childRoots.has(childId) && this.childRoots.size >= 4096) { const oldest = this.childRoots.keys().next().value; if (oldest) this.childRoots.delete(oldest); }
+    this.childRoots.set(childId, rootId); this.foreignThreads.delete(childId);
+  }
+  /** Walk native parent links. Ownership is proven only by reaching the conversation's own thread. */
+  private async ownedBy(binding: Binding, agentId: string): Promise<z.infer<typeof childThread>> {
+    if (!subagentIdSchema.safeParse(agentId).success || agentId === binding.id) throw new HarnessError('subagent_not_owned');
+    let current = agentId; let found: z.infer<typeof childThread> | undefined;
+    for (let hop = 0; hop < 8; hop++) {
+      const thread = parse(z.object({ thread: childThread }), await this.rpc.request('thread/read', { threadId: current, includeTurns: false })).thread;
+      if (thread.id !== current) throw new HarnessError('codex_native_identity_mismatch');
+      found ??= thread;
+      const parent = thread.parentThreadId ?? spawnSource.safeParse(thread.source).data?.subAgent.thread_spawn.parent_thread_id;
+      if (!parent) break;
+      if (parent === binding.id) { this.rememberChild(agentId, binding.id); return found; }
+      current = parent;
+    }
+    throw new HarnessError('subagent_not_owned');
+  }
+  private async lastTurn(threadId: string): Promise<z.infer<typeof timedTurn> | undefined> {
+    const page = parse(z.object({ data: z.array(timedTurn).max(100) }), await this.rpc.request('thread/turns/list', { threadId, limit: 1, sortDirection: 'desc', itemsView: 'notLoaded' }));
+    return page.data[0];
+  }
+  async subagents(input: Binding): Promise<SubagentSnapshot> {
+    const binding = parse(bindingSchema, input);
+    this.retain(binding.id);
+    try {
+      await this.load(binding);
+      // Archive cascades over the spawn tree but unarchive does not, so read both partitions.
+      const threads: z.infer<typeof childThread>[] = []; const ids = new Set<string>();
+      for (const archived of [false, true]) {
+        let next: string | undefined; const seen = new Set<string>();
+        for (let page = 0; page < 3 && threads.length < subagentLimit; page++) {
+          const result = parse(threadPage, await this.rpc.request('thread/list', { ancestorThreadId: binding.id, archived, limit: 100, sortKey: 'created_at', sortDirection: 'asc', ...(next ? { cursor: next } : {}) }));
+          for (const thread of result.data) if (thread.id !== binding.id && !ids.has(thread.id) && subagentIdSchema.safeParse(thread.id).success) { ids.add(thread.id); threads.push(thread); }
+          next = result.nextCursor ?? undefined;
+          if (!next || seen.has(next)) break; seen.add(next);
+        }
+      }
+      threads.sort((left, right) => (left.createdAt ?? 0) - (right.createdAt ?? 0));
+      const agents: NativeSubagent[] = [];
+      let lookups = 0;
+      for (const thread of threads.slice(0, subagentLimit)) {
+        this.rememberChild(thread.id, binding.id);
+        const source = spawnSource.safeParse(thread.source).data?.subAgent.thread_spawn;
+        const path = source?.agent_path ?? undefined;
+        const name = thread.agentNickname?.trim() || source?.agent_nickname?.trim() || path?.split('/').filter(Boolean).at(-1) || '子 Agent';
+        let status: NativeSubagent['status'] = 'unknown'; let endedAt: number | undefined;
+        if (thread.status?.type === 'active') status = 'running';
+        else if (thread.status?.type === 'systemError') status = 'failed';
+        else if (lookups++ < 64) {
+          // Idle or unloaded threads keep their last turn's outcome; reading it does not load or resume the child.
+          const latest = await this.lastTurn(thread.id);
+          status = !latest ? 'idle' : latest.status === 'inProgress' ? 'unknown' : latest.status;
+          if (latest?.completedAt) endedAt = latest.completedAt * 1000;
+        }
+        const task = thread.preview?.trim() ? firstLine(thread.preview, 2000) : path?.split('/').filter(Boolean).at(-1);
+        agents.push({ id: thread.id, parentId: thread.parentThreadId ?? source?.parent_thread_id ?? binding.id, name: firstLine(name, 400), status,
+          ...(task ? { task } : {}), ...((thread.agentRole ?? source?.agent_role) ? { role: firstLine((thread.agentRole ?? source?.agent_role)!, 400) } : {}),
+          ...(thread.model ? { model: thread.reasoningEffort ? `${thread.model} · ${thread.reasoningEffort}` : thread.model } : {}),
+          ...(thread.createdAt ? { startedAt: thread.createdAt * 1000 } : {}), ...(endedAt ? { endedAt } : {}) });
+      }
+      // Codex delivers a child's result to the parent at the parent's next turn. Report only that observable timing.
+      let resultsPending = false;
+      if (agents.length && !agents.some(agent => agent.status === 'running')) {
+        const root = await this.lastTurn(binding.id);
+        const rootEnded = root && root.status !== 'inProgress' && root.completedAt ? root.completedAt * 1000 : undefined;
+        resultsPending = !!rootEnded && agents.some(agent => agent.parentId === binding.id && agent.endedAt !== undefined && agent.endedAt > rootEnded);
+      }
+      return { agents, resultsPending };
+    } finally { await this.release(binding.id); }
+  }
+  async subagentHistory(input: Binding, agentId: string, olderCursor?: string, limit = 50): Promise<SubagentHistory> {
+    const binding = parse(bindingSchema, input);
+    const size = parse(z.number().int().min(1).max(100), limit);
+    const after = olderCursor === undefined ? undefined : parse(cursor, olderCursor);
+    this.retain(binding.id);
+    try {
+      await this.load(binding);
+      await this.ownedBy(binding, agentId);
+      let brief: string | undefined; let briefId: string | undefined;
+      if (!after) {
+        const first = parse(itemsPage, await this.rpc.request('thread/items/list', { threadId: agentId, limit: 1, sortDirection: 'asc' })).data[0];
+        if (first?.item.type === 'userMessage') { brief = mapItem(first.item, first.turnId, binding.cwd).text; briefId = first.item.id; }
+      }
+      const entries: z.infer<typeof itemsPage>['data'] = []; let next = after; let bytes = 0; const seen = new Set<string>();
+      do {
+        const page = parse(itemsPage, await this.rpc.request('thread/items/list', { threadId: agentId, limit: Math.min(size - entries.length, 10), sortDirection: 'desc', ...(next ? { cursor: next } : {}) }));
+        entries.push(...page.data);
+        bytes += page.data.reduce((n, entry) => n + Buffer.byteLength(JSON.stringify(entry.item)), 0);
+        next = page.nextCursor ?? undefined;
+        if (next && seen.has(next)) throw new HarnessError('codex_history_no_progress');
+        if (next) seen.add(next);
+      } while (next && entries.length < size && bytes < 8 * 1024 * 1024);
+      const items = entries.reverse().filter(entry => entry.item.id !== briefId).map(entry => {
+        const item = mapItem(entry.item, entry.turnId, binding.cwd, entry.completedAtMs === null && entry.item.type !== 'userMessage', typeof entry.completedAtMs === 'number');
+        // Inside a child every user message comes from the agent that delegated to it, never from the person.
+        return item.kind === 'user' ? { id: item.id, kind: 'notice' as const, text: `来自主 Agent：${item.text}`, status: 'completed' as const, ...(item.runId ? { runId: item.runId } : {}) } : item;
+      });
+      return { ...(brief ? { brief } : {}), items, olderCursor: next ?? null };
+    } finally { await this.release(binding.id); }
+  }
+  async observeSubagent(input: Binding, agentId: string): Promise<() => void> {
+    const binding = parse(bindingSchema, input);
+    const thread = await this.ownedBy(binding, agentId);
+    // Connections initialized before the spawn are attached automatically. After a reconnect, attach a loaded child
+    // again; an unloaded child is not resumed because its transcript is readable without changing native state.
+    if (!this.attachedChildren.has(agentId) && thread.status && thread.status.type !== 'notLoaded' && this.watches.has(binding.id)) {
+      await this.rpc.request('thread/resume', { threadId: agentId, excludeTurns: true });
+      this.attachedChildren.add(agentId);
+    }
+    return () => {};
+  }
+  async stopSubagent(input: Binding, agentId: string): Promise<Receipt> {
+    const binding = parse(bindingSchema, input);
+    this.retain(binding.id);
+    try {
+      await this.load(binding);
+      await this.ownedBy(binding, agentId);
+      const latest = await this.lastTurn(agentId);
+      if (latest?.status !== 'inProgress') return { outcome: 'rejected', reason: 'subagent_not_running' };
+      await this.rpc.request('turn/interrupt', { threadId: agentId, turnId: latest.id });
+      // Accepted means interruption was requested; a later read confirms the child's terminal state.
+      return { outcome: 'accepted' };
+    } catch (error) {
+      if (error instanceof HarnessError && error.code === 'subagent_not_owned') return { outcome: 'rejected', reason: 'subagent_not_owned' };
+      return { outcome: 'unknown', reason: reason(error) };
+    } finally { await this.release(binding.id); }
+  }
+  /** A notification for a thread that is not observed directly: route it to the conversation that owns it. */
+  private childNotification(method: string, threadId: string): void {
+    const root = this.childRoots.get(threadId);
+    const transcript = method.startsWith('item/');
+    if (root) { if (this.watches.has(root)) this.emit(root, { type: 'subagents', agentId: threadId, ...(transcript ? { transcript: true } : {}) }); return; }
+    if (transcript || this.foreignThreads.has(threadId) || this.discovering.has(threadId) || !this.watches.size || this.discovering.size >= 16) return;
+    this.discovering.add(threadId);
+    void (async () => {
+      try {
+        let current = threadId;
+        for (let hop = 0; hop < 8; hop++) {
+          const thread = parse(z.object({ thread: childThread }), await this.rpc.request('thread/read', { threadId: current, includeTurns: false })).thread;
+          const parent = thread.parentThreadId ?? spawnSource.safeParse(thread.source).data?.subAgent.thread_spawn.parent_thread_id;
+          if (!parent) break;
+          if (this.watches.has(parent)) { this.rememberChild(threadId, parent); this.emit(parent, { type: 'subagents', agentId: threadId }); return; }
+          const known = this.childRoots.get(parent);
+          if (known) { this.rememberChild(threadId, known); if (this.watches.has(known)) this.emit(known, { type: 'subagents', agentId: threadId }); return; }
+          current = parent;
+        }
+        if (this.foreignThreads.size >= 1024) this.foreignThreads.clear();
+        this.foreignThreads.add(threadId);
+      } catch { /* the next collaboration record or explicit read discovers it */ }
+      finally { this.discovering.delete(threadId); }
+    })();
+  }
+
   async watch(input: Binding, listener: (change: NativeChange) => void): Promise<() => void> {
     const binding = parse(bindingSchema, input);
     if (this.closed) throw new HarnessError('codex_adapter_closed');
@@ -450,7 +625,7 @@ class CodexAdapter implements HarnessAdapter {
     if (!['item/started', 'item/completed', 'item/agentMessage/delta', 'turn/started', 'turn/completed', 'thread/status/changed', 'thread/queue/changed', 'thread/tokenUsage/updated'].includes(method)) return;
     const params = parse(record, raw); const threadId = parse(nativeId, params.threadId);
     const watch = this.watches.get(threadId);
-    if (!watch) return;
+    if (!watch) { this.childNotification(method, threadId); return; }
     if (method === 'thread/tokenUsage/updated') {
       const update = tokenUsage.safeParse(params.tokenUsage);
       if (update.success) {
@@ -468,6 +643,10 @@ class CodexAdapter implements HarnessAdapter {
         this.live.set(key, { threadId, item: normalized, overflow: false }); this.liveBytes += Buffer.byteLength(normalized.text);
       }
       this.emit(threadId, { type: 'item', item: normalized });
+      if (normalized.collaboration) {
+        for (const agentId of normalized.collaboration.agentIds) this.rememberChild(agentId, threadId);
+        this.emit(threadId, { type: 'subagents' });
+      }
       return;
     }
     if (method === 'item/agentMessage/delta') {

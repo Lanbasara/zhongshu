@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { HarnessError } from '../types.ts';
 import type { Binding, Configuration, NativeItem, NativeState } from '../types.ts';
 import { editPath } from '../edit-paths.ts';
-import { revisionSchema, usageSchema } from '../../shared/workbench.ts';
+import { revisionSchema, subagentIdSchema, usageSchema } from '../../shared/workbench.ts';
 
 export const identifier = z.string().min(1).max(240);
 export const modelSchema = z.object({ provider: identifier, model: identifier, reasoningEffort: identifier.optional() });
@@ -20,6 +20,8 @@ export const projectionsSchema = z.object({ asOfSeq: z.number().int().nonnegativ
   inbox: z.object({ 'next-turn': z.array(z.unknown()).max(1000), 'next-step': z.array(z.unknown()).max(1000) }).optional(),
   userQuestions: z.object({ active: z.array(z.unknown()).max(1000) }).optional(),
   tokenUsage: z.unknown().optional(), contextPressure: z.unknown().optional(),
+  // Sub-agent projections: the parent's direct-child catalog and team; timing lives on each child.
+  subagentCatalog: z.array(z.unknown()).max(2000).optional(), agentTeam: z.unknown().optional(), subagentTiming: z.unknown().optional(),
 }) });
 export const snapshotSchema = z.object({ type: z.literal('snapshot'), header: z.object({ id: identifier, cwd: z.string().max(4096).optional() }), cursor: z.number().int().nonnegative(), records: z.array(recordSchema).max(20000), hasMore: z.boolean(), projections: projectionsSchema, assistantStream: z.object({ revision: z.number().int(), activeAttempt: z.object({ attemptId: identifier, turn: z.number().int(), step: z.number().int(), nextIndex: z.number().int().nonnegative(), stream: z.array(z.unknown()).max(20000) }).optional() }).optional() });
 export type Snapshot = z.infer<typeof snapshotSchema>;
@@ -123,6 +125,29 @@ export function boundaryFrom(snapshot: Snapshot): { openTurnStartSeq: number | n
     && events.at(-1)?.seq === snapshot.cursor && events.every((event, index) => index === 0 || event.seq === events[index - 1]!.seq + 1))
     return { openTurnStartSeq: latest.seq, lastTurn: latest.turn };
 }
+/**
+ * Senders of child messages and settle notices spliced into a parent's inbox. A busy parent receives these
+ * immediately but records them as transcript messages only when its current step ends.
+ */
+export function inboxSenders(data: Record<string, unknown>): string[] {
+  const inserted = Array.isArray(data.inserted) ? data.inserted.slice(0, 32) : [];
+  return [...new Set(inserted.flatMap(entry => {
+    const source = object(object(entry).source); const sender = source.senderSessionId;
+    return (source.kind === 'subagent-settled' || source.kind === 'agent-message') && typeof sender === 'string' && subagentIdSchema.safeParse(sender).success ? [sender] : [];
+  }))];
+}
+/** Text parts kept separate, bounded like {@link textContent}. */
+export function textBlocks(content: unknown): string[] {
+  if (!Array.isArray(content)) return [];
+  const blocks: string[] = []; let size = 0;
+  for (const value of content) {
+    const block = object(value);
+    if (block.type !== 'text' || typeof block.text !== 'string' || !block.text) continue;
+    size += block.text.length; if (size > 1024 * 1024) throw new HarnessError('DSH_ITEM_TOO_LARGE');
+    blocks.push(block.text);
+  }
+  return blocks;
+}
 export function textContent(content: unknown): string {
   if (!Array.isArray(content)) return '';
   let text = '';
@@ -160,6 +185,12 @@ export function stateFrom(binding: Binding, snapshot: Snapshot): NativeState {
 export function itemFrom(session: string, event: Event, live = false, inferredTurn?: number): NativeItem | undefined {
   const data = event.data; const turn = typeof data.turn === 'number' ? data.turn : inferredTurn;
   const base = { id: `dsh:${session}:event:${event.seq}`, status: 'completed' as const, runId: turn === undefined ? undefined : runId(session, turn) };
+  // A parent's catalog event announces a new child; a settled notice reports its end and may wake the parent.
+  if (event.type === 'subagent/catalog' && subagentIdSchema.safeParse(data.childId).success)
+    return { ...base, kind: 'notice', text: '派出子 Agent', collaboration: { action: 'started', agentIds: [String(data.childId)] } };
+  const source = object(data.source);
+  if (event.type === 'user/message' && source.kind === 'subagent-settled' && subagentIdSchema.safeParse(source.senderSessionId).success)
+    return { ...base, kind: 'notice', text: typeof source.summary === 'string' ? source.summary.slice(0, 2000) : '子 Agent 已结束', collaboration: { action: 'completed', agentIds: [String(source.senderSessionId)] } };
   if (event.type === 'user/message' && typeof object(data.source).rpcId === 'string') return { ...base, kind: 'user', text: textContent(data.content), operationId: String(object(data.source).rpcId) };
   if (event.type === 'assistant/message' && turn !== undefined && typeof data.step === 'number') {
     const text = textContent(object(data.message).content); if (!text) return;

@@ -70,3 +70,12 @@ test('cleartext cookies require an explicit loopback development origin', () => 
   assert.throws(() => validOrigin('https://user:password@workbench.example', false));
   assert.throws(() => loadConfig({ HOST: '0.0.0.0', ZHONGSHU_ORIGIN: 'http://127.0.0.1:3000', ZHONGSHU_ALLOW_HTTP_LOOPBACK: 'true' }));
 });
+
+test('the administrator password comes from configuration, with a local default only for cleartext loopback', () => {
+  const local = { ZHONGSHU_ORIGIN: 'http://127.0.0.1:3000', ZHONGSHU_ALLOW_HTTP_LOOPBACK: 'true' };
+  assert.equal(loadConfig(local).adminPassword, 'zhongshu-local');
+  assert.equal(loadConfig({ ...local, ZHONGSHU_ADMIN_PASSWORD: '' }).adminPassword, 'zhongshu-local', 'an empty value counts as unset');
+  assert.equal(loadConfig({ ...local, ZHONGSHU_ADMIN_PASSWORD: 'zhongshu-dev' }).adminPassword, 'zhongshu-dev');
+  assert.equal(loadConfig({ ZHONGSHU_ORIGIN: 'https://workbench.example' }).adminPassword, undefined, 'remote instances keep their CLI password unless configured');
+  assert.equal(loadConfig({ ZHONGSHU_ORIGIN: 'https://workbench.example', ZHONGSHU_ADMIN_PASSWORD: 'zhongshu' }).adminPassword, 'zhongshu');
+});

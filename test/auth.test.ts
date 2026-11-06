@@ -32,7 +32,7 @@ test('private WAL/FULL database, one administrator, and token hashes only', asyn
   assert.equal(statSync(join(f.directory, 'zhongshu.sqlite')).mode & 0o777, 0o600);
   assert.equal(db.prepare('PRAGMA journal_mode').get()?.journal_mode, 'wal');
   assert.equal(db.prepare('PRAGMA synchronous').get()?.synchronous, 2);
-  await assert.rejects(auth.initialize('short'), { code: 'password_requires_12_to_1024_characters' });
+  await assert.rejects(auth.initialize('short'), { code: 'password_requires_8_to_1024_characters' });
   await auth.initialize(PASSWORD);
   await assert.rejects(auth.initialize(NEW_PASSWORD), { code: 'admin_already_initialized' });
   assert.deepEqual(await auth.login('wrong password', { clientKey: 'client-one' }), { ok: false, reason: 'invalid_credentials' });
@@ -178,4 +178,17 @@ test('administrator CLI accepts stdin secrets, rejects plaintext arguments and d
   assert.equal(reset.code, 0, reset.output); assert.equal(reset.output.includes(NEW_PASSWORD), false);
   const auth = createAuth(f.open(productMigrations), silent);
   assert.equal((await auth.login(NEW_PASSWORD, { clientKey: 'device' })).ok, true);
+});
+
+test('a configured password initializes, stays, and replaces the old one while revoking sessions', async t => {
+  const f = fixture(t); const db = f.open(); const auth = createAuth(db, silent);
+  await assert.rejects(auth.apply('short'), { code: 'password_requires_8_to_1024_characters' });
+  assert.equal(await auth.apply('zhongshu'), 'initialized');
+  const first = success(await auth.login('zhongshu', { clientKey: 'a' }));
+  assert.equal(await auth.apply('zhongshu'), 'unchanged');
+  assert.ok(auth.authenticate(first.token), 'an unchanged password keeps sessions');
+  assert.equal(await auth.apply('zhongshu-pre'), 'reset');
+  assert.equal(auth.authenticate(first.token), null, 'a changed password revokes sessions');
+  assert.equal((await auth.login('zhongshu', { clientKey: 'a' })).ok, false);
+  success(await auth.login('zhongshu-pre', { clientKey: 'a' }));
 });

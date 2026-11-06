@@ -17,17 +17,56 @@ export const stateSchema = z.object({
   terminalStatus: z.enum(['completed', 'interrupted', 'failed']).optional(), pendingInputs: z.number().int().min(0).max(1_000_000),
   configurationVerified: z.boolean(), reason: boundedText(4096).optional(),
 }).strict();
+/** Native identities of sub-agents are opaque, URL-safe values verified against the owning conversation. */
+/** Native sub-agent identity as it may appear in a URL path; dot segments are refused outright. */
+export const subagentIdSchema = z.string().regex(/^[A-Za-z0-9:._-]{1,240}$/).refine(value => !value.includes('..'), 'dot_segment');
+export const subagentLimit = 200;
+export const collaborationActionSchema = z.enum(['started', 'completed', 'interrupted', 'closed', 'messaged', 'waiting']);
+/** A native collaboration record in the main transcript; agent bodies are never inlined. */
+export const collaborationSchema = z.object({ action: collaborationActionSchema, agentIds: z.array(subagentIdSchema).min(1).max(32) }).strict();
 export const itemSchema = z.object({
   id: identifierSchema, kind: z.enum(['user', 'assistant', 'tool', 'notice']),
   text: boundedText(1_048_576), status: z.enum(['running', 'completed', 'failed', 'unknown']),
   runId: identifierSchema.optional(), operationId: identifierSchema.optional(),
-  ...contentFields, tool: toolSchema.optional(),
+  ...contentFields, tool: toolSchema.optional(), collaboration: collaborationSchema.optional(),
+}).strict();
+export const subagentStatusSchema = z.enum(['running', 'idle', 'completed', 'interrupted', 'failed', 'unknown']);
+/** Counts come from the last verified native snapshot; unverified active agents are never counted as running. */
+export const subagentSummarySchema = z.object({
+  total: z.number().int().min(1).max(subagentLimit), running: z.number().int().min(0).max(subagentLimit),
+  unverified: z.number().int().min(0).max(subagentLimit), resultsPending: z.boolean(), revision: revisionSchema,
 }).strict();
 export const conversationSchema = z.object({
   id: z.uuid(), title: boundedText(200), harnessId: z.enum(['codex', 'dsh']), workspaceId: identifierSchema,
   configuration: configurationSchema, readiness: z.enum(['preparing', 'ready', 'blocked']),
   archived: z.boolean().default(false), state: stateSchema, error: boundedText(4096).nullable(), createdAt: revisionSchema,
+  subagents: subagentSummarySchema.optional(),
 }).strict();
+const operationStatusSchema = z.enum(['queued', 'dispatching', 'accepted', 'unknown', 'rejected']);
+export const subagentStopSchema = z.object({ id: z.uuid(), status: operationStatusSchema, reason: boundedText(4096).nullable(), updatedAt: revisionSchema }).strict();
+export const subagentSchema = z.object({
+  id: subagentIdSchema, name: boundedText(400).min(1), task: boundedText(4000).optional(), role: boundedText(400).optional(),
+  model: boundedText(800).optional(), status: subagentStatusSchema,
+  /** The last verified status, kept when the current status is unknown. */
+  lastStatus: subagentStatusSchema.optional(), spawnedBy: boundedText(400).optional(), external: z.literal(true).optional(),
+  startedAt: revisionSchema.optional(), endedAt: revisionSchema.optional(), verifiedAt: revisionSchema.optional(),
+  revision: revisionSchema, stop: subagentStopSchema.optional(),
+}).strict();
+export const teamSchema = z.object({
+  members: z.array(z.object({ id: subagentIdSchema, name: boundedText(400).min(1), status: z.enum(['running', 'idle', 'unknown']),
+    lead: z.literal(true).optional(), agentId: subagentIdSchema.optional() }).strict()).max(64),
+  tasks: z.array(z.object({ id: boundedText(240).min(1), title: boundedText(2000), description: boundedText(16_000),
+    status: z.enum(['pending', 'in_progress', 'completed']), owner: boundedText(400).optional(),
+    writeScopes: z.array(boundedText(4096)).max(32) }).strict()).max(200),
+}).strict();
+export const subagentListSchema = z.object({
+  agents: z.array(subagentSchema).max(subagentLimit), team: teamSchema.optional(), stale: z.boolean(),
+  verifiedAt: revisionSchema.optional(), revision: revisionSchema,
+}).strict();
+export const subagentHistorySchema = z.object({
+  brief: boundedText(64 * 1024).optional(), items: z.array(itemSchema).max(100), olderCursor: z.string().min(1).max(4096).nullable(),
+}).strict();
+export const subagentStopResponseSchema = z.object({ stop: subagentStopSchema }).strict();
 export const catalogSchema = z.object({
   id: z.enum(['codex', 'dsh']), available: z.boolean(), reason: boundedText(4096).optional(),
   models: z.array(z.object({ id: identifierSchema, label: boundedText(1024), reasoningEfforts: z.array(z.object({ id: boundedText(240).min(1), label: boundedText(500) }).strict()).max(32).optional(), defaultReasoningEffort: boundedText(240).min(1).optional() }).strict()).max(1000),
@@ -111,7 +150,7 @@ export const enqueueOperationSchema = z.discriminatedUnion('type', [
   z.object({ id: z.uuid(), type: z.literal('stop'), payload: stopPayload }).strict(),
 ]);
 const operationFields = {
-  id: z.uuid(), conversationId: z.uuid(), status: z.enum(['queued', 'dispatching', 'accepted', 'unknown', 'rejected']),
+  id: z.uuid(), conversationId: z.uuid(), status: operationStatusSchema,
   runId: identifierSchema.nullable(), reason: boundedText(4096).nullable(), createdAt: revisionSchema, updatedAt: revisionSchema,
 };
 export const operationSchema = z.object({ ...operationFields, type: z.enum(['message', 'stop']), delivery: queueDeliverySchema.optional() }).strict();
@@ -137,3 +176,9 @@ export type WorkbenchSnapshot = z.infer<typeof snapshotSchema>;
 export type WorkbenchItem = z.infer<typeof itemSchema>;
 export type WorkbenchOperation = z.infer<typeof operationSchema>;
 export type ChangeEvent = z.infer<typeof changeEventSchema>;
+export type Collaboration = z.infer<typeof collaborationSchema>;
+export type SubagentStatus = z.infer<typeof subagentStatusSchema>;
+export type SubagentView = z.infer<typeof subagentSchema>;
+export type SubagentList = z.infer<typeof subagentListSchema>;
+export type SubagentSummary = z.infer<typeof subagentSummarySchema>;
+export type TeamView = z.infer<typeof teamSchema>;

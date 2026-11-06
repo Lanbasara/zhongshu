@@ -1,5 +1,5 @@
 import type { HostPhase } from './workspace-maintenance.ts';
-import type { Catalog, HarnessAdapter, HarnessId, HistoryPage, NativeItem, NativeState, Receipt } from '../harness/types.ts';
+import { HarnessError, type Catalog, type HarnessAdapter, type HarnessId, type HistoryPage, type NativeItem, type NativeState, type Receipt } from '../harness/types.ts';
 import type { Workspace } from './harness-config.ts';
 import { decodeImage, ResourceError, workspacePath, workspaceFiles } from './resources.ts';
 import { nativeText } from '../shared/content.ts';
@@ -9,7 +9,9 @@ import { listWorkspaceDocuments, openWorkspaceDocument, saveWorkspaceDocument } 
 import { createHash, randomUUID } from 'node:crypto';
 import { StoreError, type WorkbenchStore, type CreateConversation, type OperationInput, type Conversation, type Operation } from './workbench-store.ts';
 import type { WorkspaceRegistry } from './workspace-registry.ts';
-import type { QueueCommand, QueueView, WorkbenchConfiguration, workspaceAddSchema, workspaceManagementSchema } from '../shared/workbench.ts';
+import type { QueueCommand, QueueView, SubagentList, WorkbenchConfiguration, WorkbenchItem, workspaceAddSchema, workspaceManagementSchema } from '../shared/workbench.ts';
+import { itemSchema, subagentIdSchema } from '../shared/workbench.ts';
+import { SubagentStoreError, type SubagentStop } from './subagent-store.ts';
 import type { z } from 'zod';
 
 const TERMINAL = new Set<NativeState['status']>(['idle', 'interrupted', 'failed']);
@@ -22,7 +24,10 @@ type Runtime = {
   timer?: NodeJS.Timeout; retry?: NodeJS.Timeout; flush?: NodeJS.Timeout; release?: NodeJS.Timeout;
   retryAttempt: number;
   live: Map<string, NativeItem>; generation: number; stateGeneration: number; dirty: boolean;
+  /** The native sub-agent tree may differ from the saved index. */
+  subagentsDirty: boolean;
 };
+type SubagentLease = { readers: Map<string, number>; dispose?: () => void; opening?: Promise<void> };
 type HistoryRead = { items: NativeItem[]; cursor: string | null; establishCursor: boolean; usage?: HistoryPage['usage'] };
 
 /** One application writer. Native execution outlives browser observers and application connections. */
@@ -52,6 +57,11 @@ export class Workbench {
   private readonly deleting = new Set<string>();
   private deletionGuard: (id: string) => boolean = () => false;
   private readonly deletionTasks = new Map<string, Promise<void>>();
+  private readonly subagentRefreshes = new Map<string, { task: Promise<void>; again: boolean }>();
+  private readonly subagentTimers = new Map<string, NodeJS.Timeout>();
+  private readonly subagentTouches = new Map<string, Set<string>>();
+  private readonly subagentLeases = new Map<string, SubagentLease>();
+  private readonly subagentStops = new Map<string, Promise<void>>();
 
   constructor(store: WorkbenchStore, initialWorkspaces: Workspace[], adapters: Map<HarnessId, HarnessAdapter>, registry?: WorkspaceRegistry) {
     this.store = store; this.adapters = adapters;
@@ -145,6 +155,9 @@ export class Workbench {
     const current = this.conversation(id);
     this.store.setConversationState(id, { error: reason, state: { status: 'unknown', pendingInputs: current.state.pendingInputs,
       configurationVerified: false, reason, ...(current.state.runId ? { runId: current.state.runId } : {}) } });
+    // The sub-agent index came from the same lost observation; no surface may keep calling it running.
+    this.store.subagents.markUnverified(id);
+    const runtime = this.runtimes.get(id); if (runtime) runtime.subagentsDirty = true;
   }
 
   catalogs(): Promise<Catalog[]> {
@@ -533,6 +546,7 @@ export class Workbench {
       }
       this.restoreDeletions();
       this.store.recoverDispatching();
+      this.store.subagents.recoverDispatching();
       this.restoreQueuedConversations();
       this.ensureRecoveryTimer();
     });
@@ -543,6 +557,10 @@ export class Workbench {
       for (const [id, readers] of this.readers) {
         for (const [reader, expiry] of readers) if (expiry <= Date.now()) readers.delete(reader);
         if (!readers.size) { this.readers.delete(id); this.releaseIdle(id); }
+      }
+      for (const [key, lease] of this.subagentLeases) {
+        for (const [reader, expiry] of lease.readers) if (expiry <= Date.now()) lease.readers.delete(reader);
+        if (!lease.readers.size) this.closeSubagentLease(key);
       }
       this.restoreDeletions();
       try { this.restoreQueuedConversations(); } catch { /* Durable recovery resumes on the next bounded pass. */ }
@@ -576,7 +594,10 @@ export class Workbench {
     const conversation = this.conversation(id);
     if (conversation.nativePreparationId) return this.prepare(conversation);
     return this.task(async () => {
-      try { await this.observe(id); await this.sync(id); }
+      try {
+        await this.observe(id); await this.sync(id);
+        for (const stop of this.store.subagents.pendingStops(id)) if (stop.status === 'queued') this.launch(this.dispatchSubagentStop(stop.id));
+      }
       catch { if (!this.closed) { this.unknown(id, 'native_observation_unavailable'); const runtime = this.runtimes.get(id); if (runtime) this.retryUnknown(id, runtime); } }
     });
   }
@@ -636,6 +657,8 @@ export class Workbench {
       if (this.preparing.has(id) || this.busyConversations.has(id) ||
         (current.binding ? !this.messageAllowed(current) : current.readiness === 'preparing') || this.store.readQueue(id).entries.length)
         throw new StoreError('conversation_busy', 409);
+      // Native deletion cascades to the spawn tree; running sub-agents keep the conversation busy.
+      if (current.binding) await this.assertSubagentsSettled(id);
       this.readers.delete(id); this.disposeRuntime(id);
       return current;
     } catch (error) { this.deleting.delete(id); throw error; }
@@ -868,6 +891,8 @@ export class Workbench {
       await this.observe(id);
       await this.sync(id);
       this.assertOpen();
+      // Native archive stops the spawn tree; it must not hide running sub-agents. A busy main agent is reported first.
+      if (this.messageAllowed(this.conversation(id))) await this.assertSubagentsSettled(id);
     }
     this.assertNotDeleting(id);
     return this.store.setArchived(id, archived, conversation =>
@@ -1020,6 +1045,230 @@ export class Workbench {
     });
   }
 
+  // Native sub-agents (ADR 0013): observe and stop only. The workbench never spawns or messages them.
+  private subagentKey(id: string, agentId: string): string { return `${id}\u0000${agentId}`; }
+  private hasSubagentReaders(id: string): boolean {
+    for (const key of this.subagentLeases.keys()) if (key.startsWith(`${id}\u0000`)) return true;
+    return false;
+  }
+  private ownedSubagent(id: string, agentId: string) {
+    if (!subagentIdSchema.safeParse(agentId).success) throw new StoreError('invalid_request', 400);
+    const agent = this.store.subagents.get(id)?.agents.find(value => value.id === agentId);
+    if (!agent) throw new StoreError('subagent_not_found', 404);
+    return agent;
+  }
+  private subagentTarget(id: string) {
+    const conversation = this.conversation(id);
+    const adapter = this.adapter(conversation);
+    if (!conversation.binding) throw new StoreError('conversation_not_ready', 409);
+    return { binding: conversation.binding, adapter };
+  }
+  /** Coalesce native hints: transcript growth only bumps that agent's revision; other hints re-read the tree. */
+  private scheduleSubagents(id: string, agentId?: string, transcript = false): void {
+    if (this.closed || this.isDeleting(id)) return;
+    if (agentId) {
+      let touched = this.subagentTouches.get(id);
+      if (!touched) { touched = new Set(); this.subagentTouches.set(id, touched); }
+      if (touched.size < 64) touched.add(agentId);
+    }
+    const runtime = this.runtimes.get(id);
+    if (!transcript && runtime) runtime.subagentsDirty = true;
+    if (this.subagentTimers.has(id)) return;
+    const timer = setTimeout(() => {
+      this.subagentTimers.delete(id);
+      const touched = this.subagentTouches.get(id); this.subagentTouches.delete(id);
+      if (this.closed || this.isDeleting(id) || !this.store.getConversation(id)) return;
+      try { if (touched?.size) this.store.subagents.touch(id, [...touched]); } catch { /* the next verified read replaces revisions */ }
+      const current = this.runtimes.get(id);
+      if (current?.subagentsDirty) { current.subagentsDirty = false; this.launch(this.refreshSubagents(id)); }
+    }, 400);
+    timer.unref(); this.subagentTimers.set(id, timer);
+  }
+  /** Single-flight native read of the spawn tree. A failed read revokes verification instead of keeping old states. */
+  private refreshSubagents(id: string, duringDeletion = false): Promise<void> {
+    if (this.closed) return Promise.resolve();
+    const conversation = this.store.getConversation(id);
+    if (!conversation || !this.adapters.get(conversation.harnessId)?.subagents) return Promise.resolve();
+    const running = this.subagentRefreshes.get(id);
+    if (running) { running.again = true; return running.task; }
+    // Register before starting so a fast completion can always remove its own entry.
+    const entry = { task: Promise.resolve(), again: false };
+    this.subagentRefreshes.set(id, entry);
+    entry.task = this.task(async () => {
+      await Promise.resolve();
+      try {
+        do {
+          entry.again = false;
+          const conversation = this.store.getConversation(id);
+          // Archived trees were settled before archiving; keep their last verified index.
+          if (!conversation?.binding || conversation.archived || (!duringDeletion && this.isDeleting(id))) return;
+          const adapter = this.adapter(conversation);
+          if (!adapter.subagents) return;
+          let snapshot: Awaited<ReturnType<NonNullable<typeof adapter.subagents>>>;
+          try { snapshot = await adapter.subagents(conversation.binding); }
+          catch (error) {
+            if (!this.closed && (duringDeletion || !this.isDeleting(id)) && this.store.getConversation(id)) this.store.subagents.markUnverified(id);
+            throw error;
+          }
+          if (this.closed || (!duringDeletion && this.isDeleting(id)) || !this.store.getConversation(id)) return;
+          this.store.subagents.save(id, conversation.binding.id, snapshot);
+          // A verified non-running target settles an unknown stop. This reads native state; it never resends.
+          const settled = new Map(snapshot.agents.map(agent => [agent.id, agent.status]));
+          for (const stop of this.store.subagents.pendingStops(id)) {
+            const status = settled.get(stop.agentId);
+            if (stop.status === 'unknown' && status && status !== 'running' && status !== 'unknown') this.store.subagents.settleStop(stop.id, { outcome: 'accepted' });
+          }
+        } while (entry.again && !this.closed);
+      } finally {
+        if (this.subagentRefreshes.get(id) === entry) this.subagentRefreshes.delete(id);
+        this.releaseIdle(id);
+      }
+    });
+    return entry.task;
+  }
+  /** Archive and deletion cascade natively; they wait until no sub-agent is running or unverified. */
+  private async assertSubagentsSettled(id: string): Promise<void> {
+    const conversation = this.conversation(id);
+    if (!conversation.binding || !this.adapters.get(conversation.harnessId)?.subagents) return;
+    try { await this.refreshSubagents(id, true); }
+    catch {
+      // Without a readable tree, refuse only when sub-agents are known; never invent ones that were not observed.
+      if (this.store.subagents.get(id)?.agents.length) throw new StoreError('subagents_unverified', 409);
+      return;
+    }
+    if (this.store.subagents.busy(id)) throw new StoreError('subagents_running', 409);
+  }
+  async subagents(id: string): Promise<SubagentList> {
+    this.assertOpen(); this.assertNotDeleting(id);
+    const conversation = this.conversation(id);
+    const stored = this.store.subagents.get(id);
+    const runtime = this.runtimes.get(id);
+    if (conversation.binding && this.configured(conversation) && this.adapters.get(conversation.harnessId)?.subagents &&
+      !this.executionBlocked(conversation.cwd) && (!stored || !stored.verified || !runtime?.stop))
+      await this.refreshSubagents(id).catch(() => { /* the index reports itself unverified */ });
+    this.assertOpen(); this.assertNotDeleting(id);
+    return this.store.subagents.view(id);
+  }
+  private childItem(item: NativeItem): WorkbenchItem | undefined {
+    // Child transcripts are read through and never stored; native image bytes are not materialized here.
+    const { imageSources, fileEdits: _fileEdits, images: _images, ...rest } = item;
+    const value = imageSources?.length && !rest.text ? { ...rest, text: '子 Agent 生成的图片暂不在此显示。' } : rest;
+    const parsed = itemSchema.safeParse(value);
+    return parsed.success ? parsed.data : undefined;
+  }
+  async subagentHistory(id: string, agentId: string, cursor?: string): Promise<{ brief?: string; items: WorkbenchItem[]; olderCursor: string | null }> {
+    this.assertOpen(); this.assertNotDeleting(id);
+    const { binding, adapter } = this.subagentTarget(id);
+    const agent = this.ownedSubagent(id, agentId);
+    if (agent.external) return { items: [], olderCursor: null };
+    if (!adapter.subagentHistory) throw new StoreError('subagent_history_unavailable', 409);
+    return this.task(async () => {
+      let page: Awaited<ReturnType<NonNullable<typeof adapter.subagentHistory>>>;
+      try { page = await adapter.subagentHistory!(binding, agentId, cursor, 50); }
+      catch (error) {
+        if (error instanceof HarnessError && error.code === 'subagent_not_owned') throw new StoreError('subagent_not_found', 404);
+        throw new StoreError('subagent_history_unavailable', 503);
+      }
+      this.assertOpen(); this.assertNotDeleting(id);
+      const items = page.items.slice(-100).map(item => this.childItem(item)).filter((item): item is WorkbenchItem => !!item);
+      const brief = page.brief && Buffer.byteLength(page.brief) <= 64 * 1024 ? page.brief : page.brief?.slice(0, 16_000);
+      return { ...(brief ? { brief } : {}), items, olderCursor: page.olderCursor };
+    });
+  }
+  /** Reading leases for one sub-agent keep its live hints flowing; they never affect native execution. */
+  async readingSubagent(id: string, agentId: string, readerId: string, active: boolean): Promise<void> {
+    const key = this.subagentKey(id, agentId);
+    if (!active) {
+      const lease = this.subagentLeases.get(key);
+      lease?.readers.delete(readerId);
+      if (lease && !lease.readers.size) this.closeSubagentLease(key);
+      return;
+    }
+    this.assertOpen(); this.assertNotDeleting(id);
+    if (!/^[a-zA-Z0-9-]{1,80}$/.test(readerId)) throw new StoreError('invalid_reader', 400);
+    const { binding, adapter } = this.subagentTarget(id);
+    const agent = this.ownedSubagent(id, agentId);
+    let lease = this.subagentLeases.get(key);
+    if (!lease) {
+      if (this.subagentLeases.size >= 16) throw new StoreError('reader_limit', 429);
+      lease = { readers: new Map() }; this.subagentLeases.set(key, lease);
+    }
+    if (!lease.readers.has(readerId) && lease.readers.size >= 8) throw new StoreError('reader_limit', 429);
+    lease.readers.set(readerId, Date.now() + 45_000);
+    this.ensureRecoveryTimer();
+    if (agent.external || !adapter.observeSubagent || lease.dispose) return;
+    if (lease.opening) return lease.opening;
+    const own = lease;
+    own.opening = this.task(async () => {
+      try {
+        await this.observe(id);
+        const dispose = await adapter.observeSubagent!(binding, agentId);
+        if (this.closed || this.subagentLeases.get(key) !== own) dispose(); else own.dispose = dispose;
+      } catch { /* Explicit reads still work; the next renewal retries live hints. */ }
+      finally { own.opening = undefined; }
+    });
+    return own.opening;
+  }
+  private closeSubagentLease(key: string): void {
+    const lease = this.subagentLeases.get(key); if (!lease) return;
+    this.subagentLeases.delete(key);
+    try { lease.dispose?.(); } catch { /* releasing observation never stops native work */ }
+    this.releaseIdle(key.slice(0, key.indexOf('\u0000')));
+  }
+  stopSubagent(id: string, agentId: string, stopId: string): SubagentStop {
+    this.assertOpen(); this.assertNotDeleting(id);
+    const { adapter } = this.subagentTarget(id);
+    if (!adapter.stopSubagent) throw new StoreError('subagent_stop_unavailable', 409);
+    if (!this.store.subagents.getStop(stopId)) {
+      const agent = this.store.subagents.view(id).agents.find(value => value.id === agentId);
+      if (!agent) throw new StoreError('subagent_not_found', 404);
+      if (agent.status === 'unknown') throw new StoreError('subagent_state_unverified', 409);
+      if (agent.status !== 'running') throw new StoreError('subagent_not_running', 409);
+      if (agent.stop && ['queued', 'dispatching'].includes(agent.stop.status)) throw new StoreError('subagent_stop_pending', 409);
+    }
+    let result: ReturnType<typeof this.store.subagents.enqueueStop>;
+    try { result = this.store.subagents.enqueueStop({ id: stopId, conversationId: id, agentId }); }
+    catch (error) { if (error instanceof SubagentStoreError) throw new StoreError(error.code, error.statusCode); throw error; }
+    if (result.stop.status === 'queued') this.launch(this.dispatchSubagentStop(result.stop.id));
+    return result.stop;
+  }
+  private dispatchSubagentStop(stopId: string): Promise<void> {
+    const existing = this.subagentStops.get(stopId); if (existing) return existing;
+    const task = this.task(async () => {
+      const queued = this.store.subagents.getStop(stopId);
+      if (!queued || queued.status !== 'queued' || this.closed || this.isDeleting(queued.conversationId)) return;
+      const conversation = this.conversation(queued.conversationId);
+      const adapter = this.adapters.get(conversation.harnessId);
+      if (!conversation.binding || !adapter?.stopSubagent || !this.configured(conversation)) {
+        this.store.subagents.settleStop(stopId, { outcome: 'rejected', reason: 'subagent_stop_unavailable' }); return;
+      }
+      if (!this.store.subagents.claimStop(stopId)) return;
+      let receipt: Receipt;
+      try { receipt = await adapter.stopSubagent(conversation.binding, queued.agentId); }
+      catch { receipt = { outcome: 'unknown', reason: 'native_receipt_unknown' }; }
+      this.store.subagents.settleStop(stopId, receipt);
+      if (!this.closed && !this.isDeleting(queued.conversationId)) await this.refreshSubagents(queued.conversationId).catch(() => {});
+    });
+    this.subagentStops.set(stopId, task);
+    void task.then(() => this.subagentStops.delete(stopId), () => this.subagentStops.delete(stopId));
+    return task;
+  }
+  /** Settle an unknown stop only from a verified native read. A still-running agent leaves it unknown; nothing is resent. */
+  async reconcileSubagentStop(id: string, stopId: string): Promise<SubagentStop> {
+    this.assertOpen(); this.assertNotDeleting(id);
+    const stop = this.store.subagents.getStop(stopId);
+    if (!stop || stop.conversationId !== id) throw new StoreError('operation_not_found', 404);
+    if (stop.status === 'queued') { await this.dispatchSubagentStop(stopId); return this.store.subagents.getStop(stopId)!; }
+    if (stop.status !== 'unknown') return stop;
+    await this.refreshSubagents(id).catch(() => {});
+    this.assertOpen(); this.assertNotDeleting(id);
+    const snapshot = this.store.subagents.get(id);
+    const agent = snapshot?.agents.find(value => value.id === stop.agentId);
+    if (snapshot?.verified && agent && !['running', 'unknown'].includes(agent.status))
+      return this.store.subagents.settleStop(stopId, { outcome: 'accepted' });
+    return this.store.subagents.getStop(stopId)!;
+  }
+
   private hasExecutionResponsibility(id: string): boolean {
     const conversation = this.store.getConversation(id);
     if (!conversation) return false;
@@ -1031,15 +1280,18 @@ export class Workbench {
     const latest = this.latestAcceptedMessage(id);
     if (latest && (!latest.runId || (latest.runId !== conversation.state.runId && latest.runId !== conversation.state.terminalRunId))) return true;
     const queue = this.store.readQueue(id);
-    return !queue.pause && queue.entries.length > 0;
+    if (!queue.pause && queue.entries.length > 0) return true;
+    // Native sub-agents keep working after the main turn ends; keep observing until they settle,
+    // and keep a Codex parent loaded while it holds results it has not read yet.
+    return this.store.subagents.busy(id) || (!conversation.archived && this.store.subagents.holdsObservation(id));
   }
   private releaseIdle(id: string): void {
     const runtime = this.runtimes.get(id);
     if (!runtime || this.closed || runtime.release || this.isDeleting(id)) return;
-    if (runtime.syncing || runtime.watching || runtime.older || runtime.dirty || this.readers.has(id) || this.hasExecutionResponsibility(id)) return;
+    if (runtime.syncing || runtime.watching || runtime.older || runtime.dirty || this.readers.has(id) || this.hasSubagentReaders(id) || this.subagentRefreshes.has(id) || this.hasExecutionResponsibility(id)) return;
     runtime.release = setTimeout(() => {
       runtime.release = undefined;
-      if (this.runtimes.get(id) !== runtime || runtime.syncing || runtime.watching || runtime.older || runtime.dirty || this.readers.has(id) || this.hasExecutionResponsibility(id)) return;
+      if (this.runtimes.get(id) !== runtime || runtime.syncing || runtime.watching || runtime.older || runtime.dirty || this.readers.has(id) || this.hasSubagentReaders(id) || this.subagentRefreshes.has(id) || this.hasExecutionResponsibility(id)) return;
       this.flushLive(id, runtime);
       this.disposeRuntime(id);
     }, 250);
@@ -1067,7 +1319,7 @@ export class Workbench {
         if (!idle) throw new StoreError('active_conversation_limit', 429);
         this.disposeRuntime(idle[0]);
       }
-      runtime = { live: new Map(), generation: 0, stateGeneration: 0, dirty: false, retryAttempt: 0 }; this.runtimes.set(id, runtime);
+      runtime = { live: new Map(), generation: 0, stateGeneration: 0, dirty: false, retryAttempt: 0, subagentsDirty: true }; this.runtimes.set(id, runtime);
     }
     return runtime;
   }
@@ -1089,6 +1341,7 @@ export class Workbench {
         if (this.closed || this.isDeleting(id) || this.runtimes.get(id) !== runtime) return;
         try {
           if (change.type === 'usage') { this.store.setUsage(id, change.usage); return; }
+          if (change.type === 'subagents') { this.scheduleSubagents(id, change.agentId, change.transcript); return; }
           runtime.generation++;
           if (change.type === 'item') {
             if (change.item.imageSources?.length) { this.scheduleSync(id); return; }
@@ -1110,6 +1363,8 @@ export class Workbench {
             runtime.stateGeneration++;
             if (change.type === 'state') {
               this.store.setConversationState(id, { state: change.state });
+              // An unknown native state means the same observation cannot vouch for its sub-agents either.
+              if (change.state.status === 'unknown') { this.store.subagents.markUnverified(id); runtime.subagentsDirty = true; }
               if (change.state.configurationVerified && ['running', 'waiting'].includes(change.state.status)) return;
             }
             // Transport loss is a fact, not a hint to wait for a successful read.
@@ -1203,6 +1458,8 @@ export class Workbench {
           for (const item of runtime.live.values()) this.store.saveLiveItem(id, item);
           if (runtime.flush) { clearTimeout(runtime.flush); runtime.flush = undefined; }
           this.enrichReceipts(id);
+          if (state.value.configurationVerified && (runtime.subagentsDirty || this.store.subagents.get(id)?.verified === false ||
+            history.value.items.some(item => item.collaboration))) { runtime.subagentsDirty = false; this.launch(this.refreshSubagents(id)); }
           if (state.value.status !== 'unknown' && !this.hasExecutionResponsibility(id)) runtime.retryAttempt = 0;
         } catch (error) {
           if (!this.closed && this.runtimes.get(id) === runtime) this.unknown(id, error instanceof StoreError ? error.code : 'native_state_unavailable');
@@ -1220,6 +1477,8 @@ export class Workbench {
     return result;
   }
   private disposeRuntime(id: string): void {
+    const timer = this.subagentTimers.get(id); if (timer) { clearTimeout(timer); this.subagentTimers.delete(id); this.subagentTouches.delete(id); }
+    for (const key of [...this.subagentLeases.keys()]) if (key.startsWith(`${id}\u0000`)) this.closeSubagentLease(key);
     const runtime = this.runtimes.get(id); if (!runtime) return;
     if (runtime.timer) clearTimeout(runtime.timer); if (runtime.retry) clearTimeout(runtime.retry); if (runtime.release) clearTimeout(runtime.release); if (runtime.flush) clearTimeout(runtime.flush);
     try { runtime.stop?.(); } finally { this.runtimes.delete(id); }

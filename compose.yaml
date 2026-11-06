@@ -7,6 +7,7 @@ services:
     read_only: true
     environment:
       ZHONGSHU_ORIGIN: ${ZHONGSHU_ORIGIN:-https://localhost}
+      ZHONGSHU_ADMIN_PASSWORD: ${ZHONGSHU_ADMIN_PASSWORD:-}
     volumes:
       - state:/data
     cap_drop: [ALL]

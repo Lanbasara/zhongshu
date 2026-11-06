@@ -1,11 +1,13 @@
 import { isAbsolute, normalize } from 'node:path';
 import { z } from 'zod';
-import type { QueueDelivery } from '../../shared/workbench.ts';
+import type { QueueDelivery, TeamView } from '../../shared/workbench.ts';
+import { subagentIdSchema, subagentLimit } from '../../shared/workbench.ts';
 import { HarnessError } from '../types.ts';
-import type { Binding, Catalog, Configuration, HarnessAdapter, HarnessInput, HistoryPage, NativeChange, NativeState, Receipt } from '../types.ts';
+import type { Binding, Catalog, Configuration, HarnessAdapter, HarnessInput, HistoryPage, NativeChange, NativeItem, NativeState, NativeSubagent, Receipt, SubagentHistory, SubagentSnapshot } from '../types.ts';
 import { Connection, NativeRejection } from './connection.ts';
 import { LiveAssistant } from './live.ts';
-import { boundaryFrom, decodeModel, selectedModel, eventSchema, historyItems, identifier, itemFrom, modelId, modelSchema, object, pageSchema, snapshotSchema, stateFrom, targetTurnRange, terminalStatusFrom, turnAt, usageFrom } from './native.ts';
+import { boundaryFrom, decodeModel, selectedModel, eventSchema, historyItems, identifier, inboxSenders, itemFrom, modelId, modelSchema, object, pageSchema, snapshotSchema, stateFrom, targetTurnRange, terminalStatusFrom, textBlocks, textContent, turnAt, usageFrom } from './native.ts';
+import type { Event } from './native.ts';
 import type { Snapshot, TurnOutline } from './native.ts';
 import { nativeSkill, resolveSkillInput, skillOptions, type NativeSkill } from '../skills.ts';
 
@@ -18,10 +20,23 @@ const cursorSchema = z.object({ session: identifier, through: z.number().int().n
 const bindingSchema = z.object({ id: identifier, cwd: z.string().min(1).max(4096), configuration: z.object({ modelId: z.string().max(2048), permissionId: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/), reasoningEffort: identifier.optional() }), details: z.record(z.string(), z.unknown()) });
 const unknown = (reason = 'DSH 连接中断，需要重新核对原生状态。'): NativeState => ({ status: 'unknown', pendingInputs: 0, configurationVerified: false, reason });
 const nativeError = (error: unknown): HarnessError => error instanceof HarnessError ? error : new HarnessError('DSH_PROTOCOL_INVALID');
+const catalogEntry = z.object({ id: identifier, createdAt: z.number().int().nonnegative().optional(), mode: z.enum(['one-shot', 'external', 'continuable', 'unknown']), label: z.string().max(64 * 1024).optional() }).passthrough();
+const timingSchema = z.object({ settledMs: z.number().optional(), active: z.object({ since: z.number(), through: z.number() }).passthrough().optional(), lastTurnCompleted: z.boolean().optional() }).passthrough();
+const teamProjection = z.object({
+  members: z.array(z.object({ id: identifier, name: z.string().max(400), role: z.enum(['lead', 'teammate']) }).passthrough()).max(64),
+  tasks: z.array(z.object({ id: z.string().min(1).max(240), subject: z.string().max(2000), description: z.string().max(16_000),
+    status: z.enum(['pending', 'in_progress', 'completed', 'deleted']), writeScopes: z.array(z.string().max(4096)).max(32), ownerName: z.string().max(400).optional() }).passthrough()).max(400),
+}).passthrough();
+type CatalogRow = { id: string; parentId: string; mode: z.infer<typeof catalogEntry>['mode']; label?: string; createdAt?: number };
+const shortLine = (value: string, chars: number) => { const line = value.trim().split('\n')[0] ?? ''; return line.length <= chars ? line : line.slice(0, chars - 1) + '…'; };
+const childAddress = (row: CatalogRow) => ({ kind: 'subagent', parentSessionId: row.parentId, childSessionId: row.id, mode: row.mode === 'continuable' || row.mode === 'one-shot' ? row.mode : 'unknown' });
 
 export function createDshAdapter(options: { launchFile: string }): HarnessAdapter {
   const connection = new Connection(options.launchFile);
   const subscriptions = new Set<() => void>();
+  /** Conversation watches by native session, so child observation can hint the owning conversation. */
+  const rootListeners = new Map<string, Set<(change: NativeChange) => void>>();
+  const hint = (rootId: string, change: NativeChange) => { for (const listener of rootListeners.get(rootId) ?? []) { try { listener(change); } catch { /* one observer cannot break others */ } } };
   const lastStates = new Map<string, NativeState>();
   let closed = false;
   const checkBinding = (binding: Binding): Binding => {
@@ -256,6 +271,177 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
     } catch (error) { return error instanceof NativeRejection ? { outcome: 'rejected', reason: 'DSH 拒绝了停止请求。' } : { outcome: 'unknown', reason: '停止回执未知，需核对原生终态；排队输入不会被自动清空。' }; }
   }
 
+  /** A passive snapshot through a sub-agent address; following a child never activates it. */
+  async function childSnapshot(row: CatalogRow, cwd: string, limit = 10): Promise<Snapshot> {
+    return new Promise<Snapshot>((resolve, reject) => {
+      let cancel: (() => void) | undefined; let settled = false;
+      const finish = (error?: unknown, value?: Snapshot) => { if (settled) return; settled = true; clearTimeout(timer); cancel?.(); if (error) reject(nativeError(error)); else if (value) resolve(value); };
+      const timer = setTimeout(() => finish(new HarnessError('DSH_SNAPSHOT_TIMEOUT')), 15000);
+      void connection.follow({ request: { address: childAddress(row), maxMessages: limit } }, {
+        item(value) { if (settled) return; try { const parsed = snapshotSchema.parse(value); if (parsed.header.id !== row.id || (parsed.header.cwd !== undefined && parsed.header.cwd !== cwd)) throw new HarnessError('DSH_BINDING_MISMATCH'); finish(undefined, parsed); } catch (error) { finish(error); } },
+        failed: finish,
+      }).then(stop => { cancel = stop; if (settled) stop(); }).catch(finish);
+    });
+  }
+  const catalogRows = (current: Snapshot, parentId: string): CatalogRow[] => (current.projections.values.subagentCatalog ?? []).flatMap(raw => {
+    const entry = catalogEntry.safeParse(raw);
+    if (!entry.success || !subagentIdSchema.safeParse(entry.data.id).success) return [];
+    return [{ id: entry.data.id, parentId, mode: entry.data.mode, ...(entry.data.label ? { label: entry.data.label } : {}), ...(entry.data.createdAt ? { createdAt: entry.data.createdAt } : {}) }];
+  });
+  function childStatus(current: Snapshot): { status: NativeSubagent['status']; endedAt?: number } {
+    const boundary = boundaryFrom(current);
+    const timing = timingSchema.safeParse(current.projections.values.subagentTiming).data;
+    if (boundary?.openTurnStartSeq != null) return { status: 'running' };
+    if (boundary && boundary.lastTurn === 0) return { status: 'idle' };
+    const end = boundary && current.records.find(({ event }) => event.type === 'turn/end' && event.data.turn === boundary.lastTurn)?.event;
+    if (end) {
+      const kind = String(object(end.data.reason).kind);
+      return { status: kind === 'completed' ? 'completed' : kind === 'aborted' || kind === 'interrupted' ? 'interrupted' : 'failed', endedAt: end.time };
+    }
+    if (timing?.active) return { status: 'running' };
+    if (timing?.lastTurnCompleted !== undefined) return { status: timing.lastTurnCompleted ? 'completed' : 'interrupted' };
+    return { status: 'unknown' };
+  }
+  /** The spawn tree reachable from this conversation, bounded in depth and reads. */
+  async function tree(binding: Binding): Promise<{ parent: Snapshot; rows: CatalogRow[]; children: Map<string, Snapshot> }> {
+    const parent = await snapshot(binding, 40);
+    const rows = catalogRows(parent, binding.id); const children = new Map<string, Snapshot>();
+    for (let index = 0, reads = 0; index < rows.length && rows.length <= subagentLimit; index++) {
+      const row = rows[index]!;
+      if (row.mode === 'external' || reads++ >= 48) continue;
+      const child = await childSnapshot(row, binding.cwd).catch(() => undefined);
+      if (!child) continue;
+      children.set(row.id, child);
+      const depth = (function depthOf(id: string, hops = 0): number { const value = rows.find(item => item.id === id); return !value || value.parentId === binding.id || hops > 4 ? hops : depthOf(value.parentId, hops + 1); })(row.id);
+      if (depth < 3) for (const nested of catalogRows(child, row.id)) if (!rows.some(item => item.id === nested.id)) rows.push(nested);
+    }
+    return { parent, rows: rows.slice(0, subagentLimit), children };
+  }
+  async function owned(binding: Binding, agentId: string): Promise<CatalogRow> {
+    if (!subagentIdSchema.safeParse(agentId).success || agentId === binding.id) throw new HarnessError('subagent_not_owned');
+    const parent = await snapshot(binding, 5);
+    const direct = catalogRows(parent, binding.id);
+    const found = direct.find(row => row.id === agentId);
+    if (found) return found;
+    for (const row of direct.filter(value => value.mode !== 'external').slice(0, 16)) {
+      const child = await childSnapshot(row, binding.cwd, 1).catch(() => undefined);
+      const nested = child && catalogRows(child, row.id).find(value => value.id === agentId);
+      if (nested) return nested;
+    }
+    throw new HarnessError('subagent_not_owned');
+  }
+  async function subagents(binding: Binding): Promise<SubagentSnapshot> {
+    checkBinding(binding);
+    const { parent, rows, children } = await tree(binding);
+    const settled = new Set(parent.records.flatMap(({ event }) => event.type === 'user/message' && object(event.data.source).kind === 'subagent-settled' ? [String(object(event.data.source).senderSessionId)] : []));
+    const parentRunning = boundaryFrom(parent)?.openTurnStartSeq != null;
+    const team = teamProjection.safeParse(parent.projections.values.agentTeam).data;
+    const names = new Map(team?.members.map(member => [member.id, member.name]));
+    const agents: NativeSubagent[] = rows.map(row => {
+      const child = children.get(row.id);
+      const state = row.mode === 'external' ? { status: settled.has(row.id) ? 'completed' as const : parentRunning ? 'running' as const : 'idle' as const }
+        : child ? childStatus(child) : { status: 'unknown' as const };
+      const used = child?.projections.values.modelSelection?.lastUsed;
+      const label = row.label?.trim();
+      const name = names.get(row.id) ?? (label ? shortLine(label, 40) : '子 Agent');
+      return { id: row.id, parentId: row.parentId, name, status: state.status,
+        ...(label && label !== name ? { task: shortLine(label, 2000) } : {}),
+        ...(used ? { model: used.reasoningEffort ? `${used.model} · ${used.reasoningEffort}` : used.model } : {}),
+        ...(row.mode === 'external' ? { external: true } : {}), ...(row.createdAt ? { startedAt: row.createdAt } : {}),
+        ...(state.endedAt ? { endedAt: state.endedAt } : {}) };
+    });
+    let view: TeamView | undefined;
+    if (team) {
+      const statusOf = new Map(agents.map(agent => [agent.id, agent.status]));
+      view = {
+        members: team.members.slice(0, 64).filter(member => subagentIdSchema.safeParse(member.id).success).map(member => member.id === binding.id || member.role === 'lead'
+          ? { id: member.id, name: shortLine(member.name, 200) || 'lead', status: parentRunning ? 'running' as const : 'idle' as const, lead: true as const }
+          : { id: member.id, name: shortLine(member.name, 200) || '成员', status: statusOf.get(member.id) === 'running' ? 'running' as const : statusOf.has(member.id) && statusOf.get(member.id) !== 'unknown' ? 'idle' as const : 'unknown' as const,
+            ...(statusOf.has(member.id) ? { agentId: member.id } : {}) }),
+        tasks: team.tasks.filter(task => task.status !== 'deleted').slice(0, 200).map(task => ({ id: task.id, title: task.subject.slice(0, 2000), description: task.description.slice(0, 16_000),
+          status: task.status as 'pending' | 'in_progress' | 'completed', ...(task.ownerName ? { owner: task.ownerName.slice(0, 400) } : {}), writeScopes: task.writeScopes.slice(0, 32) })),
+      };
+    }
+    // DSH wakes the parent with each settlement; nothing waits for a later user turn.
+    return { agents, ...(view ? { team: view } : {}), resultsPending: false };
+  }
+  /** Child transcripts: the first delegated message is the brief; later delegated input is attributed to the spawning agent. */
+  function childItems(agentId: string, events: Event[], activeTurn: number | undefined, outline: TurnOutline, cwd: string, briefSeq?: number): NativeItem[] {
+    const items = historyItems(agentId, events, activeTurn, outline, cwd);
+    for (const event of events) {
+      if (event.type !== 'user/message' || event.seq === briefSeq || typeof object(event.data.source).rpcId === 'string') continue;
+      const source = object(event.data.source);
+      // Runtime and time context snapshots are injected by the Host for the model; they are nobody's message.
+      if (!['user', 'agent-message', 'subagent-settled'].includes(String(source.kind))) continue;
+      const text = source.kind === 'subagent-settled' ? String(source.summary ?? '下级子 Agent 已结束') : `来自主 Agent：${textContent(event.data.content)}`;
+      const turn = turnAt(outline, event.seq);
+      items.push({ id: `dsh:${agentId}:event:${event.seq}`, kind: 'notice', text: text.slice(0, 1024 * 1024), status: 'completed', ...(turn === undefined ? {} : { runId: `dsh:${agentId}:turn:${turn}` }) });
+    }
+    const order = new Map(events.map(event => [`dsh:${agentId}:event:${event.seq}`, event.seq]));
+    return items.sort((left, right) => (order.get(left.id) ?? Number.MAX_SAFE_INTEGER) - (order.get(right.id) ?? Number.MAX_SAFE_INTEGER));
+  }
+  async function subagentHistory(binding: Binding, agentId: string, olderCursor?: string, limit = 50): Promise<SubagentHistory> {
+    checkBinding(binding); z.number().int().min(1).max(100).parse(limit);
+    const row = await owned(binding, agentId);
+    if (row.mode === 'external') return { items: [], olderCursor: null };
+    const request = (extra: Record<string, unknown>) => ({ request: { address: childAddress(row), ...extra } });
+    let records: z.infer<typeof pageSchema>['records']; let hasMore: boolean; let through: number; let activeTurn: number | undefined; let outline: TurnOutline = [];
+    let brief: string | undefined; let briefSeq: number | undefined;
+    if (olderCursor) {
+      if (!/^[A-Za-z0-9_-]{1,1024}$/.test(olderCursor)) throw new HarnessError('DSH_CURSOR_INVALID');
+      const cursor = cursorSchema.parse(JSON.parse(Buffer.from(olderCursor, 'base64url').toString()));
+      if (cursor.session !== agentId || cursor.before > cursor.through) throw new HarnessError('DSH_CURSOR_INVALID');
+      const page = pageSchema.parse(await connection.call('session/page', request({ throughSeq: cursor.through, beforeSeq: cursor.before, maxMessages: limit })));
+      records = page.records; hasMore = page.hasMore; through = cursor.through;
+      outline = (await childSnapshot(row, binding.cwd, 1)).projections.values.turnOutline ?? [];
+    } else {
+      const current = await childSnapshot(row, binding.cwd, limit); records = current.records; hasMore = current.hasMore; through = current.cursor;
+      outline = current.projections.values.turnOutline ?? [];
+      const boundary = boundaryFrom(current); if (boundary?.openTurnStartSeq !== null) activeTurn = boundary?.lastTurn;
+      // The delegated instruction is the child's first message, a few events after its header.
+      const opening = pageSchema.parse(await connection.call('session/page', request({ throughSeq: current.cursor, beforeSeq: Math.min(current.cursor + 1, 64), maxMessages: 64 })));
+      const first = [...opening.records, ...records].map(record => record.event).filter(event => event.type === 'user/message' && object(event.data.source).kind === 'user' && typeof object(event.data.source).rpcId !== 'string').sort((a, b) => a.seq - b.seq)[0];
+      // Delegated instructions arrive as separate text parts; keep them apart.
+      if (first) { brief = textBlocks(first.data.content).join('\n\n').slice(0, 64 * 1024); briefSeq = first.seq; }
+    }
+    const first = records.length ? Math.min(...records.map(record => record.event.seq)) : undefined;
+    if (hasMore && (first === undefined || first === 0)) throw new HarnessError('DSH_HISTORY_NO_PROGRESS');
+    return { ...(brief ? { brief } : {}), items: childItems(agentId, records.map(record => record.event), activeTurn, outline, binding.cwd, briefSeq),
+      olderCursor: hasMore ? Buffer.from(JSON.stringify({ session: agentId, through, before: first })).toString('base64url') : null };
+  }
+  async function observeSubagent(binding: Binding, agentId: string): Promise<() => void> {
+    checkBinding(binding);
+    const row = await owned(binding, agentId);
+    if (row.mode === 'external') return () => {};
+    let lastTranscript = 0;
+    const stop = await connection.follow({ request: { address: childAddress(row), maxMessages: 1, assistantStream: true } }, {
+      item(value) {
+        const frame = object(value);
+        if (frame.type === 'event') {
+          const type = String(object(frame.event).type ?? '');
+          if (/^turn\//.test(type)) { hint(binding.id, { type: 'subagents', agentId }); return; }
+        }
+        if (frame.type === 'event' || frame.type === 'assistant-stream') {
+          const now = Date.now(); if (now - lastTranscript < 250) return; lastTranscript = now;
+          hint(binding.id, { type: 'subagents', agentId, transcript: true });
+        }
+      },
+      failed() { hint(binding.id, { type: 'subagents', agentId }); },
+    });
+    return stop;
+  }
+  async function stopSubagent(binding: Binding, agentId: string): Promise<Receipt> {
+    checkBinding(binding);
+    let row: CatalogRow;
+    try { row = await owned(binding, agentId); }
+    catch (error) { return error instanceof HarnessError && error.code === 'subagent_not_owned' ? { outcome: 'rejected', reason: 'subagent_not_owned' } : { outcome: 'unknown', reason: '暂时无法核对子 Agent 归属；未发送停止请求。' }; }
+    if (row.mode === 'one-shot' || row.mode === 'unknown') return { outcome: 'rejected', reason: 'subagent_not_stoppable' };
+    try {
+      z.object({ accepted: z.literal(true) }).parse(await connection.call('subagents/interruptByParent', { childSessionId: row.id, parentSessionId: row.parentId, mode: 'continuable' }));
+      return { outcome: 'accepted' };
+    } catch (error) { return error instanceof NativeRejection ? { outcome: 'rejected', reason: 'DSH 拒绝了停止请求。' } : { outcome: 'unknown', reason: '停止回执未知，需核对子 Agent 状态；未自动重发。' }; }
+  }
+
   async function watch(binding: Binding, listener: (change: NativeChange) => void): Promise<() => void> {
     binding = checkBinding(binding);
     if (closed || subscriptions.size >= 24) throw new HarnessError('DSH_WATCH_LIMIT');
@@ -267,7 +453,8 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
       if (refreshTimer || refreshActive || disposed) return;
       refreshTimer = setTimeout(() => { refreshTimer = undefined; refreshActive = true; const turnGeneration = generation; void state(binding).then(value => { if (turnGeneration === generation) emit({ type: 'state', state: value }); }).catch(() => emit({ type: 'state', state: unknown() })).finally(() => { refreshActive = false; }); }, 100);
     };
-    function dispose(): void { if (disposed) return; disposed = true; generation++; cancel?.(); if (retry) clearTimeout(retry); if (refreshTimer) clearTimeout(refreshTimer); if (textTimer) clearTimeout(textTimer); subscriptions.delete(dispose); }
+    function dispose(): void { if (disposed) return; disposed = true; generation++; cancel?.(); if (retry) clearTimeout(retry); if (refreshTimer) clearTimeout(refreshTimer); if (textTimer) clearTimeout(textTimer); subscriptions.delete(dispose);
+      const listeners = rootListeners.get(binding.id); listeners?.delete(emit); if (listeners && !listeners.size) rootListeners.delete(binding.id); }
     function reconnect(): void {
       if (disposed || retry) return;
       generation++; cancel?.(); cancel = undefined;
@@ -302,6 +489,9 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
                   outline.push({ turn: event.data.turn, seq: event.seq });
                 }
                 const item = itemFrom(binding.id, event, true, turnAt(outline, event.seq)); if (item) emit({ type: 'item', item });
+                if (item?.collaboration) emit({ type: 'subagents', ...(item.collaboration.agentIds.length === 1 ? { agentId: item.collaboration.agentIds[0]! } : {}) });
+                else if (/^team\//.test(event.type)) emit({ type: 'subagents' });
+                else if (event.type === 'agent/inbox/spliced') for (const agentId of inboxSenders(event.data)) emit({ type: 'subagents', agentId });
                 if (event.type === 'assistant/message') { pendingItem = undefined; if (textTimer) clearTimeout(textTimer); textTimer = undefined; }
                 if (/^(turn\/|agent\/inbox|approval\/|permission\/|sandbox\/|model\/|tool\/|assistant\/(?:message|attempt)$|compaction\/)/.test(event.type)) refresh();
               } else if (frame.type === 'assistant-stream') {
@@ -317,7 +507,9 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
         if (disposed || ownGeneration !== generation) stopFollow(); else cancel = stopFollow;
       } catch { if (ownGeneration === generation) reconnect(); }
     }
-    subscriptions.add(dispose); await start(); return dispose;
+    subscriptions.add(dispose);
+    let listeners = rootListeners.get(binding.id); if (!listeners) { listeners = new Set(); rootListeners.set(binding.id, listeners); } listeners.add(emit);
+    await start(); return dispose;
   }
 
   return { id: 'dsh', earlyInput: 'soon', catalog,
@@ -325,5 +517,6 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
       const selected = selectedModel(configuration);
       return { ...configuration, modelId: modelId({ provider: selected.provider, model: selected.model }),
         ...(selected.reasoningEffort === undefined ? {} : { reasoningEffort: selected.reasoningEffort }) };
-    }, prepareDraft, skills: async binding => skillOptions(await skillCatalog(binding)), create, state, history, submit, submitQueued: submit, readImage, reconcile, stop, watch, async close() { closed = true; for (const dispose of [...subscriptions]) dispose(); lastStates.clear(); await connection.close(); } };
+    }, prepareDraft, skills: async binding => skillOptions(await skillCatalog(binding)), create, state, history, submit, submitQueued: submit, readImage, reconcile, stop, watch,
+    subagents, subagentHistory, observeSubagent, stopSubagent, async close() { closed = true; for (const dispose of [...subscriptions]) dispose(); lastStates.clear(); await connection.close(); } };
 }

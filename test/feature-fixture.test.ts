@@ -55,7 +55,7 @@ test('permanent E04 controls reject once, preserve native state and reach real H
   };
   control('init');
   const origin = `http://127.0.0.1:${port}`;
-  const login = await fetch(origin + '/api/login', { method: 'POST', headers: { origin, 'content-type': 'application/json' }, body: JSON.stringify({ password: readFileSync(join(runtime, 'private/password'), 'utf8') }) });
+  const login = await fetch(origin + '/api/login', { method: 'POST', headers: { origin, 'content-type': 'application/json' }, body: JSON.stringify({ password: 'zhongshu-local' }) });
   assert.equal(login.status, 200);
   const cookie = login.headers.getSetCookie().map(value => value.split(';')[0]).join('; ');
   const session = await fetch(origin + '/api/session', { headers: { cookie } }).then(r => r.json());
