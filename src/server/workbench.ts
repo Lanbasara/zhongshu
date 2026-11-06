@@ -164,6 +164,44 @@ export class Workbench {
     if (!workspace) throw new StoreError('workspace_not_found', 404);
     return workspace;
   }
+  conversationDefaults(workspaceId?: string): Conversation | null {
+    this.assertOpen();
+    if (workspaceId) this.workspace(workspaceId);
+    const eligible = this.workspaces.filter(workspace => (!workspaceId || workspace.id === workspaceId) &&
+      !this.workspaceUnavailable(workspace.id) && !this.removing.has(workspace.id));
+    const conversation = this.store.recentAcceptedConversation(eligible.map(({ id, directory }) => ({ id, directory })), [...this.adapters.keys()]);
+    if (!conversation) return null;
+    const adapter = this.adapters.get(conversation.harnessId);
+    try {
+      // Defaults seed a new draft. Do not rewrite the existing binding or its retry identity.
+      return { ...conversation, configuration: adapter?.normalizeConfiguration?.(conversation.configuration) ?? conversation.configuration };
+    } catch {
+      // An unrecognized historical selection remains unavailable rather than changing its meaning.
+      return conversation;
+    }
+  }
+
+  async draftSkills(workspaceId: string, harnessId: HarnessId) {
+    const workspace = this.workspace(workspaceId);
+    const adapter = this.adapters.get(harnessId);
+    if (!adapter) throw new StoreError('harness_unavailable', 409);
+    if (!adapter.draftSkills) return { supported: false as const, skills: [], reason: 'draft_skills_unavailable' as const };
+    return this.task(async () => {
+      const skills = await adapter.draftSkills!(workspace.directory).catch(() => { throw new StoreError('skill_catalog_unavailable', 503); });
+      this.assertOpen();
+      this.assertWorkspaceAvailable(workspaceId);
+      return { supported: true as const, skills };
+    });
+  }
+
+  async draftFiles(workspaceId: string, harnessId: HarnessId, directory = '') {
+    const workspace = this.workspace(workspaceId);
+    if (!this.adapters.has(harnessId)) throw new StoreError('harness_unavailable', 409);
+    const result = await workspaceFiles(workspace.directory, directory);
+    this.assertWorkspaceAvailable(workspaceId);
+    return result;
+  }
+
   private overlaps(left: string, right: string): boolean {
     const contains = (parent: string, child: string) => {
       const path = relative(parent, child);
@@ -433,7 +471,11 @@ export class Workbench {
         const catalog = (await this.catalogs()).find(item => item.id === conversation.harnessId);
         this.assertOpen();
         this.assertWorkspaceAvailable(conversation.workspaceId);
-        if (!catalog?.available || !catalog.models.some(item => item.id === conversation.configuration.modelId) || !catalog.permissions.some(item => item.id === conversation.configuration.permissionId))
+        const configuration = adapter.normalizeConfiguration?.(conversation.configuration) ?? conversation.configuration;
+        const model = catalog?.models.find(item => item.id === configuration.modelId);
+        const effort = configuration.reasoningEffort;
+        if (!catalog?.available || !model || (effort !== undefined && !model.reasoningEfforts?.some(item => item.id === effort)) ||
+          !catalog.permissions.some(item => item.id === conversation.configuration.permissionId))
           throw new StoreError('configuration_unavailable', 409);
         const binding = await adapter.create({ cwd: conversation.cwd, configuration: conversation.configuration, title: conversation.title }, value => {
           // During shutdown this task remains tracked: a native identity already created must still be saved.

@@ -2,12 +2,13 @@ import { createHash } from 'node:crypto';
 import { skillOptionSchema, validSkillSpans, type SkillOption } from '../shared/content.ts';
 import type { Binding, HarnessInput } from './types.ts';
 
-export type NativeSkill = SkillOption & { path?: string };
+export type NativeSkill = SkillOption & { path?: string; draftId?: string };
 
-export function nativeSkill(binding: Binding, skill: { name: string; label?: string; description: string; path?: string }): NativeSkill | undefined {
+export function nativeSkill(binding: Pick<Binding, 'id' | 'cwd'>, skill: { name: string; label?: string; description: string; path?: string }): NativeSkill | undefined {
   const id = createHash('sha256').update(JSON.stringify([binding.id, binding.cwd, skill.name, skill.path])).digest('hex');
   const parsed = skillOptionSchema.safeParse({ id, name: skill.name, label: skill.label || skill.name, description: skill.description.slice(0, 1000) });
-  if (parsed.success) return { ...parsed.data, path: skill.path };
+  const draftId = createHash('sha256').update(JSON.stringify(['workspace-skill-v1', binding.cwd, skill.name, skill.path])).digest('hex');
+  if (parsed.success) return { ...parsed.data, path: skill.path, draftId };
 }
 
 export function skillOptions(skills: NativeSkill[]): SkillOption[] {
@@ -17,7 +18,7 @@ export function skillOptions(skills: NativeSkill[]): SkillOption[] {
 /** Resolve every explicit occurrence against the bound Harness before submission. */
 export function resolveSkillInput(operation: HarnessInput, skills: NativeSkill[], prefix: '/' | '$') {
   if (!validSkillSpans(operation)) return;
-  const byId = new Map(skills.map(skill => [skill.id, skill]));
+  const byId = new Map(skills.flatMap(skill => [[skill.id, skill] as const, ...(skill.draftId ? [[skill.draftId, skill] as const] : [])]));
   const selected = new Map<string, NativeSkill>();
   let text = '';
   let end = 0;

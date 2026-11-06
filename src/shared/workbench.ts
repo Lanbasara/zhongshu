@@ -10,7 +10,7 @@ export const usageSchema = z.object({
   context: z.object({ used: revisionSchema, capacity: revisionSchema.min(1), estimated: z.boolean() }).strict().optional(),
 }).strict().refine(value => value.total !== undefined || value.context !== undefined);
 export type ConversationUsage = z.infer<typeof usageSchema>;
-export const configurationSchema = z.object({ modelId: identifierSchema, permissionId: identifierSchema }).strict();
+export const configurationSchema = z.object({ modelId: identifierSchema, permissionId: identifierSchema, reasoningEffort: boundedText(240).min(1).optional() }).strict();
 export const stateSchema = z.object({
   status: z.enum(['idle', 'running', 'waiting', 'interrupted', 'failed', 'unknown']),
   runId: identifierSchema.optional(), terminalRunId: identifierSchema.optional(),
@@ -30,7 +30,8 @@ export const conversationSchema = z.object({
 }).strict();
 export const catalogSchema = z.object({
   id: z.enum(['codex', 'dsh']), available: z.boolean(), reason: boundedText(4096).optional(),
-  models: z.array(z.object({ id: identifierSchema, label: boundedText(1024) }).strict()).max(1000),
+  models: z.array(z.object({ id: identifierSchema, label: boundedText(1024), reasoningEfforts: z.array(z.object({ id: boundedText(240).min(1), label: boundedText(500) }).strict()).max(32).optional(), defaultReasoningEffort: boundedText(240).min(1).optional() }).strict()).max(1000),
+  defaultModelId: identifierSchema.optional(),
   permissions: z.array(z.object({ id: identifierSchema, label: boundedText(1024), description: boundedText(4096) }).strict()).max(100),
 }).strict();
 export const workspaceIdSchema = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/);

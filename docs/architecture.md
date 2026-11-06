@@ -40,6 +40,14 @@ Codex adapter 在已建立连接丢失时报告内部 `unavailable` 事件，由
 
 Web manifest 提供独立窗口入口。界面以 Streamdown 渲染 Markdown/GFM/代码，用按轮折叠的工具组展示原生命令、输出和状态。运行中输入的路径见[执行功能地图](features/execution.md)。原始 HTML 不执行，链接协议受限。审批与提问仍由原生界面处理。
 
+## 新建草稿与配置归属
+
+[new-conversation.tsx](../src/web/new-conversation.tsx) 管理每工作区草稿和首次发送：生成稳定对话/操作编号，创建、等待准备、上传并派发，失败后沿原编号核对。它通过 [new-conversation-state.ts](../src/web/new-conversation-state.ts) 在 sessionStorage 保留文字、材料引用、配置及首发状态，未上传图片在 IndexedDB；[conversation-preferences.ts](../src/web/conversation-preferences.ts) 的 localStorage 只记配置偏好，不存消息正文。首次发送前不创建产品或原生会话；零工作区入口引导登记。长期决定见 [ADR 0010](adr/0010-draft-first-conversation.md)，复验入口见 [创建对话](features/conversations.md)。
+
+配置偏好失效或缺失时，私有 `/conversation-defaults` 从既有 accepted message 操作找最近成功发送的可用工作区/对话，不另建服务端偏好数据。历史 DSH 编码配置仅在新草稿默认响应中拆分 model/effort，不改旧绑定。模型目录提供真实支持的 reasoningEfforts 和可靠默认；Workbench 准备阶段校验，Store 将可选 reasoningEffort 纳入不可变配置及重试身份。已有对话不允许通过新建配置组件重配。
+
+私有 `/draft-files` 按登记工作区边界列文件；`/draft-skills` 仅在 adapter 有创建前能力时读取。Codex 按 cwd 读取并在提交时核对技能身份；DSH 原生 RPC 依赖 session，因此草稿明确提示首次发送后才可选技能，不创建临时会话绕过边界。
+
 ## 界面与设计系统
 
 当前界面以安静、清晰、有质感为方向：导航紧凑，正文舒展，动作利落。设计参考保存在 [reference](../design/reference/index.html)，它记录已接受的原型，不参与产品运行。产品通过自己的布局与真实状态实现设计意图，引用、上传、执行与恢复沿用原有能力。
@@ -72,7 +80,7 @@ Codex 以原生 image input、DSH 以原生 image content 接图片，无需新�
 
 输入草稿的文本/已上传资源/引用沿用 sessionStorage；失败或中断的上传文件单独在 IndexedDB 暂存，重新加载后需明确重试。发送前必须先持久化操作编号及原提交内容；上传未完成或暂存失败不会悄悄只发文本。退出清理浏览器草稿与暂存。两端文件读取与生成能力的具体差异留在 adapter，验证入口统一归 [对话基本可用性](features/conversation-usability.md)。
 
-技能目录从当前对话绑定的 Harness 读取。私有接口给浏览器显示信息和不透明 ID，草稿与操作保存已选技能的 ID 及文本位置。派发时 adapter 按原生清单核对并转换为本端输入。用量由 adapter 从原生事件或当前投影读取，Workbench 保存每段对话最近一次已确认的用量快照，通过原有变更流提示页面重取。复验见[技能引用](features/conversation-usability.md#u12-技能引用)与[对话用量](features/conversation-usability.md#u13-对话用量)。
+已有对话的技能目录从其绑定 Harness 读取；创建前能力见上方新建草稿边界。私有接口给浏览器显示信息和不透明 ID，草稿与操作保存已选技能的 ID 及文本位置。派发时 adapter 按原生清单核对并转换为本端输入。用量由 adapter 从原生事件或当前投影读取，Workbench 保存每段对话最近一次已确认的用量快照，通过原有变更流提示页面重取。复验见[技能引用](features/conversation-usability.md#u12-技能引用)与[对话用量](features/conversation-usability.md#u13-对话用量)。
 
 仅当已实现的变更影响本图应描述的模块职责、依赖、共享接口或数据归属时，更新受影响的条目。用户能力的入口、行为、实现定位和验收方法归对应的 [功能地图](features/README.md)。尚未实现的设计留在对应 spec 或 ADR 中。
 

@@ -5,7 +5,7 @@ import { HarnessError } from '../types.ts';
 import type { Binding, Catalog, Configuration, HarnessAdapter, HarnessInput, HistoryPage, NativeChange, NativeState, Receipt } from '../types.ts';
 import { Connection, NativeRejection } from './connection.ts';
 import { LiveAssistant } from './live.ts';
-import { boundaryFrom, decodeModel, eventSchema, historyItems, identifier, itemFrom, modelId, modelSchema, object, pageSchema, snapshotSchema, stateFrom, targetTurnRange, terminalStatusFrom, turnAt, usageFrom } from './native.ts';
+import { boundaryFrom, decodeModel, selectedModel, eventSchema, historyItems, identifier, itemFrom, modelId, modelSchema, object, pageSchema, snapshotSchema, stateFrom, targetTurnRange, terminalStatusFrom, turnAt, usageFrom } from './native.ts';
 import type { Snapshot, TurnOutline } from './native.ts';
 import { nativeSkill, resolveSkillInput, skillOptions, type NativeSkill } from '../skills.ts';
 
@@ -15,7 +15,7 @@ const permissionNames: Record<string, string> = { 'read-only': '只读', 'worksp
 const nativeSkillRow = z.object({ name: z.string().min(1).max(120).regex(/^[a-z0-9][a-z0-9-]*$/), description: z.string().max(16_000), path: z.string().max(4096).optional() });
 const skillsResponse = z.object({ skills: z.array(z.unknown()).max(2000) });
 const cursorSchema = z.object({ session: identifier, through: z.number().int().nonnegative(), before: z.number().int().nonnegative() }).strict();
-const bindingSchema = z.object({ id: identifier, cwd: z.string().min(1).max(4096), configuration: z.object({ modelId: z.string().max(2048), permissionId: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/) }), details: z.record(z.string(), z.unknown()) });
+const bindingSchema = z.object({ id: identifier, cwd: z.string().min(1).max(4096), configuration: z.object({ modelId: z.string().max(2048), permissionId: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/), reasoningEffort: identifier.optional() }), details: z.record(z.string(), z.unknown()) });
 const unknown = (reason = 'DSH 连接中断，需要重新核对原生状态。'): NativeState => ({ status: 'unknown', pendingInputs: 0, configurationVerified: false, reason });
 const nativeError = (error: unknown): HarnessError => error instanceof HarnessError ? error : new HarnessError('DSH_PROTOCOL_INVALID');
 
@@ -25,7 +25,7 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
   const lastStates = new Map<string, NativeState>();
   let closed = false;
   const checkBinding = (binding: Binding): Binding => {
-    try { const parsed = bindingSchema.parse(binding); decodeModel(parsed.configuration.modelId); if (!isAbsolute(parsed.cwd) || normalize(parsed.cwd) !== parsed.cwd) throw new Error(); return parsed; }
+    try { const parsed = bindingSchema.parse(binding); selectedModel(parsed.configuration); if (!isAbsolute(parsed.cwd) || normalize(parsed.cwd) !== parsed.cwd) throw new Error(); return parsed; }
     catch { throw new HarnessError('DSH_BINDING_INVALID'); }
   };
   const request = (binding: Binding, extra: Record<string, unknown> = {}) => ({ request: { address: { kind: 'session', sessionId: binding.id }, ...extra } });
@@ -102,8 +102,7 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
       for (const group of groups) for (const model of group.models) {
         if (result.models.length >= 2048) throw new HarnessError('DSH_CATALOG_TOO_LARGE');
         const efforts = model.reasoning?.efforts;
-        if (efforts?.length) for (const effort of efforts) result.models.push({ id: modelId({ provider: group.id, model: model.id, reasoningEffort: effort.id }), label: `${group.name} · ${model.name} · ${effort.name}` });
-        else result.models.push({ id: modelId({ provider: group.id, model: model.id }), label: `${group.name} · ${model.name}` });
+        result.models.push({ id: modelId({ provider: group.id, model: model.id }), label: `${group.name} · ${model.name}`, ...(efforts?.length ? { reasoningEfforts: efforts.map(effort => ({ id: effort.id, label: effort.name })) } : {}) });
       }
       if (!result.models.length || !result.permissions.length) { result.available = false; result.reason = '请在 DSH 原生界面登录并配置可用模型与权限。'; }
       return result;
@@ -112,8 +111,10 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
 
   async function create(input: { cwd: string; configuration: Configuration }, onBound: (binding: Binding) => void): Promise<Binding> {
     try {
-      const selected = decodeModel(input.configuration.modelId); const available = await catalog();
-      if (!available.available || !available.models.some(model => model.id === input.configuration.modelId) || !available.permissions.some(permission => permission.id === input.configuration.permissionId)) throw new HarnessError('DSH_CONFIGURATION_UNAVAILABLE');
+      const selected = selectedModel(input.configuration); const available = await catalog();
+      const model = available.models.find(model => model.id === modelId({ provider: selected.provider, model: selected.model }));
+      if (!model || (model.reasoningEfforts?.length ? !model.reasoningEfforts.some(effort => effort.id === selected.reasoningEffort) : selected.reasoningEffort !== undefined)) throw new HarnessError('DSH_REASONING_EFFORT_UNAVAILABLE');
+      if (!available.available || !available.permissions.some(permission => permission.id === input.configuration.permissionId)) throw new HarnessError('DSH_CONFIGURATION_UNAVAILABLE');
       if (!isAbsolute(input.cwd) || normalize(input.cwd) !== input.cwd || input.cwd.length > 4096) throw new HarnessError('DSH_CWD_INVALID');
       const native = z.object({ sessionId: identifier }).parse(await connection.call('session/create', { request: { cwd: input.cwd } }));
       const binding: Binding = { id: native.sessionId, cwd: input.cwd, configuration: { ...input.configuration }, details: { provider: selected.provider, model: selected.model, ...(selected.reasoningEffort ? { reasoningEffort: selected.reasoningEffort } : {}) } };
@@ -287,5 +288,10 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
     subscriptions.add(dispose); await start(); return dispose;
   }
 
-  return { id: 'dsh', earlyInput: 'soon', catalog, skills: async binding => skillOptions(await skillCatalog(binding)), create, state, history, submit, submitQueued: submit, readImage, reconcile, stop, watch, async close() { closed = true; for (const dispose of [...subscriptions]) dispose(); lastStates.clear(); await connection.close(); } };
+  return { id: 'dsh', earlyInput: 'soon', catalog,
+    normalizeConfiguration(configuration) {
+      const selected = selectedModel(configuration);
+      return { ...configuration, modelId: modelId({ provider: selected.provider, model: selected.model }),
+        ...(selected.reasoningEffort === undefined ? {} : { reasoningEffort: selected.reasoningEffort }) };
+    }, skills: async binding => skillOptions(await skillCatalog(binding)), create, state, history, submit, submitQueued: submit, readImage, reconcile, stop, watch, async close() { closed = true; for (const dispose of [...subscriptions]) dispose(); lastStates.clear(); await connection.close(); } };
 }

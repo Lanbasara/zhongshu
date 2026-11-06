@@ -104,7 +104,7 @@ async function host() {
 async function setup() {
   const fixture = await host(); const directory = await mkdtemp(join(tmpdir(), 'zhongshu-dsh-test-')); const file = join(directory, 'launch'); await writeFile(file, fixture.launch, { mode: 0o600 });
   const adapter = createDshAdapter({ launchFile: file });
-  async function create(permissionId = 'workspace-write'): Promise<Binding> { const catalog = await adapter.catalog(); assert.ok(catalog.available); const model = catalog.models[0]; assert.ok(model); return adapter.create({ cwd: directory, configuration: { modelId: model.id, permissionId } }, () => {}); }
+  async function create(permissionId = 'workspace-write'): Promise<Binding> { const catalog = await adapter.catalog(); assert.ok(catalog.available); const model = catalog.models[0]; assert.ok(model); return adapter.create({ cwd: directory, configuration: { modelId: model.id, permissionId, reasoningEffort: 'high' } }, () => {}); }
   return { fixture, directory, file, adapter, create, async close() { await adapter.close(); await fixture.close(); await rm(directory, { recursive: true, force: true }); } };
 }
 
@@ -163,7 +163,7 @@ test('DSH persists the native binding before configuration failure and never cre
   const context = await setup();
   try {
     const catalog = await context.adapter.catalog(); context.fixture.rejectModel(); let bound: Binding | undefined;
-    await assert.rejects(context.adapter.create({ cwd: context.directory, configuration: { modelId: catalog.models[0]!.id, permissionId: 'workspace-write' } }, value => { bound = value; assert.equal(context.fixture.calls.at(-1)?.method, 'session/create'); }));
+    await assert.rejects(context.adapter.create({ cwd: context.directory, configuration: { modelId: catalog.models[0]!.id, permissionId: 'workspace-write', reasoningEffort: 'high' } }, value => { bound = value; assert.equal(context.fixture.calls.at(-1)?.method, 'session/create'); }));
     assert.ok(bound); assert.equal(context.fixture.calls.filter(call => call.method === 'session/create').length, 1); assert.equal(context.fixture.calls.some(call => call.method === 'session/prompt'), false);
   } finally { await context.close(); }
 });
@@ -428,4 +428,39 @@ test('DSH discards target proof if the Host history moves backwards during looku
     const result = await context.adapter.state(binding, `dsh:${binding.id}:turn:1`);
     assert.equal(result.status, 'unknown'); assert.equal(result.terminalRunId, undefined); assert.equal(result.configurationVerified, false);
   } finally { await context.close(); }
+});
+
+test('DSH separates reasoning choices, rejects invalid selections before creation, and restores legacy IDs', async () => {
+  const context = await setup();
+  try {
+    const catalog = await context.adapter.catalog();
+    const model = catalog.models[0]!;
+    assert.equal(catalog.models.length, 1);
+    assert.deepEqual(model.reasoningEfforts, [{ id: 'high', label: 'High' }]);
+    assert.equal(model.defaultReasoningEffort, undefined);
+    assert.equal(catalog.defaultModelId, undefined);
+    const configuration = { modelId: model.id, permissionId: 'workspace-write' };
+    await assert.rejects(context.adapter.create({ cwd: context.directory, configuration }, () => {}), /DSH_REASONING_EFFORT_UNAVAILABLE/);
+    await assert.rejects(context.adapter.create({ cwd: context.directory, configuration: { ...configuration, reasoningEffort: 'low' } }, () => {}), /DSH_REASONING_EFFORT_UNAVAILABLE/);
+    assert.equal(context.fixture.sessions.size, 0);
+    const legacyId = Buffer.from(JSON.stringify({ provider: 'deepseek-account', model: 'test-model', reasoningEffort: 'high' })).toString('base64url');
+    const legacy = await context.adapter.create({ cwd: context.directory, configuration: { ...configuration, modelId: legacyId } }, () => {});
+    assert.equal((await context.adapter.state(legacy)).configurationVerified, true);
+    await assert.rejects(context.adapter.create({ cwd: context.directory, configuration: { ...configuration, modelId: legacyId, reasoningEffort: 'low' } }, () => {}), /DSH_MODEL_CONFLICT/);
+  } finally { await context.close(); }
+});
+
+
+test('DSH catalog projection splits legacy effort while preserving immutable input', async () => {
+  const adapter = createDshAdapter({ launchFile: '/unused-projection-test.json' });
+  try {
+    const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
+    const legacy = { modelId: encode({ provider: 'test', model: 'chat', reasoningEffort: 'high' }), permissionId: 'read-only' };
+    const original = { ...legacy };
+    const normalized = adapter.normalizeConfiguration!(legacy);
+    assert.deepEqual(normalized, { modelId: encode({ provider: 'test', model: 'chat' }), permissionId: 'read-only', reasoningEffort: 'high' });
+    assert.deepEqual(legacy, original);
+    assert.deepEqual(adapter.normalizeConfiguration!(normalized), normalized);
+    assert.throws(() => adapter.normalizeConfiguration!({ ...legacy, reasoningEffort: 'low' }), { code: 'DSH_MODEL_CONFLICT' });
+  } finally { await adapter.close(); }
 });

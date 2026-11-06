@@ -9,15 +9,16 @@ export type ComposerViewProps = {
   value: string; onChange(value: string): void; onSend(): void; onStop(): void;
   onImages(files: File[]): void; onFiles(): void;
   editDisabled: boolean; imagesDisabled: boolean; filesDisabled: boolean; sendDisabled: boolean;
-  sending: boolean; running: boolean; queueing?: boolean; model: string; permission: string; configurationNote: string;
+  sending: boolean; running: boolean; queueing?: boolean; model: string; reasoningEffort?: string; permission: string; configurationNote: string;
   queue?: ReactNode; materials?: ReactNode; hasMaterials: boolean; error?: string;
   renderEditor?(props: ComponentPropsWithRef<'textarea'>): ReactNode;
   footerDetails?: ReactNode;
+  configurationControls?: ReactNode;
 };
 
 /** Presentation only: the caller owns submission, upload and persistence decisions. */
 export function ComposerView(props: ComposerViewProps) {
-  const { value, onChange, onSend, onStop, onImages, onFiles, editDisabled, imagesDisabled, filesDisabled, sendDisabled, sending, running, queueing, model, permission, configurationNote, queue, materials, hasMaterials, error } = props;
+  const { value, onChange, onSend, onStop, onImages, onFiles, editDisabled, imagesDisabled, filesDisabled, sendDisabled, sending, running, queueing, model, reasoningEffort, permission, configurationNote, queue, materials, hasMaterials, error } = props;
   const canSubmit = !sendDisabled && (!running || queueing);
   const sendLabel = queueing ? '加入队列' : '发送消息';
   const field = useRef<HTMLTextAreaElement>(null);
@@ -76,7 +77,7 @@ export function ComposerView(props: ComposerViewProps) {
           <MenuItem disabled={filesDisabled} onSelect={onFiles}><FileText size={16}/>引用工作区文件</MenuItem>
         </Menu>
         <span className="writing-divider" aria-hidden="true"/>
-        <Information label="当前对话配置" summary={<span>{model}</span>}><dl><div><dt>模型</dt><dd>{model}</dd></div><div><dt>权限</dt><dd>{permission}</dd></div></dl><p>{configurationNote}</p></Information>
+        {props.configurationControls ?? <Information label="当前对话配置" summary={<span>{model}{reasoningEffort && <> · {reasoningEffort}</>}</span>}><dl><div><dt>模型</dt><dd>{model}</dd></div>{reasoningEffort && <div><dt>思考深度</dt><dd>{reasoningEffort}</dd></div>}<div><dt>权限</dt><dd>{permission}</dd></div></dl><p>{configurationNote}</p></Information>}
         <span className="writing-spacer"/>
         {running && <span className="writing-running" role="status"><LoaderCircle size={13} className="spin"/><span>执行中</span></span>}
         {running && <motion.button className="writing-send" type="button" aria-label="停止当前轮" disabled={sending}

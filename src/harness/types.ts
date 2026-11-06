@@ -2,12 +2,13 @@
 import type { ImageAttachment, InputContent, SkillOption } from '../shared/content.ts';
 import type { ConversationUsage, QueueDelivery } from '../shared/workbench.ts';
 export type HarnessId = 'codex' | 'dsh';
-export type Configuration = { modelId: string; permissionId: string };
+export type Configuration = { modelId: string; permissionId: string; reasoningEffort?: string };
 export type Catalog = {
   id: HarnessId;
   available: boolean;
   reason?: string;
-  models: { id: string; label: string }[];
+  models: { id: string; label: string; reasoningEfforts?: { id: string; label: string }[]; defaultReasoningEffort?: string }[];
+  defaultModelId?: string;
   permissions: { id: string; label: string; description: string }[];
 };
 export type Binding = {
@@ -66,7 +67,11 @@ export interface HarnessAdapter {
   readonly id: HarnessId;
   readonly earlyInput?: 'current' | 'soon';
   catalog(): Promise<Catalog>;
+  /** Project legacy configuration into the current catalog shape without mutating its stored identity. */
+  normalizeConfiguration?(configuration: Configuration): Configuration;
   skills?(binding: Binding): Promise<SkillOption[]>;
+  /** Read native workspace capabilities without creating a conversation. */
+  draftSkills?(cwd: string): Promise<SkillOption[]>;
   /** Persist the identity immediately, before later model/permission setup can fail. */
   create(input: { cwd: string; configuration: Configuration; title?: string }, onBound: (binding: Binding) => void): Promise<Binding>;
   /** A target may precede the current/latest run (for example a later native notification turn). Never infer its terminal result from that ordering. */

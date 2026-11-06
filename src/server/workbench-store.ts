@@ -44,6 +44,7 @@ export interface WorkbenchStore {
   createConversation(input: CreateConversation): { conversation: Conversation; created: boolean };
   getConversation(id: string): Conversation | null;
   listConversations(options?: ConversationList): Conversation[];
+  recentAcceptedConversation(workspaces: { id: string; directory: string }[], harnessIds: HarnessId[]): Conversation | null;
   renameConversation(id: string, title: string): Conversation;
   setArchived(id: string, archived: boolean, canArchive: (conversation: Conversation) => boolean): Conversation;
   saveBinding(id: string, binding: Binding): Conversation;
@@ -87,7 +88,7 @@ const POSITION_BOUND = Math.floor(Number.MAX_SAFE_INTEGER / 2);
 const boundedText = (bytes: number) => z.string().max(bytes).refine(value => Buffer.byteLength(value, 'utf8') <= bytes);
 const identifier = boundedText(1024).min(1).refine(value => !value.includes('\0'));
 const uuid = z.uuid();
-const configurationSchema = z.object({ modelId: identifier, permissionId: identifier }).strict();
+const configurationSchema = z.object({ modelId: identifier, permissionId: identifier, reasoningEffort: identifier.optional() }).strict();
 const nativeStateSchema = stateSchema;
 const itemSchema = z.object({
   id: identifier, kind: z.enum(['user', 'assistant', 'tool', 'notice']), text: boundedText(MAX_TEXT_BYTES),
@@ -281,7 +282,8 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
     resources,
     createConversation(value) {
       const input = parse(createConversationSchema, value);
-      const creationDigest = digest([input.harnessId, input.workspaceId, input.cwd, input.configuration.modelId, input.configuration.permissionId]);
+      const creationDigest = digest([input.harnessId, input.workspaceId, input.cwd, input.configuration.modelId, input.configuration.permissionId,
+        ...(input.configuration.reasoningEffort === undefined ? [] : [input.configuration.reasoningEffort])]);
       return mutate(changed => {
         const existing = conversationRow(input.id);
         if (existing) {
@@ -300,6 +302,21 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
       });
     },
     getConversation(id) { parse(uuid, id); return storage(() => { const row = conversationRow(id); return row ? conversationFromRow(row) : null; }); },
+    recentAcceptedConversation(workspaces, harnessIds) {
+      const eligible = parse(z.array(z.object({ id: identifier, directory: boundedText(4096).min(1) }).strict()).max(workspaceLimit), workspaces);
+      const harnesses = parse(z.array(z.enum(['codex', 'dsh'])).max(2), harnessIds);
+      return storage(() => {
+        const row = db.prepare(`SELECT c.* FROM workbench_conversations c
+          JOIN workbench_operations o ON o.conversation_id = c.id
+          WHERE c.archived = 0 AND o.type = 'message' AND o.status = 'accepted'
+            AND c.harness_id IN (SELECT value FROM json_each(?))
+            AND EXISTS (SELECT 1 FROM json_each(?) w
+              WHERE json_extract(w.value, '$.id') = c.workspace_id
+                AND json_extract(w.value, '$.directory') = c.cwd)
+          ORDER BY o.updated_at DESC, o.sequence DESC LIMIT 1`).get(JSON.stringify(harnesses), JSON.stringify(eligible));
+        return row ? conversationFromRow(row) : null;
+      });
+    },
     listConversations(value = {}) {
       const input = parse(z.object({
         beforeId: uuid.optional(), limit: z.number().int().min(1).max(1000).default(100),
@@ -364,7 +381,7 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
       parse(uuid, id); const binding = parse(bindingSchema, value); const json = bindingJson(binding);
       return mutate(changed => {
         const conversation = requireConversation(id);
-        if (binding.cwd !== conversation.cwd || binding.configuration.modelId !== conversation.configuration.modelId || binding.configuration.permissionId !== conversation.configuration.permissionId)
+        if (binding.cwd !== conversation.cwd || binding.configuration.modelId !== conversation.configuration.modelId || binding.configuration.permissionId !== conversation.configuration.permissionId || binding.configuration.reasoningEffort !== conversation.configuration.reasoningEffort)
           throw new StoreError('binding_configuration_conflict', 409);
         if (conversation.binding && conversation.binding.id !== binding.id) throw new StoreError('native_binding_conflict', 409);
         if (conversation.binding && bindingJson(conversation.binding) === json) return conversation;

@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { errorSchema } from '../shared/http.ts';
 import { inputFields, validSkillSpans, type InputContent } from '../shared/content.ts';
+import { clearNewDrafts } from './new-conversation-state.ts';
 import { clearUploads } from './upload-drafts.ts';
 
 export class RequestError extends Error {
@@ -39,9 +40,10 @@ export function readDraft(id: string): Draft {
   try { return draftSchema.parse(JSON.parse(sessionStorage.getItem(prefix + id) ?? '{}')); } catch { return { text: '' }; }
 }
 export function saveDraft(id: string, draft: Draft): boolean {
-  try { if (!draft.text && !draft.pending) sessionStorage.removeItem(prefix + id); else sessionStorage.setItem(prefix + id, JSON.stringify(draft)); return true; } catch { return false; }
+  try { if (!draft.text && !draft.pending && !draft.images?.length && !draft.references?.length && !draft.skills?.length) sessionStorage.removeItem(prefix + id); else sessionStorage.setItem(prefix + id, JSON.stringify(draft)); return true; } catch { return false; }
 }
 export function clearDrafts(): void {
+  clearNewDrafts();
   void clearUploads().catch(() => {});
   try { for (const key of Object.keys(sessionStorage)) if (key.startsWith(prefix)) sessionStorage.removeItem(key); } catch { /* Storage may be disabled; in-memory drafts disappear with the authenticated view. */ }
 }

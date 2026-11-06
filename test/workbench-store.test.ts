@@ -379,3 +379,36 @@ test('v3 conversation history upgrades to active and management metadata survive
   assert.deepEqual(store.getConversation(input.id)?.binding, native);
   assert.equal(store.readHistory(input.id).items[0]?.text, '旧库原文');
 });
+
+test('reasoning effort is immutable and optional legacy identities remain retryable', t => {
+  const f = fixture(t); const store = createWorkbenchStore(f.open()); const legacy = conversation();
+  store.createConversation(legacy); assert.equal(store.createConversation(legacy).created, false);
+  const input = { ...conversation(), configuration: { ...legacy.configuration, reasoningEffort: 'high' } };
+  store.createConversation(input); store.saveBinding(input.id, binding(input));
+  assert.equal(store.getConversation(input.id)?.configuration.reasoningEffort, 'high');
+  assert.equal(store.createConversation(input).created, false);
+  assert.throws(() => store.createConversation({ ...input, configuration: legacy.configuration }), { code: 'conversation_id_conflict' });
+  assert.throws(() => store.saveBinding(input.id, { ...binding(input), configuration: legacy.configuration }), { code: 'binding_configuration_conflict' });
+});
+
+test('conversation defaults use accepted messages and exclude archived or stale workspaces', t => {
+  const f = fixture(t); const db = f.open(); const store = createWorkbenchStore(db);
+  const a = conversation(); const b = conversation(); const unsent = conversation();
+  for (const input of [a, b, unsent]) store.createConversation(input);
+  const eligible = [{ id: a.workspaceId, directory: a.cwd }];
+  assert.equal(store.recentAcceptedConversation(eligible, ['codex']), null);
+  const send = (id: string) => {
+    const op = message(id); store.enqueueOperation(op); store.claimOperation(op.id);
+    store.settleOperation(op.id, { outcome: 'accepted' }); return op.id;
+  };
+  send(b.id); const latest = send(a.id);
+  db.prepare('UPDATE workbench_operations SET updated_at = ? WHERE id = ?').run(Date.now() + 1000, latest);
+  assert.equal(store.recentAcceptedConversation(eligible, ['codex'])?.id, a.id);
+  const stop = { id: randomUUID(), conversationId: b.id, type: 'stop' as const, payload: { runId: 'run' } };
+  store.enqueueOperation(stop); store.claimOperation(stop.id); store.settleOperation(stop.id, { outcome: 'accepted' });
+  assert.equal(store.recentAcceptedConversation(eligible, ['codex'])?.id, a.id);
+  store.setArchived(a.id, true, () => true);
+  assert.equal(store.recentAcceptedConversation(eligible, ['codex'])?.id, b.id);
+  assert.equal(store.recentAcceptedConversation([{ id: a.workspaceId, directory: '/moved' }], ['codex']), null);
+  assert.equal(store.recentAcceptedConversation(eligible, ['dsh']), null);
+});

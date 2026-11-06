@@ -10,6 +10,7 @@ export const threadStatus = z.object({ type: z.string().max(64), activeFlags: z.
 export const turn = z.object({ id: nativeId, status: z.enum(['completed', 'interrupted', 'failed', 'inProgress']) });
 export const configuredThread = z.object({
   thread: z.object({ id: nativeId, status: threadStatus.optional() }), model: nativeId, cwd: z.string().max(4096),
+  reasoningEffort: z.string().max(240).nullable().optional(),
   approvalPolicy: z.string().max(64), activePermissionProfile: z.object({ id: nativeId }).nullable(),
 });
 export const nativeItem = z.object({

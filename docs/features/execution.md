@@ -16,7 +16,7 @@
 
 ## How to get to it (user POV)
 
-进入配置已核实的对话 →“给 Agent 的消息”→“发送消息”，或 ⌘/Ctrl + Enter。Enter 换行。支持排队的对话运行时，输入动作改为“加入队列”，旁边保留“停止当前轮”。消息队列贴在输入框上方，每行右侧的图标按钮对应“编辑”“删除”和该对话支持的“追加到本轮”或“尽快发送”。未知状态可见“查询原生结果”，未确认草稿可见“核对同一发送”。
+首次发送从[工作区草稿](conversations.md)进入；已有对话路径为：进入配置已核实的对话 →“给 Agent 的消息”→“发送消息”，或 ⌘/Ctrl + Enter。Enter 换行。支持排队的对话运行时，输入动作改为“加入队列”，旁边保留“停止当前轮”。消息队列贴在输入框上方，每行右侧的图标按钮对应“编辑”“删除”和该对话支持的“追加到本轮”或“尽快发送”。未知状态可见“查询原生结果”，未确认草稿可见“核对同一发送”。
 
 ## Driving it with Harness
 
@@ -25,7 +25,7 @@
 | 场景 | 初始条件与动作 | 判据和独立观察 |
 | --- | --- | --- |
 | E01 | 建“执行 A”，输入含本轮独有标记的两行文本；先按 Enter，再发送。CLI complete 后输入新文本再发送 | Enter 不派发；首次发送 inspect 的 submitCalls=1、正文有两行用户输入、出现停止按钮。complete 后出现 `FIXTURE COMPLETED <runId>`、恢复发送，再发后 submitCalls=2；两轮同原生身份、配置不变。运行中快捷键的排队行为见 E06 |
-| E02 | 建“未知回执”；先运行 unknown-receipt，再发送唯一文本。保存产品操作 ID、inspect 调用数；在“核对同一发送”重试两次；再运行 prove，点“查询原生结果” | 未发布证据前，操作 unknown、保留 pending 草稿，同编号重试不增加 submitCalls。发布后 accepted，草稿中的 pending 被清除；inspect 始终只调用一次，原生 operationIds 只有原 ID。最后 complete 收尾 |
+| E02 | 按 [空原生会话故障前提](conversations.md#空原生会话故障前提) 建“未知回执”；先运行 unknown-receipt，再发送唯一文本。保存产品操作 ID、inspect 调用数；在“核对同一发送”重试两次；再运行 prove，点“查询原生结果” | 未发布证据前，操作 unknown、保留 pending 草稿，同编号重试不增加 submitCalls。发布后 accepted，草稿中的 pending 被清除；inspect 始终只调用一次，原生 operationIds 只有原 ID。最后 complete 收尾 |
 | E03 | 在已接受且 running 的 fixture 对话点“停止当前轮” | inspect 的 stopCalls 加一、目标 runId 等于被停止轮，产品操作 type=stop；页面变“已中断”，显示后台工具可能仍运行/改动不撤销的提示。发下一条能再次运行；fixture 不证明真实工具退出 |
 | E04 | 按下方五个独立分支，分别驱动存储失败、编码预算、HTTP 400、HTTP 413、原生 rejected | 每个分支都核对输入、pending、原操作编号、独立调用计数与编辑后再次发送；不能用其中一条代替其他分支 |
 | E05 | 按下面真实分支分别使用 Codex、DSH | 文件字节独立读回、原生身份/配置及正文共同符合预期；每个 Harness 单独结论 |
@@ -42,7 +42,7 @@ E02 另外可用 browser-faults 的 `dropNext('/api/private/workbench/conversati
 
 `unknown-receipt` 只设置下一次回执，不改变已观察到的原生状态；控制命令完成后直接按 E02 发送，不需要额外 GET 或等待来同步控制命令。
 
-E04：每个分支新建一个名称唯一、已就绪的空 fixture 对话，保存对话 ID、配置、初始快照和 inspect（submitCalls=0、operationIds/rejectedOperationIds 为空）。输入使用本轮独有的合成文本。按共同入口安装 [browser-faults.js](../../test/support/browser-faults.js)，HTTP 场景中的 `id` 必须来自该对话的实际 hash。所有动作仍使用页面输入框与按钮。
+E04：每个分支按 [空原生会话故障前提](conversations.md#空原生会话故障前提) 准备一个名称唯一、已就绪的空 fixture 对话，保存对话 ID、配置、初始快照和 inspect（submitCalls=0、operationIds/rejectedOperationIds 为空）。输入使用本轮独有的合成文本。按共同入口安装 [browser-faults.js](../../test/support/browser-faults.js)，HTTP 场景中的 `id` 必须来自该对话的实际 hash。所有动作仍使用页面输入框与按钮。
 
 | 分支 | 驱动 | 拒绝后的判据 |
 | --- | --- | --- |

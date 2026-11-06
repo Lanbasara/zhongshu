@@ -384,3 +384,40 @@ test('Invalid native frames revoke observation without exposing the malformed pa
   assert.equal(JSON.stringify(changes).includes('synthetic-private'), false);
   release();
 });
+
+test('Codex discovers effort options and pins selected effort at create, send and resume', async t => {
+  let nativeEffort = 'high';
+  const p = await peer(t, request => {
+    if (request.method === 'model/list') return { data: [{ model: 'model-a', displayName: 'Model A', hidden: false, isDefault: true, defaultReasoningEffort: 'medium', supportedReasoningEfforts: [{ reasoningEffort: 'medium', description: 'Balanced' }, { reasoningEffort: 'high', description: 'Deeper' }] }], nextCursor: null };
+    if (request.method === 'thread/start' || request.method === 'thread/resume') return { ...nativeConfiguration(), reasoningEffort: nativeEffort };
+  });
+  const catalog = await p.adapter.catalog();
+  assert.equal(catalog.defaultModelId, 'model-a');
+  assert.equal(catalog.models[0]?.defaultReasoningEffort, 'medium');
+  assert.deepEqual(catalog.models[0]?.reasoningEfforts?.map(option => option.id), ['medium', 'high']);
+  const binding = await p.adapter.create({ cwd: saved.cwd, configuration: { ...saved.configuration, reasoningEffort: 'high' } }, () => {});
+  assert.deepEqual(p.calls.find(call => call.method === 'thread/start')?.params.config, { model_reasoning_effort: 'high' });
+  assert.equal((await p.adapter.submit(binding, { id: 'effort-message', text: 'Synthetic message' })).outcome, 'accepted');
+  assert.equal(p.calls.find(call => call.method === 'turn/start')?.params.effort, 'high');
+  nativeEffort = 'medium';
+  assert.equal((await p.adapter.state(binding)).configurationVerified, false);
+  assert.equal((await p.adapter.submit(binding, { id: 'effort-drift', text: 'Should not run' })).outcome, 'rejected');
+  await assert.rejects(p.adapter.create({ cwd: saved.cwd, configuration: { ...saved.configuration, reasoningEffort: 'unsupported' } }, () => {}), /codex_reasoning_effort_unavailable/);
+  assert.equal(p.calls.filter(call => call.method === 'thread/start').length, 1);
+});
+
+test('Codex draft skill discovery creates no thread and selected references survive first binding', async t => {
+  const path = saved.cwd + '/.agents/skills/proof/SKILL.md';
+  let enabled = true;
+  const p = await peer(t, request => request.method === 'skills/list' ? { data: [{ cwd: saved.cwd, skills: [{ name: 'proof', path, enabled, description: 'Proof' }] }] } : undefined);
+  const [draft] = await p.adapter.draftSkills!(saved.cwd);
+  assert.ok(draft);
+  assert.equal(p.calls.some(call => call.method.startsWith('thread/')), false);
+  const [bound] = await p.adapter.skills!(saved);
+  assert.notEqual(draft.id, bound?.id);
+  const operation = { id: 'draft-skill', text: '⬡ proof now', skills: [{ id: draft.id, label: draft.label, start: 0, end: 7 }] };
+  assert.equal((await p.adapter.submit(saved, operation)).outcome, 'accepted');
+  assert.deepEqual(p.calls.find(call => call.method === 'turn/start')?.params.input, [{ type: 'text', text: ' $proof  now', text_elements: [] }, { type: 'skill', name: 'proof', path }]);
+  enabled = false;
+  assert.deepEqual(await p.adapter.submit(saved, { ...operation, id: 'removed-draft-skill' }), { outcome: 'rejected', reason: 'skill_reference_unavailable' });
+});

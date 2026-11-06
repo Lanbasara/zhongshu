@@ -125,7 +125,7 @@ function WorkspaceDirectoryPicker({ roots, csrf, busy, error, clearError, submit
 
 export function WorkspaceManagement({ action, roots, csrf, close, changed, report }: {
   action: WorkspaceAction; roots: Roots; csrf: string;
-  close(): void; changed(): void; report(reason: unknown): void;
+  close(): void; changed(id: string): void; report(reason: unknown): void;
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const [label, setLabel] = useState(action.kind === 'add' ? '' : action.workspace.label);
@@ -166,9 +166,9 @@ export function WorkspaceManagement({ action, roots, csrf, close, changed, repor
     setBusy(true);
     setError('');
     try {
-      await request(action.kind === 'add' ? '/workspaces' : `/workspaces/${encodeURIComponent(action.workspace.id)}/manage`, responseSchema,
+      const result = await request(action.kind === 'add' ? '/workspaces' : `/workspaces/${encodeURIComponent(action.workspace.id)}/manage`, responseSchema,
         { csrf, body, timeoutMs: 30_000 });
-      changed();
+      changed(result.id);
       close();
     } catch (reason) {
       setError(handleError(reason));
