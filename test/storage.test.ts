@@ -66,18 +66,6 @@ test('clearing the cache frees space immediately, keeps owned images and lets up
   assert.equal(store.resources.get(id, accepted.id).data.length, 2 * MiB);
 });
 
-test('retired history rows are measured separately and excluded from the budget', t => {
-  const { db, store, id } = fixture(t, 64 * MiB);
-  assert.equal(store.storage.usage().legacy, 0, 'empty retired tables report no copy');
-  const empty = store.storage.used();
-  const insert = db.prepare("INSERT INTO workbench_items(conversation_id,id,position,kind,text,status) VALUES(?,?,?,'assistant',?,'completed')");
-  db.exec('BEGIN IMMEDIATE'); for (let n = 0; n < 2000; n++) insert.run(id, 'legacy-' + n, n * 1024, 'x'.repeat(1000)); db.exec('COMMIT');
-  const fresh = createStorageAccounting(db, store.storage.budget);
-  const usage = fresh.usage();
-  assert.equal(usage.legacy >= 2000 * 1000, true);
-  assert.equal(Math.abs(usage.used - empty) < 64 * 1024, true, 'retired rows do not consume the budget');
-});
-
 test('the storage budget accepts bytes and binary units, defaults to 16 GiB and rejects nonsense', () => {
   assert.equal(parseStorageBudget(undefined), DEFAULT_STORAGE_BUDGET);
   assert.equal(parseStorageBudget(''), 16 * 1024 ** 3);

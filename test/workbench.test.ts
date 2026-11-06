@@ -70,7 +70,7 @@ test('turn files keep edited paths from live items and native pages after the ed
     { runId: 'second', paths: ['a.tsx'], limited: false },
     { runId: 'first', paths: ['a.tsx', 'b/a.tsx'], limited: false },
   ]);
-  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM workbench_items').get()?.n, 0);
+  assert.ok((['workbench_items', 'workbench_live_items'].every(name => !f.db.prepare("SELECT 1 FROM sqlite_schema WHERE name=?").get(name))), 'no history body table exists');
 });
 test('one immutable queue claim wins edit, manual send and automatic dispatch; lost receipt resolves from original history', async t => {
   const f = fixture(t);
@@ -306,7 +306,7 @@ test('a gap of any size opens at the latest native page, stays sendable, and old
   const seen = snapshot.history.items.map(item => item.id); let cursor = snapshot.history.olderCursor;
   while (cursor) { const page = await f.service.history(f.id, cursor); seen.unshift(...page.items.map(item => item.id)); cursor = page.olderCursor; }
   assert.deepEqual(seen, records.map(item => item.id));
-  for (const table of ['workbench_items', 'workbench_live_items']) assert.equal(f.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get()?.n, 0);
+  assert.ok((['workbench_items', 'workbench_live_items'].every(name => !f.db.prepare("SELECT 1 FROM sqlite_schema WHERE name=?").get(name))), 'no history body table exists');
   const next = operation(f.id); await f.service.enqueue(next); await until(() => f.peer.submitCalls.length === 1);
 });
 test('cursors are bound to their conversation and native page faults stay reading problems, not execution fences', async t => {
@@ -498,7 +498,7 @@ test('shutdown keeps live bodies out of the database; the native Harness stays a
   const f = fixture(t); await f.service.reconcile(f.id);
   f.peer.emit({ type: 'item', item: { ...nativeItem('pending-live'), text: 'latest complete live body' } });
   await f.service.close();
-  for (const table of ['workbench_items', 'workbench_live_items']) assert.equal(f.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get()?.n, 0);
+  assert.ok((['workbench_items', 'workbench_live_items'].every(name => !f.db.prepare("SELECT 1 FROM sqlite_schema WHERE name=?").get(name))), 'no history body table exists');
   f.closeDatabase(); await delay(45);
 });
 test('older paging crosses an empty native record page when its cursor advances', async t => {

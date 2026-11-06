@@ -198,8 +198,9 @@ test('change hints and edited paths persist without any history body (ADR 0014)'
   store.recordTurnFiles(input.id, [edit, item('plain', 'another secret body'), { ...edit, id: 'running', status: 'running', fileEdits: ['d.ts'] }]);
   assert.deepEqual(store.readTurnFiles(input.id, ['run-1']), [{ runId: 'run-1', paths: ['a.ts', 'b/c.ts'], limited: false }]);
   const unchanged = store.version(); store.recordTurnFiles(input.id, [edit]); assert.equal(store.version(), unchanged);
-  for (const table of ['workbench_items', 'workbench_live_items', 'workbench_changes', 'workbench_turn_files'])
+  for (const table of ['workbench_changes', 'workbench_turn_files'])
     assert.equal(JSON.stringify(db.prepare(`SELECT * FROM ${table}`).all()).includes('secret'), false, table);
+  assert.ok((['workbench_items', 'workbench_live_items'].every(name => !db.prepare("SELECT 1 FROM sqlite_schema WHERE name=?").get(name))), 'no history body table exists');
   assert.throws(() => store.touch(randomUUID()), { statusCode: 404 });
   assert.throws(() => store.recordTurnFiles(input.id, [{ ...edit, fileEdits: ['../escape'] }]), { statusCode: 400 });
 });
@@ -310,32 +311,24 @@ test('v3 conversation history upgrades to active and management metadata survive
   assert.deepEqual(store.listConversations({ archived: false }), []);
   assert.equal(store.listConversations({ archived: true })[0]?.title, '升级后的标题');
   assert.deepEqual(store.getConversation(input.id)?.binding, native);
-  // Retired projection rows stay untouched until a later, user-confirmed migration removes them (ADR 0014).
-  assert.equal(db.prepare('SELECT text FROM workbench_items WHERE conversation_id=?').get(input.id)?.text, '旧库原文');
+  // Migration 16 removes the retired projection and its copied bodies (ADR 0014); management data survives.
+  assert.ok((['workbench_items', 'workbench_live_items'].every(name => !db.prepare("SELECT 1 FROM sqlite_schema WHERE name=?").get(name))));
 });
 
-test('v10 history and live metadata survive unknown-status migration and reopen', t => {
+test('migration 16 removes retired history bodies from v10 databases while conversations and operations survive', t => {
   const f = fixture(t); const input = conversation();
   const legacy = openDatabase(f.directory, productMigrations.filter(migration => migration.version <= 10));
-  const oldItem: NativeItem = { id: 'old-tool', kind: 'tool', text: 'old result', status: 'completed', runId: 'run', tool: { name: 'read', input: 'sample.txt', output: 'old result' } };
   try {
     seedLegacyConversation(legacy, input);
-    const metadata = JSON.stringify({ tool: oldItem.tool });
-    legacy.prepare('INSERT INTO workbench_items(conversation_id,id,position,kind,text,status,run_id,metadata_json) VALUES(?,?,?,?,?,?,?,?)')
-      .run(input.id, oldItem.id, 1024, oldItem.kind, oldItem.text, oldItem.status, oldItem.runId!, metadata);
-    legacy.prepare('INSERT INTO workbench_live_items(conversation_id,id,kind,text,status,run_id,updated_at,metadata_json) VALUES(?,?,?,?,?,?,?,?)')
-      .run(input.id, 'old-live', oldItem.kind, oldItem.text, 'running', oldItem.runId!, 100, metadata);
+    legacy.prepare('INSERT INTO workbench_items(conversation_id,id,position,kind,text,status) VALUES(?,?,?,?,?,?)').run(input.id, 'old-tool', 1024, 'tool', 'retired body', 'completed');
+    legacy.prepare('INSERT INTO workbench_live_items(conversation_id,id,kind,text,status,updated_at) VALUES(?,?,?,?,?,?)').run(input.id, 'old-live', 'assistant', 'retired live body', 'running', 100);
   } finally { legacy.close(); }
-  let db = f.open(); createWorkbenchStore(db);
-  f.close(db); db = f.open(); const store = createWorkbenchStore(db);
+  const db = f.open(); const store = createWorkbenchStore(db);
   assert.equal(store.getConversation(input.id)?.id, input.id);
-  // Retired projection rows keep their content and metadata until a later, user-confirmed migration (ADR 0014).
-  assert.deepEqual({ ...db.prepare('SELECT id,status,metadata_json FROM workbench_items WHERE conversation_id=?').get(input.id) },
-    { id: 'old-tool', status: 'completed', metadata_json: JSON.stringify({ tool: oldItem.tool }) });
-  assert.equal(db.prepare('SELECT status FROM workbench_live_items WHERE conversation_id=? AND id=?').get(input.id, 'old-live')?.status, 'running');
+  assert.ok((['workbench_items', 'workbench_live_items'].every(name => !db.prepare("SELECT 1 FROM sqlite_schema WHERE name=?").get(name))));
+  assert.equal(Number(db.prepare('SELECT MAX(version) AS v FROM app_migrations').get()!.v) >= 16, true);
   assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []);
 });
-
 test('reasoning effort is immutable and optional legacy identities remain retryable', t => {
   const f = fixture(t); const store = createWorkbenchStore(f.open()); const legacy = conversation();
   store.createConversation(legacy); assert.equal(store.createConversation(legacy).created, false);

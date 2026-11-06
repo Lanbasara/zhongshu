@@ -225,6 +225,10 @@ export const productMigrations: Migration[] = [{ version: 2, sql: `
   ) STRICT;
   CREATE INDEX workbench_subagent_stops_agent ON workbench_subagent_stops(conversation_id, agent_id, created_at);
   CREATE INDEX workbench_subagent_stops_status ON workbench_subagent_stops(status, conversation_id);
+` }, { version: 16, sql: `
+  -- ADR 0014: history bodies live only in the native Harness. Remove the retired projection.
+  DROP TABLE IF EXISTS workbench_live_items;
+  DROP TABLE IF EXISTS workbench_items;
 ` }];
 
 /** Runs inside restoreDatabase's private staging transaction, before the database is published. */

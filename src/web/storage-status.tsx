@@ -47,7 +47,6 @@ export function StorageStatus({ csrf, report, signal }: { csrf: string; report(r
         <dl className="storage-breakdown">
           <div><dt>上传与快照图片</dt><dd>{bytes(value.images.owned)}</dd></div>
           <div><dt>可清理的图片缓存</dt><dd>{bytes(value.images.cache)}</dd></div>
-          {value.legacy > 0 && <div><dt>旧版历史副本（验证后删除，不计入）</dt><dd>约 {bytes(value.legacy)}</dd></div>}
         </dl>
         {value.full ? <p role="alert">已达到预算上限：暂时不能上传图片或新建对话。阅读和在已有对话里发送文字不受影响。</p>
           : value.warning ? <p role="status">已用超过预算的 80%。</p> : null}

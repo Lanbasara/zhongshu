@@ -386,7 +386,7 @@ test('native pages shrink to fit the response budget, read through to the first 
   await eventually(async () => { const body = (await f.request(`/conversations/${id}`)).body; return body.history.liveItemsLimited || body.history.liveItems.some((item: NativeItem) => item.id === 'huge-live'); });
   const limited = await f.request(`/conversations/${id}`); assert.equal(limited.status, 200); snapshotSchema.parse(limited.body);
   assert.ok(Buffer.byteLength(JSON.stringify(limited.body)) < 12 * 1024 * 1024);
-  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM workbench_live_items').get()?.n, 0);
+  assert.ok((['workbench_items', 'workbench_live_items'].every(name => !f.db.prepare("SELECT 1 FROM sqlite_schema WHERE name=?").get(name))), 'no history body table exists');
 });
 test('a real non-reading TCP client is evicted under backpressure without an unbounded event queue', async t => {
   const f = await fixture(t, { maxConnections: 1, maxConnectionsPerSession: 1, slowClientMs: 100 }); const id = f.seed();
