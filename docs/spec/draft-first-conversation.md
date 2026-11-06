@@ -2,7 +2,7 @@
 status: active
 started: 2026-11-06
 exit: 两端真实首发、配置生效、旧对话接续和恢复反例经独立验收通过，用户认可桌面与窄屏交互
-evidence: 本地两端首发、非默认深度、混合材料及两位独立 fixture 验证已取得证据；见本切片 PR
+evidence: https://github.com/Lanbasara/zhongshu/pull/34
 ---
 
 # 新对话草稿与思考深度
