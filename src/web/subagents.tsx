@@ -71,6 +71,8 @@ export function SubagentPanelHost({ conversation, list, selectedId, narrow, csrf
   // Stops this page has requested whose outcome the list has not shown yet; they read as stopping immediately.
   const [requested, setRequested] = useState<ReadonlySet<string>>(() => new Set());
   const answered = useRef(new Set<string>());
+  // DSH stops this page sent, by agent; their notice waits for the verified outcome, which arrives after the 202.
+  const delivered = useRef(new Map<string, string>());
   const harness = harnessName(conversation);
   const selected = list?.agents.find(agent => agent.id === selectedId);
   const reportRef = useRef(report); reportRef.current = report;
@@ -81,6 +83,15 @@ export function SubagentPanelHost({ conversation, list, selectedId, narrow, csrf
     if (!answered.current.size) return;
     const done = answered.current; answered.current = new Set();
     setRequested(current => new Set([...current].filter(id => !done.has(id))));
+  }, [list]);
+  useEffect(() => {
+    for (const [agentId, stopId] of delivered.current) {
+      const stop = list?.agents.find(agent => agent.id === agentId)?.stop;
+      if (stop?.id !== stopId || !['accepted', 'unknown', 'rejected'].includes(stop.status)) continue;
+      delivered.current.delete(agentId);
+      // DSH reports a stopped child to its parent; an idle parent starts a new turn on that notice.
+      if (stop.status === 'accepted') setNotice('DSH 已接受停止请求，会把停止结果告诉主 Agent；主 Agent 空闲时会因此自动开始新的一轮。');
+    }
   }, [list]);
   // Move focus into the panel when it opens or changes view; the opener regains it on close.
   useEffect(() => { if (!narrow) requestAnimationFrame(() => closeRef.current?.focus({ preventScroll: true })); }, [selectedId, narrow, closeRef]);
@@ -138,9 +149,8 @@ export function SubagentPanelHost({ conversation, list, selectedId, narrow, csrf
     setRequested(current => new Set(current).add(agentId));
     try {
       const result = await request(`/conversations/${conversation.id}/subagents/${encodeURIComponent(agentId)}/stop`, subagentStopResponseSchema, { csrf, body: { id: crypto.randomUUID() } });
-      // DSH reports a stopped child to its parent; an idle parent starts a new turn on that notice.
-      // An unconfirmed stop has its own callout and must not be described as delivered.
-      if (conversation.harnessId === 'dsh' && result.stop.status !== 'unknown') setNotice('已请求停止。DSH 会把停止结果告诉主 Agent，主 Agent 空闲时会因此自动开始新的一轮。');
+      // An unconfirmed stop has its own callout; only a delivered one is described as reaching the main agent.
+      if (conversation.harnessId === 'dsh') delivered.current.set(agentId, result.stop.id);
     } catch (reason) {
       if (reason instanceof RequestError && stopFailures[reason.code]) setNotice(stopFailures[reason.code]!); else reportRef.current(reason);
     } finally { answered.current.add(agentId); onReload(); }
