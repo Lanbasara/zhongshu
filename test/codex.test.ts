@@ -703,11 +703,11 @@ test('Codex account: the vendor decides; a 401 that survives one refresh is reje
   account = null;
   assert.deepEqual(await p.adapter.account!(), { state: 'rejected' }, 'an account that disappears was rejected');
   const events: unknown[] = []; p.adapter.onAccountEvent!(event => events.push(event));
-  assert.deepEqual(await p.adapter.startDeviceLogin!(), { loginId: 'login-1', verificationUrl: 'https://auth.openai.com/codex/device', userCode: 'ABCD-EFGHJ' });
+  assert.deepEqual(await p.adapter.startLogin!(), { kind: 'device-code', loginId: 'login-1', verificationUrl: 'https://auth.openai.com/codex/device', userCode: 'ABCD-EFGHJ' });
   assert.deepEqual(p.calls.find(call => call.method === 'account/login/start')!.params, { type: 'chatgptDeviceCode' });
   p.notify('account/login/completed', { loginId: 'login-1', success: false, error: 'Login was not completed', onboardingEntrypoint: null });
   p.notify('account/updated', { authMode: 'chatgpt', planType: 'pro' });
   await until(() => events.length === 2);
   assert.deepEqual(events, [{ type: 'login', loginId: 'login-1', success: false, reason: 'Login was not completed' }, { type: 'changed' }]);
-  assert.equal(await p.adapter.cancelDeviceLogin!('login-1'), 'canceled');
+  assert.equal(await p.adapter.cancelLogin!('login-1'), 'canceled');
 });

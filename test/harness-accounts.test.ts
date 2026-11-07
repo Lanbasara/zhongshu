@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { test, type TestContext } from 'node:test';
-import type { AccountEvent, HarnessAdapter, NativeAccount } from '../src/harness/types.ts';
+import type { AccountEvent, HarnessAdapter, LoginCompletion, NativeAccount } from '../src/harness/types.ts';
 import { buildApp } from '../src/server/app.ts';
 import { createAuth } from '../src/server/auth.ts';
 import { openDatabase } from '../src/server/database.ts';
@@ -19,8 +19,8 @@ function fakeAdapter(id: 'codex' | 'dsh', login: boolean) {
   const adapter = {
     id, async account() { if (state.next === 'hang') return new Promise<NativeAccount>(() => {}); if (state.next instanceof Error) throw state.next; return state.next; },
     ...(login ? {
-      async startDeviceLogin() { state.starts++; return { loginId: `login-${state.starts}`, verificationUrl: 'https://auth.openai.com/codex/device', userCode: `CODE-${state.starts}XYZ` }; },
-      async cancelDeviceLogin(loginId: string) { state.cancels.push(loginId); return 'canceled' as const; },
+      async startLogin() { state.starts++; return { kind: 'device-code' as const, loginId: `login-${state.starts}`, verificationUrl: 'https://auth.openai.com/codex/device', userCode: `CODE-${state.starts}XYZ` }; },
+      async cancelLogin(loginId: string) { state.cancels.push(loginId); return 'canceled' as const; },
       onAccountEvent(listener: (event: AccountEvent) => void) { listeners.add(listener); return () => { listeners.delete(listener); }; },
     } : {}),
   } as unknown as HarnessAdapter;
@@ -68,11 +68,12 @@ test('a verification that never answers counts as disconnected', async t => {
 test('device login: the code goes only to the caller; completion, failure, supersede, cancel and expiry', async t => {
   const { accounts, codex, logs } = monitor(t, { loginTtlMs: 80 });
   const first = await accounts.startLogin('codex');
+  assert.ok(first.kind === 'device-code');
   assert.equal(first.userCode, 'CODE-1XYZ'); assert.equal(first.verificationUrl, 'https://auth.openai.com/codex/device');
   assert.equal(first.account.login?.status, 'waiting');
   assert.equal(JSON.stringify(accounts.list()).includes('CODE-'), false, 'reads never carry the user code');
   const second = await accounts.startLogin('codex');
-  assert.equal(second.userCode, 'CODE-2XYZ');
+  assert.ok(second.kind === 'device-code'); assert.equal(second.userCode, 'CODE-2XYZ');
   codex.emit({ type: 'login', loginId: 'login-1', success: false });
   assert.equal(accounts.list().accounts[0]!.login?.status, 'waiting', 'a superseded login no longer counts');
   codex.state.next = { state: 'valid' };
@@ -88,12 +89,12 @@ test('device login: the code goes only to the caller; completion, failure, super
   assert.deepEqual(codex.state.cancels, ['login-4']);
   await accounts.startLogin('codex');
   await delay(150);
-  assert.deepEqual(accounts.list().accounts[0]!.login, { status: 'failed', reason: '登录码已过期，请重新发起。' });
+  assert.deepEqual(accounts.list().accounts[0]!.login, { status: 'failed', reason: '登录已过期，请重新发起。' });
   assert.deepEqual(codex.state.cancels, ['login-4', 'login-5']);
   assert.equal(JSON.stringify(logs).includes('CODE-'), false, 'logs never carry the user code');
   assert.deepEqual(logs.filter(event => event.event?.startsWith('harness_login')).map(event => event.event),
     ['harness_login_started', 'harness_login_started', 'harness_login_succeeded', 'harness_login_started', 'harness_login_failed', 'harness_login_started', 'harness_login_canceled', 'harness_login_started', 'harness_login_expired']);
-  await assert.rejects(accounts.startLogin('dsh'), (error: Error & { code?: string }) => error.code === 'login_not_supported');
+  await assert.rejects(accounts.startLogin('dsh'), (error: Error & { code?: string }) => error.code === 'login_not_supported', 'an adapter without login refuses');
 });
 
 test('account routes sit behind authentication and CSRF', async t => {
@@ -113,11 +114,40 @@ test('account routes sit behind authentication and CSRF', async t => {
   assert.equal((await post('/api/private/accounts/codex/login', {}, {})).statusCode, 403);
   assert.equal((await post('/api/private/accounts/codex/check', {})).json().state, 'valid');
   const started = await post('/api/private/accounts/codex/login', {});
-  assert.equal(started.json().userCode, 'CODE-1XYZ');
+  assert.equal(started.json().kind, 'device-code'); assert.equal(started.json().userCode, 'CODE-1XYZ');
   const read = await app.inject({ method: 'GET', url: '/api/private/accounts', headers: { cookie } });
   assert.equal(read.body.includes('CODE-1XYZ'), false);
   assert.equal(read.json().accounts[0].login.status, 'waiting');
   assert.equal((await post('/api/private/accounts/codex/login/cancel', {})).json().login, undefined);
   assert.equal((await post('/api/private/accounts/dsh/check', {})).json().error, 'harness_not_found');
   assert.equal((await post('/api/private/accounts/other/check', {})).json().error, 'invalid_request');
+});
+
+test('paste-back login: a wrong paste keeps the attempt, success re-verifies, nothing pasted reaches the logs', async t => {
+  let completion: LoginCompletion = 'invalid'; const pasted: string[] = []; let signedIn = false;
+  const dsh = { id: 'dsh',
+    async account(): Promise<NativeAccount> { return signedIn ? { state: 'valid', links: { usage: 'https://platform.example/usage', topUp: 'https://platform.example/top_up' } } : { state: 'signed-out' }; },
+    async startLogin() { return { kind: 'paste-back' as const, loginId: 'attempt-1', authorizeUrl: 'https://platform.example/sign_in?state=s', callbackPrefix: 'http://127.0.0.1:3007/oauth/callback', expiresAt: Date.now() + 600_000 }; },
+    async completeLogin(_loginId: string, url: string) { pasted.push(url); if (completion === 'succeeded') signedIn = true; return completion; },
+    async cancelLogin() { return 'canceled' as const; },
+  } as unknown as HarnessAdapter;
+  const logs: Record<string, string>[] = []; const pushes: PushEvent[] = [];
+  const accounts = createHarnessAccounts([dsh], { notify: event => pushes.push(event), log: event => logs.push(event) });
+  t.after(() => accounts.close());
+  assert.equal((await accounts.check('dsh')).state, 'signed-out');
+  await assert.rejects(accounts.completeLogin('dsh', 'http://127.0.0.1:3007/oauth/callback?code=x&state=s'), (error: Error & { code?: string }) => error.code === 'login_not_waiting');
+  const started = await accounts.startLogin('dsh');
+  assert.ok(started.kind === 'paste-back'); assert.equal(started.callbackPrefix, 'http://127.0.0.1:3007/oauth/callback');
+  assert.equal(JSON.stringify(accounts.list()).includes('platform.example/sign_in'), false, 'reads never carry the sign-in address');
+  await assert.rejects(accounts.completeLogin('dsh', 'https://example.com/wrong'), (error: Error & { code?: string }) => error.code === 'login_callback_invalid');
+  assert.equal(accounts.list().accounts[0]!.login?.status, 'waiting', 'a wrong paste keeps the attempt');
+  completion = 'succeeded';
+  const done = await accounts.completeLogin('dsh', 'http://127.0.0.1:3007/oauth/callback?code=secret-code&state=s');
+  assert.equal(done.state, 'valid'); assert.equal(done.login, undefined);
+  assert.deepEqual(done.links, { usage: 'https://platform.example/usage', topUp: 'https://platform.example/top_up' });
+  assert.equal(pasted.length, 2);
+  assert.equal(JSON.stringify(logs).includes('secret-code'), false);
+  assert.deepEqual(logs.filter(event => event.event?.startsWith('harness_login')).map(event => event.event), ['harness_login_started', 'harness_login_succeeded']);
+  await accounts.startLogin('dsh'); completion = 'expired';
+  assert.deepEqual((await accounts.completeLogin('dsh', 'http://127.0.0.1:3007/oauth/callback?code=c&state=s')).login, { status: 'failed', reason: '登录已过期，请重新发起。' });
 });

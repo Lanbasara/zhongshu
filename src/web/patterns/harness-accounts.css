@@ -37,3 +37,9 @@
 @media(prefers-reduced-motion:reduce) { .account-spin { animation:none; } }
 .account-banner-slot { flex:none; padding:10px max(16px,calc((100% - 760px) / 2 + 16px)) 0; }
 .account-banner-slot:empty { display:none; }
+.account-links { display:flex; gap:14px; flex-wrap:wrap; font-size:var(--zs-type-control); }
+.account-links a,.account-login a { display:inline-flex; align-items:center; gap:3px; color:var(--zs-accent-text); text-decoration:underline; text-underline-offset:2px; }
+.account-inline { font:var(--zs-type-caption)/1.5 var(--zs-font-code); word-break:break-all; }
+.account-paste { width:100%; min-width:0; height:36px; padding:0 10px; border:1px solid var(--zs-line); border-radius:var(--zs-radius-control); background:var(--zs-surface); color:var(--zs-text); font:var(--zs-type-caption) var(--zs-font-code); }
+.account-paste:focus-visible { outline:2px solid var(--zs-accent-line); outline-offset:1px; }
+.account-paste-error { color:var(--zs-danger); font-size:var(--zs-type-caption); }

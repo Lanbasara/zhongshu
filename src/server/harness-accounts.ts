@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { accountsSchema, accountViewSchema, deviceLoginResponseSchema, type AccountStateView, type AccountView } from '../shared/accounts.ts';
+import { accountsSchema, accountViewSchema, loginCompleteSchema, loginResponseSchema, type AccountStateView, type AccountView, type LoginResponse } from '../shared/accounts.ts';
 import type { HarnessAdapter, HarnessId } from '../harness/types.ts';
 import type { PushEvent } from './push.ts';
 
@@ -13,7 +13,7 @@ type Entry = {
   view: AccountView;
   checking?: Promise<AccountView>;
   /** The native login identity stays here; the user code is returned once and never kept. */
-  login?: { loginId: string; startedAt: number; expiry: NodeJS.Timeout };
+  login?: { loginId: string; kind: 'device-code' | 'paste-back'; startedAt: number; expiry: NodeJS.Timeout };
   failure?: string;
 };
 const pushStates = new Set<AccountStateView>(['signed-out', 'rejected']);
@@ -40,14 +40,12 @@ export function createHarnessAccounts(adapters: readonly HarnessAdapter[], optio
 
   for (const adapter of adapters) {
     if (!adapter.account) continue;
-    entries.set(adapter.id, { adapter, view: { harnessId: adapter.id, state: 'checking', canLogin: !!adapter.startDeviceLogin } });
+    entries.set(adapter.id, { adapter, view: { harnessId: adapter.id, state: 'checking', canLogin: !!adapter.startLogin } });
     const off = adapter.onAccountEvent?.(event => {
       const entry = entries.get(adapter.id); if (!entry || closed) return;
       if (event.type === 'login') {
         if (entry.login?.loginId !== event.loginId) return;
-        clearTimeout(entry.login.expiry); entry.login = undefined;
-        if (event.success) { entry.failure = undefined; log({ event: 'harness_login_succeeded', harness: adapter.id }); }
-        else { entry.failure = '登录没有完成，可以重新发起。'; log({ event: 'harness_login_failed', harness: adapter.id }); }
+        settle(entry, event.success ? 'succeeded' : 'failed');
       }
       void check(adapter.id).catch(() => {});
     });
@@ -74,7 +72,8 @@ export function createHarnessAccounts(adapters: readonly HarnessAdapter[], optio
       try {
         const account = await Promise.race([entry.adapter.account!(), new Promise<never>((_, reject) => setTimeout(() => reject(new Error('account_timeout')), timeoutMs).unref())]);
         next = { harnessId: id, state: account.state, canLogin: entry.view.canLogin, checkedAt: now(),
-          ...(account.identity ? { identity: account.identity } : {}), ...(account.plan ? { plan: account.plan } : {}), ...(account.usage ? { usage: account.usage } : {}) };
+          ...(account.identity ? { identity: account.identity } : {}), ...(account.plan ? { plan: account.plan } : {}), ...(account.usage ? { usage: account.usage } : {}),
+          ...(account.links ? { links: account.links } : {}) };
       } catch {
         next = { harnessId: id, state: 'disconnected', canLogin: entry.view.canLogin, checkedAt: now() };
       }
@@ -93,29 +92,49 @@ export function createHarnessAccounts(adapters: readonly HarnessAdapter[], optio
   const list = () => accountsSchema.parse({ accounts: [...entries.values()].map(view) });
   async function checkAll(): Promise<void> { await Promise.allSettled([...entries.keys()].map(id => check(id))); }
 
-  async function startLogin(id: string): Promise<z.infer<typeof deviceLoginResponseSchema>> {
+  function settle(entry: Entry, outcome: 'succeeded' | 'failed' | 'expired'): void {
+    if (entry.login) clearTimeout(entry.login.expiry);
+    entry.login = undefined;
+    entry.failure = outcome === 'succeeded' ? undefined : outcome === 'expired' ? '登录已过期，请重新发起。' : '登录没有完成，可以重新发起。';
+    log({ event: `harness_login_${outcome}`, harness: entry.adapter.id });
+  }
+  async function startLogin(id: string): Promise<LoginResponse> {
     const entry = entryOf(id);
-    if (!entry.adapter.startDeviceLogin) throw new AccountError('login_not_supported', 409);
-    const started = await entry.adapter.startDeviceLogin().catch(() => { throw new AccountError('login_start_failed', 502); });
+    if (!entry.adapter.startLogin) throw new AccountError('login_not_supported', 409);
+    const started = await entry.adapter.startLogin().catch(() => { throw new AccountError('login_start_failed', 502); });
     // A new native start supersedes the old one; keep only the newest identity.
     if (entry.login) clearTimeout(entry.login.expiry);
+    const ttl = started.kind === 'paste-back' && started.expiresAt ? Math.max(1000, Math.min(loginTtlMs, started.expiresAt - now())) : loginTtlMs;
     const expiry = setTimeout(() => {
       if (entry.login?.loginId !== started.loginId) return;
-      entry.login = undefined; entry.failure = '登录码已过期，请重新发起。';
-      void entry.adapter.cancelDeviceLogin?.(started.loginId).catch(() => {});
-      log({ event: 'harness_login_expired', harness: entry.adapter.id });
-    }, loginTtlMs);
+      settle(entry, 'expired');
+      void entry.adapter.cancelLogin?.(started.loginId).catch(() => {});
+    }, ttl);
     expiry.unref();
-    entry.login = { loginId: started.loginId, startedAt: now(), expiry }; entry.failure = undefined;
+    entry.login = { loginId: started.loginId, kind: started.kind, startedAt: now(), expiry }; entry.failure = undefined;
     log({ event: 'harness_login_started', harness: entry.adapter.id });
-    return deviceLoginResponseSchema.parse({ account: view(entry), verificationUrl: started.verificationUrl, userCode: started.userCode });
+    const account = view(entry);
+    return loginResponseSchema.parse(started.kind === 'device-code'
+      ? { kind: 'device-code', account, verificationUrl: started.verificationUrl, userCode: started.userCode }
+      : { kind: 'paste-back', account, authorizeUrl: started.authorizeUrl, callbackPrefix: started.callbackPrefix });
+  }
+  /** Finish a paste-back login. A wrong paste leaves the attempt open for another try. */
+  async function completeLogin(id: string, callbackUrl: string): Promise<AccountView> {
+    const entry = entryOf(id);
+    const login = entry.login;
+    if (!login || login.kind !== 'paste-back' || !entry.adapter.completeLogin) throw new AccountError('login_not_waiting', 409);
+    const outcome = await entry.adapter.completeLogin(login.loginId, callbackUrl).catch((): 'failed' => 'failed');
+    if (outcome === 'invalid') throw new AccountError('login_callback_invalid', 400);
+    if (entry.login?.loginId !== login.loginId) return view(entry);
+    settle(entry, outcome);
+    return outcome === 'succeeded' ? check(entry.adapter.id) : view(entry);
   }
   async function cancelLogin(id: string): Promise<AccountView> {
     const entry = entryOf(id);
     const login = entry.login; entry.failure = undefined;
     if (login) {
       clearTimeout(login.expiry); entry.login = undefined;
-      await entry.adapter.cancelDeviceLogin?.(login.loginId).catch(() => 'notFound');
+      await entry.adapter.cancelLogin?.(login.loginId).catch(() => 'notFound');
       log({ event: 'harness_login_canceled', harness: entry.adapter.id });
     }
     return view(entry);
@@ -151,7 +170,11 @@ export function createHarnessAccounts(adapters: readonly HarnessAdapter[], optio
     });
     app.post('/:harness/login', { bodyLimit: 1024 }, async request => { const { harness } = parse(params, request.params); return startLogin(harness); });
     app.post('/:harness/login/cancel', { bodyLimit: 1024 }, async request => { const { harness } = parse(params, request.params); return cancelLogin(harness); });
+    app.post('/:harness/login/complete', { bodyLimit: 8192 }, async request => {
+      const { harness } = parse(params, request.params); const { callbackUrl } = parse(loginCompleteSchema, request.body);
+      return completeLogin(harness, callbackUrl);
+    });
   }
 
-  return { list, check, checkAll, startLogin, cancelLogin, start, close, routes };
+  return { list, check, checkAll, startLogin, completeLogin, cancelLogin, start, close, routes };
 }

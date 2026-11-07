@@ -26,6 +26,7 @@ async function host() {
   let catalog: unknown = { groups: [{ id: 'deepseek-account', name: 'DeepSeek', models: [{ id: 'test-model', name: 'Test', reasoning: { efforts: [{ id: 'high', name: 'High' }] } }] }] };
   let signedIn = true;
   let profile: 'ready' | 'failed' | 'rejected' = 'ready';
+  let signIn: { id: string; phase: string; state: string; callbackOrigin: string } | null = null;
   const wss = new WebSocketServer({ noServer: true });
   // Answering clients (ADR 0016): forwarded requests park until settled and are replayed to every new $events stream.
   const eventStreams = new Map<string, { socket: WebSocket; clientId: string }>(); let clients = 0;
@@ -46,6 +47,14 @@ async function host() {
       assert.equal(url.searchParams.get('interactions'), 'answer');
       const cookie = `peer-${++exchanges}`; peers.set(cookie, null); response.writeHead(302, { 'Set-Cookie': `peer=${cookie}; HttpOnly`, Location: '/api/remote.mux' }).end(); return;
     }
+    // The Host's loopback callback: state-checked, no RPC authentication (DSH deepseek-account-platform).
+    if (url.pathname === '/oauth/callback') {
+      if (!signIn || url.searchParams.get('state') !== signIn.state || url.searchParams.getAll('code').length !== 1) { response.writeHead(400).end(); return; }
+      if (signIn.phase !== 'waiting-browser') { response.writeHead(410).end(); return; }
+      if (url.searchParams.get('code') === 'good') { signIn.phase = 'succeeded'; signedIn = true; response.writeHead(204).end(); }
+      else { signIn.phase = 'failed'; response.writeHead(200).end(); }
+      return;
+    }
     const cookie = request.headers.cookie?.split('=')[1];
     if (!cookie || !peers.get(cookie)) { response.writeHead(401).end(); return; }
     try {
@@ -55,7 +64,12 @@ async function host() {
       const session = sessions.get(args.request?.sessionId ?? args.agentId ?? args.request?.address?.sessionId);
       let value: unknown;
       switch (body.method) {
-        case 'account/getState': value = { status: signedIn ? 'credential-stored' : 'signed-out' }; break;
+        case 'account/getState': value = { status: signedIn ? 'credential-stored' : 'signed-out', links: { usageUrl: 'https://platform.example/usage', topUpUrl: 'https://platform.example/top_up' },
+          attempt: signIn ? { id: signIn.id, phase: signIn.phase, ...(signIn.phase === 'waiting-browser' ? { authorizeUrl: `https://platform.example/sign_in?state=${signIn.state}` } : {}) } : null }; break;
+        case 'account/startSignIn':
+          signIn = { id: randomUUID(), phase: 'waiting-browser', state: randomUUID(), callbackOrigin: args.callbackOrigin };
+          value = { status: signedIn ? 'credential-stored' : 'signed-out', links: {}, attempt: { id: signIn.id, phase: 'initializing' } }; break;
+        case 'account/cancelSignIn': if (signIn && signIn.id === args.attemptId) signIn.phase = 'cancelled'; value = { status: signedIn ? 'credential-stored' : 'signed-out', links: {}, attempt: null }; break;
         // A rejected grant is cleared by the Host and the read yields null (DSH deepseek-account README).
         case 'account/getProfile': value = profile === 'rejected' ? (signedIn = false, null) : profile === 'failed' ? { status: 'failed' } : { status: 'ready', value: { id: 'u1', name: 'Synthetic', contact: '138****9119' } }; break;
         case 'session/modelCatalog': value = catalog; break;
@@ -144,7 +158,7 @@ async function host() {
       return eventId;
     },
     withdraw(eventId: string) { parked.delete(eventId); for (const [streamId, stream] of eventStreams) stream.socket.send(JSON.stringify({ type: 'item', streamId, value: { type: 'cancel', eventId } })); },
-    dropNextResult() { failNextResult = 'drop'; }, followCalls: () => followCalls, setCatalog(value: unknown) { catalog = value; }, signOut() { signedIn = false; }, signIn() { signedIn = true; }, setProfile(value: 'ready' | 'failed' | 'rejected') { profile = value; }, onNextPage(hook: () => void) { nextPage = hook; }, exchanges: () => exchanges, rejectModel: () => { rejectModel = true; }, losePromptReceipt: () => { losePromptReceipt = true; }, live(session: string, frame: unknown) { for (const [streamId, follow] of follows) if (follow.session === session) follow.socket.send(JSON.stringify({ type: 'item', streamId, value: { type: 'assistant-stream', frame } })); }, disconnect() { for (const peer of peers.values()) peer?.terminate(); }, async close() { for (const peer of peers.values()) peer?.terminate(); await new Promise<void>(resolve => wss.close(() => resolve())); await new Promise<void>(resolve => server.close(() => resolve())); } };
+    dropNextResult() { failNextResult = 'drop'; }, followCalls: () => followCalls, setCatalog(value: unknown) { catalog = value; }, signOut() { signedIn = false; }, signIn() { signedIn = true; }, signInAttempt: () => signIn, setProfile(value: 'ready' | 'failed' | 'rejected') { profile = value; }, onNextPage(hook: () => void) { nextPage = hook; }, exchanges: () => exchanges, rejectModel: () => { rejectModel = true; }, losePromptReceipt: () => { losePromptReceipt = true; }, live(session: string, frame: unknown) { for (const [streamId, follow] of follows) if (follow.session === session) follow.socket.send(JSON.stringify({ type: 'item', streamId, value: { type: 'assistant-stream', frame } })); }, disconnect() { for (const peer of peers.values()) peer?.terminate(); }, async close() { for (const peer of peers.values()) peer?.terminate(); await new Promise<void>(resolve => wss.close(() => resolve())); await new Promise<void>(resolve => server.close(() => resolve())); } };
 }
 
 async function setup() {
@@ -745,14 +759,36 @@ test('DSH presents a plan review with its plan and answers with the native optio
 
 test('DSH account: a platform check makes it valid, a failed check unverified, a cleared grant rejected', async t => {
   const context = await setup(); t.after(() => context.close());
-  assert.deepEqual(await context.adapter.account!(), { state: 'valid', identity: 'DeepSeek 账号 138****9119' });
+  const links = { usage: 'https://platform.example/usage', topUp: 'https://platform.example/top_up' };
+  assert.deepEqual(await context.adapter.account!(), { state: 'valid', identity: 'DeepSeek 账号 138****9119', links });
   const profileCall = context.fixture.calls.find(call => call.method === 'account/getProfile');
   assert.deepEqual(Object.keys(profileCall!.args.client).sort(), ['locale', 'timezoneOffsetSeconds', 'version']);
   context.fixture.setProfile('failed');
-  assert.deepEqual(await context.adapter.account!(), { state: 'unverified' });
+  assert.deepEqual(await context.adapter.account!(), { state: 'unverified', links });
   context.fixture.setProfile('rejected');
-  assert.deepEqual(await context.adapter.account!(), { state: 'rejected' });
-  assert.deepEqual(await context.adapter.account!(), { state: 'signed-out' }, 'after the rejection is reported it is plainly signed out');
+  assert.deepEqual(await context.adapter.account!(), { state: 'rejected', links });
+  assert.deepEqual(await context.adapter.account!(), { state: 'signed-out', links }, 'after the rejection is reported it is plainly signed out');
   context.fixture.signIn(); context.fixture.setProfile('ready');
   assert.equal((await context.adapter.account!()).state, 'valid');
+});
+
+test('DSH paste-back login: the Host loopback callback receives only code and state from the pasted address', async t => {
+  const context = await setup(); t.after(() => context.close());
+  context.fixture.signOut();
+  const started = await context.adapter.startLogin!();
+  assert.ok(started.kind === 'paste-back');
+  const launchOrigin = new URL(context.fixture.launch).origin;
+  assert.equal(context.fixture.signInAttempt()!.callbackOrigin, launchOrigin, 'the callback origin is the Host loopback address');
+  assert.equal(started.callbackPrefix, `${launchOrigin}/oauth/callback`);
+  assert.match(started.authorizeUrl, /^https:\/\/platform\.example\/sign_in/);
+  const state = context.fixture.signInAttempt()!.state;
+  assert.equal(await context.adapter.completeLogin!(started.loginId, 'not a url'), 'invalid');
+  assert.equal(await context.adapter.completeLogin!(started.loginId, `http://127.0.0.1:1/elsewhere?code=good&state=${state}`), 'invalid');
+  assert.equal(await context.adapter.completeLogin!(started.loginId, `http://127.0.0.1:1/oauth/callback?code=good&state=wrong`), 'invalid', 'the Host rejects a foreign state');
+  // The pasted host and port are whatever the browser showed; only code and state travel to the Host's own callback.
+  assert.equal(await context.adapter.completeLogin!(started.loginId, `http://127.0.0.1:9/oauth/callback?code=good&state=${state}`), 'succeeded');
+  assert.equal((await context.adapter.account!()).state, 'valid');
+  const again = await context.adapter.startLogin!();
+  assert.equal(await context.adapter.cancelLogin!(again.loginId), 'canceled');
+  assert.equal(await context.adapter.completeLogin!(again.loginId, `http://127.0.0.1:9/oauth/callback?code=good&state=${context.fixture.signInAttempt()!.state}`), 'failed', 'a cancelled attempt cannot complete');
 });

@@ -3,8 +3,8 @@ import { z } from 'zod';
 import type { QueueDelivery, RequestAnswer, TeamView } from '../../shared/workbench.ts';
 import { subagentIdSchema, subagentLimit } from '../../shared/workbench.ts';
 import { HarnessError } from '../types.ts';
-import type { Binding, Catalog, Configuration, HarnessAdapter, HarnessInput, HistoryPage, NativeAccount, NativeChange, NativeItem, NativeRequest, NativeState, NativeSubagent, Receipt, SubagentHistory, SubagentSnapshot } from '../types.ts';
-import { Connection, NativeRejection, type Interaction } from './connection.ts';
+import type { Binding, Catalog, Configuration, HarnessAdapter, HarnessInput, HistoryPage, LoginCompletion, LoginStart, NativeAccount, NativeChange, NativeItem, NativeRequest, NativeState, NativeSubagent, Receipt, SubagentHistory, SubagentSnapshot } from '../types.ts';
+import { Connection, NativeRejection, readLaunchFile, type Interaction } from './connection.ts';
 import { parseInteraction, requestKey, toolCommand, type Parsed } from './requests.ts';
 import { LiveAssistant } from './live.ts';
 import { boundaryFrom, decodeModel, selectedModel, eventSchema, historyItems, identifier, inboxSenders, itemFrom, modelId, modelSchema, object, pageSchema, snapshotSchema, stateFrom, targetTurnRange, terminalStatusFrom, textBlocks, textContent, turnAt, usageFrom } from './native.ts';
@@ -211,19 +211,81 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
    * ADR 0015. DSH keeps no expiry or refresh: when the platform rejects the grant, the Host clears it. A profile read
    * asks the platform; it can fail for other reasons while inference still works, which is shown as unverified.
    */
+  const https = z.string().max(2048).refine(value => { try { return new URL(value).protocol === 'https:'; } catch { return false; } });
+  const accountState = z.object({
+    status: z.enum(['signed-out', 'credential-stored']),
+    links: z.object({ usageUrl: z.string().max(2048).optional(), topUpUrl: z.string().max(2048).optional() }).passthrough().optional(),
+    attempt: z.object({ id: z.string().min(1).max(200), phase: z.enum(['initializing', 'waiting-browser', 'exchanging', 'committing', 'succeeded', 'cancelled', 'expired', 'failed']),
+      authorizeUrl: z.string().max(4096).optional(), expiresAt: z.number().int().positive().optional() }).passthrough().nullable().optional(),
+  }).passthrough();
+  const readAccountState = async () => accountState.parse(await connection.call('account/getState'));
+  const accountClient = () => ({ version: 'zhongshu', locale: 'zh-CN', timezoneOffsetSeconds: -new Date().getTimezoneOffset() * 60 });
   async function account(): Promise<NativeAccount> {
-    const stateSchema = z.object({ status: z.enum(['signed-out', 'credential-stored']) }).passthrough();
-    const absent = (): NativeAccount => { const rejected = accountStored === true; accountStored = false; return { state: rejected ? 'rejected' : 'signed-out' }; };
-    if (stateSchema.parse(await connection.call('account/getState')).status === 'signed-out') return absent();
+    const state = await readAccountState();
+    const usage = https.safeParse(state.links?.usageUrl); const topUp = https.safeParse(state.links?.topUpUrl);
+    const links = usage.success || topUp.success ? { links: { ...(usage.success ? { usage: usage.data } : {}), ...(topUp.success ? { topUp: topUp.data } : {}) } } : {};
+    const absent = (): NativeAccount => { const rejected = accountStored === true; accountStored = false; return { state: rejected ? 'rejected' : 'signed-out', ...links }; };
+    if (state.status === 'signed-out') return absent();
     accountStored = true;
-    const client = { version: 'zhongshu', locale: 'zh-CN', timezoneOffsetSeconds: -new Date().getTimezoneOffset() * 60 };
+    const client = accountClient();
     const profile = z.union([z.null(), z.object({ status: z.literal('failed') }).passthrough(),
       z.object({ status: z.literal('ready'), value: z.object({ name: z.string().max(200).nullable().optional(), contact: z.string().max(200).nullable().optional() }).passthrough() })])
       .parse(await connection.call('account/getProfile', { client }));
-    if (profile === null) return stateSchema.parse(await connection.call('account/getState')).status === 'signed-out' ? absent() : { state: 'unverified' };
-    if (profile.status === 'failed') return { state: 'unverified' };
+    if (profile === null) return (await readAccountState()).status === 'signed-out' ? absent() : { state: 'unverified', ...links };
+    if (profile.status === 'failed') return { state: 'unverified', ...links };
     const identity = profile.value.contact ?? profile.value.name ?? undefined;
-    return { state: 'valid', ...(identity ? { identity: `DeepSeek 账号 ${identity}` } : {}) };
+    return { state: 'valid', ...(identity ? { identity: `DeepSeek 账号 ${identity}` } : {}), ...links };
+  }
+  /**
+   * Browser sign-in through a loopback callback (ADR 0015, amended 2026-11-07). The callback origin is the Host's own
+   * loopback address from the launch file; a browser elsewhere cannot reach it, so the user pastes the redirect back.
+   */
+  async function startLogin(): Promise<LoginStart> {
+    const launch = await readLaunchFile(options.launchFile);
+    if (launch.protocol !== 'http:') throw new HarnessError('DSH_LOGIN_UNAVAILABLE');
+    let state = accountState.parse(await connection.call('account/startSignIn', { client: accountClient(), callbackOrigin: launch.origin, loginSource: 'desktop' }));
+    for (let tries = 0; tries < 40; tries++) {
+      const attempt = state.attempt;
+      if (attempt?.phase === 'waiting-browser' && attempt.authorizeUrl && https.safeParse(attempt.authorizeUrl).success)
+        return { kind: 'paste-back', loginId: attempt.id, authorizeUrl: attempt.authorizeUrl, callbackPrefix: `${launch.origin}/oauth/callback`, ...(attempt.expiresAt ? { expiresAt: attempt.expiresAt } : {}) };
+      if (attempt && !['initializing', 'waiting-browser'].includes(attempt.phase)) throw new HarnessError('DSH_LOGIN_NOT_STARTED');
+      await new Promise(resolve => setTimeout(resolve, 250));
+      state = await readAccountState();
+    }
+    throw new HarnessError('DSH_LOGIN_NOT_STARTED');
+  }
+  /** Only the code and state of the pasted address are used, and they go to this Host's own callback. */
+  async function completeLogin(loginId: string, callbackUrl: string): Promise<LoginCompletion> {
+    let pasted: URL;
+    try { pasted = new URL(callbackUrl.trim()); } catch { return 'invalid'; }
+    const codes = pasted.searchParams.getAll('code'); const states = pasted.searchParams.getAll('state');
+    if (pasted.pathname !== '/oauth/callback' || codes.length !== 1 || states.length !== 1 || !/^[A-Za-z0-9._~-]{1,2048}$/.test(codes[0]!) || !/^[A-Za-z0-9._~-]{1,512}$/.test(states[0]!)) return 'invalid';
+    const before = await readAccountState();
+    if (before.attempt?.id !== loginId) return 'failed';
+    if (before.attempt.phase === 'expired') return 'expired';
+    if (before.attempt.phase !== 'waiting-browser') return before.attempt.phase === 'succeeded' ? 'succeeded' : 'failed';
+    const launch = await readLaunchFile(options.launchFile);
+    const target = new URL('/oauth/callback', launch.origin);
+    target.searchParams.set('code', codes[0]!); target.searchParams.set('state', states[0]!);
+    const response = await fetch(target, { redirect: 'manual', signal: AbortSignal.timeout(60_000) });
+    await response.body?.cancel().catch(() => {});
+    if (response.status === 400) return 'invalid';
+    // The exchange settles natively; follow this attempt to its end.
+    for (let tries = 0; tries < 120; tries++) {
+      const attempt = (await readAccountState()).attempt;
+      if (attempt?.id !== loginId) return 'failed';
+      if (attempt.phase === 'succeeded') { accountStored = true; return 'succeeded'; }
+      if (attempt.phase === 'expired') return 'expired';
+      if (attempt.phase === 'failed' || attempt.phase === 'cancelled') return 'failed';
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+    return 'failed';
+  }
+  async function cancelLogin(loginId: string): Promise<'canceled' | 'notFound'> {
+    const state = await readAccountState();
+    if (state.attempt?.id !== loginId || !['initializing', 'waiting-browser'].includes(state.attempt.phase)) return 'notFound';
+    await connection.call('account/cancelSignIn', { attemptId: loginId });
+    return 'canceled';
   }
 
   async function catalog(): Promise<Catalog> {
@@ -636,7 +698,7 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
     await start(); return dispose;
   }
 
-  return { id: 'dsh', earlyInput: 'soon', planMode: 'native', setPlan, catalog, account,
+  return { id: 'dsh', earlyInput: 'soon', planMode: 'native', setPlan, catalog, account, startLogin, completeLogin, cancelLogin,
     normalizeConfiguration(configuration) {
       const selected = selectedModel(configuration);
       return { ...configuration, modelId: modelId({ provider: selected.provider, model: selected.model }),

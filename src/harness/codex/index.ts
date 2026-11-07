@@ -1,7 +1,7 @@
 import { basename, isAbsolute, normalize } from 'node:path';
 import { z } from 'zod';
 import { HarnessError } from '../types.ts';
-import type { AccountEvent, Binding, Catalog, Configuration, DeviceLoginStart, HarnessAdapter, HarnessInput, NativeAccount, HistoryPage, NativeChange, NativeItem, NativeRequest, NativeState, NativeSubagent, Receipt, SubagentHistory, SubagentSnapshot } from '../types.ts';
+import type { AccountEvent, Binding, Catalog, Configuration, HarnessAdapter, LoginStart, HarnessInput, NativeAccount, HistoryPage, NativeChange, NativeItem, NativeRequest, NativeState, NativeSubagent, Receipt, SubagentHistory, SubagentSnapshot } from '../types.ts';
 import { CodexRpc, RpcError, type ServerRequest } from './rpc.ts';
 import { answerableMethods, parseServerRequest, type Parsed } from './requests.ts';
 import { inputFields } from '../../shared/content.ts';
@@ -343,11 +343,11 @@ class CodexAdapter implements HarnessAdapter {
       throw error;
     }
   }
-  async startDeviceLogin(): Promise<DeviceLoginStart> {
+  async startLogin(): Promise<LoginStart> {
     const started = parse(deviceLogin, await this.rpc.request('account/login/start', { type: 'chatgptDeviceCode' }));
-    return { loginId: started.loginId, verificationUrl: started.verificationUrl, userCode: started.userCode };
+    return { kind: 'device-code', loginId: started.loginId, verificationUrl: started.verificationUrl, userCode: started.userCode };
   }
-  async cancelDeviceLogin(loginId: string): Promise<'canceled' | 'notFound'> {
+  async cancelLogin(loginId: string): Promise<'canceled' | 'notFound'> {
     return parse(z.object({ status: z.enum(['canceled', 'notFound']) }), await this.rpc.request('account/login/cancel', { loginId: parse(loginIdSchema, loginId) })).status;
   }
   onAccountEvent(listener: (event: AccountEvent) => void): () => void {

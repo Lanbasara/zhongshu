@@ -143,14 +143,14 @@ Codex 经专用 Unix socket 管理进程调用固定 CLI 和同一实例的 App 
 
 ## Harness 账号
 
-边界依据 [ADR 0015](adr/0015-harness-account-status.md)：凭据留在原生 Harness，中书只核实、提醒，并为 Codex 发起设备码登录。
+边界依据 [ADR 0015](adr/0015-harness-account-status.md)：凭据留在原生 Harness，中书只核实、提醒并发起登录。Codex 用设备码登录；DSH 由用户把跳转地址粘贴回来，中书把其中的 code 和 state 交给 Host 自己的回调。
 
 | 层 | 当前职责 |
 | --- | --- |
-| 接入 | 共同语义增加 `account`、`startDeviceLogin`、`cancelDeviceLogin` 与 `onAccountEvent`。[Codex](../src/harness/codex/index.ts) 由读账号、`getAuthStatus` 和读额度得出状态：401 经一次原生刷新仍被拒，或报“无法刷新”，即为失效。[DSH](../src/harness/dsh/index.ts) 由账号状态和资料核实得出状态，没有页内登录 |
-| 服务 | [harness-accounts.ts](../src/server/harness-accounts.ts) 在内存中保存每端最近一次核实：启动后、每 30 分钟、原生账号通知、打开设置和手动核实时更新；进入未登录或失效时经推送通知。设备码登录只保存原生登录编号，20 分钟后过期，新发起顶掉旧的 |
-| 数据 | 不入库；用户码只在发起登录的响应中返回一次 |
-| 接口 | 私有 `GET /api/private/accounts`、`POST /accounts/:harness/check`、`/accounts/:harness/login`、`/accounts/:harness/login/cancel`，沿用认证、来源与 CSRF 检查 |
+| 接入 | 共同语义增加 `account`、`startLogin`（`device-code` 或 `paste-back`）、`completeLogin`、`cancelLogin` 与 `onAccountEvent`。[Codex](../src/harness/codex/index.ts) 由读账号、`getAuthStatus` 和读额度得出状态：401 经一次原生刷新仍被拒，或报“无法刷新”，即为失效。[DSH](../src/harness/dsh/index.ts) 由账号状态和资料核实得出状态，并提供用量与充值链接；发起登录时以 launch 文件的回环地址为回调地址，完成登录时只把 code 和 state 交给该地址的 `/oauth/callback` |
+| 服务 | [harness-accounts.ts](../src/server/harness-accounts.ts) 在内存中保存每端最近一次核实：启动后、每 30 分钟、原生账号通知、打开设置和手动核实时更新；进入未登录或失效时经推送通知。登录只保存原生登录编号，最多 20 分钟后过期，新发起顶掉旧的；粘贴错的地址不会结束这次登录 |
+| 数据 | 不入库；用户码和登录页地址只在发起登录的响应中返回一次，粘贴的跳转地址只在完成登录的请求中出现 |
+| 接口 | 私有 `GET /api/private/accounts`、`POST /accounts/:harness/check`、`/accounts/:harness/login`、`/accounts/:harness/login/complete`、`/accounts/:harness/login/cancel`，沿用认证、来源与 CSRF 检查 |
 | 界面 | 「设置 → 账户」顶部的账号卡片与设备码面板；对话区上方的提醒条（[功能层](../src/web/harness-accounts.tsx)、[展示组件](../src/web/patterns/harness-accounts.tsx)） |
 
 ## 对话观察与删除协调

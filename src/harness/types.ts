@@ -117,9 +117,19 @@ export type NativeAccount = {
   identity?: string;
   plan?: string;
   usage?: { usedPercent: number; resetsAt?: number; windowMinutes?: number };
+  /** Vendor pages for usage and top-up (DSH), HTTPS only. */
+  links?: { usage?: string; topUp?: string };
 };
-/** A native device-code login. The user code is shown once to the page that asked and never stored. */
-export type DeviceLoginStart = { loginId: string; verificationUrl: string; userCode: string };
+/**
+ * A native login, returned once to the page that asked and never stored (ADR 0015).
+ * - `device-code` (Codex): the user enters a code on the vendor's page; native notifies completion.
+ * - `paste-back` (DSH): the vendor redirects to a loopback callback the user's browser cannot reach; the user pastes that
+ *   address back and Zhongshu delivers only its code and state to the Host's own callback.
+ */
+export type LoginStart =
+  | { kind: 'device-code'; loginId: string; verificationUrl: string; userCode: string }
+  | { kind: 'paste-back'; loginId: string; authorizeUrl: string; callbackPrefix: string; expiresAt?: number };
+export type LoginCompletion = 'succeeded' | 'failed' | 'expired' | 'invalid';
 export type AccountEvent = { type: 'changed' } | { type: 'login'; loginId: string; success: boolean; reason?: string };
 
 export interface HarnessAdapter {
@@ -135,9 +145,11 @@ export interface HarnessAdapter {
   catalog(): Promise<Catalog>;
   /** Verify the account with the vendor. Rejects when the Host cannot be reached. */
   account?(): Promise<NativeAccount>;
-  /** Start a native device-code login; a new start supersedes an older one (Codex). */
-  startDeviceLogin?(): Promise<DeviceLoginStart>;
-  cancelDeviceLogin?(loginId: string): Promise<'canceled' | 'notFound'>;
+  /** Start a native login; a new start supersedes or reuses an older one. */
+  startLogin?(): Promise<LoginStart>;
+  /** Finish a `paste-back` login with the address the vendor redirected to. */
+  completeLogin?(loginId: string, callbackUrl: string): Promise<LoginCompletion>;
+  cancelLogin?(loginId: string): Promise<'canceled' | 'notFound'>;
   /** Native account notifications: login completion and account changes. */
   onAccountEvent?(listener: (event: AccountEvent) => void): () => void;
   /** Project legacy configuration into the current catalog shape without mutating its stored identity. */

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { accountsSchema, accountViewSchema, deviceLoginResponseSchema, type AccountView } from '../shared/accounts.ts';
+import { accountsSchema, accountViewSchema, loginResponseSchema, type AccountView } from '../shared/accounts.ts';
 import { AccountAttentionBanner, HarnessAccountCard, type DeviceLogin, type HarnessAccount } from './patterns/harness-accounts.tsx';
 import { privateRequest } from './private-api.ts';
 import { RequestError } from './workbench-client.ts';
@@ -14,6 +14,7 @@ function usageLabel(minutes: number | undefined): string {
 export function toCard(view: AccountView): HarnessAccount {
   return { harness: names[view.harnessId], state: view.state, canLogin: view.canLogin,
     ...(view.identity ? { identity: view.identity } : {}), ...(view.plan ? { plan: view.plan } : {}), ...(view.checkedAt ? { checkedAt: view.checkedAt } : {}),
+    ...(view.links ? { links: view.links } : {}),
     ...(view.usage ? { usage: { label: usageLabel(view.usage.windowMinutes), usedPercent: view.usage.usedPercent, ...(view.usage.resetsAt ? { resetsAt: view.usage.resetsAt } : {}) } } : {}) };
 }
 
@@ -36,9 +37,10 @@ export function useAccounts(report: (reason: unknown) => void) {
 }
 export type Accounts = ReturnType<typeof useAccounts>;
 
-const loginErrors: Record<string, string> = { login_start_failed: '没能向 OpenAI 申请登录码，请检查服务器网络后再试。', login_not_supported: '这个 Harness 不能在页内登录。' };
+const loginErrors: Record<string, string> = { login_start_failed: '没能发起登录，请检查服务器网络后再试。', login_not_supported: '这个 Harness 不能在页内登录。' };
+const pasteErrors: Record<string, string> = { login_callback_invalid: '这不是这次登录跳转的地址。请复制地址栏里以上面开头的完整地址再试。', login_not_waiting: '这次登录已经结束，请重新发起。' };
 
-/** Settings → 账户: one card per Harness; Codex device-code login keeps its user code only in this page. */
+/** Settings → 账户: one card per Harness. Login codes and pasted addresses stay in this page only. */
 export function HarnessAccountsPanel({ csrf, accounts }: { csrf: string; accounts: Accounts }) {
   const { accounts: list, refresh, replace } = accounts;
   const [logins, setLogins] = useState<Partial<Record<AccountView['harnessId'], DeviceLogin>>>({});
@@ -61,7 +63,7 @@ export function HarnessAccountsPanel({ csrf, accounts }: { csrf: string; account
       for (const item of list) {
         const local = current[item.harnessId];
         if (item.login?.status === 'failed') next[item.harnessId] = { status: 'failed', reason: item.login.reason };
-        else if (!item.login && local?.status === 'waiting') delete next[item.harnessId];
+        else if (!item.login && (local?.status === 'waiting' || (local?.status === 'paste' && !local.completing))) delete next[item.harnessId];
       }
       return next;
     });
@@ -70,12 +72,27 @@ export function HarnessAccountsPanel({ csrf, accounts }: { csrf: string; account
   const login = async (harnessId: AccountView['harnessId']) => {
     setBusy(true); setLogins(current => ({ ...current, [harnessId]: { status: 'starting' } }));
     try {
-      const started = await privateRequest(`/accounts/${harnessId}/login`, deviceLoginResponseSchema, { csrf, body: {}, timeoutMs: 30_000 });
+      const started = await privateRequest(`/accounts/${harnessId}/login`, loginResponseSchema, { csrf, body: {}, timeoutMs: 30_000 });
       replace(started.account);
-      setLogins(current => ({ ...current, [harnessId]: { status: 'waiting', verificationUrl: started.verificationUrl, userCode: started.userCode } }));
+      setLogins(current => ({ ...current, [harnessId]: started.kind === 'device-code'
+        ? { status: 'waiting', verificationUrl: started.verificationUrl, userCode: started.userCode }
+        : { status: 'paste', authorizeUrl: started.authorizeUrl, callbackPrefix: started.callbackPrefix } }));
     } catch (reason) {
       setLogins(current => ({ ...current, [harnessId]: { status: 'failed', reason: reason instanceof RequestError ? loginErrors[reason.code] ?? '登录没有开始，请稍后再试。' : '登录没有开始，请稍后再试。' } }));
     } finally { setBusy(false); }
+  };
+  /** The pasted address carries a one-time code: it is posted once and kept nowhere else. */
+  const complete = async (harnessId: AccountView['harnessId'], callbackUrl: string) => {
+    const current = logins[harnessId]; if (current?.status !== 'paste') return;
+    setLogins(list => ({ ...list, [harnessId]: { ...current, completing: true, error: undefined } }));
+    try {
+      replace(await privateRequest(`/accounts/${harnessId}/login/complete`, accountViewSchema, { csrf, body: { callbackUrl }, timeoutMs: 90_000 }));
+      setLogins(list => { const next = { ...list }; delete next[harnessId]; return next; });
+    } catch (reason) {
+      const code = reason instanceof RequestError ? reason.code : '';
+      setLogins(list => ({ ...list, [harnessId]: { ...current, completing: false, error: pasteErrors[code] ?? '没能完成登录，请稍后再试。' } }));
+      void refresh();
+    }
   };
   const cancel = async (harnessId: AccountView['harnessId']) => {
     setLogins(current => { const next = { ...current }; delete next[harnessId]; return next; });
@@ -89,7 +106,8 @@ export function HarnessAccountsPanel({ csrf, accounts }: { csrf: string; account
     {!list ? <p className="settings-note" role="status">正在读取…</p>
       : !list.length ? <p className="settings-note">当前实例没有配置 Harness。</p>
       : <div className="account-list">{list.map(item => <HarnessAccountCard key={item.harnessId} account={toCard(item)} login={logins[item.harnessId]} busy={busy}
-          onCheck={() => void check(item.harnessId)} onLogin={() => void login(item.harnessId)} onCancelLogin={() => void cancel(item.harnessId)} onCopy={copy}/>)}</div>}
+          onCheck={() => void check(item.harnessId)} onLogin={() => void login(item.harnessId)} onCancelLogin={() => void cancel(item.harnessId)}
+          onCompleteLogin={url => void complete(item.harnessId, url)} onCopy={copy}/>)}</div>}
     {copied && <p className="settings-note" role="status">{copied}</p>}
   </section>;
 }
