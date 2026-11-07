@@ -2,7 +2,7 @@
 status: active
 started: 2026-11-07
 exit: 新界面覆盖全部现有功能，作者在桌面与手机宽度的浏览器中走通真实用户路径，用户在测试实例上完成手机与跨端（含未读同步）验收并认可
-evidence: none yet
+evidence: 分支 feat/interface-redesign（作者自查完成，待用户验收）
 ---
 
 # 界面重设计
