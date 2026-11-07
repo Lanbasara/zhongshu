@@ -19,6 +19,8 @@ export const projectionsSchema = z.object({ asOfSeq: z.number().int().nonnegativ
   turnOutline: outlineSchema.optional(),
   inbox: z.object({ 'next-turn': z.array(z.unknown()).max(1000), 'next-step': z.array(z.unknown()).max(1000) }).optional(),
   userQuestions: z.object({ active: z.array(z.unknown()).max(1000) }).optional(),
+  // Plan mode (dsh-plan-mode): `pending` while a requested change has not taken effect.
+  plan: z.object({ active: z.boolean(), pending: z.boolean() }).passthrough().optional(),
   tokenUsage: z.unknown().optional(), contextPressure: z.unknown().optional(),
   // Sub-agent projections: the parent's direct-child catalog and team; timing lives on each child.
   subagentCatalog: z.array(z.unknown()).max(2000).optional(), agentTeam: z.unknown().optional(), subagentTiming: z.unknown().optional(),
@@ -155,6 +157,11 @@ export function textContent(content: unknown): string {
   return text;
 }
 export function stateFrom(binding: Binding, snapshot: Snapshot): NativeState {
+  const state = executionState(binding, snapshot);
+  const plan = snapshot.projections.values.plan;
+  return plan ? { ...state, plan: { active: plan.active, pending: plan.pending } } : state;
+}
+function executionState(binding: Binding, snapshot: Snapshot): NativeState {
   if (snapshot.header.id !== binding.id || snapshot.header.cwd !== binding.cwd) throw new HarnessError('DSH_BINDING_MISMATCH');
   const values = snapshot.projections.values; const selected = selectedModel(binding.configuration);
   const configurationVerified = sameModel(values.modelSelection?.next, selected) && (!values.modelSelection?.lastUsed || sameModel(values.modelSelection.lastUsed, selected)) && values.permissions?.currentValue === binding.configuration.permissionId;

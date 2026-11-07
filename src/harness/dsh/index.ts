@@ -105,6 +105,17 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
       return entry.command && request.approval ? { ...request, approval: { ...request.approval, command: entry.command } } : request;
     }).sort((left, right) => left.createdAt - right.createdAt);
   }
+  /** Native Plan mode is session state; `/plan` and `/plan off` set it, and repeating either is harmless. */
+  async function setPlan(input: Binding, active: boolean): Promise<Receipt> {
+    const binding = checkBinding(input);
+    try {
+      const result = z.object({ result: z.object({ kind: z.string().max(60) }).passthrough() }).passthrough().safeParse(
+        await connection.call('commands/execute', { agentId: binding.id, line: active ? '/plan' : '/plan off', submittedAttachments: [] }));
+      // A composition without plan mode (for example the minimal preset) returns no command result.
+      if (!result.success) return { outcome: 'rejected', reason: 'plan_unavailable' };
+      return result.data.result.kind === 'success' ? { outcome: 'accepted' } : { outcome: 'rejected', reason: 'plan_rejected' };
+    } catch (error) { return error instanceof NativeRejection ? { outcome: 'rejected', reason: 'plan_rejected' } : { outcome: 'unknown', reason: 'dsh_plan_unconfirmed' }; }
+  }
   async function answer(input: Binding, key: string, value: RequestAnswer): Promise<Receipt> {
     const binding = checkBinding(input);
     const entry = interactions.get(key);
@@ -584,7 +595,7 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
                 else if (/^team\//.test(event.type)) emit({ type: 'subagents' });
                 else if (event.type === 'agent/inbox/spliced') for (const agentId of inboxSenders(event.data)) emit({ type: 'subagents', agentId });
                 if (event.type === 'assistant/message') { pendingItem = undefined; if (textTimer) clearTimeout(textTimer); textTimer = undefined; }
-                if (/^(turn\/|agent\/inbox|approval\/|permission\/|sandbox\/|model\/|tool\/|assistant\/(?:message|attempt)$|compaction\/)/.test(event.type)) refresh();
+                if (/^(turn\/|agent\/inbox|approval\/|permission\/|plan\/|sandbox\/|model\/|tool\/|assistant\/(?:message|attempt)$|compaction\/)/.test(event.type)) refresh();
               } else if (frame.type === 'assistant-stream') {
                 const change = live.accept(frame.frame);
                 if (change.resubscribe) { reconnect(); return; }
@@ -604,7 +615,7 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
     await start(); return dispose;
   }
 
-  return { id: 'dsh', earlyInput: 'soon', catalog,
+  return { id: 'dsh', earlyInput: 'soon', planMode: 'native', setPlan, catalog,
     normalizeConfiguration(configuration) {
       const selected = selectedModel(configuration);
       return { ...configuration, modelId: modelId({ provider: selected.provider, model: selected.model }),

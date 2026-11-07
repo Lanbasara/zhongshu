@@ -32,6 +32,7 @@ import { rememberConversation } from './conversation-preferences.ts';
 import { SubagentActivity, SubagentTrigger } from './patterns/subagents.tsx';
 import { SubagentPanelHost, subagentDisplays, useSubagentList } from './subagents.tsx';
 import { ConversationRequests } from './requests.tsx';
+import { PlanArea, PlanToolbarToggle, usePlan } from './plan.tsx';
 
 const failures: Record<string, string> = {
   conversation_archived: '这段对话已归档，请恢复后继续。',
@@ -464,6 +465,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
   const newerLoadRef = useRef(loadNewer); newerLoadRef.current = loadNewer;
   const conversation = snapshot?.conversation;
   const openRequests = !!snapshot?.requests?.some(item => item.status === 'open');
+  const planning = usePlan({ conversation: snapshot?.conversation, csrf, report, onNotice: setError, onChanged: () => { if (selected) scheduleRefresh(selected); } });
   const unresolved = snapshot?.operations.some(op => ['queued', 'dispatching', 'unknown'].includes(op.status));
   const latestMessage = snapshot?.operations.find(op => op.type === 'message' && op.status === 'accepted');
   const rejectedDraft = draft.pending && snapshot?.operations.find(op => op.id === draft.pending!.id)?.status === 'rejected';
@@ -683,6 +685,8 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
             }}>查看消息</button>}
           </div>}
           {!workspaceRemoved && !conversation?.archived && draft.pending && <div className="state-notice">{rejectedDraft ? '上次发送未被接受，原始输入已保留。' : '上次发送尚未确认，原始输入已保留。'}<button className="text-button" disabled={sending} onClick={() => { if (rejectedDraft && selected) { const { pending: _pending, ...next } = draft; setDraft(next); saveDraft(selected, next); } else void send(); }}>{rejectedDraft ? '继续编辑' : '核对同一发送'}</button></div>}
+          {conversation && snapshot?.conversation.id === conversation.id && <PlanArea conversation={conversation} planReady={snapshot.planReady} csrf={csrf} report={report}
+            onChange={planning.change} onChanged={() => scheduleRefresh(conversation.id)}/>}
           {conversation && snapshot?.conversation.id === conversation.id && !!snapshot.requests?.length && <ConversationRequests conversation={conversation} requests={snapshot.requests} csrf={csrf}
             report={report} onNotice={setError} onReload={() => { if (selected) void load(selected); }} onOpenAgent={agentId => openSubagents(agentId)}/>}
           {!workspaceRemoved && !conversation?.archived && <Composer key={selected} conversation={selected} csrf={csrf} draft={draft} onChange={updateDraft}
@@ -693,7 +697,9 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
               target={running && usable && !unresolved ? conversation.state.runId : undefined} canResume={!!usable && !unresolved} onCommand={changeQueue}/>}
             permission={conversation?.state.configurationVerified ? permission?.label ?? '配置按对话固定' : '配置待核实'}
             configurationNote={conversation?.state.configurationVerified ? permission?.description ?? '配置在本对话中保持不变。' : '正在核实当前对话的原生配置，核实后可继续工作。'}
-            model={configurationLabel.model} reasoningEffort={configurationLabel.reasoningEffort}/>}
+            model={configurationLabel.model} reasoningEffort={configurationLabel.reasoningEffort}
+            toolbarExtras={conversation?.id === selected && <PlanToolbarToggle plan={conversation.plan} changing={planning.changing}
+              busy={running || sending || ['waiting', 'unknown'].includes(conversation.state.status)} onChange={active => void planning.change(active)}/>}/>}
         </div>
       </>}
       {(error || authError || unavailableNotice) && <div className="workbench-error" role="alert"><span>{error || authError || unavailableNotice}</span><button className="text-button" onClick={() => { setError(''); setUnavailableNotice(''); }}>关闭</button></div>}

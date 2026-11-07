@@ -34,6 +34,8 @@ export type NativeItem = {
   imageSources?: { data?: string; path?: string; mediaType?: string }[];
   /** A native collaboration record naming sub-agents of this conversation. */
   collaboration?: Collaboration;
+  /** A plan proposed in Plan mode. */
+  plan?: true;
 };
 /** One native sub-agent in the conversation's spawn tree, as verified by this read. */
 export type NativeSubagent = {
@@ -72,6 +74,8 @@ export type NativeState = {
   pendingInputs: number;
   configurationVerified: boolean;
   reason?: string;
+  /** Native Plan mode, when the Harness keeps it as session state. */
+  plan?: { active: boolean; pending: boolean };
 };
 export type HistoryPage = {
   /** Chronological within each page. Default is the latest page. */
@@ -89,7 +93,7 @@ export type Receipt =
  * sub-agent; it is absent when the conversation's main agent asked.
  */
 export type NativeRequest = Omit<PendingRequest, 'status' | 'answer' | 'agent'> & { agentId?: string };
-export type HarnessInput = InputContent & { id: string; imageData?: { mediaType: string; data: string }[] };
+export type HarnessInput = InputContent & { id: string; imageData?: { mediaType: string; data: string }[]; /** Run this turn in Plan mode (per-turn Harnesses). */ plan?: boolean };
 export type NativeChange =
   | { type: 'item'; item: NativeItem }
   | { type: 'state'; state: NativeState }
@@ -106,6 +110,13 @@ export type NativeChange =
 export interface HarnessAdapter {
   readonly id: HarnessId;
   readonly earlyInput?: 'current' | 'soon';
+  /**
+   * How Plan mode works natively (ADR 0016): `per-turn` takes the mode with every new turn (Codex); `native` keeps
+   * it as session state changed by `setPlan` and reported in `NativeState.plan` (DSH).
+   */
+  readonly planMode?: 'per-turn' | 'native';
+  /** Turn native Plan mode on or off (`native` Harnesses). Repeating the same request is harmless. */
+  setPlan?(binding: Binding, active: boolean): Promise<Receipt>;
   catalog(): Promise<Catalog>;
   /** Project legacy configuration into the current catalog shape without mutating its stored identity. */
   normalizeConfiguration?(configuration: Configuration): Configuration;

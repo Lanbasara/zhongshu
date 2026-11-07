@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { requestAnswerResponseSchema, type Conversation, type PendingRequest, type RequestAnswer } from '../shared/workbench.ts';
 import { RequestStack, answerSummary } from './patterns/requests.tsx';
 import { request, RequestError } from './workbench-client.ts';
+import { MarkdownText } from './conversation-content.tsx';
 
 /** Placeholder identity for an answer whose POST has not returned; never sent anywhere. */
 const pendingAnswer = '00000000-0000-4000-8000-000000000000';
@@ -64,6 +65,6 @@ export function ConversationRequests({ conversation, requests, csrf, report, onN
     } catch (reason) { report(reason); }
     finally { onReload(); }
   }
-  return <RequestStack requests={shown} now={now} onAnswer={(id, value) => void answer(id, value)} onReconcile={id => void reconcile(id)}
+  return <RequestStack requests={shown} now={now} renderMarkdown={text => <MarkdownText text={text}/>} onAnswer={(id, value) => void answer(id, value)} onReconcile={id => void reconcile(id)}
     onDismiss={id => setDismissed(current => new Set(current).add(id))} onOpenAgent={onOpenAgent}/>;
 }

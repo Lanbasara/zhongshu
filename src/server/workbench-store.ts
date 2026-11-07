@@ -19,6 +19,8 @@ export type Conversation = {
   archived: boolean; state: NativeState; error: string | null; createdAt: number; lastActivityAt: number;
   usage?: ConversationUsage;
   subagents?: SubagentSummary;
+  /** Plan mode chosen in Zhongshu for Harnesses that take the mode per turn (Codex). */
+  planMode?: true;
 };
 export type CreateConversation = Pick<Conversation, 'id' | 'harnessId' | 'workspaceId' | 'cwd' | 'configuration'> & { title?: string; preparationId?: string };
 export type OperationStatus = 'queued' | 'dispatching' | 'accepted' | 'unknown' | 'rejected';
@@ -60,6 +62,8 @@ export interface WorkbenchStore {
   listConversations(options?: ConversationList): Conversation[];
   recentAcceptedConversation(workspaces: { id: string; directory: string }[], harnessIds: HarnessId[]): Conversation | null;
   renameConversation(id: string, title: string): Conversation;
+  /** Record the Plan choice of a per-turn Harness conversation; a change emits a conversation change. */
+  setPlanMode(id: string, active: boolean): Conversation;
   setArchived(id: string, archived: boolean, canArchive: (conversation: Conversation) => boolean): Conversation;
   saveBinding(id: string, binding: Binding): Conversation;
   setConversationState(id: string, change: { readiness?: Readiness; state?: NativeState; error?: string | null }): Conversation;
@@ -108,7 +112,7 @@ const nativeStateSchema = stateSchema;
 const itemSchema = z.object({
   id: identifier, kind: z.enum(['user', 'assistant', 'tool', 'notice']), text: boundedText(MAX_TEXT_BYTES),
   status: z.enum(['running', 'completed', 'failed', 'unknown']), runId: identifier.optional(), operationId: identifier.optional(),
-  ...contentFields, tool: toolSchema.optional(), collaboration: collaborationSchema.optional(),
+  ...contentFields, tool: toolSchema.optional(), collaboration: collaborationSchema.optional(), plan: z.literal(true).optional(),
 }).strict();
 const turnFileItemSchema = z.object({ kind: z.literal('tool'), status: z.literal('completed'), runId: identifier, fileEdits: z.array(recordedFilePath).min(1).max(400) }).strict();
 const nativeItemSchema = itemSchema.extend({ fileEdits: z.array(recordedFilePath).max(400).optional() });
@@ -204,7 +208,14 @@ function conversationFromRow(row: Row): Conversation {
     state: parseJson(nativeStateSchema, row.state_json), error: row.error === null ? null : String(row.error), createdAt: Number(row.created_at), lastActivityAt: Number(row.last_activity_at ?? row.created_at),
     ...(row.usage_json == null ? {} : { usage: parseJson(usageSchema, row.usage_json) }),
     ...(summarizeSubagents(row.subagents_json) ? { subagents: summarizeSubagents(row.subagents_json)! } : {}),
+    ...(row.plan_mode === 1 ? { planMode: true as const } : {}),
   };
+}
+/** Plan mode as lists and headers show it: Zhongshu's choice for per-turn Harnesses, the native state otherwise. */
+export function planView(conversation: Conversation, mode: 'per-turn' | 'native' | undefined): { active: boolean; pending?: boolean } | undefined {
+  if (mode === 'per-turn') return { active: !!conversation.planMode };
+  if (mode === 'native' && conversation.state.plan) return { active: conversation.state.plan.active, ...(conversation.state.plan.pending ? { pending: true } : {}) };
+  return undefined;
 }
 function operationFromRow(row: Row): Operation {
   const payload = parseJson(z.unknown(), row.payload_json);
@@ -426,6 +437,16 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
         const current = requireConversation(id);
         if (current.title === title) return current;
         db.prepare('UPDATE workbench_conversations SET title=? WHERE id=?').run(title, id);
+        changed(id);
+        return requireConversation(id);
+      });
+    },
+    setPlanMode(id, active) {
+      parse(uuid, id); parse(z.boolean(), active);
+      return mutate(changed => {
+        const current = requireConversation(id);
+        if (!!current.planMode === active) return current;
+        db.prepare('UPDATE workbench_conversations SET plan_mode=? WHERE id=?').run(active ? 1 : 0, id);
         changed(id);
         return requireConversation(id);
       });

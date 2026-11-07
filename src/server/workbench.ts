@@ -8,7 +8,7 @@ import { referenceSchema } from '../shared/content.ts';
 import { isAbsolute, relative } from 'node:path';
 import { listWorkspaceDocuments, openWorkspaceDocument, saveWorkspaceDocument } from './workspace-documents.ts';
 import { createHash, randomUUID } from 'node:crypto';
-import { StoreError, type WorkbenchStore, type CreateConversation, type OperationInput, type Conversation, type Operation } from './workbench-store.ts';
+import { StoreError, planView, type WorkbenchStore, type CreateConversation, type OperationInput, type Conversation, type Operation } from './workbench-store.ts';
 import type { WorkspaceRegistry } from './workspace-registry.ts';
 import type { ConversationUsage, PendingRequest, QueueCommand, QueueView, RequestAnswer, RequestAnswerView, SubagentList, WorkbenchConfiguration, WorkbenchItem, workspaceAddSchema, workspaceManagementSchema } from '../shared/workbench.ts';
 import { attentionLimit, itemSchema, requestLimit, subagentIdSchema } from '../shared/workbench.ts';
@@ -825,7 +825,36 @@ export class Workbench {
     const history = { items, liveItems, liveItemsLimited: live.length > LIVE_VIEW_LIMIT,
       olderCursor: this.wrapCursor(id, tail?.olderCursor ?? null), loaded: !!tail && !tail.error, ...(tail?.error ? { error: tail.error } : {}) };
     return { conversation, history, turnFiles: this.store.readTurnFiles(id, [...runIds]),
-      operations: this.store.listOperations({ conversationId: id, order: 'desc', limit: 100 }), queue: this.queue(id), requests: this.requestList(id), revision: this.store.version() };
+      operations: this.store.listOperations({ conversationId: id, order: 'desc', limit: 100 }), queue: this.queue(id), requests: this.requestList(id),
+      ...(this.planReady(conversation, [...items, ...liveItems]) ? { planReady: { runId: conversation.state.runId! } } : {}), revision: this.store.version() };
+  }
+  planOf(conversation: Conversation) { return planView(conversation, this.adapters.get(conversation.harnessId)?.planMode); }
+  /**
+   * A per-turn Plan conversation whose latest turn ended with a proposed plan and nothing after it: the client
+   * offers to carry the plan out. Derived from native items and state; it is not a native request.
+   */
+  private planReady(conversation: Conversation, items: WorkbenchItem[]): boolean {
+    if (this.adapters.get(conversation.harnessId)?.planMode !== 'per-turn' || !conversation.planMode) return false;
+    const state = conversation.state;
+    if (state.status !== 'idle' || !state.configurationVerified || !state.runId || state.pendingInputs) return false;
+    if (this.store.listOperations({ conversationId: conversation.id, status: 'queued', limit: 1 }).length || this.store.readQueue(conversation.id).entries.length) return false;
+    const last = items.findLastIndex(item => item.plan && item.runId === state.runId && item.status === 'completed');
+    return last >= 0 && !items.slice(last + 1).some(item => item.kind === 'user');
+  }
+  async setPlan(id: string, active: boolean): Promise<Conversation> {
+    this.assertOpen(); this.assertNotDeleting(id);
+    const conversation = this.conversation(id); const adapter = this.adapter(conversation);
+    if (!adapter.planMode) throw new StoreError('plan_unavailable', 409);
+    if (['running', 'waiting', 'unknown'].includes(conversation.state.status) || this.busyConversations.has(id)) throw new StoreError('plan_change_while_running', 409);
+    if (adapter.planMode === 'per-turn') return this.store.setPlanMode(id, active);
+    if (!conversation.binding || !adapter.setPlan) throw new StoreError('plan_unavailable', 409);
+    let receipt: Receipt;
+    try { receipt = await adapter.setPlan(conversation.binding, active); }
+    catch { receipt = { outcome: 'unknown', reason: 'native_receipt_unknown' }; }
+    if (receipt.outcome === 'rejected') throw new StoreError(receipt.reason === 'plan_unavailable' ? 'plan_unavailable' : 'plan_rejected', 409);
+    // The native session reports what took effect; an unknown receipt is settled by that read, never by resending.
+    await this.sync(id).catch(() => {});
+    return this.conversation(id);
   }
   /** One older native page, addressed by a cursor the server issued for this conversation. Nothing is persisted. */
   async history(id: string, cursor: string) {
@@ -1079,7 +1108,9 @@ export class Workbench {
     });
   }
   private messageInput(operation: Extract<Operation, { type: 'message' }>) {
-    return { ...operation.payload, id: operation.id, text: nativeText(operation.payload), imageData: operation.payload.images?.map(image => {
+    // Per-turn Harnesses take the conversation's Plan choice as it stands when the message is dispatched.
+    const plan = !!this.store.getConversation(operation.conversationId)?.planMode;
+    return { ...operation.payload, id: operation.id, text: nativeText(operation.payload), ...(plan ? { plan: true } : {}), imageData: operation.payload.images?.map(image => {
       const resource = this.store.resources.get(operation.conversationId, image.id);
       return { mediaType: resource.mediaType, data: resource.data.toString('base64') };
     }) };

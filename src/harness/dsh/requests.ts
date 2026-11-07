@@ -15,7 +15,9 @@ const approvalRequest = z.object({ toolName: z.string().min(1).max(200), callId:
 const questionRequest = z.object({
   questions: z.array(z.object({ id: z.string().min(1).max(240), question: z.string().max(64 * 1024), header: z.string().max(400).nullish(), detail: z.string().max(256 * 1024).nullish(),
     options: z.array(z.object({ label: z.string().min(1).max(400), description: z.string().max(4000).nullish() }).passthrough()).max(16).nullish(),
-    multiSelect: z.boolean().nullish() }).passthrough()).min(1).max(8),
+    multiSelect: z.boolean().nullish(),
+    // A plan submitted for approval (dsh-plan-mode `exit_plan_mode`): `approve` names the affirmative option.
+    intent: z.object({ kind: z.string().max(60), approve: z.string().max(400).nullish() }).passthrough().nullish() }).passthrough()).min(1).max(8),
 }).passthrough();
 
 export type Parsed = {
@@ -46,11 +48,14 @@ export function parseInteraction(event: string, eventId: string, raw: unknown, n
     const questions = parsed.data.questions;
     if (new Set(questions.map(question => question.id)).size !== questions.length) return;
     return {
-      request: { id, kind: 'question', createdAt: now, questions: questions.map(question => ({
-        id: question.id, text: clip(question.detail ? `${question.question}\n\n${question.detail}` : question.question, 16_000),
-        ...(question.header ? { header: clip(question.header, 400) } : {}), multiple: !!question.multiSelect, custom: true,
-        options: (question.options ?? []).map(option => ({ label: option.label, ...(option.description ? { description: clip(option.description, 4000) } : {}) })),
-      })) },
+      request: { id, kind: 'question', createdAt: now, questions: questions.map(question => {
+        const options = (question.options ?? []).map(option => ({ label: option.label, ...(option.description ? { description: clip(option.description, 4000) } : {}) }));
+        const approve = question.intent?.kind === 'plan-review' ? question.intent.approve ?? undefined : undefined;
+        const keep = approve ? options.find(option => option.label !== approve)?.label : undefined;
+        const review = approve && keep && options.some(option => option.label === approve) && question.detail ? { approve, keep, plan: clip(question.detail, 64 * 1024) } : undefined;
+        return { id: question.id, text: clip(review || !question.detail ? question.question : `${question.question}\n\n${question.detail}`, 16_000),
+          ...(question.header ? { header: clip(question.header, 400) } : {}), multiple: !!question.multiSelect, custom: true, options, ...(review ? { review } : {}) };
+      }) },
       outcome: answer => {
         if (answer.kind !== 'question' || answer.answers.length !== questions.length) return;
         const answers = [];
@@ -59,9 +64,13 @@ export function parseInteraction(event: string, eventId: string, raw: unknown, n
           if (!given) return;
           const labels = new Set((question.options ?? []).map(option => option.label));
           if (given.selected.some(label => !labels.has(label)) || (!question.multiSelect && given.selected.length > 1)) return;
-          // Single choice: typed text replaces the selection, as the native UI sends it.
+          // Single choice: typed text replaces the selection, as the native UI sends it. A plan review keeps its
+          // option: "Keep planning" with feedback; approval is exactly the approve label without feedback.
           const custom = given.custom?.trim();
-          answers.push({ id: question.id, selected: !question.multiSelect && custom ? [] : given.selected, ...(custom ? { custom } : {}) });
+          const review = question.intent?.kind === 'plan-review' && !!question.intent.approve;
+          if (review && given.selected.length !== 1) return;
+          if (review && given.selected[0] === question.intent!.approve && custom) return;
+          answers.push({ id: question.id, selected: !question.multiSelect && custom && !review ? [] : given.selected, ...(custom ? { custom } : {}) });
         }
         return { kind: 'result', value: { answers } };
       },

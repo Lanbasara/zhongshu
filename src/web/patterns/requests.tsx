@@ -1,9 +1,10 @@
 import { useEffect, useId, useMemo, useState, type FormEvent, type ReactNode } from 'react';
-import { ChevronLeft, ChevronRight, ExternalLink, FileText, Globe, KeyRound, MessageCircleQuestion, ShieldCheck, Terminal } from 'lucide-react';
+import { ChevronLeft, ChevronRight, ClipboardList, ExternalLink, FileText, Globe, KeyRound, MessageCircleQuestion, ShieldCheck, Terminal } from 'lucide-react';
 import { Button } from '../ui/controls.tsx';
 import { answerSummary, decisionLabel } from './request-words.ts';
 export { answerSummary };
 import './requests.css';
+import './plan.css';
 
 /**
  * Questions, approvals and forms that a native agent is waiting on. Presentation only: the caller owns
@@ -11,7 +12,7 @@ import './requests.css';
  * The shapes mirror the workbench contract structurally, so the feature layer passes its views as they are.
  */
 export type ApprovalDecision = 'accept' | 'acceptForSession' | 'decline' | 'cancel';
-export type RequestQuestion = { id: string; header?: string; text: string; options: { label: string; description?: string }[]; multiple: boolean; custom: boolean };
+export type RequestQuestion = { id: string; header?: string; text: string; options: { label: string; description?: string }[]; multiple: boolean; custom: boolean; review?: { approve: string; keep: string; plan: string } };
 export type RequestField = { name: string; label: string; description?: string; type: 'string' | 'number' | 'integer' | 'boolean' | 'enum'; required: boolean; options?: string[] };
 type Approval = { action: 'command' | 'fileChange' | 'permissions' | 'other'; reason?: string; command?: string; cwd?: string; paths?: string[]; network?: boolean; decisions: ApprovalDecision[] };
 export type PendingRequest = {
@@ -121,6 +122,28 @@ function QuestionBody({ request, questions, now, onAnswer }: { request: PendingR
   </form>;
 }
 
+/** The agent submits a plan for approval: approve it, or send it back with optional feedback (native option labels). */
+function PlanReviewBody({ request, question, renderMarkdown, onAnswer }: { request: PendingRequest; question: RequestQuestion; renderMarkdown?: (text: string) => ReactNode; onAnswer(answer: RequestAnswer): void }) {
+  const review = question.review!;
+  const [feedback, setFeedback] = useState<string | undefined>();
+  const disabled = locked(request);
+  const send = (selected: string, custom?: string) => onAnswer({ kind: 'question', answers: [{ id: question.id, selected: [selected], ...(custom?.trim() ? { custom: custom.trim() } : {}) }] });
+  return <>
+    <div className="request-plan">{renderMarkdown ? renderMarkdown(review.plan) : <pre className="request-text">{review.plan}</pre>}</div>
+    {feedback !== undefined && <label className="request-custom"><span>想怎么调整（可选）</span>
+      <textarea rows={3} value={feedback} autoFocus placeholder="告诉 Agent 哪里要改" disabled={disabled} onChange={event => setFeedback(event.target.value)}/></label>}
+    <div className="request-actions">
+      {feedback === undefined ? <>
+        <Button variant="primary" size="small" disabled={disabled} onClick={() => send(review.approve)}>批准并执行</Button>
+        <Button size="small" disabled={disabled} onClick={() => setFeedback('')}>继续规划</Button>
+      </> : <>
+        <Button variant="primary" size="small" disabled={disabled} onClick={() => send(review.keep, feedback)}>发回继续规划</Button>
+        <Button variant="quiet" size="small" disabled={disabled} onClick={() => setFeedback(undefined)}>返回</Button>
+      </>}
+    </div>
+  </>;
+}
+
 function FieldInput({ field, value, onChange }: { field: RequestField; value: string | boolean | undefined; onChange(value: string | boolean): void }) {
   if (field.type === 'boolean') return <label className="request-check"><input type="checkbox" checked={value === true} onChange={event => onChange(event.target.checked)}/><span>{field.label}{field.required && ' *'}</span></label>;
   const control = field.type === 'enum'
@@ -156,13 +179,16 @@ function FormBody({ request, form, onAnswer }: { request: PendingRequest; form: 
 }
 
 function titleOf(request: PendingRequest): { icon: ReactNode; title: string } {
+  if (request.questions?.[0]?.review) return { icon: <ClipboardList size={15}/>, title: 'Agent 交来了计划，请你审核' };
   if (request.approval) return { icon: approvalIcon(request.approval), title: `Agent ${approvalTitle(request.approval)}` };
   if (request.form) return { icon: <ShieldCheck size={15}/>, title: `「${request.form.source}」需要你提供信息` };
   return { icon: <MessageCircleQuestion size={15}/>, title: request.questions && request.questions.length > 1 ? `Agent 有 ${request.questions.length} 个问题` : 'Agent 在问你' };
 }
 
-export function RequestCard({ request, onAnswer, onReconcile, onDismiss, onOpenAgent, now = Date.now() }: {
-  request: PendingRequest; onAnswer(answer: RequestAnswer): void; onReconcile(): void; onDismiss?: () => void; onOpenAgent?: (id: string) => void; now?: number;
+export function RequestCard({ request, onAnswer, onReconcile, onDismiss, onOpenAgent, renderMarkdown, now = Date.now() }: {
+  request: PendingRequest; onAnswer(answer: RequestAnswer): void; onReconcile(): void; onDismiss?: () => void; onOpenAgent?: (id: string) => void;
+  /** Renders a proposed plan; the caller supplies the product's safe markdown renderer. */
+  renderMarkdown?: (text: string) => ReactNode; now?: number;
 }) {
   const { icon, title } = titleOf(request);
   if (request.status !== 'open') {
@@ -178,6 +204,7 @@ export function RequestCard({ request, onAnswer, onReconcile, onDismiss, onOpenA
   return <Frame icon={icon} title={title} agent={request.agent} onOpenAgent={onOpenAgent}>
     {request.approval ? <ApprovalBody request={request} approval={request.approval} onAnswer={onAnswer}/>
       : request.form ? <FormBody request={request} form={request.form} onAnswer={onAnswer}/>
+      : request.questions?.length === 1 && request.questions[0]!.review ? <PlanReviewBody request={request} question={request.questions[0]!} renderMarkdown={renderMarkdown} onAnswer={onAnswer}/>
       : request.questions ? <QuestionBody request={request} questions={request.questions} now={now} onAnswer={onAnswer}/> : null}
     <Delivery request={request} onReconcile={onReconcile}/>
   </Frame>;
@@ -187,8 +214,9 @@ export function RequestCard({ request, onAnswer, onReconcile, onDismiss, onOpenA
  * The requests of one conversation, shown above its composer. While any request is open, only open ones are
  * shown, oldest first, one step apart. Once none is open, the most recently resolved one stays visible alone.
  */
-export function RequestStack({ requests, onAnswer, onReconcile, onDismiss, onOpenAgent, now }: {
-  requests: PendingRequest[]; onAnswer(id: string, answer: RequestAnswer): void; onReconcile(id: string): void; onDismiss(id: string): void; onOpenAgent?: (id: string) => void; now?: number;
+export function RequestStack({ requests, onAnswer, onReconcile, onDismiss, onOpenAgent, renderMarkdown, now }: {
+  requests: PendingRequest[]; onAnswer(id: string, answer: RequestAnswer): void; onReconcile(id: string): void; onDismiss(id: string): void; onOpenAgent?: (id: string) => void;
+  renderMarkdown?: (text: string) => ReactNode; now?: number;
 }) {
   const ordered = useMemo(() => {
     const open = requests.filter(request => request.status === 'open').sort((a, b) => a.createdAt - b.createdAt);
@@ -210,7 +238,7 @@ export function RequestStack({ requests, onAnswer, onReconcile, onDismiss, onOpe
         <button type="button" aria-label="下一个请求" disabled={index >= ordered.length - 1} onClick={() => setIndex(value => value + 1)}><ChevronRight size={15}/></button>
       </span>
     </div>}
-    <RequestCard key={current.id} request={current} now={now} onOpenAgent={onOpenAgent}
+    <RequestCard key={current.id} request={current} now={now} onOpenAgent={onOpenAgent} renderMarkdown={renderMarkdown}
       onAnswer={answer => onAnswer(current.id, answer)} onReconcile={() => onReconcile(current.id)} onDismiss={() => onDismiss(current.id)}/>
   </section>;
 }

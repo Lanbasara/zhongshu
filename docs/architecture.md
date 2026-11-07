@@ -127,6 +127,7 @@ Codex 经专用 Unix socket 管理进程调用固定 CLI 和同一实例的 App 
 | 数据 | [回答存储](../src/server/request-store.ts)（迁移 18）保存回答编号、所属对话与请求、状态与摘要；提交的内容在结算后清除。请求本身不入库 |
 | 接口 | 快照带 `requests`；私有 `POST /conversations/:id/requests/:request/answer` 与 `/request-answers/:answer/reconcile`，沿用认证、来源与 CSRF 检查，日志不含内容 |
 | 界面 | [展示组件](../src/web/patterns/requests.tsx) 只接收数据（文案与服务端摘要由测试保持一致）；[功能层](../src/web/requests.tsx) 提交与核对，放在输入框上方 |
+| Plan 模式 | 共同语义以 `planMode` 区分：Codex 为 `per-turn`，开关存在对话行（迁移 19），派发消息时随 `turn/start.collaborationMode` 送出（沿用对话的模型与深度）；DSH 为 `native`，`setPlan` 执行原生命令，状态来自会话投影并存入 `NativeState.plan`。Workbench 只在轮次之间允许切换，`planReady` 由原生计划条目与本轮终态得出。DSH 的计划审核与 Codex Plan 中的结构化提问走上面的请求通道；界面为 [plan.tsx](../src/web/plan.tsx) 与 [展示组件](../src/web/patterns/plan.tsx) |
 
 ## 对话观察与删除协调
 
