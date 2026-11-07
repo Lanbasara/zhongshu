@@ -49,6 +49,7 @@
 .settings-heading { display:flex; align-items:center; justify-content:space-between; gap:12px; }
 .settings-lead { margin:4px 0 16px; color:var(--zs-text-muted); font-size:var(--zs-type-control); line-height:1.6; }
 .settings-subheading { margin:24px 0 8px; font-size:var(--zs-type-control); font-weight:600; color:var(--zs-text-secondary); }
+.settings-admin { margin-top:32px; }
 .settings-card { padding:16px; border:1px solid var(--zs-line); border-radius:var(--zs-radius-item); background:var(--zs-surface); }
 .settings-list { list-style:none; margin:0; padding:0; border:1px solid var(--zs-line); border-radius:var(--zs-radius-item); overflow:hidden; }
 .settings-list li { display:flex; align-items:center; gap:12px; min-height:48px; padding:6px 8px 6px 14px; }

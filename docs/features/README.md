@@ -18,6 +18,7 @@
 | 添加目录、管理、移除与恢复工作区登记 | [workspace-management](workspace-management.md) | fixture、两个真实 Harness、本地与 VPS 测试实例 |
 | 实例级插件发现、安装、启停与卸载 | [plugin-management](plugin-management.md)：P01–P05 | 浏览器、隔离的 Codex 与 DSH 原生环境 |
 | 开启推送、完成/失败/等待提醒、点击直达、设备管理与安装 | [notifications](notifications.md)：N01–N07 | 能连上推送服务的真实浏览器；触发分支需真实 Harness |
+| 查看两端账号状态、失效提醒、Codex 设备码续登 | [harness-accounts](harness-accounts.md)：H01–H05 | 真实 Harness；登录类分支需隔离的 Codex |
 
 场景编号用于引用和记录证据，不表示优先级或已通过。每页的 `Implementation and regression` 给出当前代码与定向回归入口。
 

@@ -107,6 +107,31 @@ export type NativeChange =
   | { type: 'requests' }
   | { type: 'invalidate' };
 
+/**
+ * A Harness account as Zhongshu last verified it (ADR 0015). Never carries credentials.
+ * `valid` means the vendor accepted the credential just now; local presence alone is never `valid`.
+ */
+export type NativeAccount = {
+  state: 'valid' | 'signed-out' | 'rejected' | 'unverified';
+  /** Display-safe identity, already masked. */
+  identity?: string;
+  plan?: string;
+  usage?: { usedPercent: number; resetsAt?: number; windowMinutes?: number };
+  /** Vendor pages for usage and top-up (DSH), HTTPS only. */
+  links?: { usage?: string; topUp?: string };
+};
+/**
+ * A native login, returned once to the page that asked and never stored (ADR 0015).
+ * - `device-code` (Codex): the user enters a code on the vendor's page; native notifies completion.
+ * - `paste-back` (DSH): the vendor redirects to a loopback callback the user's browser cannot reach; the user pastes that
+ *   address back and Zhongshu delivers only its code and state to the Host's own callback.
+ */
+export type LoginStart =
+  | { kind: 'device-code'; loginId: string; verificationUrl: string; userCode: string }
+  | { kind: 'paste-back'; loginId: string; authorizeUrl: string; callbackPrefix: string; expiresAt?: number };
+export type LoginCompletion = 'succeeded' | 'failed' | 'expired' | 'invalid';
+export type AccountEvent = { type: 'changed' } | { type: 'login'; loginId: string; success: boolean; reason?: string };
+
 export interface HarnessAdapter {
   readonly id: HarnessId;
   readonly earlyInput?: 'current' | 'soon';
@@ -118,6 +143,15 @@ export interface HarnessAdapter {
   /** Turn native Plan mode on or off (`native` Harnesses). Repeating the same request is harmless. */
   setPlan?(binding: Binding, active: boolean): Promise<Receipt>;
   catalog(): Promise<Catalog>;
+  /** Verify the account with the vendor. Rejects when the Host cannot be reached. */
+  account?(): Promise<NativeAccount>;
+  /** Start a native login; a new start supersedes or reuses an older one. */
+  startLogin?(): Promise<LoginStart>;
+  /** Finish a `paste-back` login with the address the vendor redirected to. */
+  completeLogin?(loginId: string, callbackUrl: string): Promise<LoginCompletion>;
+  cancelLogin?(loginId: string): Promise<'canceled' | 'notFound'>;
+  /** Native account notifications: login completion and account changes. */
+  onAccountEvent?(listener: (event: AccountEvent) => void): () => void;
   /** Project legacy configuration into the current catalog shape without mutating its stored identity. */
   normalizeConfiguration?(configuration: Configuration): Configuration;
   skills?(binding: Binding): Promise<SkillOption[]>;

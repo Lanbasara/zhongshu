@@ -15,8 +15,8 @@ const MAX_PENDING = 64;
 
 export class RpcError extends HarnessError {
   readonly nativeCode: number | undefined;
-  readonly nativeKind: 'missing_rollout' | 'deleted_thread_absent' | undefined;
-  constructor(code: string, nativeCode?: number, nativeKind?: 'missing_rollout' | 'deleted_thread_absent') { super(code); this.nativeCode = nativeCode; this.nativeKind = nativeKind; }
+  readonly nativeKind: 'missing_rollout' | 'deleted_thread_absent' | 'unauthorized' | undefined;
+  constructor(code: string, nativeCode?: number, nativeKind?: 'missing_rollout' | 'deleted_thread_absent' | 'unauthorized') { super(code); this.nativeCode = nativeCode; this.nativeKind = nativeKind; }
 }
 
 /** A request the App Server sent to this client. Its id is meaningful only on the connection that received it. */
@@ -109,7 +109,9 @@ export class CodexRpc {
           if (data.error) request.reject(new RpcError('codex_native_error', data.error.code,
             data.error.code === -32600 && request.deleteThreadId && data.error.message === `thread not found: ${request.deleteThreadId}`
               ? 'deleted_thread_absent'
-              : data.error.code === -32600 && /^no rollout found for thread id [a-zA-Z0-9_-]{1,512}$/.test(data.error.message) ? 'missing_rollout' : undefined));
+              : data.error.code === -32600 && /^no rollout found for thread id [a-zA-Z0-9_-]{1,512}$/.test(data.error.message) ? 'missing_rollout'
+              // The vendor refused the stored credential (account reads only); the message itself never leaves this module.
+              : data.error.code === -32603 && (/\bfailed: (401 Unauthorized|403 Forbidden)\b/.test(data.error.message) || /access token could not be refreshed/i.test(data.error.message)) ? 'unauthorized' : undefined));
           else request.resolve(data.result);
         } else throw new RpcError('codex_invalid_frame');
       } catch { disconnect(); ws.terminate(); }

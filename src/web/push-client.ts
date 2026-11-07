@@ -1,26 +1,13 @@
 import { z } from 'zod';
-import { errorSchema } from '../shared/http.ts';
 import { pushStateSchema, pushSubscribeResponseSchema, pushTestResponseSchema, type PushState } from '../shared/push.ts';
 import { RequestError } from './workbench-client.ts';
+import { privateRequest } from './private-api.ts';
 
 /**
  * Browser side of notifications and install (ADR 0018). The service worker only shows notifications and
  * opens their entry; it never intercepts requests.
  */
-const root = '/api/private/push';
-
-async function call<T>(path: string, schema: z.ZodType<T>, options: { csrf?: string; body?: unknown } = {}): Promise<T> {
-  const response = await fetch(root + path, {
-    method: options.body === undefined ? 'GET' : 'POST', cache: 'no-store', signal: AbortSignal.timeout(15_000),
-    headers: options.body === undefined ? {} : { 'Content-Type': 'application/json', 'X-CSRF-Token': options.csrf ?? '' },
-    ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
-  });
-  const text = await response.text();
-  if (text.length > 256 * 1024) throw new RequestError('response_too_large');
-  const value: unknown = JSON.parse(text);
-  if (!response.ok) throw new RequestError(errorSchema.safeParse(value).data?.error ?? 'request_failed', response.status);
-  return schema.parse(value);
-}
+const call = <T>(path: string, schema: z.ZodType<T>, options: { csrf?: string; body?: unknown } = {}) => privateRequest(`/push${path}`, schema, options);
 export const readPushState = () => call('', pushStateSchema);
 export const testDevice = (id: string, csrf: string) => call(`/devices/${id}/test`, pushTestResponseSchema, { csrf, body: {} });
 export const removeDevice = (id: string, csrf: string) => call(`/devices/${id}/remove`, z.object({ ok: z.literal(true) }), { csrf, body: {} });
