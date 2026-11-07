@@ -229,6 +229,18 @@ export const productMigrations: Migration[] = [{ version: 2, sql: `
   -- ADR 0014: history bodies live only in the native Harness. Remove the retired projection.
   DROP TABLE IF EXISTS workbench_live_items;
   DROP TABLE IF EXISTS workbench_items;
+` }, { version: 17, sql: `
+  -- Unread results shared by every signed-in device. seen_key is the last attention key a reader saw;
+  -- seen_result_key the last one that was not "unknown", so a 待核实 episode that resolves back to an
+  -- already seen result does not resurface as unread.
+  ALTER TABLE workbench_conversations ADD COLUMN seen_key TEXT;
+  ALTER TABLE workbench_conversations ADD COLUMN seen_result_key TEXT;
+  -- Results that existed before the marker count as seen.
+  UPDATE workbench_conversations SET
+    seen_result_key = json_extract(state_json,'$.terminalStatus') || ':' || json_extract(state_json,'$.terminalRunId'),
+    seen_key = CASE WHEN json_extract(state_json,'$.status') = 'unknown'
+      THEN 'unknown:' || COALESCE(json_extract(state_json,'$.runId'), json_extract(state_json,'$.terminalRunId'), '')
+      ELSE json_extract(state_json,'$.terminalStatus') || ':' || json_extract(state_json,'$.terminalRunId') END;
 ` }];
 
 /** Runs inside restoreDatabase's private staging transaction, before the database is published. */

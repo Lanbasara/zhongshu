@@ -186,7 +186,7 @@ function fixture(t: TestContext) {
   let databaseClosed = false;
   const closeDatabase = () => { if (!databaseClosed) { db.close(); databaseClosed = true; } };
   t.after(async () => { await service.close(); closeDatabase(); rmSync(directory, { recursive: true, force: true }); });
-  return { db, store, peer, service, id, workspaces, closeDatabase };
+  return { db, directory, store, peer, service, id, workspaces, closeDatabase };
 }
 
 test('accepted ACK cannot open the next send until the same native run reaches a terminal state', async t => {
@@ -865,4 +865,67 @@ test('a terminal canonical item closes an interrupted live delta even when the f
   assert.equal(f.service.snapshot(f.id).history.liveItems.length, 0);
   f.service.releaseReading(f.id, 'page');
   await until(() => f.peer.unwatchCount === 1);
+});
+
+const finished = (runId: string, terminalStatus: 'completed' | 'interrupted' | 'failed'): NativeState => ({
+  ...terminal(runId), status: terminalStatus === 'completed' ? 'idle' : terminalStatus, terminalRunId: runId, terminalStatus,
+});
+
+test('an unread result clears when a page reads it, a result arriving during reading is never unread, and seen survives release and restart', async t => {
+  const f = fixture(t);
+  const unread = (service = f.service, store = f.store) => service.unread([store.getConversation(f.id)!]).has(f.id);
+  f.peer.current = finished('run-1', 'completed');
+  f.store.setConversationState(f.id, { state: f.peer.current });
+  assert.equal(unread(), true);
+  assert.equal(f.service.attention().unread, 1);
+  await f.service.reading(f.id, 'desktop');
+  assert.equal(unread(), false); assert.equal(f.store.unseen([f.id]).size, 0, 'opening the conversation persists seen');
+  // The result arrives while the page is visible: no device may show it as unread, before or after release.
+  f.peer.current = finished('run-2', 'failed');
+  f.peer.emit({ type: 'state', state: f.peer.current });
+  await until(() => f.store.getConversation(f.id)?.state.terminalRunId === 'run-2');
+  assert.equal(unread(), false);
+  assert.deepEqual(f.service.attention(), { unread: 0, conversations: [{ conversation: f.store.getConversation(f.id)!, unread: false }] });
+  f.service.releaseReading(f.id, 'desktop');
+  assert.equal(unread(), false); assert.equal(f.store.unseen([f.id]).size, 0, 'release persists what the lease covered');
+  // A hidden page renews with active:false; without a lease it saw nothing.
+  f.store.setConversationState(f.id, { state: finished('run-3', 'completed') });
+  f.service.releaseReading(f.id, 'hidden-page');
+  assert.equal(unread(), true);
+  await f.service.close(); f.closeDatabase();
+  const db = openDatabase(f.directory, productMigrations);
+  try {
+    const store = createWorkbenchStore(db); const restarted = new Workbench(store, f.workspaces, new Map([['codex', new Peer()]]));
+    assert.equal(unread(restarted, store), true, 'unread is durable server state');
+    store.markSeen(f.id);
+    assert.equal(unread(restarted, store), false);
+    await restarted.close();
+  } finally { db.close(); }
+});
+
+test('an expired reading lease marks the result it covered as seen', async t => {
+  const f = fixture(t);
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+  await f.service.reading(f.id, 'lost-page');
+  f.store.setConversationState(f.id, { state: finished('run-1', 'completed') });
+  assert.equal(f.service.unread([f.store.getConversation(f.id)!]).size, 0);
+  assert.equal(f.store.unseen([f.id]).size, 1);
+  t.mock.timers.tick(46_000);
+  assert.equal(f.store.unseen([f.id]).size, 0);
+  assert.equal(f.service.unread([f.store.getConversation(f.id)!]).size, 0);
+});
+
+test('stopping a run through the workbench is not unread; an interruption nobody requested is', async t => {
+  const f = fixture(t);
+  const unread = () => f.service.unread([f.store.getConversation(f.id)!]).has(f.id);
+  f.peer.current = { ...terminal('stopped-run'), status: 'running' }; await f.service.reconcile(f.id);
+  const stop: OperationInput = { id: randomUUID(), conversationId: f.id, type: 'stop', payload: { runId: 'stopped-run' } };
+  await f.service.enqueue(stop);
+  await until(() => f.store.getOperation(stop.id)?.status === 'accepted');
+  f.peer.current = finished('stopped-run', 'interrupted'); await f.service.reconcile(f.id);
+  assert.equal(f.store.getConversation(f.id)?.state.terminalStatus, 'interrupted');
+  assert.equal(unread(), false);
+  f.peer.current = { ...terminal('native-run'), status: 'running' }; await f.service.reconcile(f.id);
+  f.peer.current = finished('native-run', 'interrupted'); await f.service.reconcile(f.id);
+  assert.equal(unread(), true);
 });

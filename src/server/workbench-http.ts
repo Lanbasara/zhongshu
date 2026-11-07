@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { ServerResponse } from 'node:http';
 import { z } from 'zod';
-import { conversationManagementSchema, conversationSearchSchema, createConversationSchema, enqueueOperationSchema, historyCursorSchema, historyPageSchema, identifierSchema, queueCommandSchema, storageSchema, workbenchConfigurationSchema,
+import { attentionSchema, conversationManagementSchema, conversationSearchSchema, createConversationSchema, enqueueOperationSchema, historyCursorSchema, historyPageSchema, identifierSchema, queueCommandSchema, storageSchema, workbenchConfigurationSchema,
   subagentHistorySchema, subagentIdSchema, subagentListSchema, subagentStopResponseSchema,
   workspaceAddSchema, workspaceBrowseSchema, workspaceDirectoryListSchema, workspaceIdSchema, workspaceManagementSchema } from '../shared/workbench.ts';
 import type { Conversation as ConversationView, WorkbenchOperation, WorkbenchSnapshot } from '../shared/workbench.ts';
@@ -37,10 +37,10 @@ function parse<T>(schema: z.ZodType<T>, value: unknown): T {
   if (!parsed.success) throw new StoreError('invalid_request', 400);
   return parsed.data;
 }
-function conversationView(value: Conversation): ConversationView {
+function conversationView(value: Conversation, unread: boolean): ConversationView {
   return { id: value.id, title: value.title, harnessId: value.harnessId, workspaceId: value.workspaceId, archived: value.archived,
     configuration: value.configuration, readiness: value.readiness, state: value.state, error: value.error, createdAt: value.createdAt,
-    ...(value.subagents ? { subagents: value.subagents } : {}) };
+    ...(value.subagents ? { subagents: value.subagents } : {}), unread };
 }
 function stopView(value: SubagentStop) {
   return subagentStopResponseSchema.parse({ stop: { id: value.id, status: value.status, reason: value.reason, updatedAt: value.updatedAt } });
@@ -59,9 +59,9 @@ function newestWithin<T>(values: T[], budget: number, newestFirst = false): T[] 
   }
   return newestFirst ? kept : kept.reverse();
 }
-function snapshotView(value: ReturnType<Workbench['snapshot']>): WorkbenchSnapshot {
+function snapshotView(value: ReturnType<Workbench['snapshot']>, unread: boolean): WorkbenchSnapshot {
   const { history } = value;
-  const conversation = conversationView(value.conversation);
+  const conversation = conversationView(value.conversation, unread);
   const operations = newestWithin(value.operations.map(operationView), 1024 * 1024, true);
   const { queue, turnFiles } = value;
   // A native latest page is whole: if it cannot fit, the older cursor still addresses everything before it.
@@ -164,6 +164,14 @@ export function createWorkbenchHttp(workbench: Workbench, input: Partial<z.input
   function logout(sessionId: string): void { for (const connection of [...connections]) if (connection.sessionId === sessionId) disconnect(connection); }
   function changed(_change: WorkbenchChange): void { for (const connection of connections) schedule(connection); }
 
+  /** Unread is shared server state, so every conversation view carries it. */
+  function views(values: Conversation[]): ConversationView[] {
+    const unread = workbench.unread(values);
+    return values.map(value => conversationView(value, unread.has(value.id)));
+  }
+  const view = (value: Conversation) => views([value])[0]!;
+  const snapshot = (value: ReturnType<Workbench['snapshot']>) => snapshotView(value, workbench.unread([value.conversation]).has(value.conversation.id));
+
   async function routes(app: FastifyInstance, context: PrivateContext): Promise<void> {
     // This plugin is installed inside buildApp's authenticated/CSRF-protected scope.
     await app.register(async privateApp => {
@@ -204,14 +212,14 @@ export function createWorkbenchHttp(workbench: Workbench, input: Partial<z.input
       privateApp.get('/conversations', async (request, reply) => {
         const query = parse(listQuery, request.query);
         const values = workbench.store.listConversations({ ...query, limit: 101 });
-        const conversations = values.slice(0, 100).map(conversationView);
+        const conversations = views(values.slice(0, 100));
         return json(reply, { conversations, olderBeforeId: values.length > 100 ? conversationCursor(values[99]!, query) : null, revision: workbench.store.version() });
       });
       // Titles stay in the body, outside request URL logs.
       privateApp.get('/conversation-defaults', async (request, reply) => {
         const { workspaceId } = parse(z.object({ workspaceId: workspaceIdSchema.optional() }).strict(), request.query);
         const conversation = workbench.conversationDefaults(workspaceId);
-        return json(reply, { conversation: conversation ? conversationView(conversation) : null });
+        return json(reply, { conversation: conversation ? view(conversation) : null });
       });
       privateApp.get('/draft-skills', async (request, reply) => {
         const query = parse(z.object({ workspaceId: workspaceIdSchema, harnessId: z.enum(['codex', 'dsh']) }).strict(), request.query);
@@ -238,8 +246,15 @@ export function createWorkbenchHttp(workbench: Workbench, input: Partial<z.input
           ...(workspaces ? { excludeWorkspaces: [...workspaces.workspaces, ...(workspaces.removedWorkspaces ?? [])].map(workspace => workspace.id) } : {}),
         };
         const values = workbench.store.listConversations({ ...scope, limit: limit + 1 });
-        const conversations = values.slice(0, limit).map(conversationView);
+        const conversations = views(values.slice(0, limit));
         return json(reply, { conversations, olderBeforeId: values.length > limit ? conversationCursor(values[limit - 1]!, scope) : null, revision: workbench.store.version() });
+      });
+      // Running, waiting, failed, unknown, then unread conversations; the count spans all unread ones.
+      privateApp.get('/attention', async (request, reply) => {
+        parse(noQuery, request.query);
+        const result = workbench.attention();
+        return json(reply, attentionSchema.parse({ unread: result.unread,
+          conversations: result.conversations.map(({ conversation, unread }) => conversationView(conversation, unread)) }));
       });
       privateApp.post('/conversations/:id/reading', { bodyLimit: 4096 }, async (request, reply) => {
         parse(noQuery, request.query);
@@ -292,16 +307,16 @@ export function createWorkbenchHttp(workbench: Workbench, input: Partial<z.input
         const body = parse(conversationManagementSchema, request.body);
         const conversation = body.action === 'rename' ? workbench.renameConversation(id, body.title) :
           await workbench.setArchived(id, body.archived);
-        return json(reply, { conversation: conversationView(conversation) });
+        return json(reply, { conversation: view(conversation) });
       });
       privateApp.post('/conversations', async (request, reply) => {
         parse(noQuery, request.query);
         const conversation = await workbench.create(parse(createConversationSchema, request.body));
-        return json(reply.code(202), { conversation: conversationView(conversation) });
+        return json(reply.code(202), { conversation: view(conversation) });
       });
       privateApp.get('/conversations/:id', async (request, reply) => {
         parse(noQuery, request.query); const { id } = parse(uuidParams, request.params);
-        return json(reply, snapshotView(await workbench.open(id)));
+        return json(reply, snapshot(await workbench.open(id)));
       });
       privateApp.get('/conversations/:id/skills', async (request, reply) => {
         parse(noQuery, request.query);
@@ -396,7 +411,7 @@ export function createWorkbenchHttp(workbench: Workbench, input: Partial<z.input
       privateApp.post('/conversations/:id/reconcile', async (request, reply) => {
         parse(noQuery, request.query); const { id } = parse(uuidParams, request.params); parse(noQuery, request.body ?? {});
         await workbench.reconcile(id);
-        return json(reply, snapshotView(workbench.snapshot(id)));
+        return json(reply, snapshot(workbench.snapshot(id)));
       });
       privateApp.get('/events', (request: FastifyRequest, reply: FastifyReply) => {
         const query = parse(eventsQuery, request.query);

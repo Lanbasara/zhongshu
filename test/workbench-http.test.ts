@@ -14,7 +14,7 @@ import { createWorkbenchStore } from '../src/server/workbench-store.ts';
 import { Workbench } from '../src/server/workbench.ts';
 import { createWorkbenchHttp } from '../src/server/workbench-http.ts';
 import { WorkspaceRegistry } from '../src/server/workspace-registry.ts';
-import { changeEventSchema, historyPageSchema, snapshotSchema, workbenchConfigurationSchema } from '../src/shared/workbench.ts';
+import { attentionSchema, changeEventSchema, conversationListSchema, historyPageSchema, snapshotSchema, workbenchConfigurationSchema } from '../src/shared/workbench.ts';
 
 const origin = 'https://workbench.example';
 const configuration = { modelId: 'synthetic-model', permissionId: 'workspace-write' };
@@ -515,4 +515,47 @@ test('history defaults split legacy DSH model effort without changing persisted 
   assert.deepEqual(f.store.getConversation(input.id)?.configuration, configuration);
   assert.deepEqual(f.store.getConversation(input.id)?.binding, binding);
   assert.equal(f.store.createConversation(input).created, false);
+});
+
+test('attention requires authentication, orders live, failed and unknown work before unread results, and reading clears unread on every device', async t => {
+  const f = await fixture(t);
+  assert.equal((await f.request('/attention', { authenticated: false })).status, 401);
+  assert.equal((await f.request('/attention?limit=5')).status, 400);
+  const finished = (runId: string, status: 'idle' | 'failed' = 'idle'): NativeState =>
+    ({ ...nativeState, status, runId, terminalRunId: runId, terminalStatus: status === 'idle' ? 'completed' : 'failed' });
+  const seeded = new Set<string>();
+  for (let index = 0; index < 52; index++) {
+    const id = f.seed(); f.store.setConversationState(id, { state: finished('run-' + index) }); seeded.add(id);
+  }
+  // Recency is the sidebar order (latest activity, then identity).
+  const unread = f.store.listConversations({ limit: 1000 }).map(entry => entry.id).filter(id => seeded.has(id));
+  const failed = f.seed(); f.store.setConversationState(failed, { state: finished('failed-run', 'failed') });
+  const unknown = f.seed(); f.store.setConversationState(unknown, { state: { ...nativeState, status: 'unknown', configurationVerified: false, reason: 'native_observation_unavailable' } });
+  const waiting = f.seed(); f.store.setConversationState(waiting, { state: { ...nativeState, status: 'waiting', runId: 'waiting-run' } });
+  const running = f.seed(); f.store.setConversationState(running, { state: { ...nativeState, status: 'running', runId: 'running-run' } });
+  f.seed();
+  const attention = await f.request('/attention');
+  assert.equal(attention.status, 200);
+  const view = attentionSchema.parse(attention.body);
+  assert.equal(view.unread, 54, 'every unread conversation counts, beyond the listed 50');
+  assert.equal(view.conversations.length, 50);
+  assert.deepEqual(view.conversations.map(entry => entry.id), [running, waiting, failed, unknown, ...unread.slice(0, 46)]);
+  assert.deepEqual(view.conversations.map(entry => entry.unread), [false, false, true, true, ...Array(46).fill(true)]);
+  const target = unread[0]!;
+  const listed = conversationListSchema.parse((await f.request('/conversations')).body).conversations;
+  assert.equal(listed.find(entry => entry.id === target)?.unread, true);
+  assert.equal(listed.find(entry => entry.id === running)?.unread, false);
+  const searched = await f.request('/conversation-search', { method: 'POST', body: { title: 'synthetic' } });
+  assert.equal(searched.body.conversations.find((entry: { id: string }) => entry.id === target)?.unread, true);
+  // Another device opens the target: the reader's mark reaches this device through the change stream.
+  f.setState(f.store.getConversation(target)!.state);
+  const events = await f.stream();
+  assert.equal((await events.named('ready'))?.name, 'ready');
+  assert.equal((await f.request(`/conversations/${target}/reading`, { method: 'POST', body: { readerId: randomUUID(), active: true } })).status, 200);
+  for (;;) { const event = await events.named('change'); assert.ok(event); if (changeEventSchema.parse(event.data).conversationId === target) break; }
+  events.close();
+  assert.equal(snapshotSchema.parse((await f.request(`/conversations/${target}`)).body).conversation.unread, false);
+  const after = attentionSchema.parse((await f.request('/attention')).body);
+  assert.equal(after.unread, 53);
+  assert.equal(after.conversations.some(entry => entry.id === target), false);
 });

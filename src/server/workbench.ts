@@ -11,7 +11,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { StoreError, type WorkbenchStore, type CreateConversation, type OperationInput, type Conversation, type Operation } from './workbench-store.ts';
 import type { WorkspaceRegistry } from './workspace-registry.ts';
 import type { ConversationUsage, QueueCommand, QueueView, SubagentList, WorkbenchConfiguration, WorkbenchItem, workspaceAddSchema, workspaceManagementSchema } from '../shared/workbench.ts';
-import { itemSchema, subagentIdSchema } from '../shared/workbench.ts';
+import { attentionLimit, itemSchema, subagentIdSchema } from '../shared/workbench.ts';
 import { SubagentStoreError, type SubagentStop } from './subagent-store.ts';
 import { z } from 'zod';
 
@@ -606,7 +606,10 @@ export class Workbench {
     this.queueRecovery ??= setInterval(() => {
       if (this.closed) return;
       for (const [id, readers] of this.readers) {
-        for (const [reader, expiry] of readers) if (expiry <= Date.now()) readers.delete(reader);
+        let expired = false;
+        for (const [reader, expiry] of readers) if (expiry <= Date.now()) { readers.delete(reader); expired = true; }
+        // The lease covered the conversation until now; what arrived meanwhile was never shown as unread.
+        if (expired) this.markSeen(id);
         if (!readers.size) { this.readers.delete(id); this.releaseIdle(id); }
       }
       for (const [key, lease] of this.subagentLeases) {
@@ -672,6 +675,8 @@ export class Workbench {
     this.assertOpen(); this.assertNotDeleting(id);
     if (!/^[a-zA-Z0-9-]{1,80}$/.test(readerId)) throw new StoreError('invalid_reader', 400);
     const conversation = this.conversation(id);
+    // An open, visible page sees the current result for every device, configured or not.
+    this.store.markSeen(id);
     if (!this.configured(conversation)) return;
     let readers = this.readers.get(id);
     if (!readers) {
@@ -688,9 +693,30 @@ export class Workbench {
   }
   releaseReading(id: string, readerId: string): void {
     const readers = this.readers.get(id);
-    readers?.delete(readerId);
+    // Only a page that held a lease saw the conversation; renewals from a hidden page also arrive here.
+    const held = readers?.delete(readerId) ?? false;
     if (!readers?.size) this.readers.delete(id);
+    if (held) this.markSeen(id);
     this.releaseIdle(id);
+  }
+  /** Unseen results, except where an open, visible page is reading the conversation right now. */
+  unread(conversations: readonly Conversation[]): Set<string> {
+    const unseen = this.store.unseen(conversations.map(conversation => conversation.id));
+    for (const id of unseen) if (this.hasActiveReader(id)) unseen.delete(id);
+    return unseen;
+  }
+  attention(): { unread: number; conversations: { conversation: Conversation; unread: boolean }[] } {
+    const reading = [...this.readers.keys()].filter(id => this.hasActiveReader(id));
+    const result = this.store.attention(reading, attentionLimit);
+    return { unread: result.unseen, conversations: result.conversations.map(({ conversation, unseen }) => ({ conversation, unread: unseen })) };
+  }
+  private hasActiveReader(id: string): boolean {
+    const now = Date.now();
+    return [...(this.readers.get(id)?.values() ?? [])].some(expiry => expiry > now);
+  }
+  /** The seen marker is a hint renewed by every lease heartbeat; a failed write must not break lease bookkeeping. */
+  private markSeen(id: string): void {
+    try { this.store.markSeen(id); } catch { /* the next heartbeat, release or expiry writes it again */ }
   }
   setDeletionGuard(guard: (id: string) => boolean): void { this.deletionGuard = guard; }
   private isDeleting(id: string): boolean { return this.deleting.has(id) || this.deletionGuard(id); }
