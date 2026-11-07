@@ -1,71 +1,120 @@
 import { useState } from 'react';
 import type { Meta, StoryObj } from '@storybook/react-vite';
-import { Folder, Plus, PenSquare, Check } from 'lucide-react';
-import { BrandMark, Button, IconButton, Information } from '../../src/web/ui/controls.tsx';
-import { WorkbenchFrame } from '../../src/web/patterns/workbench-frame.tsx';
+import { FileText, Folder, X } from 'lucide-react';
+import { skillLabelText, skillLimit, type SkillReference } from '../../src/shared/content.ts';
 import { ComposerView } from '../../src/web/patterns/composer.tsx';
-import { DraftConfiguration, type DraftConfigurationCatalog } from '../../src/web/patterns/draft-configuration.tsx';
-import './new-conversation.css';
+import { SkillEditor } from '../../src/web/patterns/composer-extras.tsx';
+import { DraftConfiguration, type DraftConfigurationCatalog, type DraftConfigurationValue } from '../../src/web/patterns/draft-configuration.tsx';
+import { Button } from '../../src/web/ui/controls.tsx';
+import '../../src/web/new-conversation.css';
+import { draftCatalogs, skillOptions, workspaces } from './fixtures.tsx';
+import { phone, useReadout } from './catalog.tsx';
 
-// Design-only, synthetic fixtures. No API, credentials, uploads or persistence.
-const workspaces = ['研究笔记', '产品工作台'];
-const catalogs = {
-  Codex: ['GPT-6.1-Sol', 'GPT-6-Astra'],
-  DSH: ['DeepSeek-V4.1-Flash', 'DeepSeek-V4-Pro'],
+type Args = {
+  workspace: '' | 'example-notes' | 'example-site'; noWorkspaces: boolean; harness: 'codex' | 'dsh';
+  model: 'default' | 'example-fast' | 'example-deep' | 'example-plain' | 'unavailable' | 'none';
+  effort: 'native-default' | 'unselected' | 'unavailable';
+  permission: 'read-only' | 'workspace-write' | 'full' | 'unavailable' | 'none';
+  availability: 'all' | 'codex-unavailable' | 'dsh-unavailable' | 'no-default' | 'no-catalogs';
+  locked: boolean; preparation: 'ready' | 'loading' | 'failed' | 'unsupported'; submission: boolean; reference: boolean; error: string;
 };
-type Agent = keyof typeof catalogs;
-const levels: Record<Agent, string[]> = { Codex: ['Low', 'Medium', 'High', 'XHigh', 'Max', 'Ultra'], DSH: ['Off', 'Low', 'High', 'Max'] };
-const configurationCatalogs: DraftConfigurationCatalog[] = (['Codex','DSH'] as Agent[]).map(agent => ({
-  id: agent === 'Codex' ? 'codex' : 'dsh', available: true,
-  ...(agent === 'Codex' ? { defaultModelId: catalogs.Codex[0] } : {}),
-  models: catalogs[agent].map(label => ({ id: label, label, reasoningEfforts: levels[agent].map(level => ({id:level,label:level})), ...(agent === 'Codex' ? {defaultReasoningEffort:label.includes('Astra')?'Medium':'Low'} : {}) })),
-  permissions: ['只读', '工作区读写', '完全访问'].map(label => ({id:label,label,description:'示例权限，未连接真实服务'})),
-}));
-type Saved = { id: number; workspace: string; text: string; agent: Agent; model: string; effort: string; permission: string };
-function NewConversation({ firstUse = false }: { firstUse?: boolean }) {
-  const [navigation, setNavigation] = useState(false);
-  const [workspace, setWorkspace] = useState(firstUse ? '' : workspaces[0]!);
-  const [agent, setAgent] = useState<Agent>('Codex');
-  const initial = { Codex: {model: catalogs.Codex[0]!, effort:'Low', permission:'只读', automatic:true}, DSH: {model:catalogs.DSH[0]!, effort:'', permission:'只读', automatic:true} };
-  const [powerSettings, setPowerSettings] = useState(initial);
-  const {model,effort,permission,automatic} = powerSettings[agent];
-  const update = (patch: Partial<typeof initial.Codex>) => setPowerSettings(old=>({...old,[agent]:{...old[agent],...patch}}));
-  const [text, setText] = useState('');
-  const [saved, setSaved] = useState<Saved[]>([]);
-  const [active, setActive] = useState<number | null>(null);
-  const [draft, setDraft] = useState('');
-  const [note, setNote] = useState(firstUse ? '先选择工作区，再开始。' : '已沿用最近使用的工作区与配置，可在发送前调整。');
-  const current = saved.find(s => s.id === active);
-  function start(ws?: string) {
-    setActive(null); setText(draft); setNavigation(false);
-    if (ws) setWorkspace(ws);
-    setNote(ws ? '首条消息发送前，可以调整下方配置。' : '沿用当前工作区与配置；需要时可直接修改。');
-  }
-  function send() {
-    if (!text.trim() || !workspace || current) return;
-    const item = { id: saved.length + 1, workspace, text, agent, model, effort, permission };
-    setSaved([...saved, item]); setActive(item.id); setText(''); setDraft('');
-  }
-  const choose = (items: string[], selected: string, update: (v: string) => void) => <div className="nc-choices">{items.map(item => <button type="button" key={item} aria-pressed={selected === item} onClick={() => update(item)}>{item}{selected === item && <Check size={14}/>}</button>)}</div>;
-  const settings = <DraftConfiguration catalogs={configurationCatalogs} harnessId={agent === 'Codex' ? 'codex' : 'dsh'} configuration={{modelId:model,permissionId:permission,reasoningEffort:effort || undefined}}
-    onPowerChange={id => setAgent(id === 'codex' ? 'Codex' : 'DSH')}
-    onConfigurationChange={value => update({model:value.modelId,permission:value.permissionId,effort:value.reasoningEffort ?? '',automatic:false})}/>;
-  return <div className="nc-prototype"><div className="nc-banner"><span>设计预览 · 不连接真实 Agent</span><span>点新对话 → 写消息与调整配置 → 首次发送后入历史</span></div>
-    <WorkbenchFrame navigationOpen={navigation} onNavigationChange={setNavigation}
-      sidebar={<><div className="workbench-brand"><BrandMark/><span>中书</span></div><Button onClick={() => start()}><PenSquare size={16}/>新对话</Button><div className="nc-workspaces">{workspaces.map(ws => <section key={ws}><div className="nc-workspace-row"><Folder size={16}/><strong>{ws}</strong><IconButton label={`在${ws}新建对话`} onClick={() => start(ws)}><Plus size={16}/></IconButton></div>{saved.filter(s => s.workspace === ws).map(s => <button key={s.id} className="nc-history" aria-current={active === s.id ? 'page' : undefined} onClick={() => { if (!current) setDraft(text); setActive(s.id); setText(''); setNavigation(false); }}>{s.text.slice(0, 26)}<small>{s.agent} · {s.effort}</small></button>)}{!saved.some(s => s.workspace === ws) && <p className="nc-empty-history">发送第一条消息后显示在这里</p>}</section>)}</div><p className="nc-sidebar-note">模拟历史 {saved.length} 条 · 未发送的草稿不计入</p></>}
-      header={<><div className="conversation-heading"><h1>{current ? current.text.slice(0, 24) : '新对话'}</h1><p>{current ? `${current.workspace} · ${current.agent} · ${current.model} · ${current.effort}` : workspace || '尚未选择工作区'}</p></div><span className="nc-state">{current ? '已创建 · 模拟' : '草稿'}</span></>}>
-      <div className={`nc-main ${current ? 'nc-created' : ''}`}>
-        {current ? <div className="nc-transcript"><div className="nc-user">{current.text}</div><h2>对话已创建</h2><p>这里将呈现 Agent 的回复。当前是交互模拟，没有发送真实请求。</p><p className="nc-muted">{current.model} · {current.effort} · {current.permission}<br/>配置在首次发送时固定。点击侧栏「新对话」可继续体验。</p></div> : <div className="nc-intro"><span className="nc-kicker">A PLACE TO BEGIN</span><h2>从一个想法开始。</h2><p>选择工作现场，然后开始。</p></div>}
-        <div className="nc-compose">
 
-          {!current && <div className="nc-context"><Folder size={15}/><Information label="选择工作区" summary={workspace || '选择工作区'}>{choose(workspaces, workspace, setWorkspace)}</Information><span>{workspace ? '此对话的工作现场' : '选择后即可发送'}</span></div>}
-          <ComposerView value={text} onChange={value => {setText(value); setDraft(value);}} onSend={send} onStop={() => {}} onImages={() => {}} onFiles={() => {}} editDisabled={!!current} imagesDisabled filesDisabled sendDisabled={!workspace || !text.trim() || !effort || !!current} sending={false} running={false} model={current?.model ?? model} permission={current?.permission ?? permission} configurationNote="原型：首次发送固定配置" hasMaterials={false} renderEditor={props => <textarea {...props} placeholder="你想从哪里开始？"/>} configurationControls={!current ? settings : undefined} footerDetails={current ? <span>{current.effort} · 配置已固定</span> : undefined}/>
-          {!current && <p className="nc-hint" role="status">{note}</p>}
-        </div>
-      </div>
-    </WorkbenchFrame>
+function catalogsFor(availability: Args['availability']): DraftConfigurationCatalog[] {
+  if (availability === 'no-catalogs') return [];
+  return draftCatalogs.map(catalog => {
+    if (availability === `${catalog.id}-unavailable`) return { ...catalog, available: false, reason: `示例：${catalog.id === 'codex' ? 'Codex' : 'DSH'} 暂未连接` };
+    if (availability === 'no-default' && catalog.id === 'codex') { const { defaultModelId: _default, ...rest } = catalog; return rest; }
+    return catalog;
+  });
+}
+function configurationFor(catalog: DraftConfigurationCatalog | undefined, args: Pick<Args, 'model' | 'effort' | 'permission'>): DraftConfigurationValue {
+  const modelId = args.model === 'default' ? catalog?.defaultModelId ?? catalog?.models[0]?.id ?? '' : args.model === 'unavailable' ? 'example-retired' : args.model === 'none' ? '' : args.model;
+  const model = catalog?.models.find(item => item.id === modelId);
+  const reasoningEffort = args.effort === 'unavailable' ? 'retired-effort' : args.effort === 'native-default' ? model?.defaultReasoningEffort : undefined;
+  const permissionId = args.permission === 'unavailable' ? 'retired-permission' : args.permission === 'none' ? '' : args.permission;
+  return { modelId, permissionId, ...(reasoningEffort ? { reasoningEffort } : {}) };
+}
+const loadSkills = () => Promise.resolve(skillOptions);
+
+/** The first-message page as new-conversation.tsx lays it out: workspace chip, composer with draft configuration, status lines. */
+function NewDraftDemo(args: Args) {
+  const catalogs = catalogsFor(args.availability);
+  const [workspace, setWorkspace] = useState<string>(args.noWorkspaces ? '' : args.workspace);
+  const [harness, setHarness] = useState(args.harness);
+  const [configuration, setConfiguration] = useState(() => configurationFor(catalogs.find(item => item.id === args.harness), args));
+  const [text, setText] = useState('');
+  const [spans, setSpans] = useState<SkillReference[]>([]);
+  const [reference, setReference] = useState(args.reference);
+  const [readout, say] = useReadout();
+  const catalog = catalogs.find(item => item.id === harness);
+  const model = catalog?.models.find(item => item.id === configuration.modelId);
+  const valid = !!workspace && !!catalog?.available && !!model && (!model.reasoningEfforts?.length || model.reasoningEfforts.some(item => item.id === configuration.reasoningEffort))
+    && !!catalog.permissions.some(item => item.id === configuration.permissionId);
+  const locked = args.locked || args.submission;
+  return <div style={{ display: 'flex', flexDirection: 'column', height: '100dvh' }}>
+    <section className="new-draft-page"><div className="new-draft-content">
+      <div className="new-draft-intro"><h2>要做点什么？</h2><p>选好工作区，写下要做的事。第一次发送时才会创建对话。</p></div>
+      <div className="new-draft-workspace"><Folder size={15}/><label className="sr-only" htmlFor="example-draft-workspace">工作区</label>
+        <select id="example-draft-workspace" value={workspace} disabled={locked} onChange={event => setWorkspace(event.target.value)}>
+          <option value="">选择工作区</option>{!args.noWorkspaces && workspaces.map(item => <option key={item.id} value={item.id}>{item.label}</option>)}</select></div>
+      {args.noWorkspaces && <div className="state-notice"><p>先添加工作区，再开始对话。</p><Button onClick={() => say('添加工作区')}>添加工作区</Button></div>}
+      <ComposerView value={text} onChange={value => { setText(value); setSpans([]); }}
+        renderEditor={editor => <SkillEditor editor={{ ...editor, placeholder: '你想从哪里开始？' }} spans={spans}
+          picker={workspace && catalog?.available && args.preparation === 'ready' && !locked ? { load: loadSkills, format: skillLabelText, limit: skillLimit } : undefined}
+          onEdit={(value, next) => { setText(value); setSpans(next); }}/>}
+        onSend={() => { say(`创建对话并发送：${text}`); setText(''); setSpans([]); }} onStop={() => {}}
+        onImages={() => say('添加图片（未上传）')} onFiles={() => setReference(true)}
+        editDisabled={locked} imagesDisabled={locked} filesDisabled={locked || !workspace}
+        sendDisabled={!args.submission && (!valid || (!text.trim() && !reference))} sending={false} running={false}
+        model={model?.label ?? '选择模型'} permission={catalog?.permissions.find(item => item.id === configuration.permissionId)?.label ?? '选择权限'} configurationNote="首次发送后配置固定。"
+        configurationControls={<DraftConfiguration catalogs={catalogs} harnessId={harness} configuration={configuration} disabled={locked}
+          onPowerChange={id => { setHarness(id); setConfiguration(configurationFor(catalogs.find(item => item.id === id), { model: 'default', effort: 'native-default', permission: 'read-only' })); }}
+          onConfigurationChange={value => { setConfiguration(value); say(`配置：${value.modelId} · ${value.reasoningEffort ?? '无深度'} · ${value.permissionId}`); }}/>}
+        hasMaterials={reference} error={args.error || undefined}
+        materials={reference && <div className="reference-card"><FileText size={14}/><span>示例/周报/数据表.csv</span>
+          <button type="button" aria-label="移除引用" disabled={locked} onClick={() => setReference(false)}><X size={14}/></button></div>}/>
+      {args.preparation === 'unsupported' && <p className="new-draft-status">当前 Power 暂未提供首发技能目录。</p>}
+      {!args.submission && args.preparation === 'loading' && <p className="new-draft-status" role="status">正在准备首发技能…</p>}
+      {!args.submission && args.preparation === 'failed' && <div className="new-draft-status" role="status"><p>首发技能准备未完成，内容已保留。可重试核对同一准备。</p>
+        <Button onClick={() => say('重试准备首发技能')}>重试准备首发技能</Button></div>}
+      <p className="new-draft-status" role="status">{args.submission ? '上次创建或发送尚待核对，重试会使用同一编号。' : '首次发送时创建对话；配置在对话中保持不变。'}</p>
+      {args.submission && <><Button onClick={() => say('重试核对首条消息')}>重试核对首条消息</Button><Button onClick={() => say('查看已创建的对话')}>查看已创建的对话</Button></>}
+      {readout}
+    </div></section>
   </div>;
 }
-export default { title: '设计探索/新对话与思考深度', component: NewConversation } satisfies Meta<typeof NewConversation>;
-export const RecentWorkspace: StoryObj<typeof NewConversation> = {};
-export const FirstUse: StoryObj<typeof NewConversation> = { args: { firstUse: true } };
+
+const meta = {
+  title: '模式/新对话',
+  component: NewDraftDemo,
+  args: {
+    workspace: 'example-notes', noWorkspaces: false, harness: 'codex', model: 'default', effort: 'native-default', permission: 'workspace-write',
+    availability: 'all', locked: false, preparation: 'ready', submission: false, reference: false, error: '',
+  },
+  argTypes: {
+    workspace: { control: 'inline-radio', options: ['', 'example-notes', 'example-site'] },
+    harness: { control: 'inline-radio', options: ['codex', 'dsh'] },
+    model: { control: 'select', options: ['default', 'example-fast', 'example-deep', 'example-plain', 'unavailable', 'none'] },
+    effort: { control: 'inline-radio', options: ['native-default', 'unselected', 'unavailable'] },
+    permission: { control: 'select', options: ['read-only', 'workspace-write', 'full', 'unavailable', 'none'] },
+    availability: { control: 'select', options: ['all', 'codex-unavailable', 'dsh-unavailable', 'no-default', 'no-catalogs'] },
+    preparation: { control: 'inline-radio', options: ['ready', 'loading', 'failed', 'unsupported'] },
+  },
+  render: args => <NewDraftDemo key={JSON.stringify(args)} {...args}/>,
+} satisfies Meta<typeof NewDraftDemo>;
+export default meta;
+type Story = StoryObj<typeof meta>;
+
+export const Draft: Story = { name: '草稿页' };
+export const NoWorkspaceChosen: Story = { name: '尚未选择工作区', args: { workspace: '' } };
+export const NoWorkspaces: Story = { name: '还没有工作区', args: { noWorkspaces: true } };
+export const EffortUnselected: Story = { name: '思考深度未选择', args: { effort: 'unselected' } };
+export const NoEffortLevels: Story = { name: '模型没有深度档位', args: { model: 'example-plain', effort: 'unselected' } };
+export const ConfigurationGone: Story = { name: '原配置已不可用', args: { model: 'unavailable', permission: 'unavailable' } };
+export const PowerUnavailable: Story = { name: 'Power 不可用', args: { availability: 'codex-unavailable' } };
+export const NoReliableDefault: Story = { name: '原生没有可靠默认', args: { availability: 'no-default', model: 'example-deep' } };
+export const NoCatalogs: Story = { name: '没有可用 Power', args: { availability: 'no-catalogs' } };
+export const SkillsPreparing: Story = { name: '首发技能准备中', args: { preparation: 'loading' } };
+export const SkillsFailed: Story = { name: '首发技能准备失败', args: { preparation: 'failed' } };
+export const SubmissionPending: Story = { name: '首条消息待核对（锁定）', args: { submission: true, reference: true } };
+export const Phone: Story = { name: '手机', globals: phone };
