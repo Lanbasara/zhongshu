@@ -6,6 +6,7 @@ import { UIProvider } from './ui/provider.tsx';
 import { BrandMark, Button } from './ui/controls.tsx';
 import { WorkbenchView } from './workbench.tsx';
 import { clearDrafts } from './workbench-client.ts';
+import { captureInstallOffer, registerWorker } from './push-client.ts';
 
 type Version = { version: string; revision: string };
 const failureText: Record<string, string> = {
@@ -89,4 +90,7 @@ function App() {
   </main>;
 }
 
+// Push-only service worker and the browser's install offer (ADR 0018); both are harmless before login.
+registerWorker();
+captureInstallOffer();
 createRoot(document.getElementById('root')!).render(<UIProvider><App /></UIProvider>);

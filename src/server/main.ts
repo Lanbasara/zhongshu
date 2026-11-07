@@ -13,6 +13,8 @@ import { Workbench } from './workbench.ts';
 import { createWorkbenchHttp } from './workbench-http.ts';
 import { WorkspaceRegistry } from './workspace-registry.ts';
 import { createPluginManagement } from './plugins.ts';
+import { createPush } from './push.ts';
+import { createPushTriggers } from './push-triggers.ts';
 
 const metadataSchema = z.object({ name: z.literal('zhongshu'), version: z.string().max(64), revision: z.string().regex(/^(development|[a-f0-9]{40})$/) });
 
@@ -30,32 +32,40 @@ async function main() {
   let workbench: Workbench | undefined;
   let transport: ReturnType<typeof createWorkbenchHttp> | undefined;
   let plugins: ReturnType<typeof createPluginManagement> | undefined;
+  let triggers: ReturnType<typeof createPushTriggers> | undefined;
+  const push = createPush(db, { origin: config.origin, log: event => app?.log.info(event), badge: () => workbench?.attention().unread });
   let app: Awaited<ReturnType<typeof buildApp>> | undefined;
   try {
     const harnesses = await loadHarnesses(process.env.ZHONGSHU_HARNESS_CONFIG, config.dataDirectory);
     plugins = createPluginManagement(db, harnesses.plugins);
-    const store = createWorkbenchStore(db, { onChange: (change: WorkbenchChange) => transport?.changed(change), storageBudget: config.storageBudget });
+    const store = createWorkbenchStore(db, { onChange: (change: WorkbenchChange) => { transport?.changed(change); triggers?.changed(change); }, storageBudget: config.storageBudget });
     const registry = new WorkspaceRegistry(db, harnesses.workspaces, harnesses.workspaceRoots);
     workbench = new Workbench(store, harnesses.workspaces, harnesses.adapters, registry);
     transport = createWorkbenchHttp(workbench);
+    const source = workbench;
+    triggers = createPushTriggers({
+      conversation: id => source.store.getConversation(id), unread: values => source.unread(values), isReading: id => source.isReading(id),
+      active: () => source.attention().conversations.map(entry => entry.conversation),
+    }, event => { void push.notify(event); });
     app = await buildApp({ db, origin: config.origin, metadata, assetsDirectory: import.meta.url.endsWith('.ts') ? undefined : fileURLToPath(new URL('../public/', import.meta.url)), logger: true,
       privateRoutes: async (scope, context) => {
         await transport!.routes(scope, context);
         await scope.register(plugins!.routes, { prefix: '/workbench' });
+        await scope.register(push.routes, { prefix: '/push' });
       }, onLogout: transport.logout });
     let closing = false;
     const stop = async () => {
       if (closing) return;
       closing = true;
       const timeout = setTimeout(() => process.exit(1), 10_000).unref();
-      try { transport!.close(); await plugins!.close(); await workbench!.close(); await app!.close(); db.close(); clearTimeout(timeout); }
+      try { triggers?.close(); push.close(); transport!.close(); await plugins!.close(); await workbench!.close(); await app!.close(); db.close(); clearTimeout(timeout); }
       catch { process.exitCode = 1; }
     };
     process.once('SIGINT', () => { void stop(); });
     process.once('SIGTERM', () => { void stop(); });
     await workbench.start();
     await app.listen({ port: config.port, host: config.host });
-  } catch (error) { transport?.close(); await plugins?.close(); await workbench?.close(); await app?.close(); db.close(); throw error; }
+  } catch (error) { triggers?.close(); push.close(); transport?.close(); await plugins?.close(); await workbench?.close(); await app?.close(); db.close(); throw error; }
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

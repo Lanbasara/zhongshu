@@ -721,6 +721,8 @@ export class Workbench {
     const result = this.store.attention(reading, attentionLimit);
     return { unread: result.unseen, conversations: result.conversations.map(({ conversation, unseen }) => ({ conversation, unread: unseen })) };
   }
+  /** An open, visible page somewhere is reading this conversation right now. */
+  isReading(id: string): boolean { return this.hasActiveReader(id); }
   private hasActiveReader(id: string): boolean {
     const now = Date.now();
     return [...(this.readers.get(id)?.values() ?? [])].some(expiry => expiry > now);

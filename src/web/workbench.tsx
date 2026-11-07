@@ -33,6 +33,7 @@ import { SubagentActivity, SubagentTrigger } from './patterns/subagents.tsx';
 import { SubagentPanelHost, subagentDisplays, useSubagentList } from './subagents.tsx';
 import { ConversationRequests } from './requests.tsx';
 import { PlanArea, PlanToolbarToggle, usePlan } from './plan.tsx';
+import { onNotificationOpen, parseEntry, setBadge } from './push-client.ts';
 
 const failures: Record<string, string> = {
   conversation_archived: '这段对话已归档，请恢复后继续。',
@@ -88,8 +89,10 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
   const [configuration, setConfiguration] = useState<WorkbenchConfiguration>();
   const [workspaceAction, setWorkspaceAction] = useState<WorkspaceAction>();
   /** Instance-level pages replace the conversation column; the selected conversation stays selected underneath. */
-  const [view, setView] = useState<'settings' | 'archive'>();
-  const [settingsTab, setSettingsTab] = useState<SettingsTab>('workspaces');
+  /** `#settings` or `#settings:<tab>` opens Settings, so a notification can open it in a new window. */
+  const entry = useMemo(() => { const value = parseEntry(location.hash); return value?.kind === 'settings' ? value : undefined; }, []);
+  const [view, setView] = useState<'settings' | 'archive' | undefined>(() => entry ? 'settings' : undefined);
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>(() => settingsTabs.find(tab => tab.id === entry?.tab)?.id ?? 'workspaces');
   const [searching, setSearching] = useState(false);
   const [managing, setManaging] = useState<Conversation>();
   const [toasts, setToasts] = useState<ToastView[]>([]);
@@ -563,7 +566,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
       pushToast({ title: `「${item.title}」${verb}`, detail: `${configuration?.workspaces.find(w => w.id === item.workspaceId)?.label ?? '工作区'} · ${harnessLabel(item.harnessId)}`, status: now, action: { label: '查看', run: () => choose(item.id) } });
     }
   }, [attention, choose, pushToast, configuration, readingId]);
-  useEffect(() => { const count = attention?.unread ?? 0; document.title = count ? `(${count}) 中书` : '中书'; }, [attention?.unread]);
+  useEffect(() => { const count = attention?.unread ?? 0; document.title = count ? `(${count}) 中书` : '中书'; if (attention) setBadge(count); }, [attention, attention?.unread]);
   useEffect(() => () => { document.title = '中书'; }, []);
   useEffect(() => {
     const shortcut = (event: KeyboardEvent) => {
@@ -576,6 +579,12 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
   }, [setCollapsed]);
   const openFiles = () => { if (!configuration?.workspaces.length) return; setSubagentPanel(undefined); setReader(true); setNavigation(false); };
   const openSettings = (tab?: SettingsTab) => { if (tab) setSettingsTab(tab); setView('settings'); setReader(false); setSubagentPanel(undefined); setNavigation(false); };
+  const openSettingsRef = useRef(openSettings); openSettingsRef.current = openSettings;
+  // A notification clicked while this page is open switches it in place (ADR 0018).
+  useEffect(() => onNotificationOpen(request => {
+    if (request.kind === 'conversation') choose(request.id);
+    else if (request.kind === 'settings') openSettingsRef.current(settingsTabs.find(tab => tab.id === request.tab)?.id);
+  }), [choose]);
   const openArchive = () => { setView('archive'); setReader(false); setSubagentPanel(undefined); setNavigation(false); };
   const searchActions: SearchActions = { open: choose, draft: startDraft, files: openFiles, archive: openArchive, settings: openSettings,
     ...(narrow ? {} : { toggleSidebar: () => setCollapsed(current => !current) }) };

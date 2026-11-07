@@ -6,12 +6,13 @@ import { ConversationResults } from './conversation-navigation.tsx';
 import { Button, IconButton } from './ui/controls.tsx';
 import { ConnectionStatus } from './patterns/sidebar.tsx';
 import { PluginManagement } from './plugin-management.tsx';
+import { NotificationSettingsPanel } from './notification-settings.tsx';
 import { StoragePanel, type useStorage } from './storage-status.tsx';
 import type { WorkspaceAction } from './workspace-management.tsx';
 
-export type SettingsTab = 'workspaces' | 'plugins' | 'storage' | 'account';
+export type SettingsTab = 'workspaces' | 'plugins' | 'storage' | 'notifications' | 'account';
 export const settingsTabs: { id: SettingsTab; label: string }[] = [
-  { id: 'workspaces', label: '工作区' }, { id: 'plugins', label: '插件' }, { id: 'storage', label: '存储' }, { id: 'account', label: '账户' },
+  { id: 'workspaces', label: '工作区' }, { id: 'plugins', label: '插件' }, { id: 'storage', label: '存储' }, { id: 'notifications', label: '通知' }, { id: 'account', label: '账户' },
 ];
 
 /** Everything that configures the instance rather than a conversation lives here (decided 2026-11-07). */
@@ -31,6 +32,7 @@ export function SettingsView({ tab, onTab, configuration, workspaceAction, csrf,
         {tab === 'workspaces' && <WorkspaceSettings configuration={configuration} workspaceAction={workspaceAction} results={{ revision, csrf, report, rows: { choose, manage } }}/>}
         {tab === 'plugins' && <section className="settings-section"><PluginManagement csrf={csrf} report={report}/></section>}
         {tab === 'storage' && <StoragePanel csrf={csrf} report={report} storage={storage}/>}
+        {tab === 'notifications' && <NotificationSettingsPanel csrf={csrf} report={report}/>}
         {tab === 'account' && <AccountSettings connection={connection} logout={logout} busy={busy}/>}
       </div>
     </div>
