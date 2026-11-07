@@ -72,6 +72,10 @@ async function host() {
           if (args.line === '/plan' || args.line === '/plan off') {
             // Native plan mode is session state; a change requested between turns waits for the next turn.
             const active = args.line === '/plan'; session.plan = { active, pending: false }; append(session, 'plan/mode', { active });
+            // Native rc.4: a switch in a session that has run leaves a non-waking notice in next-step.
+            if (session.turn > 0) { const summary = active ? 'The user switched this session to plan mode.' : 'The user switched this session out of plan mode.';
+              const notice = { content: [{ type: 'text', text: summary }], source: { kind: 'plan-mode', form: 'notice', summary }, role: 'user', id: randomUUID() };
+              session.stepInbox.push(notice); append(session, 'agent/inbox/spliced', { target: 'next-step', start: session.stepInbox.length - 1, inserted: [notice] }); }
             value = { commandId: randomUUID(), result: { kind: 'success', text: active ? 'Plan mode on' : 'Plan mode off' } }; break;
           }
           assert.ok(['/permission workspace-write', '/permission danger-full-access'].includes(args.line));
@@ -698,6 +702,15 @@ test('DSH turns native Plan mode on and off and reports it in state', async () =
     assert.deepEqual(await context.adapter.setPlan!(binding, false), { outcome: 'accepted' });
     assert.deepEqual((await context.adapter.state(binding)).plan, { active: false, pending: false });
     assert.deepEqual(context.fixture.calls.filter(call => call.method === 'commands/execute' && String(call.args.line).startsWith('/plan')).map(call => call.args.line), ['/plan', '/plan off']);
+    // After a turn, the switch leaves a passive notice that must not block the next message.
+    const native = context.fixture.sessions.get(binding.id)!;
+    await context.adapter.submit(binding, { id: randomUUID(), text: 'Synthetic first turn' });
+    native.open = null; context.fixture.append(native, 'turn/end', { turn: native.turn, reason: { kind: 'completed' } });
+    assert.deepEqual(await context.adapter.setPlan!(binding, true), { outcome: 'accepted' });
+    assert.equal(native.stepInbox.some(entry => (entry as { source?: { kind?: string } }).source?.kind === 'plan-mode'), true);
+    const afterSwitch = await context.adapter.state(binding);
+    assert.deepEqual([afterSwitch.status, afterSwitch.pendingInputs, afterSwitch.plan?.active], ['idle', 0, true]);
+    assert.equal((await context.adapter.submit(binding, { id: randomUUID(), text: 'Plan the next step' })).outcome, 'accepted');
   } finally { await context.close(); }
 });
 

@@ -50,6 +50,14 @@ const passiveApprovalContext = z.object({
   source: z.object({ kind: z.literal('user-approval') }).strict(),
   content: z.array(z.object({ type: z.literal('text'), text: z.string().max(1024 * 1024) }).strict()).min(1).max(32),
 }).strict();
+// A Plan mode switch in a session that has run leaves the same kind of non-waking notice in next-step
+// ("The user switched this session to plan mode."); it is consumed with the next prompt as well.
+const passivePlanNotice = z.object({
+  id: identifier, role: z.literal('user'),
+  source: z.object({ kind: z.literal('plan-mode'), form: z.literal('notice'), summary: z.string().max(4096).optional() }).strict(),
+  content: z.array(z.object({ type: z.literal('text'), text: z.string().max(1024 * 1024) }).strict()).min(1).max(32),
+}).strict();
+const passiveContext = (input: unknown) => passiveApprovalContext.safeParse(input).success || passivePlanNotice.safeParse(input).success;
 export function object(value: unknown): Record<string, unknown> { return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
 export function modelId(model: Model): string { return Buffer.from(JSON.stringify(modelSchema.parse(model))).toString('base64url'); }
 export function decodeModel(id: string): Model {
@@ -166,7 +174,7 @@ function executionState(binding: Binding, snapshot: Snapshot): NativeState {
   const values = snapshot.projections.values; const selected = selectedModel(binding.configuration);
   const configurationVerified = sameModel(values.modelSelection?.next, selected) && (!values.modelSelection?.lastUsed || sameModel(values.modelSelection.lastUsed, selected)) && values.permissions?.currentValue === binding.configuration.permissionId;
   const pendingInputs = (values.inbox?.['next-turn'].length ?? 0)
-    + (values.inbox?.['next-step'].filter(input => !passiveApprovalContext.safeParse(input).success).length ?? 0);
+    + (values.inbox?.['next-step'].filter(input => !passiveContext(input)).length ?? 0);
   const boundary = boundaryFrom(snapshot);
   const latestRun = boundary && boundary.lastTurn > 0 ? runId(binding.id, boundary.lastTurn) : undefined;
   if (!configurationVerified) return { status: boundary?.openTurnStartSeq != null ? 'running' : 'unknown', runId: latestRun, pendingInputs, configurationVerified: false, reason: '原生模型或权限与对话配置不一致，已停止派发；正在执行的工作仍可停止。' };
