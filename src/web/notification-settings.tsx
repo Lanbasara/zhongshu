@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { PushState } from '../shared/push.ts';
 import { NotificationSettings, failureText, type DeviceStatus, type NotificationDevice, type NotificationNotice } from './patterns/notifications.tsx';
-import { disableDevice, enableDevice, install, installKind, localDevice, onInstallChange, ownFingerprint, readPushState, removeDevice, testDevice, type LocalDevice } from './push-client.ts';
+import { disableDevice, enableDevice, install, installKind, isAndroid, localDevice, onInstallChange, ownFingerprint, readPushState, removeDevice, testDevice, type LocalDevice } from './push-client.ts';
 import { RequestError } from './workbench-client.ts';
 
 const errors: Record<string, string> = {
@@ -61,6 +61,6 @@ export function NotificationSettingsPanel({ csrf, report }: { csrf: string; repo
   const device: DeviceStatus = local ? { kind: local.kind } : { kind: 'checking' };
   const devices = state?.devices.map(item => ({ id: item.id, label: item.label, thisDevice: item.fingerprint === own, stale: !item.current,
     createdAt: item.createdAt, deliveredAt: item.deliveredAt, failedAt: item.failedAt, failure: item.failure }));
-  return <NotificationSettings device={device} devices={devices} install={{ kind: installState }} busy={busy || !state} notice={notice}
+  return <NotificationSettings device={device} devices={devices} install={{ kind: installState }} android={isAndroid()} busy={busy || !state} notice={notice}
     onEnable={enable} onDisable={disable} onTest={test} onRemove={remove} onInstall={installNow}/>;
 }

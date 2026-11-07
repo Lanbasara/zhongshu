@@ -11,7 +11,7 @@ const desktopDevice: NotificationDevice = { id: 'd-desktop', label: 'macOS · Ch
 const failingDevice: NotificationDevice = { id: 'd-laptop', label: 'Windows · Edge', thisDevice: false, stale: false, createdAt: at - 7 * 86_400_000, deliveredAt: at - 5 * 86_400_000, failedAt: at - 3_600_000, failure: 'push_service_unreachable' };
 const staleDevice: NotificationDevice = { id: 'd-old', label: 'iOS · Safari', thisDevice: false, stale: true, createdAt: at - 30 * 86_400_000, deliveredAt: null, failedAt: null, failure: null };
 
-function Settings({ initial, install, startDevices }: { initial: DeviceStatus['kind']; install: InstallStatus['kind']; startDevices: NotificationDevice[] }) {
+function Settings({ initial, install, startDevices, android }: { initial: DeviceStatus['kind']; install: InstallStatus['kind']; startDevices: NotificationDevice[]; android?: boolean }) {
   const [readout, say] = useReadout();
   const [device, setDevice] = useState<DeviceStatus>({ kind: initial } as DeviceStatus);
   const [devices, setDevices] = useState(startDevices);
@@ -23,7 +23,7 @@ function Settings({ initial, install, startDevices }: { initial: DeviceStatus['k
       {['工作区', '插件', '存储', '通知', '账户'].map(label => <button key={label} type="button" role="tab" aria-selected={label === '通知'}>{label}</button>)}
     </div>
     <div className="settings-scroll"><div className="settings-column">
-      <NotificationSettings device={device} devices={devices} install={{ kind: install } as InstallStatus} busy={busy} notice={notice}
+      <NotificationSettings device={device} devices={devices} install={{ kind: install } as InstallStatus} android={android} busy={busy} notice={notice}
         onEnable={() => { say('请求通知权限并订阅'); later(() => {
           setDevice({ kind: 'on' }); setNotice({ tone: 'ok', text: '已开启。离开页面后，这台设备会收到提醒。' });
           setDevices(list => list.some(item => item.thisDevice) ? list.map(item => item.thisDevice ? { ...item, stale: false } : item) : [...list, { ...desktopDevice, createdAt: Date.now(), deliveredAt: null }]);
@@ -84,6 +84,7 @@ type Story = StoryObj<typeof meta>;
 export const Desktop: Story = { name: '桌面 · 设置' };
 export const DesktopOn: Story = { name: '桌面 · 已开启', args: { initial: 'on', install: 'installed', startDevices: [phoneDevice, desktopDevice, failingDevice] } };
 export const Phone: Story = { name: '手机 · 设置', globals: phone };
+export const PhoneAndroid: Story = { name: '手机 · 安卓提示', args: { initial: 'on', install: 'installed', android: true, startDevices: [phoneDevice] }, globals: phone };
 export const PhoneIos: Story = { name: '手机 · iPhone 未添加到主屏幕', args: { initial: 'needs-install', install: 'ios', startDevices: [desktopDevice] }, globals: phone };
 export const States: Story = { name: '通知与状态一览', render: () => <Catalog/> };
 export const PhoneStates: Story = { name: '手机 · 通知与状态一览', render: () => <Catalog/>, globals: phone };

@@ -36,8 +36,10 @@ export function failureText(code: string): string {
  * Notification and install settings (ADR 0018). Presentation only: permission prompts, subscriptions and
  * delivery belong to the caller.
  */
-export function NotificationSettings({ device, devices, install, busy, notice, onEnable, onDisable, onTest, onRemove, onInstall }: {
+export function NotificationSettings({ device, devices, install, android, busy, notice, onEnable, onDisable, onTest, onRemove, onInstall }: {
   device: DeviceStatus; devices?: NotificationDevice[]; install: InstallStatus; busy?: boolean; notice?: NotificationNotice;
+  /** Android shows Chrome's notification channels and background limits; the hints only apply there. */
+  android?: boolean;
   onEnable(): void; onDisable(): void; onTest(): void; onRemove(device: NotificationDevice): void; onInstall(): void;
 }) {
   return <>
@@ -46,6 +48,13 @@ export function NotificationSettings({ device, devices, install, busy, notice, o
       <p className="settings-lead">离开页面后，对话完成、失败，或 Agent 在等你回答或批准时，提醒开启了通知的设备。通知显示对话标题和发生了什么，不含消息、提问或文件内容；有设备正在看这个对话时不提醒。</p>
       <DeviceCard device={device} busy={busy} notice={notice} onEnable={onEnable} onDisable={onDisable} onTest={onTest}/>
       <p className="settings-note">安卓和电脑上的 Chrome 经 Google 的推送服务送达，设备要能连上 Google；暂时连不上时，通知最多保留 12 小时，之后作废。</p>
+      {android && <div className="settings-card notify-android">
+        <strong>安卓手机还需要两步</strong>
+        <ol>
+          <li>通知默认只进通知栏、不弹出。想要横幅和振动：系统设置 → 通知 → Chrome → 找到本站，打开横幅（悬浮）、振动和锁屏显示。</li>
+          <li>国产系统会在你划掉应用后冻结 Chrome，通知要等下次打开才到。请允许 Chrome（以及你用来连 Google 的代理）后台运行和自启动，并在最近任务里锁定，离开时按返回桌面，不要划掉。</li>
+        </ol>
+      </div>}
       <h3 className="settings-subheading">已开启通知的设备</h3>
       {!devices ? <p className="settings-note" role="status">正在读取…</p>
         : devices.length ? <ul className="settings-list">{devices.map(item => <li key={item.id}>
@@ -61,7 +70,8 @@ export function NotificationSettings({ device, devices, install, busy, notice, o
     <section className="settings-section notify-install" aria-labelledby="install-title">
       <h2 id="install-title">安装</h2>
       <p className="settings-lead">安装后，中书有自己的图标和窗口，不和浏览器标签混在一起；支持的设备上，图标会显示未读数。</p>
-      <div className="settings-card"><Install install={install} busy={busy} onInstall={onInstall}/></div>
+      <div className="settings-card"><Install install={install} busy={busy} onInstall={onInstall}/>
+        {android && <p className="settings-note">安装后图标若带 Chrome 小角标，说明手机没能装成独立应用（取决于手机上的 Play 商店），它会以快捷方式打开。通知照常送达，以 Chrome 的名义显示。</p>}</div>
     </section>
   </>;
 }

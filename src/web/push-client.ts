@@ -28,6 +28,7 @@ export const removeDevice = (id: string, csrf: string) => call(`/devices/${id}/r
 const workerSupported = () => typeof window !== 'undefined' && window.isSecureContext && 'serviceWorker' in navigator;
 export const pushSupported = () => workerSupported() && 'PushManager' in window && 'Notification' in window;
 export const isAppleMobile = () => /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+export const isAndroid = () => /Android/.test(navigator.userAgent);
 export const isStandalone = () => matchMedia('(display-mode: standalone)').matches || (navigator as Navigator & { standalone?: boolean }).standalone === true;
 
 /** Registered on every load so the worker stays current; it has no fetch handler, so pages are unaffected. */
