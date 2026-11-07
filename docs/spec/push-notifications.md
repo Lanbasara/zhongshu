@@ -2,7 +2,7 @@
 status: active
 started: 2026-11-07
 exit: Android 与桌面真机上，安装、开启与移除推送、完成/失败/等待三类触发与点击直达均有证据，通知不含消息、提问或文件内容；用户在测试实例试用确认
-evidence: none yet
+evidence: PR #42；作者自测通过，待用户验收
 ---
 
 # 通知与安装
