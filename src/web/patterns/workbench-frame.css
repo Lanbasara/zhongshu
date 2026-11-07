@@ -31,6 +31,8 @@
   .header-crumb,.header-separator,.header-status { display:none; }
   .header-meta { display:flex; align-items:center; gap:5px; max-width:100%; font-size:var(--zs-type-caption); color:var(--zs-text-muted); white-space:nowrap; overflow:hidden; }
   .header-search { display:inline-flex; }
+  .conversation-header .zs-icon { width:36px; height:36px; }
+  .header-actions { gap:0; }
   .workbench-panel,.workbench-panel.is-expanded { position:fixed; inset:0; width:100%; z-index:var(--zs-layer-dialog); border:0; padding-top:env(safe-area-inset-top); box-shadow:none; animation:zs-sheet-in var(--zs-duration-surface) var(--zs-ease) both; }
 }
 @media(prefers-reduced-motion:reduce) { .workbench-panel { animation:none; transition:none; } }

@@ -16,7 +16,7 @@ type FileTarget = { workspaceId: string; path: string };
 
 const errors = new Map([
   ['workspace_not_idle', '工作区正在运行或尚未确认空闲。修改已保留。'],
-  ['workspace_writes_unmanaged', '此工作区未启用原地保存。'],
+  ['workspace_writes_unmanaged', '这个工作区只能阅读：实例没有为它开启原地保存。'],
   ['workspace_maintenance_online', '进入编辑时会暂停工作区的 DSH。'],
   ['workspace_maintenance_transition', '正在切换工作区维护状态。'],
   ['workspace_maintenance_unknown', '无法核对 DSH 状态，请恢复 Agent 后重试。'],

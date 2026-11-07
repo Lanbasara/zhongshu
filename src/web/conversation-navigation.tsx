@@ -138,7 +138,7 @@ export function ConversationResults({ query, revision, csrf, report, rows, hideE
   }, [revision, visible]);
 
   return <>
-    {visible && loadingPage && !failed && !results.length && <p className="navigation-empty" role="status">正在加载…</p>}
+    {visible && loadingPage && !loaded && !failed && <p className="navigation-empty" role="status">正在加载…</p>}
     {label && results.length > 0 && <p className="nav-label">{label}</p>}
     {failed && <p className="navigation-empty">读取失败。<button className="text-button" onClick={() => fetchResults.current()}>重试</button></p>}
     {loaded && !failed && !results.length && !hideEmpty && <p className="navigation-empty">{empty}</p>}

@@ -117,7 +117,7 @@
 
 @media (max-width: 759px) {
   .writing-skills { width: min(calc(100vw - 20px), calc(var(--radix-popover-trigger-width) + 26px)); border-radius: 16px; }
-  .writing-editor-mirror { font-size: 16px; }
+  .writing-editor-mirror { font-size: 16px; line-height: 1.5; padding: 3px 2px; }
   .writing-footnote:has(.writing-usage) { gap: var(--zs-space-1); }
   .writing-footnote:has(.writing-usage) > span:last-child {
     position: absolute;
