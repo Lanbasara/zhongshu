@@ -62,7 +62,7 @@ npm run build:storybook   # .artifacts/storybook, development artifact only
 npm run check:release     # verify the most recent product build inventory
 ```
 
-The [UI architecture](docs/architecture.md#界面与设计系统) describes the token, control, pattern and feature boundaries. The [interface map](docs/features/interface.md) covers interaction, component states and release-boundary verification. Storybook renders the product's actual components; its accepted reference prototype is a separate historical reference under `design/reference/`, not a product entry.
+The [UI architecture](docs/architecture.md#界面与设计系统) describes the token, control, pattern and feature boundaries. The [interface map](docs/features/interface.md) covers interaction, component states and release-boundary verification. Storybook is the component catalog: it renders the product's actual components in every state, plus a foundations page generated from the design tokens. It is a development entry, not part of the product.
 
 Product builds reject development imports and unreviewed public assets. Storybook outputs never go into `dist`. The Docker build copies an explicit input list, installs production dependencies in the runtime stage and verifies the final artifact inventory. These checks also run in CI. Deliberate changes to public assets require updating `scripts/product-assets.json` and reviewing the changed file, not just accepting a new hash.
 

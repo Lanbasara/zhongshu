@@ -50,7 +50,7 @@ Web manifest 提供独立窗口入口。界面以 Streamdown 渲染 Markdown/GFM
 
 ## 界面与设计系统
 
-当前界面以安静、清晰、有质感为方向：导航紧凑，正文舒展，动作利落。设计参考保存在 [reference](../design/reference/index.html)，它记录已接受的原型，不参与产品运行。产品通过自己的布局与真实状态实现设计意图，引用、上传、执行与恢复沿用原有能力。
+当前界面方向为“精密工具”（[界面重设计](spec/interface-redesign.md)）：冷白底、高对比、紧凑，单一靛蓝强调色，彩色状态点，细边框，快速利落的动效。信息结构以工作区树为主导航：侧栏只放新对话、搜索与跳转、工作区树和底部的工作区文件/已归档/设置；插件、工作区管理、存储和账户都在设置页。阅读器和子 Agent 面板按需从右侧滑出，不常驻占列。设计取值与组件状态在 Storybook 组件目录中展示，产品不依赖任何原型文件。
 
 依赖从功能向展示单向流动：
 
@@ -58,15 +58,15 @@ Web manifest 提供独立窗口入口。界面以 Streamdown 渲染 Markdown/GFM
 | --- | --- | --- |
 | 设计基础 | [tokens](../src/web/ui/tokens.ts) 是字体、字号角色、间距、颜色、圆角、层级、阴影与动效时序的作者源；[theme](../src/web/ui/theme.css) 由生成器输出，[motion](../src/web/ui/motion.ts) 使用同一时序 | 先找已有语义。新值在作者源定义并运行 tokens；构建拒绝未同步的 CSS |
 | 基础组件 | [controls](../src/web/ui/controls.tsx) 和 [provider](../src/web/ui/provider.tsx)：按钮、图标按钮、菜单、提示、配置浮层及减少动效；Radix 负责焦点与键盘语义，Motion 负责状态过渡 | 不引用功能或展示模式；不请求服务、不持有对话或操作身份 |
-| 展示模式 | [WorkbenchFrame](../src/web/patterns/workbench-frame.tsx) 管视口、分栏、导航抽屉；[ComposerView](../src/web/patterns/composer.tsx) 管输入增长、材料区、工具栏与状态呈现 | 通过 props 接受内容、能力、状态和回调。局部 hover/focus/展开是展示状态；发送/恢复结论由调用方给出 |
-| 功能 | [workbench](../src/web/workbench.tsx)、[composer](../src/web/composer.tsx)、[transcript](../src/web/conversation-content.tsx)、工作区阅读/管理 | 拥有 API、真实业务状态、授权能力、草稿、上传与操作生命周期；向展示层传值，不把业务状态机搬进公共组件 |
+| 展示模式 | [WorkbenchFrame](../src/web/patterns/workbench-frame.tsx) 管视口、侧栏、手机抽屉与右侧面板；[sidebar](../src/web/patterns/sidebar.tsx) 管侧栏结构与对话行；[command-palette](../src/web/patterns/command-palette.tsx) 管搜索与跳转；[process](../src/web/patterns/process.tsx) 管 Agent 过程的展开与收起；[ComposerView](../src/web/patterns/composer.tsx) 管输入增长、材料区、工具栏与状态呈现 | 通过 props 接受内容、能力、状态和回调。局部 hover/focus/展开是展示状态；发送/恢复结论由调用方给出 |
+| 功能 | [workbench](../src/web/workbench.tsx)、[composer](../src/web/composer.tsx)、[transcript](../src/web/conversation-content.tsx)、[search](../src/web/workbench-search.tsx)、[settings](../src/web/settings-view.tsx)、[archive](../src/web/archive-view.tsx)、工作区阅读/管理；对话状态到状态点的映射只在 [conversation-status](../src/web/conversation-status.ts) | 拥有 API、真实业务状态、授权能力、草稿、上传与操作生命周期；向展示层传值，不把业务状态机搬进公共组件 |
 | 开发工作台 | [.storybook](../.storybook/main.ts)、[stories](../design/stories/) | 复用产品组件展示状态。示例与模拟只存在开发入口，不成为产品默认值 |
 
-界面字体用于控制与正文，宋体/衬线只用于阅读标题，等宽用于代码。颜色按 surface/text/action/status 等语义使用；工作区身份不改变主题，绿色只作为明确成功状态的一部分。输入与正文共用阅读宽度，导航和阅读器各自滚动；窄屏导航为有焦点约束的抽屉。响应、状态、表面切换分别使用 140/180/260ms 与同一缓动，系统减少动效时去除位移/持续旋转。
+标题、控制与正文统一使用界面字体（长文正文 15px），等宽只用于代码与命令。组件只用语义颜色（surface/text/accent/status 等），以后加入暗色只需重定义语义层。状态各有一种形状与颜色：运行中为蓝色转圈，完成未读为绿点，执行失败为红点，等待处理为琥珀点，待核实与已中断分别为橙色、灰色空心圈，就绪不显示。输入与正文共用阅读宽度；窄屏为抽屉导航，标题栏提供搜索，浮层改为底部面板或全屏。响应、状态、表面切换分别使用 120/180/260ms 与同一缓动，系统减少动效时去除位移、持续旋转与流光。
 
 界面原型与组件示例的维护约定见 [ADR 0008](adr/0008-storybook-ui-prototypes.md)。启动命令见 [README](../README.md#ui-development)。
 
-发布边界在 [design-boundaries](../scripts/design-boundaries.ts) 与 [check-release](../scripts/check-release.mjs)：源码 AST 拒绝产品到开发目录的依赖、展示层到功能的依赖与直接网络调用；Vite 检查实际模块图、输出名称和静态资源清单；最终 dist 记录文件及 SHA-256，容器校验清单且不得安装 Storybook。源码检查是防误用护栏，不是恶意源码沙箱。公共静态资源变化由 [product-assets](../scripts/product-assets.json) 显式登记，检查会识别改名混入的原型。构建与 Docker 的输入只含产品和必要构建工具，不含 reference/stories/Storybook 输出；验证反例见 [interface](features/interface.md)。
+发布边界在 [design-boundaries](../scripts/design-boundaries.ts) 与 [check-release](../scripts/check-release.mjs)：源码 AST 拒绝产品到开发目录的依赖、展示层到功能的依赖与直接网络调用；Vite 检查实际模块图、输出名称和静态资源清单；最终 dist 记录文件及 SHA-256，容器校验清单且不得安装 Storybook。源码检查是防误用护栏，不是恶意源码沙箱。公共静态资源变化由 [product-assets](../scripts/product-assets.json) 显式登记，检查会识别改名混入的原型。构建与 Docker 的输入只含产品和必要构建工具，不含 stories/Storybook 输出；验证反例见 [interface](features/interface.md)。
 
 本次使用官方 npm 源固定 Radix UI 1.8.1、Motion 14.9.0；开发工作台使用 Storybook / React Vite 10.6.5，边界 AST 使用 Babel parser 8.1.0。准确依赖树由 lockfile 维护；新增依赖随版本变化重新审查。库负责通用交互机制，产品的视觉语义与组件契约由上述本地模块拥有。
 
