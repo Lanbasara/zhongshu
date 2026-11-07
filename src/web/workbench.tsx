@@ -31,6 +31,7 @@ import { appendNewer, joinLatest, pageItems, preparePage, prependOlder, touchesW
 import { rememberConversation } from './conversation-preferences.ts';
 import { SubagentActivity, SubagentTrigger } from './patterns/subagents.tsx';
 import { SubagentPanelHost, subagentDisplays, useSubagentList } from './subagents.tsx';
+import { ConversationRequests } from './requests.tsx';
 
 const failures: Record<string, string> = {
   conversation_archived: '这段对话已归档，请恢复后继续。',
@@ -462,6 +463,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
   const olderRef = useRef(older); olderRef.current = older;
   const newerLoadRef = useRef(loadNewer); newerLoadRef.current = loadNewer;
   const conversation = snapshot?.conversation;
+  const openRequests = !!snapshot?.requests?.some(item => item.status === 'open');
   const unresolved = snapshot?.operations.some(op => ['queued', 'dispatching', 'unknown'].includes(op.status));
   const latestMessage = snapshot?.operations.find(op => op.type === 'message' && op.status === 'accepted');
   const rejectedDraft = draft.pending && snapshot?.operations.find(op => op.id === draft.pending!.id)?.status === 'rejected';
@@ -659,7 +661,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
         </div>
         <div className="composer-region">
           {moreOutput && <button className="new-output" aria-label="有新内容，回到底部" onClick={() => { atBottom.current = true; if (scroll.current) scroll.current.scrollTop = scroll.current.scrollHeight; setMoreOutput(false); }}>↓ 有新内容</button>}
-          {(conversation?.error || conversation?.state.reason) && <p className="state-notice">{explain(conversation.error ?? conversation.state.reason!)}</p>}
+          {(conversation?.error || (conversation?.state.reason && !(conversation.state.status === 'waiting' && openRequests))) && <p className="state-notice">{explain(conversation.error ?? conversation.state.reason!)}</p>}
           {conversation?.state.status === 'interrupted' && <p className="state-notice">本轮已中断。此前启动的后台工具可能仍在运行，已经产生的改动不会撤销。</p>}
           {conversation?.state.status === 'interrupted' && !!conversation.subagents?.running && <p className="state-notice" role="status">
             主 Agent 已停止，仍有 {conversation.subagents.running} 个子 Agent 在运行。{conversation.harnessId === 'dsh' && '它们完成后，DSH 可能让主 Agent 自动继续工作。'}
@@ -681,6 +683,8 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
             }}>查看消息</button>}
           </div>}
           {!workspaceRemoved && !conversation?.archived && draft.pending && <div className="state-notice">{rejectedDraft ? '上次发送未被接受，原始输入已保留。' : '上次发送尚未确认，原始输入已保留。'}<button className="text-button" disabled={sending} onClick={() => { if (rejectedDraft && selected) { const { pending: _pending, ...next } = draft; setDraft(next); saveDraft(selected, next); } else void send(); }}>{rejectedDraft ? '继续编辑' : '核对同一发送'}</button></div>}
+          {conversation && snapshot?.conversation.id === conversation.id && !!snapshot.requests?.length && <ConversationRequests conversation={conversation} requests={snapshot.requests} csrf={csrf}
+            report={report} onNotice={setError} onReload={() => { if (selected) void load(selected); }} onOpenAgent={agentId => openSubagents(agentId)}/>}
           {!workspaceRemoved && !conversation?.archived && <Composer key={selected} conversation={selected} csrf={csrf} draft={draft} onChange={updateDraft}
             onSend={() => { if (ready || draft.pending) void send(); }} onStop={() => void stop()} onFiles={() => setPickingFile(true)}
             ready={ready} sending={sending} running={running} queueing={queueing}

@@ -156,6 +156,60 @@ const operationFields = {
   runId: identifierSchema.nullable(), reason: boundedText(4096).nullable(), createdAt: revisionSchema, updatedAt: revisionSchema,
 };
 export const operationSchema = z.object({ ...operationFields, type: z.enum(['message', 'stop']), delivery: queueDeliverySchema.optional() }).strict();
+/** Opaque, URL-safe identity of one native pending request; meaningful only within its conversation. */
+export const requestIdSchema = z.string().regex(/^[A-Za-z0-9_-]{1,160}$/);
+export const requestLimit = 32;
+export const approvalDecisionSchema = z.enum(['accept', 'acceptForSession', 'decline', 'cancel']);
+export const requestQuestionSchema = z.object({
+  id: boundedText(240).min(1), header: boundedText(400).optional(), text: boundedText(16_000),
+  options: z.array(z.object({ label: boundedText(400).min(1), description: boundedText(4000).optional() }).strict()).max(16),
+  /** Several options may be chosen; otherwise at most one. */
+  multiple: z.boolean(),
+  /** A typed answer is accepted in addition to (or instead of) the options. */
+  custom: z.boolean(),
+}).strict();
+export const requestFieldSchema = z.object({
+  name: boundedText(200).min(1), label: boundedText(400).min(1), description: boundedText(4000).optional(),
+  type: z.enum(['string', 'number', 'integer', 'boolean', 'enum']), required: z.boolean(),
+  options: z.array(boundedText(400)).max(32).optional(),
+}).strict();
+const answerViewSchema = z.object({ id: z.uuid(), status: operationStatusSchema, reason: boundedText(4096).nullable(), updatedAt: revisionSchema, summary: boundedText(2000).optional() }).strict();
+/**
+ * A question, approval or form a native agent is waiting on. Native Harnesses own the request; the
+ * view keeps a resolved request briefly so every device can see that it was answered or expired.
+ */
+export const pendingRequestSchema = z.object({
+  id: requestIdSchema, kind: z.enum(['question', 'approval', 'form']), status: z.enum(['open', 'answered', 'expired']),
+  createdAt: revisionSchema,
+  /** The sub-agent that asked; absent when the conversation's main agent asked. */
+  agent: z.object({ id: subagentIdSchema, name: boundedText(400).min(1) }).strict().optional(),
+  questions: z.array(requestQuestionSchema).min(1).max(8).optional(),
+  /** When the native agent stops waiting in the foreground; the question stays answerable afterwards. */
+  deadline: revisionSchema.optional(),
+  approval: z.object({
+    action: z.enum(['command', 'fileChange', 'permissions', 'other']),
+    reason: boundedText(8000).optional(), command: boundedText(32_000).optional(), cwd: boundedText(4096).optional(),
+    paths: z.array(boundedText(4096)).max(64).optional(), network: z.boolean().optional(),
+    /** Exactly the decisions the native request offers, in native order. */
+    decisions: z.array(approvalDecisionSchema).min(1).max(4),
+  }).strict().optional(),
+  form: z.object({ source: boundedText(400).min(1), message: boundedText(16_000), url: z.url({ protocol: /^https$/ }).max(4096).optional(), fields: z.array(requestFieldSchema).max(24) }).strict().optional(),
+  answer: answerViewSchema.optional(),
+}).strict();
+export const requestAnswerSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('question'), answers: z.array(z.object({ id: boundedText(240).min(1), selected: z.array(boundedText(400).min(1)).max(16), custom: boundedText(16_000).optional() }).strict()).min(1).max(8) }).strict(),
+  z.object({ kind: z.literal('approval'), decision: approvalDecisionSchema }).strict(),
+  z.object({ kind: z.literal('form'), action: z.enum(['accept', 'decline', 'cancel']),
+    values: z.record(boundedText(200).min(1), z.union([boundedText(16_000), z.number().finite(), z.boolean()])).optional() }).strict(),
+]);
+export const answerRequestSchema = z.object({ id: z.uuid(), answer: requestAnswerSchema }).strict();
+export const requestAnswerResponseSchema = z.object({ answer: answerViewSchema }).strict();
+export type PendingRequest = z.infer<typeof pendingRequestSchema>;
+export type RequestAnswer = z.infer<typeof requestAnswerSchema>;
+export type ApprovalDecision = z.infer<typeof approvalDecisionSchema>;
+export type RequestQuestion = z.infer<typeof requestQuestionSchema>;
+export type RequestField = z.infer<typeof requestFieldSchema>;
+export type RequestAnswerView = z.infer<typeof answerViewSchema>;
 export const conversationListSchema = z.object({
   conversations: z.array(conversationSchema).max(100), olderBeforeId: z.string().min(1).max(512).nullable(), revision: revisionSchema,
 }).strict();
@@ -177,7 +231,10 @@ export const snapshotSchema = z.object({
   /** The native latest page plus in-flight items; `error` keeps already loaded content readable when native reads fail. */
   history: z.object({ items: z.array(itemSchema).max(historyPageItemLimit), liveItems: z.array(itemSchema).max(100), liveItemsLimited: z.boolean(),
     olderCursor: historyCursorSchema.nullable(), loaded: z.boolean(), error: z.string().regex(/^[a-z][a-z0-9_]{0,99}$/).optional() }).strict(),
-  operations: z.array(operationSchema).max(100), queue: queueViewSchema.optional(), turnFiles: z.array(turnFilesSchema).max(200).optional(), usage: usageSchema.optional(), revision: revisionSchema,
+  operations: z.array(operationSchema).max(100), queue: queueViewSchema.optional(), turnFiles: z.array(turnFilesSchema).max(200).optional(), usage: usageSchema.optional(),
+  /** Questions and approvals the agents are waiting on, plus recently resolved ones. */
+  requests: z.array(pendingRequestSchema).max(requestLimit).optional(),
+  revision: revisionSchema,
 }).strict();
 /** One older native page. `olderCursor` is null at the first message of the conversation. */
 export const historyPageSchema = z.object({

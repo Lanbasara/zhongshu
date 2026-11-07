@@ -19,9 +19,12 @@ export class RpcError extends HarnessError {
   constructor(code: string, nativeCode?: number, nativeKind?: 'missing_rollout' | 'deleted_thread_absent') { super(code); this.nativeCode = nativeCode; this.nativeKind = nativeKind; }
 }
 
+/** A request the App Server sent to this client. Its id is meaningful only on the connection that received it. */
+export type ServerRequest = { id: string | number; method: string; params: unknown; connection: number };
 type Hooks = {
   notification(method: string, params: unknown): void;
-  unsupportedRequest(method: string, params: unknown): void;
+  /** Return true to answer later through `respond`; false refuses the request at once without granting anything. */
+  serverRequest(request: ServerRequest): boolean;
   disconnected(): void;
 };
 
@@ -37,6 +40,8 @@ export class CodexRpc {
   private heartbeat: NodeJS.Timeout | undefined;
   private awaitingPong = false;
   private home: string | undefined;
+  /** Increments with every established connection; server request ids are scoped to one connection. */
+  private generation = 0;
 
   constructor(socketPath: string, hooks: Hooks) {
     const parsed = z.string().min(1).max(4096).refine(path => isAbsolute(path) && normalize(path) === path && !path.includes('\0')).safeParse(socketPath);
@@ -92,8 +97,10 @@ export class CodexRpc {
         const data = envelope.parse(JSON.parse(buffer.toString()));
         if (data.method) {
           if (data.id !== undefined) {
-            this.hooks.unsupportedRequest(data.method, data.params);
-            ws.send(JSON.stringify({ id: data.id, error: { code: -32601, message: 'This client does not support this interaction and grants no additional permissions.' } }));
+            let handled = false;
+            try { handled = established && this.hooks.serverRequest({ id: data.id, method: data.method, params: data.params, connection: this.generation }); }
+            catch { handled = false; }
+            if (!handled) ws.send(JSON.stringify({ id: data.id, error: { code: -32601, message: 'This client does not support this interaction and grants no additional permissions.' } }));
           } else this.hooks.notification(data.method, data.params);
         } else if (typeof data.id === 'number') {
           const request = this.pending.get(data.id);
@@ -118,6 +125,7 @@ export class CodexRpc {
       if (ws.readyState !== WebSocket.OPEN) throw new RpcError('codex_disconnected');
       this.home = initialization.data?.codexHome;
       ws.send(JSON.stringify({ method: 'initialized', params: {} }));
+      this.generation++;
       established = true;
       this.awaitingPong = false;
       this.heartbeat = setInterval(() => {
@@ -136,6 +144,20 @@ export class CodexRpc {
   /** Used when the caller must fence a request to an already verified connection. */
   requestConnected(method: string, params: unknown): Promise<unknown> {
     return this.send(method, params);
+  }
+
+  get connection(): number { return this.connected ? this.generation : -1; }
+
+  /**
+   * Answer a server request on the connection that received it. Resolves once the frame is written;
+   * the App Server confirms resolution separately (`serverRequest/resolved`).
+   */
+  respond(request: Pick<ServerRequest, 'id' | 'connection'>, result: unknown): Promise<void> {
+    const ws = this.socket;
+    if (!ws || ws.readyState !== WebSocket.OPEN || request.connection !== this.generation) return Promise.reject(new RpcError('codex_disconnected'));
+    const payload = JSON.stringify({ id: request.id, result });
+    if (Buffer.byteLength(payload) > MAX_FRAME) return Promise.reject(new RpcError('codex_request_too_large'));
+    return new Promise((resolve, reject) => ws.send(payload, error => error ? reject(new RpcError('codex_send_failed')) : resolve()));
   }
 
   private send(method: string, params: unknown): Promise<unknown> {

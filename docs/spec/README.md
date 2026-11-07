@@ -16,7 +16,7 @@ spec 是与用户讨论后确认的临时约定：它回答“接下来建什么
 | [工作区管理](workspace-management.md) | 添加已有或新建的目录，改名、置顶、搜索、移除和恢复工作区 | active | 见工作单退出条件 | 见工作单 | 2026-11-03 |
 | 运行中排队与追加输入 | 运行中排多条消息，逐条提前发送并核对归属轮次 | done | 两个真实 Harness 的队列、轮尾竞争和回执恢复通过独立执行 | [PR #19](https://github.com/Lanbasara/zhongshu/pull/19) · [执行地图](../features/execution.md#e06--e07-排队与提前发送) | 2026-11-03 |
 | [原生子 Agent 的查看与停止](native-subagents.md) | 在对话中查看主 Agent 派生的子 Agent 与 DSH 团队，单独停止子 Agent | active | 两端真实派生、停止、恢复与待核实反例经独立验收，用户试用确认 | 已实现；用户已试用；两端 fixture 与真实 Host 独立验收通过；Codex Host 重启、嵌套/外部子 Agent、真机未覆盖 | 2026-11-06 |
-| [Agent 提问与审批](questions-approvals.md) | 任何权限下都能回答 DSH Agent 的提问；工作区读写与只读时审批，完全访问时全部允许；含 Codex 子 Agent 的审批（[ADR 0016](../adr/0016-questions-and-approvals.md)）。用户决定完成后再正式开始日常使用 | active | 见工作单 | none yet；已授权实施，先做界面原型 | 2026-11-07 |
+| Agent 提问与审批 | 任何权限下都能回答 DSH Agent 的提问；工作区读写与只读时审批，完全访问时全部允许；含 Codex 子 Agent 的审批（[ADR 0016](../adr/0016-questions-and-approvals.md)）。用户决定完成后再正式开始日常使用 | done | DSH 主 Agent 的提问与两端按权限出现的审批都在中书得到一次有效回答，完全访问不出现审批；恢复与多端反例有真实 Host 证据，用户在测试实例验收确认 | [PR #40](https://github.com/Lanbasara/zhongshu/pull/40)；两端真实 Host 探针与作者浏览器自测通过；用户 2026-11-07 在测试实例完成手机与跨端验收；未做独立执行验收（用户决定）；未覆盖：Codex 子 Agent 审批与 MCP 信息请求的真实运行 · [执行地图 E08–E10](../features/execution.md#e08e10-提问与审批) | 2026-11-07 |
 | Plan 模式 | 两端在输入区开关 Plan，审核计划后再执行；Codex 的结构化提问随本切片接入，复用提问卡片（[ADR 0016](../adr/0016-questions-and-approvals.md)） | next | 两端真实 Host 完成进入、提问（含 Codex 结构化提问）、计划审核与退出的往返，用户试用确认 | none yet | 2026-11-07 |
 | 通知与安装 | 安装成独立窗口；离开页面后收到完成、失败、等待回答或审批、Harness 账号需要处理的推送（[ADR 0018](../adr/0018-push-notifications.md)） | next | Android 与桌面真机上，安装、开启与移除推送、四类触发和点击直达均有证据，通知不含正文；用户试用确认 | none yet | 2026-11-07 |
 | Harness 账号 | 在设置中查看两端账号状态，需要处理时得到提醒；Codex 在页内用设备码续登，DSH 由操作者处理（[ADR 0015](../adr/0015-harness-account-status.md)） | next | 两端真实状态与原生一致，失效状态能被识别；Codex 真实设备码续登成功；凭据与用户码不出现在日志和数据库 | none yet | 2026-11-07 |
@@ -45,7 +45,6 @@ Ledger 状态只允许 `next / active / blocked / done`；spec front matter 使�
 - [workspace-file-reading-editing.md](workspace-file-reading-editing.md) — 真实 Harness 与浏览器已验证，手机真机待验收
 - [integration-probes.md](integration-probes.md) — next
 - [native-subagents.md](native-subagents.md) — 已实现（PR #37），独立验收通过；剩余未覆盖分支见工作单
-- [questions-approvals.md](questions-approvals.md) — 范围依据 2026-11-07 对齐；已授权实施，先做界面原型
 
 ## spec 模板
 

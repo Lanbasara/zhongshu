@@ -1,5 +1,6 @@
 import { createDeletionStore, type DeletionStore } from './conversation-deletions.ts';
 import { createSubagentStore, summarizeSubagents, type SubagentStore } from './subagent-store.ts';
+import { createRequestStore, type RequestStore } from './request-store.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import type { DatabaseSync, StatementSync } from 'node:sqlite';
 import { z } from 'zod';
@@ -50,6 +51,7 @@ type StoredQueue = Omit<QueueView, 'mode'> & { afterRunId: string | null };
 export interface WorkbenchStore {
   deletions: DeletionStore;
   subagents: SubagentStore;
+  requests: RequestStore;
   resources: ReturnType<typeof createResourceStore>;
   reservePreparation(workspaceId: string, cwd: string, id: string, expectedId?: string): { preparationId: string; nativeId: string };
   completePreparation(id: string): void;
@@ -301,6 +303,7 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
   const store: WorkbenchStore = {
     deletions: createDeletionStore(db, event => options.onChange?.(event), now),
     subagents: createSubagentStore(db, event => options.onChange?.(event), now),
+    requests: createRequestStore(db, event => options.onChange?.(event), now),
     resources,
     reservePreparation(workspaceId, cwd, id, expectedId) {
       parse(identifier, workspaceId); parse(boundedText(4096).min(1), cwd); parse(uuid, id); if (expectedId) parse(uuid, expectedId);

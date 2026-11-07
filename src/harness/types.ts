@@ -1,6 +1,6 @@
 /** Product-facing semantics. Native protocol types stay inside each adapter. */
 import type { ImageAttachment, InputContent, SkillOption } from '../shared/content.ts';
-import type { Collaboration, ConversationUsage, QueueDelivery, SubagentStatus, TeamView } from '../shared/workbench.ts';
+import type { Collaboration, ConversationUsage, PendingRequest, QueueDelivery, RequestAnswer, SubagentStatus, TeamView } from '../shared/workbench.ts';
 export type HarnessId = 'codex' | 'dsh';
 export type Configuration = { modelId: string; permissionId: string; reasoningEffort?: string };
 export type Catalog = {
@@ -83,6 +83,12 @@ export type Receipt =
   | { outcome: 'accepted'; runId?: string }
   | { outcome: 'rejected'; reason: string }
   | { outcome: 'unknown'; reason: string };
+/**
+ * A question, approval or form a native agent is waiting on, as the adapter currently sees it. The native
+ * Harness owns it; its content stays in memory and is never persisted. `agentId` names the asking
+ * sub-agent; it is absent when the conversation's main agent asked.
+ */
+export type NativeRequest = Omit<PendingRequest, 'status' | 'answer' | 'agent'> & { agentId?: string };
 export type HarnessInput = InputContent & { id: string; imageData?: { mediaType: string; data: string }[] };
 export type NativeChange =
   | { type: 'item'; item: NativeItem }
@@ -93,6 +99,8 @@ export type NativeChange =
   | { type: 'subagents'; agentId?: string; transcript?: boolean }
   /** A confirmed loss of observation; retain last-known facts but revoke verification immediately. */
   | { type: 'unavailable'; reason: string }
+  /** The set of open native requests changed; re-read them. */
+  | { type: 'requests' }
   | { type: 'invalidate' };
 
 export interface HarnessAdapter {
@@ -131,6 +139,13 @@ export interface HarnessAdapter {
   observeSubagent?(binding: Binding, agentId: string): Promise<() => void>;
   /** Interrupt only the named owned sub-agent's current work. Never resend after an unknown receipt. */
   stopSubagent?(binding: Binding, agentId: string): Promise<Receipt>;
+  /** Open requests of this conversation, including its sub-agents'. Reading never answers or cancels them. */
+  requests?(binding: Binding): Promise<NativeRequest[]>;
+  /**
+   * Deliver one answer. `accepted` means the native side resolved the request with it; `rejected` that the
+   * request is not open (or the answer is invalid) and nothing was delivered. Never resend after `unknown`.
+   */
+  answer?(binding: Binding, requestId: string, answer: RequestAnswer): Promise<Receipt>;
   /** Changes are hints/live items; history and state are re-read on reconnect. */
   watch(binding: Binding, listener: (change: NativeChange) => void): Promise<() => void>;
   /** Close app-owned connections only; native hosts and their work have independent lifetimes. */

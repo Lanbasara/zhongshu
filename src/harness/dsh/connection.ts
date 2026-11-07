@@ -15,6 +15,16 @@ const responseSchema = z.object({ type: z.literal('server-response'), rpcId: z.s
 const frameSchema = z.object({ type: z.enum(['item', 'error', 'end']), streamId: z.string().max(200), value: z.unknown().optional(), error: z.object({ code }).optional() });
 export class NativeRejection extends HarnessError {}
 type Stream = { item: (value: unknown) => void; failed: (error: HarnessError) => void };
+/** A request the Host forwards to answering clients (ADR 0016). `agentId` is the asking session. */
+export type Interaction = { eventId: string; event: string; agentId: string; request: unknown };
+/** Receives forwarded interactions. `reset` means every forwarded request of the old connection is void; the Host replays open ones. */
+export type InteractionSink = { request(interaction: Interaction): void; cancel(eventId: string): void; reset(): void };
+const eventItem = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('ready'), clientId: z.string().min(1).max(200) }).passthrough(),
+  z.object({ type: z.literal('waterfall'), event: z.string().max(120), eventId: z.string().min(1).max(200), agentId: z.string().min(1).max(240), request: z.unknown() }).passthrough(),
+  z.object({ type: z.literal('cancel'), eventId: z.string().min(1).max(200) }).passthrough(),
+  z.object({ type: z.literal('emit') }).passthrough(),
+]);
 
 export async function readLaunchFile(path: string): Promise<URL> {
   try {
@@ -68,7 +78,10 @@ export class Connection {
   private requests = new Set<AbortController>();
   private heartbeat: ReturnType<typeof setInterval> | undefined;
   private lastSeen = 0;
-  constructor(launchFile: string) { this.launchFile = launchFile; }
+  private readonly sink: InteractionSink | undefined;
+  /** This client's identity on the current `$events` stream; answers must name it. */
+  private clientId: string | undefined;
+  constructor(launchFile: string, sink?: InteractionSink) { this.launchFile = launchFile; this.sink = sink; }
 
   async ready(): Promise<void> {
     if (this.closed) throw new HarnessError('DSH_ADAPTER_CLOSED');
@@ -81,7 +94,7 @@ export class Connection {
     try {
       const launch = await readLaunchFile(this.launchFile);
       if (this.closed) throw new HarnessError('DSH_ADAPTER_CLOSED');
-      const url = new URL('/connect', launch.origin); url.search = launch.search; url.searchParams.set('interactions', 'none');
+      const url = new URL('/connect', launch.origin); url.search = launch.search; url.searchParams.set('interactions', this.sink ? 'answer' : 'none');
       const reply = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(10000) });
       if (reply.status !== 302) throw new HarnessError('DSH_CONNECT_REJECTED');
       const cookie = reply.headers.getSetCookie().map(value => value.split(';')[0]).join('; ');
@@ -107,21 +120,48 @@ export class Connection {
       socket.on('close', () => { if (this.socket === socket) this.disconnected(); });
       await new Promise<void>((resolve, reject) => { socket.once('open', resolve); socket.once('error', () => reject(new HarnessError('DSH_UNAVAILABLE'))); socket.once('close', () => reject(new HarnessError('DSH_UNAVAILABLE'))); });
       this.lastSeen = Date.now();
+      if (this.sink) this.openEvents(socket);
       this.heartbeat = setInterval(() => { if (Date.now() - this.lastSeen > 15000) socket.terminate(); else if (socket.readyState === WebSocket.OPEN) socket.ping(); }, 5000);
       this.heartbeat.unref();
     } catch (error) { if (error instanceof HarnessError) throw error; throw new HarnessError('DSH_UNAVAILABLE'); }
   }
 
+  /** Answering clients receive forwarded requests here; open ones are replayed after `ready` on every new stream. */
+  private openEvents(socket: WebSocket): void {
+    const streamId = randomUUID();
+    this.streams.set(streamId, {
+      item: value => {
+        const parsed = eventItem.safeParse(value);
+        if (!parsed.success || this.socket !== socket) return;
+        const item = parsed.data;
+        if (item.type === 'ready') this.clientId = item.clientId;
+        else if (item.type === 'waterfall') this.sink?.request({ eventId: item.eventId, event: item.event, agentId: item.agentId, request: item.request });
+        else if (item.type === 'cancel') this.sink?.cancel(item.eventId);
+      },
+      // Without the stream nothing can be answered; other calls keep working and the next connection retries.
+      failed: () => { if (this.socket === socket) this.clientId = undefined; },
+    });
+    socket.send(JSON.stringify({ type: 'open', streamId, endpoint: '$events', payload: { args: {} } }));
+  }
+
+  /** Settle one forwarded request. Never send `next`: as the only answering client that would fail the request. */
+  async settle(eventId: string, outcome: { kind: 'result'; value: unknown } | { kind: 'rejected'; error: { name: string; message: string; code?: string } }): Promise<void> {
+    const clientId = this.clientId;
+    if (!clientId || !this.socket) throw new NativeRejection('DSH_NATIVE_interactions_unavailable');
+    await this.call('$events/result', { clientId, eventId, outcome });
+  }
+
   private disconnected(): void {
     if (this.heartbeat) clearInterval(this.heartbeat); this.heartbeat = undefined;
-    this.socket = undefined; this.cookie = ''; this.origin = '';
+    this.socket = undefined; this.cookie = ''; this.origin = ''; this.clientId = undefined;
+    try { this.sink?.reset(); } catch { /* a sink failure cannot keep a dead connection */ }
     const listeners = [...this.streams.values()]; this.streams.clear();
     for (const listener of listeners) listener.failed(new HarnessError('DSH_DISCONNECTED'));
   }
 
   async call(endpoint: string, args: Record<string, unknown> = {}, timeout = 15_000): Promise<unknown> {
     await this.ready();
-    if (!/^[A-Za-z][A-Za-z0-9]*\/[A-Za-z][A-Za-z0-9]*$/.test(endpoint)) throw new HarnessError('DSH_ENDPOINT_INVALID');
+    if (!/^(?:[A-Za-z][A-Za-z0-9]*|\$events)\/[A-Za-z][A-Za-z0-9]*$/.test(endpoint)) throw new HarnessError('DSH_ENDPOINT_INVALID');
     if (this.requests.size >= 32) throw new HarnessError('DSH_REQUEST_LIMIT');
     const controller = new AbortController(); this.requests.add(controller);
     const timer = setTimeout(() => controller.abort(), timeout);

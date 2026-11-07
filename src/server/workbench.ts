@@ -1,5 +1,5 @@
 import type { HostPhase } from './workspace-maintenance.ts';
-import { HarnessError, type Catalog, type HarnessAdapter, type HarnessId, type HistoryPage, type NativeItem, type NativeState, type Receipt } from '../harness/types.ts';
+import { HarnessError, type Catalog, type HarnessAdapter, type HarnessId, type HistoryPage, type NativeItem, type NativeRequest, type NativeState, type Receipt } from '../harness/types.ts';
 import type { Workspace } from './harness-config.ts';
 import { decodeImage, ResourceError, workspacePath, workspaceFiles } from './resources.ts';
 import { NATIVE_IMAGE_OWNER } from './storage.ts';
@@ -10,12 +10,17 @@ import { listWorkspaceDocuments, openWorkspaceDocument, saveWorkspaceDocument } 
 import { createHash, randomUUID } from 'node:crypto';
 import { StoreError, type WorkbenchStore, type CreateConversation, type OperationInput, type Conversation, type Operation } from './workbench-store.ts';
 import type { WorkspaceRegistry } from './workspace-registry.ts';
-import type { ConversationUsage, QueueCommand, QueueView, SubagentList, WorkbenchConfiguration, WorkbenchItem, workspaceAddSchema, workspaceManagementSchema } from '../shared/workbench.ts';
-import { attentionLimit, itemSchema, subagentIdSchema } from '../shared/workbench.ts';
+import type { ConversationUsage, PendingRequest, QueueCommand, QueueView, RequestAnswer, RequestAnswerView, SubagentList, WorkbenchConfiguration, WorkbenchItem, workspaceAddSchema, workspaceManagementSchema } from '../shared/workbench.ts';
+import { attentionLimit, itemSchema, requestLimit, subagentIdSchema } from '../shared/workbench.ts';
+import { answerFits, answerSummary } from '../shared/requests.ts';
+import { answerView, RequestStoreError } from './request-store.ts';
 import { SubagentStoreError, type SubagentStop } from './subagent-store.ts';
 import { z } from 'zod';
 
 const TERMINAL = new Set<NativeState['status']>(['idle', 'interrupted', 'failed']);
+/** A resolved request stays visible this long so every device sees that it was answered or expired. */
+const RESOLVED_RETENTION = 10 * 60_000;
+type RequestEntry = { request: NativeRequest; status: PendingRequest['status']; resolvedAt?: number };
 /** Target items per native history page; adapters translate it into their own page unit. */
 const HISTORY_PAGE_SIZE = 50;
 /** Hard bounds on what one native page may contribute to a response. */
@@ -110,6 +115,11 @@ export class Workbench {
   private readonly subagentTouches = new Map<string, Set<string>>();
   private readonly subagentLeases = new Map<string, SubagentLease>();
   private readonly subagentStops = new Map<string, Promise<void>>();
+  /** Requests the native agents wait on, as last read from each adapter. Memory only; the native side owns them (ADR 0016). */
+  private readonly requestViews = new Map<string, Map<string, RequestEntry>>();
+  private readonly requestTimers = new Map<string, NodeJS.Timeout>();
+  private readonly requestRefreshes = new Map<string, { task: Promise<void>; again: boolean }>();
+  private readonly answerTasks = new Map<string, Promise<void>>();
 
   constructor(store: WorkbenchStore, initialWorkspaces: Workspace[], adapters: Map<HarnessId, HarnessAdapter>, registry?: WorkspaceRegistry) {
     this.store = store; this.adapters = adapters;
@@ -598,6 +608,7 @@ export class Workbench {
       this.restoreDeletions();
       this.store.recoverDispatching();
       this.store.subagents.recoverDispatching();
+      this.store.requests.recoverDispatching();
       this.restoreQueuedConversations();
       this.ensureRecoveryTimer();
     });
@@ -814,7 +825,7 @@ export class Workbench {
     const history = { items, liveItems, liveItemsLimited: live.length > LIVE_VIEW_LIMIT,
       olderCursor: this.wrapCursor(id, tail?.olderCursor ?? null), loaded: !!tail && !tail.error, ...(tail?.error ? { error: tail.error } : {}) };
     return { conversation, history, turnFiles: this.store.readTurnFiles(id, [...runIds]),
-      operations: this.store.listOperations({ conversationId: id, order: 'desc', limit: 100 }), queue: this.queue(id), revision: this.store.version() };
+      operations: this.store.listOperations({ conversationId: id, order: 'desc', limit: 100 }), queue: this.queue(id), requests: this.requestList(id), revision: this.store.version() };
   }
   /** One older native page, addressed by a cursor the server issued for this conversation. Nothing is persisted. */
   async history(id: string, cursor: string) {
@@ -1481,6 +1492,124 @@ export class Workbench {
     return this.store.subagents.getStop(stopId)!;
   }
 
+  // ADR 0016: questions and approvals. The request belongs to the native Harness; Zhongshu shows it and
+  // delivers one answer per request as an operation with a stable identity, never resending an unknown one.
+  private scheduleRequests(id: string): void {
+    if (this.closed || this.isDeleting(id) || this.requestTimers.has(id)) return;
+    const timer = setTimeout(() => { this.requestTimers.delete(id); this.launch(this.refreshRequests(id)); }, 40);
+    timer.unref(); this.requestTimers.set(id, timer);
+  }
+  private refreshRequests(id: string): Promise<void> {
+    const running = this.requestRefreshes.get(id);
+    if (running) { running.again = true; return running.task; }
+    const entry = { task: Promise.resolve(), again: false };
+    entry.task = this.task(async () => {
+      try { do { entry.again = false; await this.readRequests(id); } while (entry.again && !this.closed); }
+      finally { this.requestRefreshes.delete(id); }
+    });
+    this.requestRefreshes.set(id, entry);
+    return entry.task;
+  }
+  private async readRequests(id: string): Promise<void> {
+    const conversation = this.store.getConversation(id);
+    if (!conversation?.binding || this.closed || this.isDeleting(id)) return;
+    const adapter = this.adapters.get(conversation.harnessId);
+    if (!adapter?.requests || !this.configured(conversation)) return;
+    let native: NativeRequest[];
+    try { native = (await adapter.requests(conversation.binding)).slice(0, requestLimit); } catch { return; }
+    if (this.closed || this.isDeleting(id)) return;
+    const now = Date.now(); const current = this.requestViews.get(id) ?? new Map<string, RequestEntry>();
+    // While observation is lost the adapter cannot vouch for absence; keep what was open until it is re-verified.
+    const verified = this.store.getConversation(id)?.state.status !== 'unknown';
+    const next = new Map<string, RequestEntry>(); let changed = false;
+    for (const request of native) {
+      const previous = current.get(request.id);
+      if (!previous || previous.status !== 'open' || JSON.stringify(previous.request) !== JSON.stringify(request)) changed = true;
+      next.set(request.id, { request, status: 'open' });
+      // Still open after an unconfirmed answer: that answer was not taken. The native side takes one answer
+      // per request, so answering again cannot apply twice.
+      const latest = this.store.requests.latest(id, request.id);
+      if (latest?.status === 'unknown') { this.store.requests.settle(latest.id, { outcome: 'rejected', reason: 'answer_not_delivered' }); changed = true; }
+    }
+    for (const [key, previous] of current) {
+      if (next.has(key)) continue;
+      if (previous.status === 'open' && !verified) { next.set(key, previous); continue; }
+      if (previous.status === 'open') {
+        const latest = this.store.requests.latest(id, key);
+        next.set(key, { ...previous, status: latest?.status === 'accepted' ? 'answered' : 'expired', resolvedAt: now }); changed = true;
+      } else if (now - (previous.resolvedAt ?? now) < RESOLVED_RETENTION) next.set(key, previous);
+      else changed = true;
+    }
+    while (next.size > requestLimit) { const oldest = [...next].find(([, value]) => value.status !== 'open')?.[0] ?? next.keys().next().value!; next.delete(oldest); changed = true; }
+    if (next.size) this.requestViews.set(id, next); else this.requestViews.delete(id);
+    if (changed) this.store.touch(id);
+  }
+  private requestList(id: string): PendingRequest[] {
+    const entries = [...(this.requestViews.get(id)?.values() ?? [])];
+    if (!entries.length) return [];
+    const names = new Map(this.store.subagents.view(id).agents.map(agent => [agent.id, agent.name]));
+    return entries.sort((left, right) => left.request.createdAt - right.request.createdAt).map(({ request, status }) => {
+      const { agentId, ...rest } = request;
+      const latest = this.store.requests.latest(id, request.id);
+      return { ...rest, status, ...(agentId ? { agent: { id: agentId, name: names.get(agentId) ?? '子 Agent' } } : {}), ...(latest ? { answer: answerView(latest) } : {}) };
+    });
+  }
+  answerRequest(id: string, requestId: string, answerId: string, answer: RequestAnswer): RequestAnswerView {
+    this.assertOpen(); this.assertNotDeleting(id);
+    const conversation = this.conversation(id);
+    const existing = this.store.requests.get(answerId);
+    if (existing) {
+      if (existing.conversationId !== id || existing.requestId !== requestId) throw new StoreError('operation_id_conflict', 409);
+      return answerView(existing);
+    }
+    const adapter = this.adapter(conversation);
+    if (!adapter.answer || !conversation.binding) throw new StoreError('request_answer_unavailable', 409);
+    const entry = this.requestViews.get(id)?.get(requestId);
+    if (!entry) throw new StoreError('request_not_found', 404);
+    if (entry.status !== 'open') throw new StoreError('request_not_open', 409);
+    const latest = this.store.requests.latest(id, requestId);
+    if (latest && latest.status !== 'rejected') throw new StoreError('request_answer_pending', 409);
+    if (!answerFits(entry.request, answer)) throw new StoreError('answer_invalid', 400);
+    let result;
+    try { result = this.store.requests.enqueue({ id: answerId, conversationId: id, requestId, answer, summary: answerSummary(entry.request, answer) }); }
+    catch (error) { if (error instanceof RequestStoreError) throw new StoreError(error.code, error.statusCode); throw error; }
+    if (result.answer.status === 'queued') this.launch(this.dispatchAnswer(result.answer.id));
+    return answerView(result.answer);
+  }
+  private dispatchAnswer(answerId: string): Promise<void> {
+    const existing = this.answerTasks.get(answerId); if (existing) return existing;
+    const task = this.task(async () => {
+      const queued = this.store.requests.get(answerId);
+      if (!queued || queued.status !== 'queued' || !queued.answer || this.closed || this.isDeleting(queued.conversationId)) return;
+      const conversation = this.conversation(queued.conversationId);
+      const adapter = this.adapters.get(conversation.harnessId);
+      if (!conversation.binding || !adapter?.answer || !this.configured(conversation)) {
+        this.store.requests.settle(answerId, { outcome: 'rejected', reason: 'request_answer_unavailable' }); return;
+      }
+      const answer = queued.answer;
+      if (!this.store.requests.claim(answerId)) return;
+      let receipt: Receipt;
+      try { receipt = await adapter.answer(conversation.binding, queued.requestId, answer); }
+      catch { receipt = { outcome: 'unknown', reason: 'native_receipt_unknown' }; }
+      this.store.requests.settle(answerId, receipt);
+      const entry = this.requestViews.get(queued.conversationId)?.get(queued.requestId);
+      if (receipt.outcome === 'accepted' && entry?.status === 'open') { entry.status = 'answered'; entry.resolvedAt = Date.now(); this.store.touch(queued.conversationId); }
+      if (!this.closed && !this.isDeleting(queued.conversationId)) await this.refreshRequests(queued.conversationId).catch(() => {});
+    });
+    this.answerTasks.set(answerId, task);
+    void task.then(() => this.answerTasks.delete(answerId), () => this.answerTasks.delete(answerId));
+    return task;
+  }
+  /** Settle an unknown answer only from a fresh native read; nothing is resent. */
+  async reconcileAnswer(id: string, answerId: string): Promise<RequestAnswerView> {
+    this.assertOpen(); this.assertNotDeleting(id);
+    const answer = this.store.requests.get(answerId);
+    if (!answer || answer.conversationId !== id) throw new StoreError('operation_not_found', 404);
+    if (answer.status === 'queued') { await this.dispatchAnswer(answerId); return answerView(this.store.requests.get(answerId)!); }
+    if (answer.status === 'unknown') await this.refreshRequests(id).catch(() => {});
+    return answerView(this.store.requests.get(answerId)!);
+  }
+
   private hasExecutionResponsibility(id: string): boolean {
     const conversation = this.store.getConversation(id);
     if (!conversation) return false;
@@ -1495,6 +1624,7 @@ export class Workbench {
     if (!queue.pause && queue.entries.length > 0) return true;
     // Native sub-agents keep working after the main turn ends; keep observing until they settle,
     // and keep a Codex parent loaded while it holds results it has not read yet.
+    if (this.store.requests.busy(id)) return true;
     return this.store.subagents.busy(id) || (!conversation.archived && this.store.subagents.holdsObservation(id));
   }
   private releaseIdle(id: string): void {
@@ -1567,6 +1697,7 @@ export class Workbench {
         try {
           if (change.type === 'usage') { this.store.setUsage(id, change.usage); return; }
           if (change.type === 'subagents') { this.scheduleSubagents(id, change.agentId, change.transcript); return; }
+          if (change.type === 'requests') { this.scheduleRequests(id); return; }
           runtime.generation++;
           if (change.type === 'item') {
             if (change.item.imageSources?.length) { this.scheduleSync(id); return; }
@@ -1653,6 +1784,7 @@ export class Workbench {
           if (runtime.flush) { clearTimeout(runtime.flush); this.flushLive(id, runtime); }
           if (state.value.configurationVerified && (runtime.subagentsDirty || this.store.subagents.get(id)?.verified === false ||
             (runtime.tail?.items ?? []).some(item => item.collaboration))) { runtime.subagentsDirty = false; this.launch(this.refreshSubagents(id)); }
+          if (current.binding && this.adapters.get(current.harnessId)?.requests) this.scheduleRequests(id);
           if (state.value.status !== 'unknown' && !this.hasExecutionResponsibility(id)) runtime.retryAttempt = 0;
         } catch (error) {
           if (!this.closed && this.runtimes.get(id) === runtime) this.unknown(id, error instanceof StoreError ? error.code : 'native_state_unavailable');
@@ -1680,6 +1812,8 @@ export class Workbench {
     if (this.closing) return this.closing;
     this.closed = true;
     if (this.queueRecovery) clearInterval(this.queueRecovery);
+    for (const timer of this.requestTimers.values()) clearTimeout(timer);
+    this.requestTimers.clear();
     this.closing = (async () => {
       // In-flight bodies are memory only; the native Harness keeps the authoritative history (ADR 0014).
       for (const id of [...this.runtimes.keys()]) {

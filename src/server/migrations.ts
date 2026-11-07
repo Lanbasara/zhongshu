@@ -241,6 +241,22 @@ export const productMigrations: Migration[] = [{ version: 2, sql: `
     seen_key = CASE WHEN json_extract(state_json,'$.status') = 'unknown'
       THEN 'unknown:' || COALESCE(json_extract(state_json,'$.runId'), json_extract(state_json,'$.terminalRunId'), '')
       ELSE json_extract(state_json,'$.terminalStatus') || ':' || json_extract(state_json,'$.terminalRunId') END;
+` }, { version: 18, sql: `
+  -- ADR 0016: answers to native questions and approvals are operations with stable identities. The
+  -- request itself stays native; answer_json holds the submitted answer only until it settles.
+  CREATE TABLE workbench_request_answers (
+    id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL REFERENCES workbench_conversations(id) ON DELETE CASCADE,
+    request_id TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('queued','dispatching','accepted','unknown','rejected')),
+    reason TEXT,
+    summary TEXT NOT NULL,
+    answer_json TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  ) STRICT;
+  CREATE INDEX workbench_request_answers_request ON workbench_request_answers(conversation_id, request_id, created_at);
+  CREATE INDEX workbench_request_answers_status ON workbench_request_answers(status, conversation_id);
 ` }];
 
 /** Runs inside restoreDatabase's private staging transaction, before the database is published. */

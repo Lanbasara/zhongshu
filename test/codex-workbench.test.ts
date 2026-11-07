@@ -77,7 +77,7 @@ async function peer(t: TestContext) {
 
 test('transport loss is emitted once per initialized connection, never for failed retries or intentional shutdown', async t => {
   const p = await peer(t); let losses = 0; let notifications = 0;
-  const rpc = new CodexRpc(p.socketPath, { notification() { notifications++; }, unsupportedRequest() {}, disconnected() { losses++; } });
+  const rpc = new CodexRpc(p.socketPath, { notification() { notifications++; }, serverRequest: () => false, disconnected() { losses++; } });
   p.cleanup(() => rpc.close());
   for (let attempt = 0; attempt < 3; attempt++) await assert.rejects(rpc.connect());
   assert.equal(losses, 0, 'failed initial handshakes have no verified connection to lose');

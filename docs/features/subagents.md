@@ -61,7 +61,7 @@ node test/support/feature-fixture.ts inspect --root "$zh_verify_root" --title '�
 - Host 重启中断的子 Agent 与被停止的子 Agent 一样显示「已停止」。
 - 停止 Codex 子 Agent 不会通知主 Agent，也不终止它正在运行的工具进程；主 Agent 可能继续等待，或另行给它新任务（正文出现「向 X 发送了新任务」）。停止 DSH 子 Agent 会终止其工具并通知主 Agent，空闲的主 Agent 随即开始新一轮。
 - Codex 主 Agent 不被观察约 60 秒后卸载，已交回但未读的子 Agent 结果随之丢失；中书在结果待处理期间持续观察该对话。
-- 中书运行的对话使用不请求审批的策略，子 Agent 继承它；审批与提问不在本功能内。
+- 子 Agent 继承对话的审批策略：完全访问不询问，其余权限需要时询问。Codex 子 Agent 的审批出现在所属对话的输入框上方并标明来源，DSH 子 Agent 不向用户提问或要审批；验证见[执行地图 E09](execution.md#e08e10-提问与审批)。
 
 ## Implementation and regression
 

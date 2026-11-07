@@ -1,10 +1,11 @@
 import { isAbsolute, normalize } from 'node:path';
 import { z } from 'zod';
-import type { QueueDelivery, TeamView } from '../../shared/workbench.ts';
+import type { QueueDelivery, RequestAnswer, TeamView } from '../../shared/workbench.ts';
 import { subagentIdSchema, subagentLimit } from '../../shared/workbench.ts';
 import { HarnessError } from '../types.ts';
-import type { Binding, Catalog, Configuration, HarnessAdapter, HarnessInput, HistoryPage, NativeChange, NativeItem, NativeState, NativeSubagent, Receipt, SubagentHistory, SubagentSnapshot } from '../types.ts';
-import { Connection, NativeRejection } from './connection.ts';
+import type { Binding, Catalog, Configuration, HarnessAdapter, HarnessInput, HistoryPage, NativeChange, NativeItem, NativeRequest, NativeState, NativeSubagent, Receipt, SubagentHistory, SubagentSnapshot } from '../types.ts';
+import { Connection, NativeRejection, type Interaction } from './connection.ts';
+import { parseInteraction, requestKey, toolCommand, type Parsed } from './requests.ts';
 import { LiveAssistant } from './live.ts';
 import { boundaryFrom, decodeModel, selectedModel, eventSchema, historyItems, identifier, inboxSenders, itemFrom, modelId, modelSchema, object, pageSchema, snapshotSchema, stateFrom, targetTurnRange, terminalStatusFrom, textBlocks, textContent, turnAt, usageFrom } from './native.ts';
 import type { Event } from './native.ts';
@@ -55,11 +56,74 @@ const shortLine = (value: string, chars: number) => { const line = value.trim().
 const childAddress = (row: CatalogRow) => ({ kind: 'subagent', parentSessionId: row.parentId, childSessionId: row.id, mode: row.mode === 'continuable' || row.mode === 'one-shot' ? row.mode : 'unknown' });
 
 export function createDshAdapter(options: { launchFile: string }): HarnessAdapter {
-  const connection = new Connection(options.launchFile);
+  /** Requests forwarded to this answering client, by product key. The Host replays open ones on every new stream. */
+  const interactions = new Map<string, { eventId: string; agentId: string; parsed: Parsed; answering: boolean; command?: string }>();
+  /** Bindings of watched conversations, so a forwarded approval can show the command it concerns. */
+  const watched = new Map<string, Binding>();
+  const connection = new Connection(options.launchFile, {
+    request(interaction) { receive(interaction); },
+    cancel(eventId) { const key = requestKey(eventId); const entry = interactions.get(key); if (!entry) return; interactions.delete(key); hint(entry.agentId, { type: 'requests' }); },
+    reset() { const agents = new Set([...interactions.values()].map(entry => entry.agentId)); interactions.clear(); for (const agentId of agents) hint(agentId, { type: 'requests' }); },
+  });
   const subscriptions = new Set<() => void>();
   /** Conversation watches by native session, so child observation can hint the owning conversation. */
   const rootListeners = new Map<string, Set<(change: NativeChange) => void>>();
   const hint = (rootId: string, change: NativeChange) => { for (const listener of rootListeners.get(rootId) ?? []) { try { listener(change); } catch { /* one observer cannot break others */ } } };
+  function receive(interaction: Interaction): void {
+    if (closed) return;
+    const parsed = parseInteraction(interaction.event, interaction.eventId, interaction.request);
+    if (!parsed) {
+      // A request this client cannot present is refused rather than left blocking the turn; never answer `next`.
+      const outcome = interaction.event === 'approval/request' ? { kind: 'result' as const, value: 'rejected' }
+        : { kind: 'rejected' as const, error: { name: 'UserQuestionError', message: 'the user cancelled ask_user_question', code: 'ASK_CANCELLED' } };
+      if (['approval/request', 'user-questions/request'].includes(interaction.event)) {
+        void connection.settle(interaction.eventId, outcome).catch(() => {});
+        hint(interaction.agentId, { type: 'item', item: { id: `request-declined-${requestKey(interaction.eventId)}`, kind: 'notice', status: 'failed', text: '中书无法呈现 DSH 的这项请求，已拒绝。' } });
+      }
+      return;
+    }
+    const key = parsed.request.id;
+    if (!interactions.has(key) && interactions.size >= 256) return;
+    const previous = interactions.get(key);
+    interactions.set(key, { eventId: interaction.eventId, agentId: interaction.agentId, parsed, answering: previous?.answering ?? false, ...(previous?.command ? { command: previous.command } : {}) });
+    hint(interaction.agentId, { type: 'requests' });
+    const binding = watched.get(interaction.agentId);
+    if (parsed.callId && binding && !previous?.command) void (async () => {
+      try {
+        const current = await snapshot(binding, 5);
+        const call = current.records.map(record => record.event).find(event => event.type === 'tool/call' && object(event.data).callId === parsed.callId);
+        const command = call ? toolCommand(object(call.data)) : undefined;
+        const entry = interactions.get(key);
+        if (command && entry) { entry.command = command; hint(interaction.agentId, { type: 'requests' }); }
+      } catch { /* The approval still shows its reason; the command is an aid. */ }
+    })();
+  }
+  async function requests(input: Binding): Promise<NativeRequest[]> {
+    const binding = checkBinding(input);
+    return [...interactions.values()].filter(entry => entry.agentId === binding.id).map(entry => {
+      const request = entry.parsed.request;
+      return entry.command && request.approval ? { ...request, approval: { ...request.approval, command: entry.command } } : request;
+    }).sort((left, right) => left.createdAt - right.createdAt);
+  }
+  async function answer(input: Binding, key: string, value: RequestAnswer): Promise<Receipt> {
+    const binding = checkBinding(input);
+    const entry = interactions.get(key);
+    if (!entry || entry.agentId !== binding.id) return { outcome: 'rejected', reason: 'request_not_open' };
+    if (entry.answering) return { outcome: 'rejected', reason: 'request_answer_pending' };
+    const outcome = entry.parsed.outcome(value);
+    if (!outcome) return { outcome: 'rejected', reason: 'answer_invalid' };
+    entry.answering = true;
+    try {
+      await connection.settle(entry.eventId, outcome);
+      if (interactions.get(key) === entry) interactions.delete(key);
+      hint(binding.id, { type: 'requests' });
+      return { outcome: 'accepted' };
+    } catch (error) {
+      entry.answering = false;
+      // A refused result was not applied; a transport failure leaves it unknown and is never resent.
+      return error instanceof NativeRejection ? { outcome: 'rejected', reason: 'request_not_open' } : { outcome: 'unknown', reason: 'dsh_answer_unconfirmed' };
+    }
+  }
   const lastStates = new Map<string, NativeState>();
   let closed = false;
   const checkBinding = (binding: Binding): Binding => {
@@ -137,7 +201,7 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
       const nativeCatalog = modelCatalog.parse(models);
       const groups = nativeCatalog.groups.filter(group => group.id !== 'deepseek-account' || signedIn);
       const result: Catalog = { id: 'dsh', available: groups.length > 0, models: [], permissions: permissionCatalog.parse(permissions).options.map(option => ({ id: option.value, label: permissionNames[option.value] ?? option.name,
-        description: `使用 DSH 原生 ${option.value} 权限；交互式审批尚不支持，遇到审批需在原生界面处理或停止。${option.description ? ` ${option.description}` : ''}` })) };
+        description: `使用 DSH 原生 ${option.value} 权限；${option.value === 'danger-full-access' ? '不会请求审批。' : '需要越界时会请求你批准。'}${option.description ? ` ${option.description}` : ''}` })) };
       for (const group of groups) for (const model of group.models) {
         if (result.models.length >= 2048) throw new HarnessError('DSH_CATALOG_TOO_LARGE');
         const efforts = model.reasoning?.efforts;
@@ -481,7 +545,7 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
       refreshTimer = setTimeout(() => { refreshTimer = undefined; refreshActive = true; const turnGeneration = generation; void state(binding).then(value => { if (turnGeneration === generation) emit({ type: 'state', state: value }); }).catch(() => emit({ type: 'state', state: unknown() })).finally(() => { refreshActive = false; }); }, 100);
     };
     function dispose(): void { if (disposed) return; disposed = true; generation++; cancel?.(); if (retry) clearTimeout(retry); if (refreshTimer) clearTimeout(refreshTimer); if (textTimer) clearTimeout(textTimer); subscriptions.delete(dispose);
-      const listeners = rootListeners.get(binding.id); listeners?.delete(emit); if (listeners && !listeners.size) rootListeners.delete(binding.id); }
+      const listeners = rootListeners.get(binding.id); listeners?.delete(emit); if (listeners && !listeners.size) { rootListeners.delete(binding.id); watched.delete(binding.id); } }
     function reconnect(): void {
       if (disposed || retry) return;
       generation++; cancel?.(); cancel = undefined;
@@ -536,6 +600,7 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
     }
     subscriptions.add(dispose);
     let listeners = rootListeners.get(binding.id); if (!listeners) { listeners = new Set(); rootListeners.set(binding.id, listeners); } listeners.add(emit);
+    watched.set(binding.id, binding);
     await start(); return dispose;
   }
 
@@ -545,5 +610,6 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
       return { ...configuration, modelId: modelId({ provider: selected.provider, model: selected.model }),
         ...(selected.reasoningEffort === undefined ? {} : { reasoningEffort: selected.reasoningEffort }) };
     }, prepareDraft, skills: async binding => skillOptions(await skillCatalog(binding)), create, state, history, submit, submitQueued: submit, readImage, reconcile, stop, watch,
-    subagents, subagentHistory, observeSubagent, stopSubagent, async close() { closed = true; for (const dispose of [...subscriptions]) dispose(); lastStates.clear(); await connection.close(); } };
+    subagents, subagentHistory, observeSubagent, stopSubagent, requests, answer,
+    async close() { closed = true; for (const dispose of [...subscriptions]) dispose(); lastStates.clear(); interactions.clear(); await connection.close(); } };
 }

@@ -38,7 +38,7 @@ React 浏览器 ──同源 HTTP / SSE──→ Fastify 应用
 
 Codex adapter 在已建立连接丢失时报告内部 `unavailable` 事件，由 Workbench 立即持久化“待核实”并撤销配置/终态证明，保留绑定、历史、操作及最后已知运行信息。离线连接尝试失败不重复发失联事件；旧连接事件和旧代次读取不能覆盖后来的状态。重新连接后按原绑定核实配置和原生状态，不自动重发未知操作。公开 HTTP/SSE 仍使用既有状态契约。
 
-Web manifest 提供独立窗口入口。界面以 Streamdown 渲染 Markdown/GFM/代码，用按轮折叠的工具组展示原生命令、输出和状态。运行中输入的路径见[执行功能地图](features/execution.md)。原始 HTML 不执行，链接协议受限。审批与提问仍由原生界面处理。
+Web manifest 提供独立窗口入口。界面以 Streamdown 渲染 Markdown/GFM/代码，用按轮折叠的工具组展示原生命令、输出和状态。运行中输入的路径见[执行功能地图](features/execution.md)。原始 HTML 不执行，链接协议受限。Agent 的提问与审批见下方[提问与审批](#提问与审批)。
 
 ## 新建草稿与配置归属
 
@@ -115,6 +115,18 @@ Codex 经专用 Unix socket 管理进程调用固定 CLI 和同一实例的 App 
 | 数据 | [子 Agent 存储](../src/server/subagent-store.ts) 在对话行保存子 Agent 索引（身份、父子、显示信息、最后核实状态、每个子 Agent 的修订号）和停止操作表；子 Agent 过程只向原生现读，不入库 |
 | 接口 | 私有路由提供列表、过程分页、阅读租约、停止及停止结果核对；对话视图带子 Agent 摘要，变更流以摘要修订号提示页面重读 |
 | 界面 | [展示组件](../src/web/patterns/subagents.tsx) 只接收数据；[功能层](../src/web/subagents.tsx) 管理请求、租约与停止，[工作台](../src/web/workbench.tsx) 放置头部入口、阅读区面板（窄屏整页）、正文协作卡片和提示，[侧栏](../src/web/conversation-navigation.tsx) 显示后台运行标记 |
+
+## 提问与审批
+
+边界依据 [ADR 0016](adr/0016-questions-and-approvals.md)：请求由原生 Harness 持有，中书展示并递送一次回答；审批策略随权限在新建时固定。
+
+| 层 | 当前职责 |
+| --- | --- |
+| 接入 | [共同语义](../src/harness/types.ts) 增加 `requests` / `answer` 与 `requests` 变更提示。[Codex](../src/harness/codex/index.ts) 经 [RPC](../src/harness/codex/rpc.ts) 接住 App Server 发来的命令、文件、权限审批与 MCP 信息请求（[映射](../src/harness/codex/requests.ts)），在收到它的连接上回答，以 `serverRequest/resolved` 为送达确认；断线时清空，重新接入对话及运行中的子 Agent 时由原生重发。[DSH](../src/harness/dsh/index.ts) 以应答身份连接，[连接](../src/harness/dsh/connection.ts) 另开事件流接收转发的提问与审批（[映射](../src/harness/dsh/requests.ts)），按事件编号回答，绝不回复“交给下一个”。无法呈现的请求明确拒绝并在对话中说明 |
+| 服务 | [Workbench](../src/server/workbench.ts) 在内存中保持每段对话的请求视图（打开、已回答、已失效，已结束的保留约 10 分钟），观察丢失时不判失效。回答是带稳定编号的操作：校验与请求相符后入库、派发、按回执结算；回执未知只靠重新读取原生判断，原生仍在等待则作废该回答以便重答 |
+| 数据 | [回答存储](../src/server/request-store.ts)（迁移 18）保存回答编号、所属对话与请求、状态与摘要；提交的内容在结算后清除。请求本身不入库 |
+| 接口 | 快照带 `requests`；私有 `POST /conversations/:id/requests/:request/answer` 与 `/request-answers/:answer/reconcile`，沿用认证、来源与 CSRF 检查，日志不含内容 |
+| 界面 | [展示组件](../src/web/patterns/requests.tsx) 只接收数据（文案与服务端摘要由测试保持一致）；[功能层](../src/web/requests.tsx) 提交与核对，放在输入框上方 |
 
 ## 对话观察与删除协调
 
