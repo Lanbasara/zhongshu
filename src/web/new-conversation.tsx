@@ -211,7 +211,7 @@ export function NewConversation(props:Props) {
         persist({...current.current,submission:undefined});
         setPreparationState('failed');setPreparationClaimed(true);setSkillsSupported(false);setStatus('');
         setError('原生准备已被使用，本次尚未发送。请重新准备并核验技能。');
-      }else if(reason instanceof RequestError&&reason.code==='storage_budget_reached'){setError('存储已达到预算上限，暂时不能新建对话或上传图片。内容已保留；可以在侧栏“存储”中清理后重试。');}
+      }else if(reason instanceof RequestError&&reason.code==='storage_budget_reached'){setError('存储已达到预算上限，暂时不能新建对话或上传图片。内容已保留；可以在「设置 › 存储」中清理后重试。');}
       else if(reason instanceof RequestError){props.report(reason);setError('暂时无法确认结果。原配置和内容已保留，请重试核对。');}
       else if(!(reason instanceof DOMException&&reason.name==='AbortError'))setError(reason instanceof Error?reason.message:'暂时无法确认结果，请重试。');
     }
@@ -257,7 +257,7 @@ export function NewConversation(props:Props) {
     persist({...previous,harnessId,configuration:next,powers:{...previous.powers,[previous.harnessId]:previous.configuration}});
     if(previous.skills?.length)setError('已保留文字及技能标记；发送前会核验技能是否适用于当前 Power，不适用时请重新选择。');
   }
-  return <section className="new-draft-page"><div className="new-draft-content"><div className="new-draft-intro"><span>A PLACE TO BEGIN</span><h2>从一个想法开始。</h2><p>选择工作现场，然后开始。</p></div>
+  return <section className="new-draft-page"><div className="new-draft-content"><div className="new-draft-intro"><h2>要做点什么？</h2><p>选好工作区，写下要做的事。第一次发送时才会创建对话。</p></div>
     <div className="new-draft-workspace"><Folder size={15}/><label className="sr-only" htmlFor="draft-workspace">工作区</label><select id="draft-workspace" value={draft.workspaceId} disabled={locked||staging||!initialized} onChange={e=>{if(stagingRef.current)return;if(!current.current.workspaceId){if(!persist({...current.current,workspaceId:e.target.value},true))return;removeNewDraft('');}else if(!persist(current.current,true))return;props.onWorkspace(e.target.value);}}><option value="">选择工作区</option>{props.configuration.workspaces.map(w=><option key={w.id} value={w.id}>{w.label}</option>)}</select></div>
     {!props.configuration.workspaces.length&&<div className="state-notice"><p>先添加工作区，再开始对话。</p>{props.configuration.workspaceRoots?.length?<Button onClick={()=>{awaitingWorkspace.current={previous:props.addedWorkspace};props.onAddWorkspace();}}>添加工作区</Button>:<p>管理员尚未配置允许添加的目录，请先完成工作区配置。</p>}</div>}
     <ComposerView value={draft.text} onChange={text=>edit(text,[])} renderEditor={editor=><SkillEditor editor={{...editor,placeholder:'你想从哪里开始？'}} spans={draft.skills} picker={workspace&&catalog?.available&&skillsSupported&&!locked?{load:loadSkills,format:skillLabelText,limit:skillLimit}:undefined} onEdit={edit}/>}

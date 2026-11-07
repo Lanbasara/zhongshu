@@ -2,10 +2,11 @@
   z-index: var(--zs-layer-popover);
   width: min(calc(100vw - 20px), calc(var(--radix-popover-trigger-width) + 2 * var(--zs-space-4) + 2px));
   padding: var(--zs-space-2);
-  border: 1px solid var(--zs-border);
+  border: 0;
   border-radius: var(--zs-radius-surface);
   background: var(--zs-surface);
   box-shadow: var(--zs-shadow-overlay);
+  animation: zs-surface-in var(--zs-duration-state) var(--zs-ease);
 }
 .writing-skills-heading, .writing-skills-hint, .writing-skills-empty {
   padding: var(--zs-space-1) var(--zs-space-2);
@@ -33,7 +34,7 @@
   background: transparent;
   text-align: start;
 }
-.writing-skill[aria-selected=true] { background: var(--zs-surface-selected); }
+.writing-skill[aria-selected=true] { background: var(--zs-surface-press); }
 .writing-skill[aria-selected=false]:hover { background: var(--zs-surface-hover); }
 .writing-skill svg { color: var(--zs-text-secondary); }
 .writing-skill strong, .writing-skill small {
@@ -42,8 +43,8 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.writing-skill strong { font-size: var(--zs-type-interface); font-weight: 600; }
-.writing-skill small { color: var(--zs-text-secondary); font-size: var(--zs-type-control); }
+.writing-skill strong { font-size: var(--zs-type-control); font-weight: 500; }
+.writing-skill small { color: var(--zs-text-muted); font-size: var(--zs-type-caption); }
 .writing-skill kbd {
   padding: 1px 4px;
   border: 1px solid var(--zs-line);
@@ -60,16 +61,16 @@
   inset: 0;
   overflow: auto;
   pointer-events: none;
-  padding: 0 4px;
-  color: var(--zs-text-body);
-  font: var(--zs-type-body)/1.75 var(--zs-font-interface);
+  padding: 2px 2px;
+  color: var(--zs-text);
+  font: var(--zs-type-body)/1.6 var(--zs-font-interface);
   white-space: pre-wrap;
   overflow-wrap: break-word;
 }
 .writing-editor-mirror mark {
   border-radius: 4px;
-  background: var(--zs-selection);
-  color: var(--zs-action);
+  background: var(--zs-accent-soft);
+  color: var(--zs-accent-text);
 }
 .writing-editor[data-decorated=true] textarea {
   position: relative;
@@ -88,7 +89,7 @@
   border-radius: var(--zs-radius-control);
   color: var(--zs-text-muted);
   background: transparent;
-  font-size: var(--zs-type-control);
+  font-size: var(--zs-type-caption);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
@@ -98,8 +99,10 @@
 }
 .writing-usage-trigger span { display: inline-flex; align-items: center; gap: var(--zs-space-1); }
 .writing-usage-trigger span + .writing-usage-context { padding-inline-start: var(--zs-space-2); border-inline-start: 1px solid var(--zs-border); }
-.writing-usage-context svg { fill: none; stroke: var(--zs-focus); stroke-width: 2.5; stroke-linecap: round; }
-.writing-usage-context .writing-ring-track { stroke: var(--zs-border); }
+.writing-usage-context .writing-ring-track { fill: none; stroke: var(--zs-border-hover); stroke-width: 1.3; }
+.writing-usage-context .writing-ring-fill { fill: var(--zs-text-muted); }
+.writing-usage-context svg[data-level=warm] .writing-ring-fill { fill: var(--zs-status-waiting); }
+.writing-usage-context svg[data-level=high] .writing-ring-fill { fill: var(--zs-status-failed); }
 .writing-usage-popover { font-variant-numeric: tabular-nums; }
 .writing-usage-popover dl > div { justify-content: space-between; }
 .writing-usage-popover dd { font-weight: 600; }
@@ -110,11 +113,11 @@
   overflow: hidden;
   background: var(--zs-surface-selected);
 }
-.writing-usage-track span { display: block; height: 100%; background: var(--zs-focus); border-radius: inherit; }
+.writing-usage-track span { display: block; height: 100%; background: var(--zs-accent); border-radius: inherit; }
 
 @media (max-width: 759px) {
   .writing-skills { width: min(calc(100vw - 20px), calc(var(--radix-popover-trigger-width) + 26px)); border-radius: 16px; }
-  .writing-editor-mirror { font-size: var(--zs-type-input); }
+  .writing-editor-mirror { font-size: 16px; }
   .writing-footnote:has(.writing-usage) { gap: var(--zs-space-1); }
   .writing-footnote:has(.writing-usage) > span:last-child {
     position: absolute;

@@ -37,7 +37,7 @@ export function Composer(props: Props) {
       if (!change({ ...current.current, images: [...(current.current.images ?? []), image] }, true)) throw Error('draft_storage_failed');
       await removeUpload(item.id);
       setUploads(old => old.filter(u => u.id !== item.id));
-    } catch (reason) { if (alive.current) { setUploads(old => old.map(u => u.id === item.id ? { ...u, status: 'failed' } : u)); setError(reason instanceof Error && reason.message === 'storage_budget_reached' ? '存储已达到预算上限，暂时不能上传图片；文件已保留。可以在侧栏“存储”中清理。' : '图片上传失败，文件已保留；可以重试或移除。'); } }
+    } catch (reason) { if (alive.current) { setUploads(old => old.map(u => u.id === item.id ? { ...u, status: 'failed' } : u)); setError(reason instanceof Error && reason.message === 'storage_budget_reached' ? '存储已达到预算上限，暂时不能上传图片；文件已保留。可以在「设置 › 存储」中清理。' : '图片上传失败，文件已保留；可以重试或移除。'); } }
   }
   async function add(files: File[]) {
     if (draft.pending || sending) return;

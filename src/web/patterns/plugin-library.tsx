@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { ArrowLeft, ArrowUpRight, Boxes, Check, ChevronRight, ExternalLink, GitFork, Layers3, Plus, Puzzle, RefreshCw, Search, SlidersHorizontal, X } from 'lucide-react';
+import { ArrowLeft, ArrowUpRight, Boxes, Check, ChevronRight, ExternalLink, GitFork, Plus, Puzzle, RefreshCw, Search, SlidersHorizontal, X } from 'lucide-react';
 import { Dialog } from 'radix-ui';
 import { Button, IconButton } from '../ui/controls.tsx';
 import './plugin-library.css';
@@ -126,7 +126,7 @@ export function PluginLibrary({ harness, onHarness, view, error, sourceError, bu
   return <section className="pl-scroll" aria-label="插件管理">
     <div className="pl-wrap">
       <header className="pl-hero">
-        <div><p className="pl-kicker"><Layers3 size={14}/> 本实例 · 共享能力</p><h1>插件</h1><p className="pl-intro">浏览市场，为当前实例安装和管理插件。</p></div>
+        <div><h2>插件</h2><p className="pl-intro">浏览市场，为本实例的 Codex 与 DSH 安装和管理插件。</p></div>
         <Button variant="primary" disabled={view?.availability === 'unconfigured' || locked} onClick={() => add()}><Plus size={17}/>添加来源</Button>
       </header>
       <div className="pl-switches">
