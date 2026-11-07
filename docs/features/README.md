@@ -9,7 +9,7 @@
 | 主界面、输入交互、组件工作台与发布隔离 | [interface](interface.md)：I01–I05 | fixture、浏览器与本地构建；原生链路按关联地图 |
 | 登录、刷新、退出、密码重置后失效 | [access](access.md)：A01–A05 | 真实应用、两个独立浏览器上下文 |
 | 工作区草稿、首发创建、默认回退、思考深度与核对首发 | [conversations](conversations.md)：C01–C10 | fixture；C05/C08/C09 原生分支需真实 Harness |
-| 工作区分组、侧栏调整、标题搜索、重命名、归档、删除与存储预算 | [conversation-management](conversation-management.md)：M01–M09 | fixture、真实 Harness 与手机分支 |
+| 工作区分组、侧栏调整、搜索与跳转、重命名、归档、删除、存储预算与未读同步 | [conversation-management](conversation-management.md)：M01–M10 | fixture、真实 Harness 与手机分支 |
 | 发送、接续、停止、排队与提前发送 | [execution](execution.md)：E01–E07 | fixture；原生轮次与接收语义需真实 Harness |
 | 刷新/关页/应用中断后恢复、草稿、连续回溯长历史与停机缺口 | [continuity](continuity.md)：R01–R07 | fixture；原生恢复与长历史需另跑真实分支 |
 | 完整图文对话、工具阅读、输入与引用、本轮文件、技能、用量、恢复接续 | [conversation-usability](conversation-usability.md)：U01–U13 | 两个真实 Harness、合成图片及工作区文件 |
