@@ -588,8 +588,9 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
       total={conversation.subagents.total} attention={conversation.subagents.resultsPending} expanded={!!subagentPanel}
       onClick={() => subagentPanel ? closeSubagents() : openSubagents()}/>}
     {searchButton}
-    {!view && <IconButton label="打开工作区文件" tooltip="工作区文件" aria-expanded={reader} disabled={!configuration?.workspaces.length} onClick={openFiles}><FolderOpen size={16}/></IconButton>}
+    {!view && !narrow && <IconButton label="打开工作区文件" tooltip="工作区文件" aria-expanded={reader} disabled={!configuration?.workspaces.length} onClick={openFiles}><FolderOpen size={16}/></IconButton>}
     {conversationView && conversation && <Menu label="对话操作" trigger={<MoreHorizontal size={17}/>} align="end">
+      {narrow && <MenuItem disabled={!configuration?.workspaces.length} onSelect={openFiles}><FolderOpen size={15}/>打开工作区文件</MenuItem>}
       <MenuItem onSelect={() => setManaging(conversation)}><Pencil size={15}/>{conversation.archived ? '重命名、恢复或删除' : '重命名、归档或删除'}</MenuItem>
       <MenuItem onSelect={() => { scheduleRefresh(); refreshConfiguration(); }}><RefreshCw size={15}/>重新连接并刷新状态</MenuItem>
     </Menu>}

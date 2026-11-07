@@ -65,8 +65,8 @@ export function SubagentTrigger({ running, unverified = 0, total, attention, exp
     aria-label={label} onClick={onClick}>
     <Users size={15} aria-hidden="true"/>
     <span className="subagent-trigger-label">子 Agent</span>
-    {running ? <span className="subagent-trigger-count"><span className="activity-dot"/>{running} 运行中</span>
-      : unverified ? <span className="subagent-trigger-count"><i className="subagent-attention" aria-hidden="true"/>{unverified} 待核实</span>
+    {running ? <span className="subagent-trigger-count"><span className="activity-dot"/>{running}<span className="subagent-trigger-word"> 运行中</span></span>
+      : unverified ? <span className="subagent-trigger-count"><i className="subagent-attention" aria-hidden="true"/>{unverified}<span className="subagent-trigger-word"> 待核实</span></span>
       : <span className="subagent-trigger-count">{total}{attention && <i className="subagent-attention" aria-hidden="true"/>}</span>}
   </button>;
 }

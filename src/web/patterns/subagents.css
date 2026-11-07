@@ -136,7 +136,8 @@
   .subagent-trigger.is-running .activity-dot,.subagent-status-mark,.subagent-background .activity-dot { animation:none !important; }
 }
 @media (max-width:759px) {
-  .subagent-trigger-label { display:none; }
+  .subagent-trigger-label,.subagent-trigger-word { display:none; }
+  .subagent-trigger { height:32px; padding:0 8px; gap:5px; border-color:var(--zs-line); }
   .workspace-reader button.subagent-row-main,.subagent-activity-row { grid-template-columns:28px minmax(0,1fr) auto; }
   .subagent-row-main > svg:last-child,.subagent-activity-row > svg:last-child { display:none; }
   .workspace-reader button.subagent-stop { min-height:var(--zs-control-touch); }

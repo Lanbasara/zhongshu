@@ -25,5 +25,6 @@
   .new-draft-workspace { height:36px; margin-left:4px; }
   .new-draft-workspace select { font-size:16px!important; height:34px; }
   .new-draft-page .writing-toolbar { flex-wrap:wrap; }
+  .new-draft-page .writing-surface textarea { min-height:48px; }
 }
 @media(prefers-reduced-motion:reduce) { .new-draft-content { animation:none; } }

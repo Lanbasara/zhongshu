@@ -3,6 +3,7 @@ import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 import { ArrowUp, FileText, ImagePlus, ListPlus, LoaderCircle, Plus, ShieldCheck, Square } from 'lucide-react';
 import { Information, Menu, MenuItem } from '../ui/controls.tsx';
 import { transitions } from '../ui/motion.ts';
+import { useNarrow } from './workbench-frame.tsx';
 import './composer.css';
 
 export type ComposerViewProps = {
@@ -26,6 +27,8 @@ export function ComposerView(props: ComposerViewProps) {
   const depth = useRef(0);
   const [dragging, setDragging] = useState(false);
   const reduce = useReducedMotion();
+  // Phones start with one line; the field still grows with the text.
+  const narrow = useNarrow();
   const hintId = useId();
   const errorId = useId();
   const transition = reduce ? { duration: 0 } : transitions.surface;
@@ -46,7 +49,7 @@ export function ComposerView(props: ComposerViewProps) {
   }, []);
   const editor: ComponentPropsWithRef<'textarea'> = {
     ref: field, 'aria-label': '给 Agent 的消息', 'aria-describedby': `${hintId}${error ? ` ${errorId}` : ''}`,
-    rows: 2, value, disabled: editDisabled, maxLength: 16000,
+    rows: narrow ? 1 : 2, value, disabled: editDisabled, maxLength: 16000,
     placeholder: queueing ? '写下下一条消息，加入队列…' : running ? '可以先写下下一步，完成后继续…' : '继续思考，或开始一件新工作…',
     onChange: event => onChange(event.currentTarget.value),
     onPaste: event => {
@@ -79,12 +82,13 @@ export function ComposerView(props: ComposerViewProps) {
         <span className="writing-divider" aria-hidden="true"/>
         {props.configurationControls ?? <Information label="当前对话配置" summary={<span>{model}{reasoningEffort && <> · {reasoningEffort}</>}</span>}><dl><div><dt>模型</dt><dd>{model}</dd></div>{reasoningEffort && <div><dt>思考深度</dt><dd>{reasoningEffort}</dd></div>}<div><dt>权限</dt><dd>{permission}</dd></div></dl><p>{configurationNote}</p></Information>}
         <span className="writing-spacer"/>
-        {running && <span className="writing-running" role="status"><LoaderCircle size={13} className="spin"/><span>执行中</span></span>}
-        {running && <motion.button className="writing-send" type="button" aria-label="停止当前轮" disabled={sending}
-          onClick={onStop} whileTap={reduce ? undefined : { scale: .94 }} transition={transitions.state}>
-          <Square size={13} fill="currentColor"/>
+        {running && <span className="sr-only" role="status">执行中</span>}
+        {running && <motion.button className="writing-stop" type="button" aria-label="停止当前轮" title="停止当前轮" disabled={sending}
+          onClick={onStop} whileTap={reduce ? undefined : { scale: .92 }} transition={transitions.state}>
+          <span className="writing-stop-ring" aria-hidden="true"/><Square size={9} fill="currentColor" strokeWidth={0}/>
         </motion.button>}
-        {(!running || queueing) && <motion.button className="writing-send" type="submit" aria-label={sendLabel} title={sendLabel} disabled={sendDisabled}
+        {/* While running, the queue button appears only once there is something to queue. */}
+        {(!running || (queueing && (!sendDisabled || sending))) && <motion.button className="writing-send" type="submit" aria-label={sendLabel} title={sendLabel} disabled={sendDisabled}
           whileTap={reduce ? undefined : { scale: .94 }} transition={transitions.state}>
           {sending ? <LoaderCircle size={18} className="spin"/> : queueing ? <ListPlus size={19}/> : <ArrowUp size={19}/>}
         </motion.button>}

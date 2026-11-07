@@ -12,13 +12,16 @@
 .writing-toolbar .zs-information-trigger { max-width:min(50%,260px); }
 .writing-divider { width:1px; height:14px; background:var(--zs-line); margin-inline:4px; }
 .writing-spacer { flex:1; }
-.writing-send { display:grid; place-items:center; border:0; border-radius:var(--zs-radius-action); width:30px; height:30px; flex:none; color:var(--zs-action-text); background:var(--zs-accent); box-shadow:var(--zs-elevation-action),inset 0 1px 0 rgba(255,255,255,.14); transition:background var(--zs-duration-response),color var(--zs-duration-response),box-shadow var(--zs-duration-response); }
+.writing-send { display:grid; place-items:center; border:0; border-radius:50%; width:30px; height:30px; animation:zs-pop-in var(--zs-duration-state) var(--zs-ease); flex:none; color:var(--zs-action-text); background:var(--zs-accent); box-shadow:var(--zs-elevation-action),inset 0 1px 0 rgba(255,255,255,.14); transition:background var(--zs-duration-response),color var(--zs-duration-response),box-shadow var(--zs-duration-response); }
 .writing-send:enabled:hover { background:var(--zs-accent-hover); }
 .writing-send:disabled { opacity:1; background:var(--zs-action-disabled); color:var(--zs-action-on-disabled); box-shadow:none; }
-.writing-send[aria-label=停止当前轮] { background:var(--zs-text); }
-.writing-send[aria-label=停止当前轮]:enabled:hover { background:var(--zs-neutral-700); }
-.writing-running { display:flex; align-items:center; gap:6px; margin-right:6px; color:var(--zs-text-muted); font-size:var(--zs-type-caption); white-space:nowrap; }
-.writing-running svg { color:var(--zs-status-running); }
+@keyframes zs-pop-in { from { transform:scale(.6); opacity:0; } }
+/* Stop: a quiet round button; the thin arc around it says the turn is still running. */
+.writing-stop { position:relative; display:grid; place-items:center; flex:none; width:30px; height:30px; margin:0 4px 0 2px; border-radius:50%; color:var(--zs-text); background:var(--zs-surface-subtle); box-shadow:inset 0 0 0 1px var(--zs-border); transition:background var(--zs-duration-response),color var(--zs-duration-response); animation:zs-pop-in var(--zs-duration-state) var(--zs-ease); }
+.writing-stop:enabled:hover { background:var(--zs-surface-press); }
+.writing-stop:disabled { opacity:.5; }
+.writing-stop svg { border-radius:2px; }
+.writing-stop-ring { position:absolute; inset:-3px; border-radius:50%; border:1.5px solid transparent; border-top-color:var(--zs-status-running); border-right-color:color-mix(in srgb,var(--zs-status-running) 35%,transparent); animation:zs-spin 1.1s linear infinite; pointer-events:none; }
 .writing-footnote { display:flex; justify-content:space-between; align-items:center; gap:12px; margin:6px 6px 0; color:var(--zs-text-placeholder); font-size:var(--zs-type-caption); min-width:0; }
 .writing-footnote>span { display:flex; align-items:center; gap:4px; min-width:0; }
 .writing-footnote>span:first-child { overflow:hidden; white-space:nowrap; text-overflow:ellipsis; display:block; }
@@ -31,13 +34,13 @@
 .writing-drop { position:absolute; inset:3px; border:1.5px dashed var(--zs-accent); border-radius:10px; background:var(--zs-surface-drop); display:flex; align-items:center; justify-content:center; gap:10px; color:var(--zs-accent-text); font-size:var(--zs-type-control); font-weight:500; pointer-events:none; animation:zs-fade-in var(--zs-duration-response) var(--zs-ease); }
 @media(max-width:759px) {
   .writing-region { --writing-radius:14px; }
-  .writing-surface { padding:10px 8px 6px 12px; }
-  .writing-surface textarea { font-size:16px!important; min-height:44px; }
-  .writing-send { width:38px; height:38px; border-radius:10px; }
-  .writing-toolbar>.zs-icon,.writing-toolbar>button.zs-icon { width:38px; height:38px; }
-  .writing-toolbar { gap:0; margin-top:4px; }
-  .writing-running>span { display:none; }
-  .writing-footnote { margin-top:4px; }
+  .writing-surface { padding:7px 6px 5px 12px; }
+  .writing-surface textarea { font-size:16px!important; line-height:1.5!important; min-height:24px; padding:3px 2px!important; }
+  .writing-send,.writing-stop { width:34px; height:34px; }
+  .writing-toolbar>.zs-icon,.writing-toolbar>button.zs-icon { width:34px; height:34px; }
+  .writing-toolbar { gap:0; margin-top:2px; }
+  .writing-toolbar .zs-information-trigger { height:34px; }
+  .writing-footnote { margin:3px 6px 0; gap:8px; }
   .writing-footnote>span:last-child { display:none; }
 }
-@media(prefers-reduced-motion:reduce) { .writing-dock,.writing-send { transition:none; } }
+@media(prefers-reduced-motion:reduce) { .writing-dock,.writing-send,.writing-stop { transition:none; animation:none; } .writing-stop-ring { animation:none; } }
