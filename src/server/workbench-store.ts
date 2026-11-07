@@ -83,6 +83,12 @@ export interface WorkbenchStore {
   recordTurnFiles(conversationId: string, items: NativeItem[]): void;
   storage: StorageAccounting;
   readTurnFiles(conversationId: string, runIds: readonly string[]): TurnFileSummary[];
+  /** Record the current result as seen; emits a change hint only when an unseen result became seen. */
+  markSeen(id: string): boolean;
+  /** The ids among `ids` whose current result differs from what a reader last saw. */
+  unseen(ids: readonly string[]): Set<string>;
+  /** Non-archived conversations needing a look, and the uncapped unseen count; `reading` ids count as seen now. */
+  attention(reading: readonly string[], limit: number): { unseen: number; conversations: { conversation: Conversation; unseen: boolean }[] };
 }
 
 export class StoreError extends Error {
@@ -122,6 +128,26 @@ const receiptSchema = z.discriminatedUnion('outcome', [
   z.object({ outcome: z.literal('unknown'), reason: boundedText(4096).min(1) }).strict(),
   z.object({ outcome: z.literal('rejected'), reason: boundedText(4096).min(1) }).strict(),
 ]);
+
+/**
+ * The result a reader has yet to see, as one SQL definition over a conversation row aliased `c`.
+ * NULL when archived, preparing, running or waiting, without a terminal result, or for an interruption
+ * caused by a user stop that reached the Harness (dispatching, accepted or unknown receipt).
+ */
+const ATTENTION_KEY = `(CASE
+  WHEN c.archived = 1 OR c.readiness = 'preparing' OR json_extract(c.state_json,'$.status') IN ('running','waiting') THEN NULL
+  WHEN json_extract(c.state_json,'$.status') = 'unknown'
+    THEN 'unknown:' || COALESCE(json_extract(c.state_json,'$.runId'), json_extract(c.state_json,'$.terminalRunId'), '')
+  WHEN json_extract(c.state_json,'$.terminalStatus') = 'interrupted' AND EXISTS (SELECT 1 FROM workbench_operations o
+    WHERE o.conversation_id = c.id AND o.type = 'stop' AND o.status IN ('dispatching','accepted','unknown')
+      AND json_extract(o.payload_json,'$.runId') = json_extract(c.state_json,'$.terminalRunId')) THEN NULL
+  ELSE json_extract(c.state_json,'$.terminalStatus') || ':' || json_extract(c.state_json,'$.terminalRunId')
+END)`;
+const ATTENTION_ROWS = `SELECT c.id, c.last_activity_at, json_extract(c.state_json,'$.status') AS status,
+  c.seen_key, c.seen_result_key, ${ATTENTION_KEY} AS attention_key FROM workbench_conversations c`;
+const UNSEEN = 'attention_key IS NOT NULL AND attention_key IS NOT seen_key AND attention_key IS NOT seen_result_key';
+/** Attention buckets: running, waiting, failed, unknown, then unseen results. */
+const ATTENTION_BUCKET = "CASE status WHEN 'running' THEN 0 WHEN 'waiting' THEN 1 WHEN 'failed' THEN 2 WHEN 'unknown' THEN 3 ELSE 4 END";
 
 type Row = Record<string, string | number | bigint | Uint8Array | null>;
 type PositionedId = { id: string; position: number };
@@ -723,6 +749,44 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
         }
         return summaries;
       });
+    },
+    markSeen(id) {
+      parse(uuid, id);
+      return mutate(changed => {
+        const row = db.prepare(`${ATTENTION_ROWS} WHERE c.id = ?`).get(id);
+        if (!row) throw new StoreError('conversation_not_found', 404);
+        if (row.attention_key === null) return false;
+        const key = String(row.attention_key);
+        // An "unknown" key never replaces the last seen result, so resolving back to it stays seen.
+        const result = !key.startsWith('unknown:');
+        if (row.seen_key === key && (!result || row.seen_result_key === key)) return false;
+        const unseen = key !== row.seen_key && key !== row.seen_result_key;
+        if (result) db.prepare('UPDATE workbench_conversations SET seen_key=?,seen_result_key=? WHERE id=?').run(key, key, id);
+        else db.prepare('UPDATE workbench_conversations SET seen_key=? WHERE id=?').run(key, id);
+        if (unseen) changed(id);
+        return unseen;
+      });
+    },
+    unseen(ids) {
+      const values = parse(z.array(uuid).max(1000), ids);
+      if (!values.length) return new Set<string>();
+      return storage(() => new Set(db.prepare(`SELECT id FROM (${ATTENTION_ROWS} WHERE c.id IN (SELECT value FROM json_each(?))) WHERE ${UNSEEN}`)
+        .all(JSON.stringify(values)).map(row => String(row.id))));
+    },
+    attention(reading, limit) {
+      const readers = JSON.stringify(parse(z.array(uuid).max(1000), reading));
+      parse(z.number().int().min(1).max(100), limit);
+      // Bounded by the conversation capacity: one pass over non-archived rows (archive/activity index).
+      const scope = `SELECT id, last_activity_at, ${ATTENTION_BUCKET} AS bucket, status,
+        (${UNSEEN} AND id NOT IN (SELECT value FROM json_each(?))) AS unseen
+        FROM (${ATTENTION_ROWS} WHERE c.archived = 0)`;
+      return transaction(db, () => {
+        const count = Number(db.prepare(`SELECT COUNT(*) AS count FROM (${scope}) WHERE unseen`).get(readers)!.count);
+        const rows = db.prepare(`SELECT c.*, a.unseen AS attention_unseen FROM (${scope}) a JOIN workbench_conversations c ON c.id = a.id
+          WHERE a.status IN ('running','waiting','failed','unknown') OR a.unseen
+          ORDER BY a.bucket, a.last_activity_at DESC, a.id DESC LIMIT ?`).all(readers, limit);
+        return { unseen: count, conversations: rows.map(row => ({ conversation: conversationFromRow(row), unseen: Number(row.attention_unseen) === 1 })) };
+      }, 'read');
     },
   };
   return store;

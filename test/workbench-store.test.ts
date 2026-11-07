@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { test, type TestContext } from 'node:test';
-import type { Binding, NativeItem } from '../src/harness/types.ts';
+import type { Binding, NativeItem, NativeState } from '../src/harness/types.ts';
 import { backupDatabase, openDatabase, restoreDatabase } from '../src/server/database.ts';
 import { afterProductRestore, productMigrations } from '../src/server/migrations.ts';
 import { conversationCursor, createWorkbenchStore, type CreateConversation, type OperationInput, type WorkbenchChange } from '../src/server/workbench-store.ts';
@@ -421,4 +421,111 @@ test('activity migration uses accepted submission timestamps and equal-time page
   const first = store.listConversations({ limit: 2 });
   const second = store.listConversations({ beforeId: conversationCursor(first.at(-1)!) });
   assert.deepEqual([...first, ...second].map(value => value.id), [a.id, ...[b.id, c.id].sort().reverse()]);
+});
+
+const result = (runId: string, terminalStatus: 'completed' | 'interrupted' | 'failed'): NativeState => ({
+  status: terminalStatus === 'completed' ? 'idle' : terminalStatus, runId, terminalRunId: runId, terminalStatus, pendingInputs: 0, configurationVerified: true,
+});
+
+test('completed, failed and unknown results stay unseen until marked; the marker survives reopen and hints only a newly seen result', t => {
+  const f = fixture(t); const changes: WorkbenchChange[] = [];
+  let db = f.open(); let store = createWorkbenchStore(db, { onChange: change => changes.push(change) });
+  const input = conversation(); store.createConversation(input);
+  const unseen = () => store.unseen([input.id]).has(input.id);
+  assert.equal(unseen(), false, 'preparation is not a result');
+  store.saveBinding(input.id, binding(input));
+  store.setConversationState(input.id, { readiness: 'ready', state: { status: 'idle', pendingInputs: 0, configurationVerified: true } });
+  assert.equal(unseen(), false, 'no result yet'); assert.equal(store.markSeen(input.id), false);
+  store.setConversationState(input.id, { state: { status: 'running', runId: 'run-1', pendingInputs: 0, configurationVerified: true } });
+  assert.equal(unseen(), false, 'live work shows its own status');
+  store.setConversationState(input.id, { state: result('run-1', 'completed') });
+  assert.equal(unseen(), true);
+  changes.length = 0;
+  assert.equal(store.markSeen(input.id), true);
+  assert.deepEqual(changes.map(change => change.conversationId), [input.id], 'other devices learn through the change stream');
+  assert.equal(store.markSeen(input.id), false); assert.equal(changes.length, 1, 'an unchanged marker is not announced');
+  f.close(db); db = f.open(); store = createWorkbenchStore(db, { onChange: change => changes.push(change) });
+  assert.equal(unseen(), false, 'seen survives reopen');
+  // A 待核实 episode is unread; once seen, resolving back to the already seen result does not resurface it.
+  store.setConversationState(input.id, { state: { status: 'unknown', runId: 'run-1', pendingInputs: 0, configurationVerified: false, reason: 'native_observation_unavailable' } });
+  assert.equal(unseen(), true); assert.equal(store.markSeen(input.id), true);
+  store.setConversationState(input.id, { state: result('run-1', 'completed') });
+  assert.equal(unseen(), false);
+  store.setConversationState(input.id, { state: result('run-2', 'failed') });
+  assert.equal(unseen(), true, 'a failed result is unread');
+  store.setArchived(input.id, true, () => true);
+  assert.equal(unseen(), false, 'archived conversations never count');
+  assert.equal(store.markSeen(input.id), false);
+  store.setArchived(input.id, false, () => true);
+  assert.equal(unseen(), true, 'restoring keeps the result nobody saw');
+});
+
+test('an interruption caused by a user stop that reached the Harness is not unseen; any other interruption is', t => {
+  const f = fixture(t); const store = createWorkbenchStore(f.open()); const input = conversation();
+  store.createConversation(input); store.saveBinding(input.id, binding(input));
+  const unseen = () => store.unseen([input.id]).has(input.id);
+  const stop = (runId: string): OperationInput => ({ id: randomUUID(), conversationId: input.id, type: 'stop', payload: { runId } });
+  store.setConversationState(input.id, { readiness: 'ready', state: { status: 'running', runId: 'stopped-run', pendingInputs: 0, configurationVerified: true } });
+  const userStop = stop('stopped-run'); store.enqueueOperation(userStop);
+  store.setConversationState(input.id, { state: result('stopped-run', 'interrupted') });
+  assert.equal(unseen(), true, 'a queued stop has not reached the Harness');
+  store.claimOperation(userStop.id);
+  assert.equal(unseen(), false, 'the native interruption can arrive before the stop receipt');
+  store.settleOperation(userStop.id, { outcome: 'accepted', runId: 'stopped-run' });
+  assert.equal(unseen(), false); assert.equal(store.markSeen(input.id), false);
+  store.setConversationState(input.id, { state: result('other-run', 'interrupted') });
+  assert.equal(unseen(), true, 'a stop for another run does not cover this interruption');
+  const late = stop('third-run'); store.enqueueOperation(late);
+  store.settleOperation(late.id, { outcome: 'rejected', reason: 'native_run_changed' });
+  store.setConversationState(input.id, { state: result('third-run', 'interrupted') });
+  assert.equal(unseen(), true, 'a rejected stop did not cause the interruption');
+});
+
+test('attention lists running, waiting, failed, unknown, then unseen conversations by recency with an uncapped unseen count', t => {
+  let clock = 1000;
+  const store = createWorkbenchStore(fixture(t).open(), { now: () => clock });
+  const make = (state: NativeState, seen = false) => {
+    const input = conversation(); clock += 10;
+    store.createConversation(input); store.saveBinding(input.id, binding(input));
+    store.setConversationState(input.id, { readiness: 'ready', state });
+    if (seen) store.markSeen(input.id);
+    return input.id;
+  };
+  const live = (status: 'running' | 'waiting', runId: string): NativeState => ({ status, runId, pendingInputs: 0, configurationVerified: true });
+  const olderUnseen = make(result('a', 'completed'));
+  const olderRunning = make(live('running', 'b'));
+  const failedSeen = make(result('c', 'failed'), true);
+  make(result('d', 'completed'), true);
+  make({ status: 'idle', pendingInputs: 0, configurationVerified: true });
+  const unknown = make({ status: 'unknown', runId: 'e', pendingInputs: 0, configurationVerified: false, reason: 'native_observation_unavailable' });
+  const waiting = make(live('waiting', 'f'));
+  const failedUnseen = make(result('g', 'failed'));
+  const archived = make(result('h', 'failed')); store.setArchived(archived, true, () => true);
+  const reading = make(result('i', 'completed'));
+  const newerUnseen = make(result('j', 'interrupted'));
+  const newerRunning = make(live('running', 'k'));
+  const view = store.attention([reading], 50);
+  assert.deepEqual(view.conversations.map(entry => entry.conversation.id),
+    [newerRunning, olderRunning, waiting, failedUnseen, failedSeen, unknown, newerUnseen, olderUnseen]);
+  assert.deepEqual(view.conversations.filter(entry => entry.unseen).map(entry => entry.conversation.id), [failedUnseen, unknown, newerUnseen, olderUnseen]);
+  assert.equal(view.unseen, 4, 'a conversation being read counts as seen right now');
+  assert.equal(store.attention([], 50).unseen, 5);
+  const capped = store.attention([], 3);
+  assert.equal(capped.conversations.length, 3); assert.equal(capped.unseen, 5, 'the count is not capped by the list limit');
+});
+
+test('migration 17 counts results that existed before the seen marker as seen', t => {
+  const f = fixture(t); const completed = conversation(); const unknown = conversation(); const pending = conversation();
+  const legacy = openDatabase(f.directory, productMigrations.filter(migration => migration.version <= 16));
+  try {
+    for (const input of [completed, unknown, pending]) seedLegacyConversation(legacy, input);
+    const update = legacy.prepare('UPDATE workbench_conversations SET state_json=? WHERE id=?');
+    update.run(JSON.stringify(result('old-run', 'completed')), completed.id);
+    update.run(JSON.stringify({ status: 'unknown', pendingInputs: 0, configurationVerified: false, reason: 'database_restored_requires_reconciliation' }), unknown.id);
+    update.run(JSON.stringify({ status: 'running', runId: 'live-run', pendingInputs: 0, configurationVerified: true }), pending.id);
+  } finally { legacy.close(); }
+  const store = createWorkbenchStore(f.open());
+  assert.deepEqual([...store.unseen([completed.id, unknown.id, pending.id])], []);
+  store.setConversationState(pending.id, { state: result('live-run', 'completed') });
+  assert.deepEqual([...store.unseen([completed.id, unknown.id, pending.id])], [pending.id], 'results after the upgrade are tracked');
 });

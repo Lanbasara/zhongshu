@@ -41,6 +41,8 @@ export const conversationSchema = z.object({
   configuration: configurationSchema, readiness: z.enum(['preparing', 'ready', 'blocked']),
   archived: z.boolean().default(false), state: stateSchema, error: boundedText(4096).nullable(), createdAt: revisionSchema,
   subagents: subagentSummarySchema.optional(),
+  /** A completed, failed, 待核实 or not user-caused interrupted result that no device has seen; shared through the server. */
+  unread: z.boolean().optional(),
 }).strict();
 const operationStatusSchema = z.enum(['queued', 'dispatching', 'accepted', 'unknown', 'rejected']);
 export const subagentStopSchema = z.object({ id: z.uuid(), status: operationStatusSchema, reason: boundedText(4096).nullable(), updatedAt: revisionSchema }).strict();
@@ -158,6 +160,11 @@ export const conversationListSchema = z.object({
   conversations: z.array(conversationSchema).max(100), olderBeforeId: z.string().min(1).max(512).nullable(), revision: revisionSchema,
 }).strict();
 export const conversationResponseSchema = z.object({ conversation: conversationSchema }).strict();
+export const attentionLimit = 50;
+/** Non-archived conversations needing a look: running, waiting, failed, unknown, then unread; `unread` counts all of them, uncapped. */
+export const attentionSchema = z.object({
+  unread: revisionSchema, conversations: z.array(conversationSchema).max(attentionLimit),
+}).strict();
 export const operationResponseSchema = z.object({ operation: operationSchema }).strict();
 export const turnFileLimit = 500;
 const turnFilesSchema = z.object({ runId: identifierSchema, paths: z.array(recordedFilePath).max(turnFileLimit), limited: z.boolean() }).strict();
@@ -185,6 +192,7 @@ export const resetEventSchema = z.object({ type: z.literal('reset'), revision: r
 export const readyEventSchema = z.object({ type: z.literal('ready'), revision: revisionSchema }).strict();
 export type WorkbenchConfiguration = z.infer<typeof workbenchConfigurationSchema>;
 export type Conversation = z.infer<typeof conversationSchema>;
+export type AttentionView = z.infer<typeof attentionSchema>;
 export type WorkbenchSnapshot = z.infer<typeof snapshotSchema>;
 export type HistoryPageView = z.infer<typeof historyPageSchema>;
 export type StorageView = z.infer<typeof storageSchema>;
