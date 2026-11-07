@@ -9,7 +9,7 @@ import { putUpload, removeUpload, uploadDrafts, type UploadDraft } from './uploa
 import { ComposerView } from './patterns/composer.tsx';
 import { ComposerUsage, SkillEditor } from './patterns/composer-extras.tsx';
 
-type Props = { conversation: string; csrf: string; draft: Draft; onChange(draft: Draft, requireDurable?: boolean): boolean; onSend(): void; onStop(): void; onFiles(): void; ready: boolean; sending: boolean; running: boolean; queueing: boolean; queue?: ReactNode; model: string; reasoningEffort?: string; permission: string; configurationNote: string; skillsEnabled: boolean; usage?: ConversationUsage };
+type Props = { conversation: string; csrf: string; draft: Draft; onChange(draft: Draft, requireDurable?: boolean): boolean; onSend(): void; onStop(): void; onFiles(): void; ready: boolean; sending: boolean; running: boolean; queueing: boolean; queue?: ReactNode; model: string; reasoningEffort?: string; permission: string; configurationNote: string; skillsEnabled: boolean; usage?: ConversationUsage; toolbarExtras?: ReactNode };
 type Upload = UploadDraft & { status: 'uploading' | 'failed' };
 export function Composer(props: Props) {
   const { conversation, csrf, draft, onChange, onSend, onStop, onFiles, ready, sending, running, queueing, queue, model, reasoningEffort, permission, configurationNote } = props;
@@ -56,7 +56,7 @@ export function Composer(props: Props) {
   return <ComposerView value={draft.text} onChange={text => edit(text, [])}
     renderEditor={editor => <SkillEditor editor={editor} spans={draft.skills}
       picker={props.skillsEnabled ? { load: loadSkills, format: skillLabelText, limit: skillLimit } : undefined} onEdit={edit}/>}
-    footerDetails={props.usage && <ComposerUsage usage={props.usage}/>}
+    footerDetails={props.usage && <ComposerUsage usage={props.usage}/>} toolbarExtras={props.toolbarExtras}
     onSend={onSend} onStop={onStop} onFiles={onFiles} onImages={files => void add(files)}
     editDisabled={!!draft.pending} imagesDisabled={!!draft.pending || sending} filesDisabled={!!draft.pending || (draft.references?.length ?? 0) >= 8}
     sendDisabled={!!disabled} sending={sending} running={running} queueing={queueing} queue={queue} model={model} reasoningEffort={reasoningEffort} permission={permission} configurationNote={configurationNote}

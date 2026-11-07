@@ -257,6 +257,9 @@ export const productMigrations: Migration[] = [{ version: 2, sql: `
   ) STRICT;
   CREATE INDEX workbench_request_answers_request ON workbench_request_answers(conversation_id, request_id, created_at);
   CREATE INDEX workbench_request_answers_status ON workbench_request_answers(status, conversation_id);
+` }, { version: 19, sql: `
+  -- ADR 0016: Plan mode chosen in Zhongshu for Harnesses that take the mode with every turn (Codex).
+  ALTER TABLE workbench_conversations ADD COLUMN plan_mode INTEGER NOT NULL DEFAULT 0 CHECK (plan_mode IN (0, 1));
 ` }];
 
 /** Runs inside restoreDatabase's private staging transaction, before the database is published. */

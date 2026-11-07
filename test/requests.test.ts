@@ -152,4 +152,9 @@ test('the card and the server describe an answer in the same words', async () =>
     { kind: 'form', action: 'decline' }, { kind: 'approval', decision: 'acceptForSession' },
   ];
   for (const answer of answers) assert.equal(card.answerSummary({ approval: { action: 'command', decisions: ['accept'] } }, answer), shared.answerSummary({ approval: { action: 'command', decisions: ['accept'] } }, answer));
+  const review = { questions: [{ id: 'plan-review', text: 'Approve?', multiple: false, custom: true, options: [{ label: 'Approve' }, { label: 'Keep planning' }],
+    review: { approve: 'Approve', keep: 'Keep planning', plan: '## Plan' } }] };
+  for (const answer of [{ kind: 'question' as const, answers: [{ id: 'plan-review', selected: ['Approve'] }] }, { kind: 'question' as const, answers: [{ id: 'plan-review', selected: ['Keep planning'], custom: '加上测试' }] }])
+    assert.equal(card.answerSummary(review, answer), shared.answerSummary(review, answer));
+  assert.equal(shared.answerSummary(review, { kind: 'question', answers: [{ id: 'plan-review', selected: ['Approve'] }] }), '批准并执行');
 });

@@ -2,7 +2,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { ServerResponse } from 'node:http';
 import { z } from 'zod';
 import { attentionSchema, conversationManagementSchema, conversationSearchSchema, createConversationSchema, enqueueOperationSchema, historyCursorSchema, historyPageSchema, identifierSchema, queueCommandSchema, storageSchema, workbenchConfigurationSchema,
-  subagentHistorySchema, subagentIdSchema, subagentListSchema, subagentStopResponseSchema, answerRequestSchema, requestAnswerResponseSchema, requestIdSchema,
+  subagentHistorySchema, subagentIdSchema, subagentListSchema, subagentStopResponseSchema, answerRequestSchema, requestAnswerResponseSchema, requestIdSchema, conversationResponseSchema,
   workspaceAddSchema, workspaceBrowseSchema, workspaceDirectoryListSchema, workspaceIdSchema, workspaceManagementSchema } from '../shared/workbench.ts';
 import type { Conversation as ConversationView, WorkbenchOperation, WorkbenchSnapshot } from '../shared/workbench.ts';
 import type { PrivateContext } from './app.ts';
@@ -37,10 +37,10 @@ function parse<T>(schema: z.ZodType<T>, value: unknown): T {
   if (!parsed.success) throw new StoreError('invalid_request', 400);
   return parsed.data;
 }
-function conversationView(value: Conversation, unread: boolean): ConversationView {
+function conversationView(value: Conversation, unread: boolean, plan: ConversationView['plan']): ConversationView {
   return { id: value.id, title: value.title, harnessId: value.harnessId, workspaceId: value.workspaceId, archived: value.archived,
     configuration: value.configuration, readiness: value.readiness, state: value.state, error: value.error, createdAt: value.createdAt,
-    ...(value.subagents ? { subagents: value.subagents } : {}), unread };
+    ...(value.subagents ? { subagents: value.subagents } : {}), ...(plan ? { plan } : {}), unread };
 }
 function stopView(value: SubagentStop) {
   return subagentStopResponseSchema.parse({ stop: { id: value.id, status: value.status, reason: value.reason, updatedAt: value.updatedAt } });
@@ -59,9 +59,9 @@ function newestWithin<T>(values: T[], budget: number, newestFirst = false): T[] 
   }
   return newestFirst ? kept : kept.reverse();
 }
-function snapshotView(value: ReturnType<Workbench['snapshot']>, unread: boolean): WorkbenchSnapshot {
+function snapshotView(value: ReturnType<Workbench['snapshot']>, unread: boolean, plan: ConversationView['plan']): WorkbenchSnapshot {
   const { history } = value;
-  const conversation = conversationView(value.conversation, unread);
+  const conversation = conversationView(value.conversation, unread, plan);
   const operations = newestWithin(value.operations.map(operationView), 1024 * 1024, true);
   const { queue, turnFiles } = value;
   // Oldest open requests first: the agent waits on them. The list is bounded so it cannot crowd out the transcript.
@@ -74,7 +74,7 @@ function snapshotView(value: ReturnType<Workbench['snapshot']>, unread: boolean)
     items: trimmed ? [] : items, liveItems, liveItemsLimited: history.liveItemsLimited || liveItems.length < history.liveItems.length,
     olderCursor: history.olderCursor, loaded: history.loaded && !trimmed,
     ...(trimmed ? { error: 'native_history_page_limit' } : history.error ? { error: history.error } : {}),
-  }, operations, queue, ...(turnFiles.length ? { turnFiles } : {}), ...(value.conversation.usage ? { usage: value.conversation.usage } : {}), ...(requests ? { requests } : {}), revision: value.revision };
+  }, operations, queue, ...(turnFiles.length ? { turnFiles } : {}), ...(value.conversation.usage ? { usage: value.conversation.usage } : {}), ...(requests ? { requests } : {}), ...(value.planReady ? { planReady: value.planReady } : {}), revision: value.revision };
 }
 function json(reply: FastifyReply, value: unknown): FastifyReply {
   const body = JSON.stringify(value);
@@ -189,10 +189,10 @@ export function createWorkbenchHttp(workbench: Workbench, input: Partial<z.input
   /** Unread is shared server state, so every conversation view carries it. */
   function views(values: Conversation[]): ConversationView[] {
     const unread = workbench.unread(values);
-    return values.map(value => conversationView(value, unread.has(value.id)));
+    return values.map(value => conversationView(value, unread.has(value.id), workbench.planOf(value)));
   }
   const view = (value: Conversation) => views([value])[0]!;
-  const snapshot = (value: ReturnType<Workbench['snapshot']>) => snapshotView(value, workbench.unread([value.conversation]).has(value.conversation.id));
+  const snapshot = (value: ReturnType<Workbench['snapshot']>) => snapshotView(value, workbench.unread([value.conversation]).has(value.conversation.id), workbench.planOf(value.conversation));
 
   async function routes(app: FastifyInstance, context: PrivateContext): Promise<void> {
     // This plugin is installed inside buildApp's authenticated/CSRF-protected scope.
@@ -276,7 +276,7 @@ export function createWorkbenchHttp(workbench: Workbench, input: Partial<z.input
         parse(noQuery, request.query);
         const result = workbench.attention();
         return json(reply, attentionSchema.parse({ unread: result.unread,
-          conversations: result.conversations.map(({ conversation, unread }) => conversationView(conversation, unread)) }));
+          conversations: result.conversations.map(({ conversation, unread }) => conversationView(conversation, unread, workbench.planOf(conversation))) }));
       });
       privateApp.post('/conversations/:id/reading', { bodyLimit: 4096 }, async (request, reply) => {
         parse(noQuery, request.query);
@@ -329,6 +329,13 @@ export function createWorkbenchHttp(workbench: Workbench, input: Partial<z.input
         const { id, answer } = parse(z.object({ id: z.uuid(), answer: z.uuid() }).strict(), request.params);
         parse(noQuery, request.body ?? {});
         return json(reply, requestAnswerResponseSchema.parse({ answer: await workbench.reconcileAnswer(id, answer) }));
+      });
+      // ADR 0016: Plan mode is not fixed configuration; it changes only between turns.
+      privateApp.post('/conversations/:id/plan', { bodyLimit: 4096 }, async (request, reply) => {
+        parse(noQuery, request.query); const { id } = parse(uuidParams, request.params);
+        const input = parse(z.object({ active: z.boolean() }).strict(), request.body);
+        const conversation = await workbench.setPlan(id, input.active);
+        return json(reply, conversationResponseSchema.parse({ conversation: conversationView(conversation, workbench.unread([conversation]).has(conversation.id), workbench.planOf(conversation)) }));
       });
       privateApp.post('/conversations/:id/delete', { bodyLimit: 4096 }, async (request, reply) => {
         parse(noQuery, request.query);

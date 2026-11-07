@@ -14,7 +14,7 @@ import { snapshotSchema, stateFrom, terminalRunFrom } from '../src/harness/dsh/n
 import type { Binding, NativeChange } from '../src/harness/types.ts';
 
 type Event = { type: string; seq: number; time: number; data: Record<string, unknown> };
-type Session = { id: string; cwd: string; model: { provider: string; model: string; reasoningEffort?: string }; permission: string; events: Event[]; turn: number; open: number | null; inbox: unknown[]; stepInbox: unknown[]; questions: unknown[] };
+type Session = { id: string; cwd: string; model: { provider: string; model: string; reasoningEffort?: string }; permission: string; events: Event[]; turn: number; open: number | null; inbox: unknown[]; stepInbox: unknown[]; questions: unknown[]; plan?: { active: boolean; pending: boolean } };
 async function until(predicate: () => boolean, timeout = 4000): Promise<void> { const end = Date.now() + timeout; while (!predicate()) { if (Date.now() > end) assert.fail('condition did not become true'); await delay(10); } }
 
 /** Protocol fixture only. These tests make no claim about real model execution. */
@@ -37,7 +37,7 @@ async function host() {
     for (const [streamId, follow] of follows) if (follow.session === session.id && follow.socket.readyState === WebSocket.OPEN) follow.socket.send(JSON.stringify({ type: 'item', streamId, value: { type: 'event', event } }));
     return event;
   }
-  const projections = (session: Session) => ({ asOfSeq: Math.max(0, session.events.length - 1), values: { permissions: { currentValue: session.permission }, modelSelection: { next: session.model, lastUsed: session.turn ? session.model : null }, inbox: { 'next-turn': session.inbox, 'next-step': session.stepInbox }, turnOutline: session.events.filter(event => event.type === 'turn/start').map(event => ({ turn: event.data.turn, seq: event.seq, prompt: '', response: '' })), userQuestions: { active: session.questions } } });
+  const projections = (session: Session) => ({ asOfSeq: Math.max(0, session.events.length - 1), values: { permissions: { currentValue: session.permission }, modelSelection: { next: session.model, lastUsed: session.turn ? session.model : null }, inbox: { 'next-turn': session.inbox, 'next-step': session.stepInbox }, turnOutline: session.events.filter(event => event.type === 'turn/start').map(event => ({ turn: event.data.turn, seq: event.seq, prompt: '', response: '' })), userQuestions: { active: session.questions }, ...(session.plan ? { plan: session.plan } : {}) } });
   const server = createServer(async (request, response) => {
     const url = new URL(request.url ?? '/', 'http://127.0.0.1');
     if (url.pathname === '/connect') {
@@ -68,7 +68,17 @@ async function host() {
           assert.ok(session); session.model = { provider: args.request.provider, model: args.request.model, reasoningEffort: args.request.reasoningEffort }; append(session, 'model/selection', session.model); value = { selected: session.model }; break;
         }
         case 'commands/execute': {
-          assert.ok(session); assert.ok(['/permission workspace-write', '/permission danger-full-access'].includes(args.line));
+          assert.ok(session);
+          if (args.line === '/plan' || args.line === '/plan off') {
+            // Native plan mode is session state; a change requested between turns waits for the next turn.
+            const active = args.line === '/plan'; session.plan = { active, pending: false }; append(session, 'plan/mode', { active });
+            // Native rc.4: a switch in a session that has run leaves a non-waking notice in next-step.
+            if (session.turn > 0) { const summary = active ? 'The user switched this session to plan mode.' : 'The user switched this session out of plan mode.';
+              const notice = { content: [{ type: 'text', text: summary }], source: { kind: 'plan-mode', form: 'notice', summary }, role: 'user', id: randomUUID() };
+              session.stepInbox.push(notice); append(session, 'agent/inbox/spliced', { target: 'next-step', start: session.stepInbox.length - 1, inserted: [notice] }); }
+            value = { commandId: randomUUID(), result: { kind: 'success', text: active ? 'Plan mode on' : 'Plan mode off' } }; break;
+          }
+          assert.ok(['/permission workspace-write', '/permission danger-full-access'].includes(args.line));
           const permission = args.line.slice('/permission '.length); const changed = session.permission !== permission; session.permission = permission;
           append(session, 'permission/preset', { preset: permission });
           // Native rc.4 policy changes inject non-waking context into next-step.
@@ -677,5 +687,55 @@ test('DSH refuses forwarded requests it cannot present instead of leaving the tu
       outcome: { kind: 'rejected', error: { name: 'UserQuestionError', message: 'the user cancelled ask_user_question', code: 'ASK_CANCELLED' } } });
     assert.ok(changes.some(change => change.type === 'item' && change.item.kind === 'notice'));
     assert.deepEqual(await context.adapter.requests!(binding), []);
+  } finally { await context.close(); }
+});
+
+// Plan mode (ADR 0016): native session state set by /plan and /plan off; the plan review is a forwarded question.
+test('DSH turns native Plan mode on and off and reports it in state', async () => {
+  const context = await setup();
+  try {
+    const binding = await context.create();
+    assert.equal(context.adapter.planMode, 'native');
+    assert.equal((await context.adapter.state(binding)).plan, undefined, 'a composition without plan state reports none');
+    assert.deepEqual(await context.adapter.setPlan!(binding, true), { outcome: 'accepted' });
+    assert.deepEqual((await context.adapter.state(binding)).plan, { active: true, pending: false });
+    assert.deepEqual(await context.adapter.setPlan!(binding, false), { outcome: 'accepted' });
+    assert.deepEqual((await context.adapter.state(binding)).plan, { active: false, pending: false });
+    assert.deepEqual(context.fixture.calls.filter(call => call.method === 'commands/execute' && String(call.args.line).startsWith('/plan')).map(call => call.args.line), ['/plan', '/plan off']);
+    // After a turn, the switch leaves a passive notice that must not block the next message.
+    const native = context.fixture.sessions.get(binding.id)!;
+    await context.adapter.submit(binding, { id: randomUUID(), text: 'Synthetic first turn' });
+    native.open = null; context.fixture.append(native, 'turn/end', { turn: native.turn, reason: { kind: 'completed' } });
+    assert.deepEqual(await context.adapter.setPlan!(binding, true), { outcome: 'accepted' });
+    assert.equal(native.stepInbox.some(entry => (entry as { source?: { kind?: string } }).source?.kind === 'plan-mode'), true);
+    const afterSwitch = await context.adapter.state(binding);
+    assert.deepEqual([afterSwitch.status, afterSwitch.pendingInputs, afterSwitch.plan?.active], ['idle', 0, true]);
+    assert.equal((await context.adapter.submit(binding, { id: randomUUID(), text: 'Plan the next step' })).outcome, 'accepted');
+  } finally { await context.close(); }
+});
+
+test('DSH presents a plan review with its plan and answers with the native option labels', async () => {
+  const context = await setup();
+  try {
+    const binding = await context.create();
+    await context.adapter.watch(binding, () => {});
+    await until(() => context.fixture.eventStreams.size === 1);
+    const ask = () => context.fixture.ask(binding.id, 'user-questions/request', { questions: [{ id: 'plan-review', question: 'Approve this plan and leave plan mode?',
+      detail: '## Plan\n1. Read\n2. Write', options: [{ label: 'Approve' }, { label: 'Keep planning' }], intent: { kind: 'plan-review', approve: 'Approve', callId: 'exit-1' } }] });
+    const first = ask();
+    let requests: Awaited<ReturnType<NonNullable<typeof context.adapter.requests>>> = [];
+    for (let tries = 0; tries < 100 && !requests.length; tries++) { await delay(20); requests = await context.adapter.requests!(binding); }
+    const [review] = requests;
+    assert.deepEqual(review?.questions?.[0], { id: 'plan-review', text: 'Approve this plan and leave plan mode?', multiple: false, custom: true,
+      options: [{ label: 'Approve' }, { label: 'Keep planning' }], review: { approve: 'Approve', keep: 'Keep planning', plan: '## Plan\n1. Read\n2. Write' } }, 'the plan is not folded into the question');
+    assert.deepEqual(await context.adapter.answer!(binding, review!.id, { kind: 'question', answers: [{ id: 'plan-review', selected: ['Keep planning'], custom: 'Add tests' }] }), { outcome: 'accepted' });
+    const second = ask();
+    requests = [];
+    for (let tries = 0; tries < 100 && !requests.length; tries++) { await delay(20); requests = await context.adapter.requests!(binding); }
+    assert.deepEqual(await context.adapter.answer!(binding, requests[0]!.id, { kind: 'question', answers: [{ id: 'plan-review', selected: ['Approve'] }] }), { outcome: 'accepted' });
+    assert.deepEqual(context.fixture.settled.map(row => [row.eventId, row.outcome]), [
+      [first, { kind: 'result', value: { answers: [{ id: 'plan-review', selected: ['Keep planning'], custom: 'Add tests' }] } }],
+      [second, { kind: 'result', value: { answers: [{ id: 'plan-review', selected: ['Approve'] }] } }],
+    ], 'approval is exactly the approve label without feedback');
   } finally { await context.close(); }
 });

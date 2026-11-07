@@ -2,13 +2,14 @@ import { Fragment, memo, useEffect, useMemo, useRef, useState, type ReactNode } 
 import { Streamdown, defaultRemarkPlugins } from 'streamdown';
 import { code } from '@streamdown/code';
 import { cjk } from '@streamdown/cjk';
-import { Check, Copy, FileText, Info, Quote, X, ImageIcon } from 'lucide-react';
+import { Check, ClipboardList, Copy, FileText, Info, Quote, X, ImageIcon } from 'lucide-react';
 import type { TurnFileSummary, WorkbenchItem } from '../shared/workbench.ts';
 import type { MessageReference, ImageAttachment } from '../shared/content.ts';
 import { referenceSchema } from '../shared/content.ts';
 import { workspaceImages } from './markdown.ts';
 import { TurnFiles } from './patterns/turn-files.tsx';
 import { ProcessBlock } from './patterns/process.tsx';
+import './patterns/plan.css';
 
 export const imageUrl = (conversation: string, image: ImageAttachment) => `/api/private/workbench/conversations/${encodeURIComponent(conversation)}/resources/${image.id}`;
 
@@ -29,6 +30,12 @@ function imageSource(source: string) {
 const markdownComponents = {
   a: ({ href, children }: React.ComponentProps<'a'>) => <a href={safeUrl(href ?? '') || undefined} target="_blank" rel="noopener noreferrer">{children}</a>,
 };
+
+const plainRemarkPlugins = Object.values(defaultRemarkPlugins);
+/** Agent-written markdown outside the transcript (for example a plan under review): no raw HTML, safe links only, no workspace images. */
+export function MarkdownText({ text }: { text: string }) {
+  return <div className="message-text"><Streamdown plugins={{ code, cjk }} remarkPlugins={plainRemarkPlugins} components={markdownComponents} skipHtml urlTransform={url => safeUrl(url)}>{text}</Streamdown></div>;
+}
 
 export function Message({ item, conversation, onQuote }: { item: WorkbenchItem; conversation: string; onQuote(reference: MessageReference): void }) {
   const ref = useRef<HTMLElement>(null);
@@ -52,6 +59,7 @@ export function Message({ item, conversation, onQuote }: { item: WorkbenchItem; 
     <button type="button" aria-label="复制消息" title={copied ? '已复制' : '复制'} onClick={() => { void navigator.clipboard.writeText(item.text).then(() => { setCopied(true); setTimeout(() => setCopied(false),1500); }).catch(() => {}); }}>{copied ? <Check size={14}/> : <Copy size={14}/>}</button>
     <button type="button" aria-label="引用所选文字" title="引用所选文字" onClick={quote}><Quote size={14}/></button>
   </div>;
+  const body = <div className="message-text">{item.kind === 'assistant' ? <Streamdown plugins={{ code, cjk }} remarkPlugins={remarkPlugins} components={components} skipHtml urlTransform={(url, key) => safeUrl(url) || (key === 'src' && imageSource(url) ? url : '')} isAnimating={item.status === 'running'}>{item.text || (item.status === 'running' ? '正在生成…' : '')}</Streamdown> : item.text}</div>;
   if (item.kind === 'assistant' && !item.text && item.status !== 'running' && !item.images?.length && !item.references?.length) return null;
   return <article ref={ref} tabIndex={-1} className={`message message-${item.kind}`} data-message-id={item.id} data-status={item.status}>
     {item.kind === 'notice' && <Info size={14} className="message-notice-icon" aria-hidden="true"/>}
@@ -61,7 +69,7 @@ export function Message({ item, conversation, onQuote }: { item: WorkbenchItem; 
         {item.images?.length ? <div className="message-images">{item.images.map(image => <ImageView key={image.id} src={imageUrl(conversation, image)} alt={image.name}/>)}</div> : null}
         {item.references?.length ? <div className="message-references">{item.references.map((reference, index) => <div key={index} className="reference-card">{reference.type === 'file' ? <><FileText size={14}/><span>{reference.path}<small>工作区原文件</small></span></> : <><Quote size={14}/><blockquote>{reference.text}<small>引用消息片段</small></blockquote></>}</div>)}</div> : null}
       </div> : <>
-        <div className="message-text">{item.kind === 'assistant' ? <Streamdown plugins={{ code, cjk }} remarkPlugins={remarkPlugins} components={components} skipHtml urlTransform={(url, key) => safeUrl(url) || (key === 'src' && imageSource(url) ? url : '')} isAnimating={item.status === 'running'}>{item.text || (item.status === 'running' ? '正在生成…' : '')}</Streamdown> : item.text}</div>
+        {item.plan ? <div className="message-plan"><div className="message-plan-head"><ClipboardList size={13} aria-hidden="true"/>计划</div>{body}</div> : body}
         {item.images?.length ? <div className="message-images">{item.images.map(image => <ImageView key={image.id} src={imageUrl(conversation, image)} alt={image.name}/>)}</div> : null}
         {item.references?.length ? <div className="message-references">{item.references.map((reference, index) => <div key={index} className="reference-card">{reference.type === 'file' ? <><FileText size={14}/><span>{reference.path}<small>工作区原文件</small></span></> : <><Quote size={14}/><blockquote>{reference.text}<small>引用消息片段</small></blockquote></>}</div>)}</div> : null}
       </>}

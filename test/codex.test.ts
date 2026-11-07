@@ -615,3 +615,45 @@ test('New conversations ask for approval unless they have full access, and every
   assert.equal(asking.details.approvalPolicy, 'on-request');
   assert.equal(p.calls.filter(call => call.method === 'thread/start').at(-1)?.params.approvalPolicy, 'on-request');
 });
+
+// Plan mode (ADR 0016): the mode is a thread setting natively, so every turn names it explicitly.
+test('Codex names the collaboration mode on every turn, with the conversation model and effort', async t => {
+  const p = await peer(t, request => request.method === 'thread/start' || request.method === 'thread/resume'
+    ? { ...nativeConfiguration(), reasoningEffort: 'high' } : undefined);
+  const binding = { ...saved, configuration: { ...saved.configuration, reasoningEffort: 'high' } };
+  assert.equal((await p.adapter.submit(binding, { id: 'plan-turn', text: 'Plan this', plan: true })).outcome, 'accepted');
+  assert.deepEqual(p.calls.filter(call => call.method === 'turn/start').at(-1)?.params.collaborationMode,
+    { mode: 'plan', settings: { model: 'model-a', reasoning_effort: 'high', developer_instructions: null } });
+  assert.equal((await p.adapter.submit(binding, { id: 'default-turn', text: 'Do it' })).outcome, 'accepted');
+  assert.equal((p.calls.filter(call => call.method === 'turn/start').at(-1)?.params.collaborationMode as { mode: string }).mode, 'default',
+    'leaving the mode out would keep the thread in Plan');
+  assert.equal(p.adapter.planMode, 'per-turn');
+});
+
+test('A proposed plan is shown as a plan, and Plan-mode questions are answered as the official client does', async t => {
+  const p = await peer(t); const changes: NativeChange[] = [];
+  await p.adapter.watch(saved, change => changes.push(change));
+  p.notify('item/completed', { threadId: saved.id, turnId: 'run-1', item: { type: 'plan', id: 'run-1-plan', text: '## Plan\n1. Read\n2. Write' } });
+  await until(() => changes.some(change => change.type === 'item' && change.item.id === 'run-1-plan'));
+  const plan = changes.find(change => change.type === 'item' && change.item.id === 'run-1-plan');
+  assert.deepEqual(plan?.type === 'item' && [plan.item.kind, plan.item.plan, plan.item.text], ['assistant', true, '## Plan\n1. Read\n2. Write']);
+  sendRequest(p, 21, 'item/tool/requestUserInput', { threadId: saved.id, turnId: 'run-1', itemId: 'ask-1', isBlocking: true, questions: [
+    { id: 'scope', header: 'Scope', question: 'Body only?', isOther: true, isSecret: false, options: [{ label: 'Body (Recommended)', description: 'Smaller' }, { label: 'Both', description: 'Larger' }] },
+    { id: 'when', header: '', question: 'When?', isOther: true, isSecret: false, options: [{ label: 'Today', description: '' }, { label: 'Later', description: '' }] },
+  ] });
+  let requests: Awaited<ReturnType<NonNullable<typeof p.adapter.requests>>> = [];
+  for (let tries = 0; tries < 100 && !requests.length; tries++) { await delay(20); requests = await p.adapter.requests!(saved); }
+  const [question] = requests;
+  assert.deepEqual(question?.questions?.map(item => [item.id, item.header ?? null, item.multiple, item.custom, item.options.map(option => option.label)]),
+    [['scope', 'Scope', false, true, ['Body (Recommended)', 'Both']], ['when', null, false, true, ['Today', 'Later']]]);
+  assert.deepEqual(await p.adapter.answer!(saved, question!.id, { kind: 'question', answers: [{ id: 'scope', selected: ['Body (Recommended)', 'Both'] }, { id: 'when', selected: [] }] }),
+    { outcome: 'rejected', reason: 'answer_invalid' }, 'one option at most');
+  const receipt = p.adapter.answer!(saved, question!.id, { kind: 'question', answers: [{ id: 'scope', selected: ['Body (Recommended)'], custom: 'keep the table' }, { id: 'when', selected: [], custom: 'Friday' }] });
+  await until(() => p.clientResponses.length === 1);
+  assert.deepEqual(p.clientResponses[0], { id: 21, result: { answers: {
+    scope: { answers: ['Body (Recommended)', 'user_note: keep the table'] },
+    when: { answers: ['None of the above', 'user_note: Friday'] },
+  } } });
+  p.notify('serverRequest/resolved', { threadId: saved.id, requestId: 21 });
+  assert.deepEqual(await receipt, { outcome: 'accepted' });
+});

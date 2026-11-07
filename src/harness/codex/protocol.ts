@@ -111,7 +111,8 @@ export function mapItem(input: z.infer<typeof nativeItem>, runId: string, cwd: s
     }
     // Reasoning without a readable summary arrives as an empty list; it still reads as thinking, never as a blank row.
     case 'reasoning': return { ...base, kind: 'notice', text: input.summary?.filter(Boolean).join('\n') || '思考', status: running ? 'running' : 'completed' };
-    case 'plan': return { ...base, kind: 'notice', text: input.text ?? '更新计划', status: running ? 'running' : 'completed' };
+    // A plan proposed in Plan mode (`<turnId>-plan`); the completed text is authoritative.
+    case 'plan': return { ...base, kind: 'assistant', plan: true, text: input.text ?? '', status: running ? 'running' : 'completed' };
     default: return { ...base, kind: 'notice', text: `此原生条目的详情尚未适配展示：${input.type}。这不表示原生能力不可用。`, status: observedStatus };
   }
 }

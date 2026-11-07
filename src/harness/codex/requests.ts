@@ -6,7 +6,9 @@ import { approvalDecisionSchema } from '../../shared/workbench.ts';
 import { nativeId } from './protocol.ts';
 
 /** Server requests this client can present and answer. Everything else is refused without granting anything. */
-export const answerableMethods = new Set(['item/commandExecution/requestApproval', 'item/fileChange/requestApproval', 'item/permissions/requestApproval', 'mcpServer/elicitation/request']);
+export const answerableMethods = new Set(['item/commandExecution/requestApproval', 'item/fileChange/requestApproval', 'item/permissions/requestApproval', 'mcpServer/elicitation/request', 'item/tool/requestUserInput']);
+/** The label the official client uses for a typed answer instead of an option. */
+export const otherLabel = 'None of the above';
 
 const encoder = new TextEncoder();
 /** Truncate to a UTF-8 byte budget without splitting a character. */
@@ -26,6 +28,10 @@ const fileSystem = z.object({ read: pathList, write: pathList }).passthrough().n
 const permissionParams = base.extend({ cwd: optionalText(4096), permissions: z.object({ network: z.object({ enabled: z.boolean().nullish() }).passthrough().nullish(), fileSystem }).passthrough() });
 const elicitationParams = z.object({ threadId: nativeId, turnId: nativeId.nullish(), serverName: z.string().min(1).max(400), mode: z.string().max(100) }).passthrough();
 const formParams = elicitationParams.extend({ message: z.string().max(64 * 1024), requestedSchema: z.object({ type: z.literal('object'), properties: z.record(z.string().max(200), z.unknown()), required: z.array(z.string().max(200)).max(64).nullish() }).passthrough() });
+const userInputParams = z.object({ threadId: nativeId, turnId: nativeId, itemId: nativeId, questions: z.array(z.object({
+  id: z.string().min(1).max(240), header: z.string().max(400), question: z.string().max(64 * 1024), isOther: z.boolean().optional(), isSecret: z.boolean().optional(),
+  options: z.array(z.object({ label: z.string().min(1).max(400), description: z.string().max(4000) }).passthrough()).max(16).nullish(),
+}).passthrough()).min(1).max(8) }).passthrough();
 const urlParams = elicitationParams.extend({ message: z.string().max(64 * 1024), url: z.url({ protocol: /^https$/ }).max(4096), elicitationId: z.string().min(1).max(400) });
 
 const allDecisions: ApprovalDecision[] = ['accept', 'acceptForSession', 'decline', 'cancel'];
@@ -99,6 +105,34 @@ export function parseServerRequest(method: string, rpcId: string | number, raw: 
           ...(requested.network?.enabled ? { network: true } : {}), ...(value.cwd ? { cwd: value.cwd } : {}) } },
       result: answer => answer.kind !== 'approval' || !offered.includes(answer.decision) ? undefined
         : answer.decision === 'decline' ? { permissions: {}, scope: 'turn' } : { permissions: granted, scope: answer.decision === 'acceptForSession' ? 'session' : 'turn' },
+    };
+  }
+  if (method === 'item/tool/requestUserInput') {
+    const params = userInputParams.safeParse(raw); if (!params.success) return;
+    const value = params.data; const questions = value.questions;
+    if (new Set(questions.map(question => question.id)).size !== questions.length) return;
+    return {
+      threadId: value.threadId,
+      request: { id: requestKey(value.threadId, rpcId, value.itemId), kind: 'question', createdAt: now, questions: questions.map(question => ({
+        id: question.id, ...(question.header.trim() ? { header: clip(question.header, 400) } : {}), text: clip(question.question, 16_000), multiple: false,
+        custom: question.isOther !== false, options: (question.options ?? []).map(option => ({ label: option.label, ...(option.description ? { description: clip(option.description, 4000) } : {}) })),
+      })) },
+      // As the official client answers: at most one option label, or the "other" label, plus an optional note.
+      result: answer => {
+        if (answer.kind !== 'question' || answer.answers.length > questions.length) return;
+        const answers: Record<string, { answers: string[] }> = {};
+        for (const question of questions) {
+          const given = answer.answers.find(item => item.id === question.id);
+          if (!given) return;
+          const labels = new Set((question.options ?? []).map(option => option.label));
+          if (given.selected.length > 1 || given.selected.some(label => !labels.has(label))) return;
+          const note = given.custom?.trim();
+          if (note && question.isOther === false) return;
+          const chosen = given.selected[0] ?? (note ? otherLabel : undefined);
+          answers[question.id] = { answers: [...(chosen ? [chosen] : []), ...(note ? [`user_note: ${note}`] : [])] };
+        }
+        return { answers };
+      },
     };
   }
   if (method === 'mcpServer/elicitation/request') {

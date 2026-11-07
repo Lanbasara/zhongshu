@@ -15,6 +15,8 @@ export type ComposerViewProps = {
   renderEditor?(props: ComponentPropsWithRef<'textarea'>): ReactNode;
   footerDetails?: ReactNode;
   configurationControls?: ReactNode;
+  /** Extra controls after the configuration summary, such as the Plan toggle. */
+  toolbarExtras?: ReactNode;
 };
 
 /** Presentation only: the caller owns submission, upload and persistence decisions. */
@@ -81,6 +83,7 @@ export function ComposerView(props: ComposerViewProps) {
         </Menu>
         <span className="writing-divider" aria-hidden="true"/>
         {props.configurationControls ?? <Information label="当前对话配置" summary={<span>{model}{reasoningEffort && <> · {reasoningEffort}</>}</span>}><dl><div><dt>模型</dt><dd>{model}</dd></div>{reasoningEffort && <div><dt>思考深度</dt><dd>{reasoningEffort}</dd></div>}<div><dt>权限</dt><dd>{permission}</dd></div></dl><p>{configurationNote}</p></Information>}
+        {props.toolbarExtras}
         <span className="writing-spacer"/>
         {running && <span className="sr-only" role="status">执行中</span>}
         {running && <motion.button className="writing-stop" type="button" aria-label="停止当前轮" title="停止当前轮" disabled={sending}

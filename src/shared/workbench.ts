@@ -16,6 +16,8 @@ export const stateSchema = z.object({
   runId: identifierSchema.optional(), terminalRunId: identifierSchema.optional(),
   terminalStatus: z.enum(['completed', 'interrupted', 'failed']).optional(), pendingInputs: z.number().int().min(0).max(1_000_000),
   configurationVerified: z.boolean(), reason: boundedText(4096).optional(),
+  /** Native Plan mode, for Harnesses that keep it as session state (DSH). */
+  plan: z.object({ active: z.boolean(), pending: z.boolean() }).strict().optional(),
 }).strict();
 /** Native identities of sub-agents are opaque, URL-safe values verified against the owning conversation. */
 /** Native sub-agent identity as it may appear in a URL path; dot segments are refused outright. */
@@ -29,6 +31,8 @@ export const itemSchema = z.object({
   text: boundedText(1_048_576), status: z.enum(['running', 'completed', 'failed', 'unknown']),
   runId: identifierSchema.optional(), operationId: identifierSchema.optional(),
   ...contentFields, tool: toolSchema.optional(), collaboration: collaborationSchema.optional(),
+  /** A plan the agent proposed in Plan mode (Codex); shown as a plan block, not as an ordinary reply. */
+  plan: z.literal(true).optional(),
 }).strict();
 export const subagentStatusSchema = z.enum(['running', 'idle', 'completed', 'interrupted', 'failed', 'unknown']);
 /** Counts come from the last verified native snapshot; unverified active agents are never counted as running. */
@@ -41,6 +45,8 @@ export const conversationSchema = z.object({
   configuration: configurationSchema, readiness: z.enum(['preparing', 'ready', 'blocked']),
   archived: z.boolean().default(false), state: stateSchema, error: boundedText(4096).nullable(), createdAt: revisionSchema,
   subagents: subagentSummarySchema.optional(),
+  /** Plan mode, when the Harness offers it. `pending`: a requested change has not taken effect natively yet. */
+  plan: z.object({ active: z.boolean(), pending: z.boolean().optional() }).strict().optional(),
   /** A completed, failed, 待核实 or not user-caused interrupted result that no device has seen; shared through the server. */
   unread: z.boolean().optional(),
 }).strict();
@@ -167,6 +173,8 @@ export const requestQuestionSchema = z.object({
   multiple: z.boolean(),
   /** A typed answer is accepted in addition to (or instead of) the options. */
   custom: z.boolean(),
+  /** The agent asks to approve this plan: `approve` and `keep` are the native option labels; `plan` is markdown. */
+  review: z.object({ approve: boundedText(400).min(1), keep: boundedText(400).min(1), plan: boundedText(64 * 1024) }).strict().optional(),
 }).strict();
 export const requestFieldSchema = z.object({
   name: boundedText(200).min(1), label: boundedText(400).min(1), description: boundedText(4000).optional(),
@@ -234,6 +242,8 @@ export const snapshotSchema = z.object({
   operations: z.array(operationSchema).max(100), queue: queueViewSchema.optional(), turnFiles: z.array(turnFilesSchema).max(200).optional(), usage: usageSchema.optional(),
   /** Questions and approvals the agents are waiting on, plus recently resolved ones. */
   requests: z.array(pendingRequestSchema).max(requestLimit).optional(),
+  /** A Plan-mode turn ended with a proposed plan and nothing came after it: offer to carry it out (Codex). */
+  planReady: z.object({ runId: identifierSchema }).strict().optional(),
   revision: revisionSchema,
 }).strict();
 /** One older native page. `olderCursor` is null at the first message of the conversation. */

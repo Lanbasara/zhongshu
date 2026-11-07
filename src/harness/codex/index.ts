@@ -72,6 +72,7 @@ const permissionLabels: Record<string, string> = { ':read-only': '只读', ':wor
 class CodexAdapter implements HarnessAdapter {
   readonly id = 'codex' as const;
   readonly earlyInput = 'current' as const;
+  readonly planMode = 'per-turn' as const;
   private rpc: CodexRpc;
   private watches = new Map<string, Watch>();
   private live = new Map<string, Live>();
@@ -436,8 +437,10 @@ class CodexAdapter implements HarnessAdapter {
       if (!['idle', 'interrupted', 'failed'].includes(current.status) || current.pendingInputs > 0) return { outcome: 'rejected', reason: 'codex_conversation_busy' };
       const nativeInput = await this.input(binding, operation).catch(() => undefined);
       if (!nativeInput) return { outcome: 'rejected', reason: 'skill_reference_unavailable' };
-      // Every send pins the saved selection as well as checking the live native configuration.
-      const result = parse(z.object({ turn }), await this.rpc.request('turn/start', { threadId: binding.id, clientUserMessageId: operation.id, ...(binding.configuration.reasoningEffort ? { effort: binding.configuration.reasoningEffort } : {}), model: binding.configuration.modelId, permissions: binding.configuration.permissionId, approvalPolicy: binding.details.approvalPolicy, input: nativeInput }));
+      // Every send pins the saved selection as well as checking the live native configuration. The mode is a
+      // thread setting natively, so every turn names it explicitly; it carries the conversation's model and effort.
+      const collaborationMode = { mode: rawOperation.plan === true ? 'plan' : 'default', settings: { model: binding.configuration.modelId, reasoning_effort: binding.configuration.reasoningEffort ?? null, developer_instructions: null } };
+      const result = parse(z.object({ turn }), await this.rpc.request('turn/start', { threadId: binding.id, clientUserMessageId: operation.id, ...(binding.configuration.reasoningEffort ? { effort: binding.configuration.reasoningEffort } : {}), model: binding.configuration.modelId, permissions: binding.configuration.permissionId, approvalPolicy: binding.details.approvalPolicy, collaborationMode, input: nativeInput }));
       return { outcome: 'accepted', runId: result.turn.id };
     } catch (error) {
       if (error instanceof RpcError && error.nativeCode === -32602) return { outcome: 'rejected', reason: 'codex_native_rejected' };

@@ -1,6 +1,6 @@
 # 执行与停止：feature map
 
-本页覆盖发送、停止、排队、提前发送，以及回答 Agent 的提问与审批。图文与引用的完整行为见[对话基本可用性](conversation-usability.md)。发送与恢复约定见 [ADR 0004](../adr/0004-recoverable-communication.md)，原生语义见 [ADR 0001](../adr/0001-native-harness-boundary.md)。
+本页覆盖发送、停止、排队、提前发送、回答 Agent 的提问与审批，以及 Plan 模式。图文与引用的完整行为见[对话基本可用性](conversation-usability.md)。发送与恢复约定见 [ADR 0004](../adr/0004-recoverable-communication.md)，原生语义见 [ADR 0001](../adr/0001-native-harness-boundary.md)。
 
 ## Sub-features
 
@@ -16,6 +16,9 @@
 | E08 | DSH 主 Agent 的结构化提问在任何权限下出现在输入框上方；一次回答生效，其他设备同步显示已回答；应用重启后未答问题仍可回答 |
 | E09 | 审批只在工作区读写与只读时出现，按钮与原生给出的决定一致；完全访问不出现审批；Codex 子 Agent 的审批标明来源 |
 | E10 | 回答回执未知时不重发；原生仍在等待则重新打开，原生已不等待则显示已失效（[ADR 0016](../adr/0016-questions-and-approvals.md)） |
+| E11 | Plan 开关：两端都在输入框工具栏，运行中不能切换，各设备一致；开着时显示说明条 |
+| E12 | Codex Plan：Plan 中的结构化提问按官方格式回答；计划显示为计划块，本轮后出现“计划已就绪”，按计划执行即关闭 Plan 并开始默认模式的一轮 |
+| E13 | DSH Plan：开关执行原生命令并以原生状态为准；计划审核卡片可批准或附意见继续规划，批准后原生退出 Plan 并继续执行 |
 
 ## How to get to it (user POV)
 
@@ -94,6 +97,16 @@ node test/support/feature-fixture.ts inspect --root "$zh_verify_root" --title '�
 | E09 DSH 审批 | DSH、工作区读写，同样的联网指令 | 卡片只有“允许运行 / 拒绝”，理由来自原生中文说明，命令从会话记录按调用编号找回。拒绝后 Agent 报告提权被拒 |
 | E10 回执与失效 | 自动化覆盖，见下方回归命令；真实 Host 只能观察“正在提交 → 已回答” | 未知回执查询不增加原生回答次数；原生仍在等待时卡片重新可选，原生停止或结束本轮后显示已失效 |
 
+### E11–E13 Plan 模式
+
+只能用真实 Host 驱动。为避免执行时真的改文件，可用只读权限；执行阶段的写入会变成审批，可以拒绝收尾。
+
+| 场景 | 驱动 | 判据和独立观察 |
+| --- | --- | --- |
+| E11 开关 | 两端各一段对话，点工具栏的 Plan；发一条消息后在运行中再点 | 开着时说明条出现、页面刷新后仍开着、另一个浏览器上下文看到相同状态；运行中开关为灰；服务端对运行中的切换返回 `plan_change_while_running` |
+| E12 Codex | 打开 Plan，发“先用 request_user_input 问我计划要几步，再给出计划，不要改文件” | 提问卡片的选项与原生一致（含“(Recommended)”）；回答后出现带“计划”标题的块和“计划已就绪”。点“按计划执行”：Plan 关闭，对话出现“按上面的计划开始执行。”，原生下一轮为默认模式。点“继续规划”只收起卡片 |
+| E13 DSH | 打开 Plan，发“规划后提交审核，批准前不要改文件” | 原生 Plan 为开启；审核卡片显示原生计划正文。“继续规划”附意见后 Agent 交回修改后的计划；“批准并执行”后原生 Plan 关闭、Agent 在同一轮继续，开关随之关闭 |
+
 ## Gotchas
 
 - `accepted` 是原生接收，操作记录不会为了表示工作结束而改成 completed；终态来自对话 state/原生历史。
@@ -110,6 +123,11 @@ node test/support/feature-fixture.ts inspect --root "$zh_verify_root" --title '�
 - 请求内容只在应用内存中；已回答或已失效的卡片保留约 10 分钟，应用重启后消失。回答在送达后只保留摘要。
 - “没能确认上一次回答被采用”出现在回答回执未知、而原生仍在等待时；再选一次不会让原生执行两次，因为原生每个请求只采用一次回答。
 - 开发用容器可能没有 curl 或外网；命令失败不影响审批是否生效的判断，判据看原生历史中是否出现提权重跑或被拒。
+- Plan 只是让 Agent 先规划，两端都不限制工具；需要限制时靠权限与审批。
+- DSH 在已经跑过的会话里切换 Plan，会在原生“下一步”队列留一条“已切换 Plan”的提示，它随下一条消息一起被带走，不算待处理输入，不能挡住发送。E13 要在对话跑过至少一轮之后再打开 Plan，才能覆盖这个分支。
+- Codex 的模式是线程设置，中书每轮都明确发送 Plan 或默认，并沿用对话的模型和思考深度；Codex 的开关保存在中书。DSH 的开关以原生状态为准，原生在批准计划后自行退出 Plan。
+- “计划已就绪”由中书根据原生计划条目与本轮终态得出：之后有新消息、排队或 Plan 已关闭都不显示；“继续规划”只在本页收起，不改变状态。
+- Codex 官方客户端的“清空上下文后执行”（另开线程）不提供。
 
 ## Implementation and regression
 
@@ -118,4 +136,5 @@ node test/support/feature-fixture.ts inspect --root "$zh_verify_root" --title '�
 - 原生派发/停止：[Codex](../../src/harness/codex/index.ts)、[DSH](../../src/harness/dsh/index.ts)。
 - E04 永久故障入口与真实HTTP/CLI回归：[feature-fixture.ts](../../test/support/feature-fixture.ts)、[browser-faults.js](../../test/support/browser-faults.js)、[feature-fixture.test.ts](../../test/feature-fixture.test.ts)。运行 `node --test test/feature-fixture.test.ts`；覆盖两个替身的单次拒绝/同ID不重派/新ID恢复、装载不失效、真实400/413及故障只消费一次；Node中的最小页面表面不证明DOM行为，仍须跑上述真实浏览器分支。
 - `node --test test/workbench.test.ts test/workbench-store.test.ts test/workbench-http.test.ts test/codex.test.ts test/dsh.test.ts`：覆盖 ACK 门禁、目标轮终态、目标变化、未知回执、重复提交、当前停止目标与派发中崩溃。实际浏览器判据仍是 E01–E04。
+- Plan 模式：开关与就绪提示在 [plan.tsx](../../src/web/plan.tsx) 与 [展示组件](../../src/web/patterns/plan.tsx)，服务端在 Workbench 的 `setPlan` / `planReady`；`node --test test/plan.test.ts test/codex.test.ts test/dsh.test.ts` 覆盖开关、运行中拒绝、每轮模式、就绪判定、计划审核与 Codex 提问格式；真实判据是 E11–E13。
 - 提问与审批：原生请求的接收与回答在 [Codex 请求](../../src/harness/codex/requests.ts)、[DSH 请求](../../src/harness/dsh/requests.ts) 及各自 adapter；回答操作在 [request-store.ts](../../src/server/request-store.ts) 与 Workbench；卡片在 [requests.tsx](../../src/web/requests.tsx) 与 [展示组件](../../src/web/patterns/requests.tsx)，Storybook「工作台 / 提问与审批」展示各状态。`node --test test/requests.test.ts test/codex.test.ts test/dsh.test.ts test/workbench-http.test.ts` 覆盖送达确认、断线重发、未知回执不重发、失效、重启恢复、多端重复提交与认证/CSRF；真实判据仍是 E08–E09。

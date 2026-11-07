@@ -1,0 +1,28 @@
+.plan-toggle { display:inline-flex; align-items:center; gap:5px; height:28px; padding:0 9px; margin-left:4px; border:1px solid var(--zs-border-default); border-radius:999px; background:var(--zs-surface); color:var(--zs-text-secondary); font-size:var(--zs-type-caption); font-weight:500; transition:background var(--zs-duration-response) var(--zs-ease), border-color var(--zs-duration-response) var(--zs-ease), color var(--zs-duration-response) var(--zs-ease); }
+.plan-toggle:hover:not(:disabled) { border-color:var(--zs-border-hover); color:var(--zs-text-primary); }
+.plan-toggle[aria-pressed=true] { border-color:var(--zs-accent); background:var(--zs-accent-soft); color:var(--zs-accent-text); }
+.plan-toggle:disabled { opacity:.5; }
+.plan-toggle-pending { font-weight:400; color:var(--zs-text-muted); }
+.plan-toggle:focus-visible { outline:none; box-shadow:0 0 0 3px var(--zs-accent-soft); border-color:var(--zs-border-focus); }
+
+.plan-notice { display:flex; align-items:flex-start; gap:6px; margin:0 0 8px; padding:7px 12px; border-radius:var(--zs-radius-item); background:var(--zs-accent-soft); color:var(--zs-accent-text); font-size:var(--zs-type-caption); line-height:1.55; }
+.plan-notice svg { flex:none; margin-top:2px; }
+
+.plan-ready { display:flex; flex-direction:column; gap:8px; margin:0 0 8px; padding:12px 14px; border:1px solid var(--zs-accent-line); border-radius:var(--zs-radius-surface); background:var(--zs-surface); box-shadow:0 0 0 3px color-mix(in srgb,var(--zs-accent) 10%,transparent); animation:zs-surface-in var(--zs-duration-surface) var(--zs-ease); }
+.plan-ready-head { display:flex; align-items:center; gap:8px; font-size:var(--zs-type-interface); color:var(--zs-text-primary); }
+.plan-ready-icon { display:inline-grid; place-items:center; width:24px; height:24px; border-radius:var(--zs-radius-small); background:var(--zs-accent-soft); color:var(--zs-accent-text); }
+.plan-ready p { margin:0; font-size:var(--zs-type-interface); line-height:1.6; color:var(--zs-text-body); }
+.plan-ready-actions { display:flex; flex-wrap:wrap; gap:8px; }
+
+/* A proposed plan inside the transcript. */
+.message-plan { border:1px solid var(--zs-accent-line); border-radius:var(--zs-radius-item); padding:10px 14px 4px; background:var(--zs-surface); }
+.message-plan-head { display:flex; align-items:center; gap:6px; margin-bottom:4px; font-size:var(--zs-type-caption); font-weight:600; color:var(--zs-accent-text); }
+
+/* The plan an agent submits for approval inside a request card. */
+.request-plan { max-height:min(45dvh,420px); overflow:auto; padding:6px 12px; border:1px solid var(--zs-line); border-radius:var(--zs-radius-item); background:var(--zs-neutral-25); font-size:var(--zs-type-interface); }
+
+@media (max-width:759px) {
+  .plan-toggle { height:34px; }
+  .plan-ready-actions .zs-button { flex:1 1 auto; min-height:var(--zs-control-touch); }
+}
+@media (prefers-reduced-motion:reduce) { .plan-ready { animation:none; } .plan-toggle { transition:none; } }
