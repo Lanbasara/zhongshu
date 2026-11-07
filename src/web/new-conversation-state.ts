@@ -16,6 +16,7 @@ export const newDraftSchema = z.object({
   return !frozen || (frozen.id===draft.id && frozen.workspaceId===draft.workspaceId && frozen.harnessId===draft.harnessId
     && frozen.configuration.modelId===draft.configuration.modelId && frozen.configuration.permissionId===draft.configuration.permissionId
     && frozen.configuration.reasoningEffort===draft.configuration.reasoningEffort
+    && (frozen.configuration.agentPreset===undefined || frozen.configuration.agentPreset===(draft.configuration.agentPreset??frozen.configuration.agentPreset))
     && (!frozen.preparationId || frozen.preparationId===draft.preparationId));
 }, 'Frozen submission must belong to this draft');
 export type NewDraft = z.infer<typeof newDraftSchema>;

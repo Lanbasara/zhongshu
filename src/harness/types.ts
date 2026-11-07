@@ -2,7 +2,8 @@
 import type { ImageAttachment, InputContent, SkillOption } from '../shared/content.ts';
 import type { Collaboration, ConversationUsage, PendingRequest, QueueDelivery, RequestAnswer, SubagentStatus, TeamView } from '../shared/workbench.ts';
 export type HarnessId = 'codex' | 'dsh';
-export type Configuration = { modelId: string; permissionId: string; reasoningEffort?: string };
+/** `agentPreset` is the DSH Agent preset chosen at creation (ADR 0017); absent for Codex and for older conversations. */
+export type Configuration = { modelId: string; permissionId: string; reasoningEffort?: string; agentPreset?: string };
 export type Catalog = {
   id: HarnessId;
   available: boolean;
@@ -10,6 +11,9 @@ export type Catalog = {
   models: { id: string; label: string; reasoningEfforts?: { id: string; label: string }[]; defaultReasoningEffort?: string }[];
   defaultModelId?: string;
   permissions: { id: string; label: string; description: string }[];
+  /** DSH Agent presets offered for new conversations (ADR 0017); unavailable ones stay listed and unselectable. */
+  presets?: { id: string; label: string; description: string; available: boolean }[];
+  defaultPresetId?: string;
 };
 export type Binding = {
   id: string;

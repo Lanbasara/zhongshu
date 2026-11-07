@@ -5,11 +5,14 @@ import './draft-configuration.css';
 
 // Presentation inputs only. Catalogs must be validated by the calling feature;
 // this component renders text, holds no credentials and performs no requests.
-export type DraftConfigurationValue = { modelId: string; permissionId: string; reasoningEffort?: string };
+export type DraftConfigurationValue = { modelId: string; permissionId: string; reasoningEffort?: string; agentPreset?: string };
 export type DraftConfigurationCatalog = {
   id: 'codex' | 'dsh'; available: boolean; reason?: string; defaultModelId?: string;
   models: { id: string; label: string; reasoningEfforts?: { id: string; label: string }[]; defaultReasoningEffort?: string }[];
   permissions: { id: string; label: string; description: string }[];
+  /** DSH Agent presets (ADR 0017); unavailable ones stay visible and unselectable. */
+  presets?: { id: string; label: string; description: string; available: boolean }[];
+  defaultPresetId?: string;
 };
 export type DraftConfigurationProps = {
   catalogs: DraftConfigurationCatalog[];
@@ -55,7 +58,8 @@ export function DraftConfiguration({ catalogs, harnessId, configuration, disable
     const selected = catalog?.models.find(item => item.id === id);
     if (disabled || !catalog?.available || !selected) return;
     const nativeDefault = selected.reasoningEfforts?.find(item => item.id === selected.defaultReasoningEffort);
-    onConfigurationChange({ modelId: selected.id, permissionId: configuration.permissionId, ...(nativeDefault ? { reasoningEffort: nativeDefault.id } : {}) });
+    onConfigurationChange({ modelId: selected.id, permissionId: configuration.permissionId, ...(nativeDefault ? { reasoningEffort: nativeDefault.id } : {}),
+      ...(configuration.agentPreset ? { agentPreset: configuration.agentPreset } : {}) });
     showModels(false);
   }
   function reset() { if (!disabled && canReset && defaultModel) setModel(defaultModel.id); }
@@ -114,5 +118,24 @@ export function DraftConfiguration({ catalogs, harnessId, configuration, disable
         {!catalog?.permissions.length && <p className="draft-config-note">暂无可用权限配置。</p>}
       </Popover.Content></Popover.Portal>
     </Popover.Root>
+    {!!catalog?.presets?.length && <PresetChoice catalog={catalog} value={configuration.agentPreset ?? catalog.defaultPresetId} disabled={disabled}
+      onChange={agentPreset => onConfigurationChange({ ...configuration, agentPreset })}/>}
   </div>;
+}
+
+/** DSH Agent preset, chosen once for the new conversation; it cannot change after the first turn. */
+function PresetChoice({ catalog, value, disabled, onChange }: { catalog: DraftConfigurationCatalog; value?: string; disabled: boolean; onChange(id: string): void }) {
+  const presets = catalog.presets ?? [];
+  const selected = presets.find(item => item.id === value);
+  const invalid = !selected?.available;
+  return <Popover.Root>
+    <Popover.Trigger asChild><button type="button" className="draft-config-trigger draft-preset-trigger" aria-label="Agent 预设" disabled={disabled} data-invalid={invalid || undefined}>
+      {selected ? selected.label : '选择预设'}{selected && !selected.available && <small>不可用</small>}<ChevronDown size={11}/></button></Popover.Trigger>
+    <Popover.Portal><Popover.Content className="draft-config-menu draft-preset-menu" side="top" align="start" sideOffset={8} collisionPadding={12} aria-label="Agent 预设">
+      <span className="draft-config-caption">Agent 预设</span>
+      {presets.map(item => <Popover.Close asChild key={item.id}><button type="button" className="draft-config-option" disabled={disabled || !catalog.available || !item.available} aria-pressed={item.id === selected?.id} onClick={() => onChange(item.id)}>
+        <span>{item.label}{item.id === catalog.defaultPresetId && ' · 默认'}<small>{item.available ? item.description : '此 Host 没有提供这个预设，暂不可选'}</small></span>{item.id === selected?.id && <Check size={13}/>}</button></Popover.Close>)}
+      <p className="draft-config-note">首次发送后固定，之后不能更改。</p>
+    </Popover.Content></Popover.Portal>
+  </Popover.Root>;
 }

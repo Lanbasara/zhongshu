@@ -582,8 +582,11 @@ export class Workbench {
         const configuration = adapter.normalizeConfiguration?.(conversation.configuration) ?? conversation.configuration;
         const model = catalog?.models.find(item => item.id === configuration.modelId);
         const effort = configuration.reasoningEffort;
+        const preset = configuration.agentPreset;
         if (!catalog?.available || !model || (effort !== undefined && !model.reasoningEfforts?.some(item => item.id === effort)) ||
-          !catalog.permissions.some(item => item.id === conversation.configuration.permissionId))
+          !catalog.permissions.some(item => item.id === conversation.configuration.permissionId) ||
+          // A chosen preset must be offered and usable now; it is never swapped for another (ADR 0017).
+          (preset !== undefined && !catalog.presets?.some(item => item.id === preset && item.available)))
           throw new StoreError('configuration_unavailable', 409);
         const binding = await adapter.create({ cwd: conversation.cwd, configuration: conversation.configuration, title: conversation.title, ...(conversation.nativePreparationId ? { preparedId: conversation.nativePreparationId } : {}) }, value => {
           // During shutdown this task remains tracked: a native identity already created must still be saved.

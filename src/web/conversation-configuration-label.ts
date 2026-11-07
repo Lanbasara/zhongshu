@@ -23,9 +23,12 @@ export function conversationConfigurationLabel(conversation: Pick<Conversation, 
     return candidate?.provider === legacy.provider && candidate.model === legacy.model;
   }) : undefined);
   const effortId = selected?.reasoningEffort ?? legacy?.reasoningEffort;
+  const presetId = selected?.agentPreset;
   return {
     model: model?.label ?? legacy?.model ?? '配置按对话固定',
     reasoningEffort: model?.reasoningEfforts?.find(item => item.id === effortId)?.label ?? effortId,
+    // Conversations created before presets have none recorded here; the Host default applied to them.
+    ...(presetId ? { agentPreset: catalog?.presets?.find(item => item.id === presetId)?.label ?? presetId } : {}),
   };
 }
 

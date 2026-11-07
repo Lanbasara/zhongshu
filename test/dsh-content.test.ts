@@ -31,3 +31,19 @@ test('DSH producer exit outcome survives tool result and keeps original readable
   assert.equal(textOnly[0]?.status,'completed');
   assert.equal(itemFrom('session',event('job/settled',2,{kind:'bash',producerReported:false,toolCall:{callId:'missing'},detail:'exit code: 1'})),undefined);
 });
+test('DSH PTC: each tool a run_code script calls shows as its own tool step with name, arguments and output', () => {
+  const root = 'call_00_root'; const sub = `${root}:ptc:1`;
+  const events = [
+    event('tool/call', 1, { turn: 1, step: 1, callId: root, name: 'run_code', arguments: { code: 'await tools.bash({ command: "ls" })' } }),
+    event('tool/ptc-dispatch-start', 2, { rootCallId: root, parentCallId: root, subCallId: sub, name: 'bash', arguments: { description: 'List files', command: 'ls -la' } }),
+    event('tool/ptc-dispatch', 3, { rootCallId: root, parentCallId: root, subCallId: sub, name: 'bash', arguments: { description: 'List files', command: 'ls -la' }, isError: false, content: [{ type: 'text', text: 'total 0\n' }], meta: {} }),
+    event('tool/ptc-dispatch', 4, { rootCallId: root, parentCallId: root, subCallId: `${root}:ptc:2`, name: 'glob', arguments: { pattern: '**/*' }, isError: true, content: [{ type: 'text', text: 'denied' }], meta: {} }),
+  ];
+  const started = itemFrom('session', events[1]!, false, 1);
+  assert.equal(started?.id, `dsh:session:tool:${sub}`); assert.equal(started?.status, 'running'); assert.equal(started?.tool?.name, 'bash');
+  const done = itemFrom('session', events[2]!, false, 1);
+  assert.equal(done?.id, started?.id, 'start and finish are one step');
+  assert.deepEqual(done?.tool, { name: 'bash', input: JSON.stringify({ description: 'List files', command: 'ls -la' }), output: 'total 0\n' });
+  assert.equal(done?.status, 'completed');
+  assert.equal(itemFrom('session', events[3]!, false, 1)?.status, 'failed');
+});

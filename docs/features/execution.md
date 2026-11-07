@@ -109,6 +109,8 @@ node test/support/feature-fixture.ts inspect --root "$zh_verify_root" --title '�
 
 ## Gotchas
 
+- **DSH 0.2.2 起，`session/follow` 默认只观察、不唤醒 Agent。** 中书的主会话跟随带 `activate: true`（0.2.1 会忽略这个字段），否则 Host 重启后被打断的轮次不会结束、排队输入不处理、停止失败。子 Agent 的跟随保持只观察。验证方法：运行中重启 DSH Host，对话应结束为已中断，下一条消息正常执行。
+
 - `accepted` 是原生接收，操作记录不会为了表示工作结束而改成 completed；终态来自对话 state/原生历史。
 - 每个对话可保留 20 条排队消息，图片与引用沿用普通消息的归属和资源检查。未派发条目可编辑或删除。错过 Codex 目标轮、停止或失败后保留队列并暂停，用户可选择“继续派发”。DSH 的“尽快发送”允许后续轮接收，实际轮次以原生用户条目为准。
 - 带显式技能的 Codex 消息保留在队列，等下一轮调用。两端技能随队列派发的原生证据见[技能引用 U12](conversation-usability.md#u12-技能引用)。

@@ -44,6 +44,8 @@ Web manifest 提供独立窗口入口，推送与安装见下方[通知与安装
 
 [new-conversation.tsx](../src/web/new-conversation.tsx) 管理每工作区草稿和首次发送：生成稳定对话/操作编号，创建、等待准备、上传并派发，失败后沿原编号核对。它通过 [new-conversation-state.ts](../src/web/new-conversation-state.ts) 在 sessionStorage 保留文字、材料引用、配置及首发状态，未上传图片在 IndexedDB；[conversation-preferences.ts](../src/web/conversation-preferences.ts) 的 localStorage 只记配置偏好，不存消息正文。首次发送前不创建正式产品对话；DSH 可提前准备原生空会话，Codex 不提前创建；零工作区入口引导登记。长期决定见 [ADR 0010](adr/0010-draft-first-conversation.md) 与 [ADR 0011](adr/0011-dsh-prepared-session.md)，复验入口见 [创建对话](features/conversations.md)。
 
+DSH 对话的 Agent 预设（标准或 PTC）是固定配置的一部分（[ADR 0017](adr/0017-dsh-agent-preset.md)）：模型目录给出可选预设与中书自己的默认（标准）；Workbench 只接受目录中可用的预设，Store 把它纳入创建身份（仅在选择时，旧对话的身份不变）；DSH 在新建或首发占用准备时设定，并以原生投影核对。
+
 配置偏好失效或缺失时，私有 `/conversation-defaults` 从既有 accepted message 操作找最近成功发送的可用工作区/对话，不另建服务端偏好数据。历史 DSH 编码配置仅在新草稿默认响应中拆分 model/effort，不改旧绑定。模型目录提供真实支持的 reasoningEfforts 和可靠默认；Workbench 准备阶段校验，Store 将可选 reasoningEffort 纳入不可变配置及重试身份。已有对话不允许通过新建配置组件重配。
 
 私有 `/draft-files` 按登记工作区边界列文件；`/draft-skills` 仅在 adapter 有创建前能力时读取。Codex 按 cwd 读取并在提交时核对技能身份；DSH 通过带认证与 CSRF 的 `POST /draft-preparation` 准备并读取技能。Workbench/Store 持久化每工作区一份未占用准备；浏览器持有与原生身份不同的 preparationId，首发原子占用并沿原生身份配置和派发。已占用身份不能被另一草稿复用，未知准备保留核对；重复进入不会不断增加空会话。

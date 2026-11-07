@@ -21,6 +21,8 @@ export const projectionsSchema = z.object({ asOfSeq: z.number().int().nonnegativ
   userQuestions: z.object({ active: z.array(z.unknown()).max(1000) }).optional(),
   // Plan mode (dsh-plan-mode): `pending` while a requested change has not taken effect.
   plan: z.object({ active: z.boolean(), pending: z.boolean() }).passthrough().optional(),
+  // The Agent preset the session runs with (ADR 0017); locked once the first turn starts.
+  agentPreset: z.string().max(200).nullable().optional(),
   tokenUsage: z.unknown().optional(), contextPressure: z.unknown().optional(),
   // Sub-agent projections: the parent's direct-child catalog and team; timing lives on each child.
   subagentCatalog: z.array(z.unknown()).max(2000).optional(), agentTeam: z.unknown().optional(), subagentTiming: z.unknown().optional(),
@@ -172,12 +174,13 @@ export function stateFrom(binding: Binding, snapshot: Snapshot): NativeState {
 function executionState(binding: Binding, snapshot: Snapshot): NativeState {
   if (snapshot.header.id !== binding.id || snapshot.header.cwd !== binding.cwd) throw new HarnessError('DSH_BINDING_MISMATCH');
   const values = snapshot.projections.values; const selected = selectedModel(binding.configuration);
-  const configurationVerified = sameModel(values.modelSelection?.next, selected) && (!values.modelSelection?.lastUsed || sameModel(values.modelSelection.lastUsed, selected)) && values.permissions?.currentValue === binding.configuration.permissionId;
+  const configurationVerified = sameModel(values.modelSelection?.next, selected) && (!values.modelSelection?.lastUsed || sameModel(values.modelSelection.lastUsed, selected)) && values.permissions?.currentValue === binding.configuration.permissionId
+    && (binding.configuration.agentPreset === undefined || values.agentPreset === binding.configuration.agentPreset);
   const pendingInputs = (values.inbox?.['next-turn'].length ?? 0)
     + (values.inbox?.['next-step'].filter(input => !passiveContext(input)).length ?? 0);
   const boundary = boundaryFrom(snapshot);
   const latestRun = boundary && boundary.lastTurn > 0 ? runId(binding.id, boundary.lastTurn) : undefined;
-  if (!configurationVerified) return { status: boundary?.openTurnStartSeq != null ? 'running' : 'unknown', runId: latestRun, pendingInputs, configurationVerified: false, reason: '原生模型或权限与对话配置不一致，已停止派发；正在执行的工作仍可停止。' };
+  if (!configurationVerified) return { status: boundary?.openTurnStartSeq != null ? 'running' : 'unknown', runId: latestRun, pendingInputs, configurationVerified: false, reason: '原生模型、权限或 Agent 预设与对话配置不一致，已停止派发；正在执行的工作仍可停止。' };
   if (!boundary || !values.inbox) return { status: 'unknown', pendingInputs, configurationVerified, reason: '原生状态不完整，需要重新核对。' };
   const running = boundary.openTurnStartSeq !== null;
   const approvals = new Set<string>(); const questions = new Set<string>();
@@ -214,6 +217,15 @@ export function itemFrom(session: string, event: Event, live = false, inferredTu
   if (event.type === 'tool/call' && typeof data.callId === 'string') return { ...base, id: `dsh:${session}:tool:${data.callId}`, kind: 'tool', text: typeof data.name === 'string' ? data.name.slice(0, 120) : '工具执行', tool: { name: typeof data.name === 'string' ? data.name.slice(0,200) : '工具执行', input: (typeof (data.input ?? data.arguments) === 'string' ? String(data.input ?? data.arguments) : JSON.stringify(data.input ?? data.arguments ?? {})).slice(0,32000) }, status: 'running' };
   // rc.4 marks a successfully invoked bash tool isError=false even when its
   // command exits nonzero. Use the producer's job outcome, never parse stdout.
+  // PTC (ADR 0017): a run_code script calls tools itself; each sub-call is its own record, shown like an ordinary tool step.
+  if ((event.type === 'tool/ptc-dispatch-start' || event.type === 'tool/ptc-dispatch') && typeof data.subCallId === 'string' && data.subCallId.length <= 1024) {
+    const name = typeof data.name === 'string' && data.name ? data.name.slice(0, 200) : '工具执行';
+    const input = (typeof data.arguments === 'string' ? data.arguments : JSON.stringify(data.arguments ?? {})).slice(0, 32000);
+    const id = `dsh:${session}:tool:${data.subCallId}`;
+    if (event.type === 'tool/ptc-dispatch-start') return { ...base, id, kind: 'tool', text: name, tool: { name, input }, status: 'running' };
+    const output = textContent(data.content).slice(0, 128000);
+    return { ...base, id, kind: 'tool', text: name, tool: { name, input, output }, status: data.isError === true ? 'failed' : 'completed' };
+  }
   if (event.type === 'job/settled' && data.kind === 'bash' && data.producerReported === true) {
     const callId = object(data.toolCall).callId;
     const match = typeof data.detail === 'string' ? /^exit code: (-?\d{1,10})$/.exec(data.detail) : null;

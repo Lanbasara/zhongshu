@@ -123,7 +123,9 @@ export const draftCatalogs: DraftConfigurationCatalog[] = [
     ] },
   { id: 'dsh', available: true,
     models: [{ id: 'example-other', label: '另一个示例模型', reasoningEfforts: ['off', 'low', 'high'].map(id => ({ id, label: `示例档位 ${id}` })) }],
-    permissions: [{ id: 'read-only', label: '只读', description: '示例：只能读取工作区。' }, { id: 'workspace-write', label: '工作区读写', description: '示例：可以在工作区内修改文件。' }] },
+    permissions: [{ id: 'read-only', label: '只读', description: '示例：只能读取工作区。' }, { id: 'workspace-write', label: '工作区读写', description: '示例：可以在工作区内修改文件。' }],
+    presets: [{ id: 'standard', label: '标准', description: 'DSH 的默认方式：Agent 逐个调用工具。', available: true }, { id: 'ptc', label: 'PTC', description: 'Agent 写脚本批量调用工具，适合大量重复的读写与检索。', available: true }],
+    defaultPresetId: 'standard' },
 ];
 
 export const subagents: SubagentSummary[] = [
