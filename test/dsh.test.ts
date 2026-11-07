@@ -25,6 +25,7 @@ async function host() {
   let rejectModel = false; let losePromptReceipt = false; let exchanges = 0; let nextPage: (() => void) | undefined; let followCalls = 0;
   let catalog: unknown = { groups: [{ id: 'deepseek-account', name: 'DeepSeek', models: [{ id: 'test-model', name: 'Test', reasoning: { efforts: [{ id: 'high', name: 'High' }] } }] }] };
   let signedIn = true;
+  let profile: 'ready' | 'failed' | 'rejected' = 'ready';
   const wss = new WebSocketServer({ noServer: true });
   // Answering clients (ADR 0016): forwarded requests park until settled and are replayed to every new $events stream.
   const eventStreams = new Map<string, { socket: WebSocket; clientId: string }>(); let clients = 0;
@@ -55,6 +56,8 @@ async function host() {
       let value: unknown;
       switch (body.method) {
         case 'account/getState': value = { status: signedIn ? 'credential-stored' : 'signed-out' }; break;
+        // A rejected grant is cleared by the Host and the read yields null (DSH deepseek-account README).
+        case 'account/getProfile': value = profile === 'rejected' ? (signedIn = false, null) : profile === 'failed' ? { status: 'failed' } : { status: 'ready', value: { id: 'u1', name: 'Synthetic', contact: '138****9119' } }; break;
         case 'session/modelCatalog': value = catalog; break;
         case 'permissionPresets/catalog': value = { options: ['workspace-write', 'danger-full-access'].map(value => ({ value, name: value, description: 'Fixture permission' })) }; break;
         case 'session/list': assert.deepEqual(args, { _request: {} }); value = { items: [...sessions.values()].map(s => ({ sessionId: s.id, cwd: s.cwd, blank: !s.turn })) }; break;
@@ -141,7 +144,7 @@ async function host() {
       return eventId;
     },
     withdraw(eventId: string) { parked.delete(eventId); for (const [streamId, stream] of eventStreams) stream.socket.send(JSON.stringify({ type: 'item', streamId, value: { type: 'cancel', eventId } })); },
-    dropNextResult() { failNextResult = 'drop'; }, followCalls: () => followCalls, setCatalog(value: unknown) { catalog = value; }, signOut() { signedIn = false; }, onNextPage(hook: () => void) { nextPage = hook; }, exchanges: () => exchanges, rejectModel: () => { rejectModel = true; }, losePromptReceipt: () => { losePromptReceipt = true; }, live(session: string, frame: unknown) { for (const [streamId, follow] of follows) if (follow.session === session) follow.socket.send(JSON.stringify({ type: 'item', streamId, value: { type: 'assistant-stream', frame } })); }, disconnect() { for (const peer of peers.values()) peer?.terminate(); }, async close() { for (const peer of peers.values()) peer?.terminate(); await new Promise<void>(resolve => wss.close(() => resolve())); await new Promise<void>(resolve => server.close(() => resolve())); } };
+    dropNextResult() { failNextResult = 'drop'; }, followCalls: () => followCalls, setCatalog(value: unknown) { catalog = value; }, signOut() { signedIn = false; }, signIn() { signedIn = true; }, setProfile(value: 'ready' | 'failed' | 'rejected') { profile = value; }, onNextPage(hook: () => void) { nextPage = hook; }, exchanges: () => exchanges, rejectModel: () => { rejectModel = true; }, losePromptReceipt: () => { losePromptReceipt = true; }, live(session: string, frame: unknown) { for (const [streamId, follow] of follows) if (follow.session === session) follow.socket.send(JSON.stringify({ type: 'item', streamId, value: { type: 'assistant-stream', frame } })); }, disconnect() { for (const peer of peers.values()) peer?.terminate(); }, async close() { for (const peer of peers.values()) peer?.terminate(); await new Promise<void>(resolve => wss.close(() => resolve())); await new Promise<void>(resolve => server.close(() => resolve())); } };
 }
 
 async function setup() {
@@ -738,4 +741,18 @@ test('DSH presents a plan review with its plan and answers with the native optio
       [second, { kind: 'result', value: { answers: [{ id: 'plan-review', selected: ['Approve'] }] } }],
     ], 'approval is exactly the approve label without feedback');
   } finally { await context.close(); }
+});
+
+test('DSH account: a platform check makes it valid, a failed check unverified, a cleared grant rejected', async t => {
+  const context = await setup(); t.after(() => context.close());
+  assert.deepEqual(await context.adapter.account!(), { state: 'valid', identity: 'DeepSeek 账号 138****9119' });
+  const profileCall = context.fixture.calls.find(call => call.method === 'account/getProfile');
+  assert.deepEqual(Object.keys(profileCall!.args.client).sort(), ['locale', 'timezoneOffsetSeconds', 'version']);
+  context.fixture.setProfile('failed');
+  assert.deepEqual(await context.adapter.account!(), { state: 'unverified' });
+  context.fixture.setProfile('rejected');
+  assert.deepEqual(await context.adapter.account!(), { state: 'rejected' });
+  assert.deepEqual(await context.adapter.account!(), { state: 'signed-out' }, 'after the rejection is reported it is plainly signed out');
+  context.fixture.signIn(); context.fixture.setProfile('ready');
+  assert.equal((await context.adapter.account!()).state, 'valid');
 });

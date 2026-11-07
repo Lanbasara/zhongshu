@@ -107,6 +107,21 @@ export type NativeChange =
   | { type: 'requests' }
   | { type: 'invalidate' };
 
+/**
+ * A Harness account as Zhongshu last verified it (ADR 0015). Never carries credentials.
+ * `valid` means the vendor accepted the credential just now; local presence alone is never `valid`.
+ */
+export type NativeAccount = {
+  state: 'valid' | 'signed-out' | 'rejected' | 'unverified';
+  /** Display-safe identity, already masked. */
+  identity?: string;
+  plan?: string;
+  usage?: { usedPercent: number; resetsAt?: number; windowMinutes?: number };
+};
+/** A native device-code login. The user code is shown once to the page that asked and never stored. */
+export type DeviceLoginStart = { loginId: string; verificationUrl: string; userCode: string };
+export type AccountEvent = { type: 'changed' } | { type: 'login'; loginId: string; success: boolean; reason?: string };
+
 export interface HarnessAdapter {
   readonly id: HarnessId;
   readonly earlyInput?: 'current' | 'soon';
@@ -118,6 +133,13 @@ export interface HarnessAdapter {
   /** Turn native Plan mode on or off (`native` Harnesses). Repeating the same request is harmless. */
   setPlan?(binding: Binding, active: boolean): Promise<Receipt>;
   catalog(): Promise<Catalog>;
+  /** Verify the account with the vendor. Rejects when the Host cannot be reached. */
+  account?(): Promise<NativeAccount>;
+  /** Start a native device-code login; a new start supersedes an older one (Codex). */
+  startDeviceLogin?(): Promise<DeviceLoginStart>;
+  cancelDeviceLogin?(loginId: string): Promise<'canceled' | 'notFound'>;
+  /** Native account notifications: login completion and account changes. */
+  onAccountEvent?(listener: (event: AccountEvent) => void): () => void;
   /** Project legacy configuration into the current catalog shape without mutating its stored identity. */
   normalizeConfiguration?(configuration: Configuration): Configuration;
   skills?(binding: Binding): Promise<SkillOption[]>;

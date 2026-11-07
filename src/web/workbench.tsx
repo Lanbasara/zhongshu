@@ -34,6 +34,7 @@ import { SubagentPanelHost, subagentDisplays, useSubagentList } from './subagent
 import { ConversationRequests } from './requests.tsx';
 import { PlanArea, PlanToolbarToggle, usePlan } from './plan.tsx';
 import { onNotificationOpen, parseEntry, setBadge } from './push-client.ts';
+import { AccountBanner, useAccounts } from './harness-accounts.tsx';
 
 const failures: Record<string, string> = {
   conversation_archived: '这段对话已归档，请恢复后继续。',
@@ -544,6 +545,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
   const permission = configuration?.harnesses.find(h => h.id === conversation?.harnessId)?.permissions.find(p => p.id === conversation?.configuration.permissionId);
   const storage = useStorage();
   const attention = useAttention(listRevision + attentionRevision, report);
+  const accounts = useAccounts(report);
   const connectionView = { text: connection, state: connection === '已连接' ? 'online' as const : connection.startsWith('离线') ? 'offline' as const : 'connecting' as const };
   const dismissToast = useCallback((id: string) => setToasts(current => current.filter(toast => toast.id !== id)), []);
   const pushToast = useCallback((toast: Omit<ToastView, 'id'>) => {
@@ -639,8 +641,9 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
       csrf={csrf} editStatusSignal={JSON.stringify([conversation?.id, conversation?.state.status, conversation?.state.pendingInputs, unresolved])} expanded={readerExpanded} onExpand={setReaderExpanded} onClose={closeReader}/> : undefined;
   return <><WorkbenchFrame style={sidebarWidth.style} navigationOpen={navigation} onNavigationChange={setNavigation} collapsed={collapsed} onCollapsedChange={setCollapsed}
     sidebar={sidebar} header={<>{header}{headerActions}</>} panel={panel} panelExpanded={!!reader && readerExpanded && !subagentPanel}>
+      {view !== 'settings' && <AccountBanner accounts={accounts.accounts} onOpen={() => openSettings('account')}/>}
       {view === 'settings' ? <SettingsView tab={settingsTab} onTab={setSettingsTab} configuration={configuration} workspaceAction={setWorkspaceAction} csrf={csrf} report={report}
-          storage={storage} connection={connectionView} logout={logout} busy={busy} revision={listRevision} choose={choose} manage={setManaging}/>
+          storage={storage} connection={connectionView} logout={logout} busy={busy} revision={listRevision} choose={choose} manage={setManaging} accounts={accounts}/>
         : view === 'archive' ? <ArchiveView configuration={configuration} revision={listRevision} csrf={csrf} report={report} choose={choose} manage={setManaging}/>
         : creating ? configuration ? <NewConversation key={String(creating)} configuration={configuration} initialWorkspace={typeof creating==='string'?creating:undefined} addedWorkspace={addedWorkspace} csrf={csrf} onWorkspace={startDraft} onAddWorkspace={()=>setWorkspaceAction({kind:'add'})} onCreated={c=>{refreshList(value=>value+1);choose(c.id);}} report={report}/> : <p className="view-status" role="status">正在读取工作区与配置…</p>
         : !selected ? <section className="empty-workbench">

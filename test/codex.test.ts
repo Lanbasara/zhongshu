@@ -657,3 +657,57 @@ test('A proposed plan is shown as a plan, and Plan-mode questions are answered a
   p.notify('serverRequest/resolved', { threadId: saved.id, requestId: 21 });
   assert.deepEqual(await receipt, { outcome: 'accepted' });
 });
+
+test('Codex account: the vendor decides; a 401 that survives one refresh is rejected, other failures unverified', async t => {
+  let limits: 'ok' | '401' | '401-once' | '500' = 'ok'; let refreshes = 0; let stale = false;
+  let account: unknown = { type: 'chatgpt', email: 'someone@example.com', planType: 'pro' };
+  const p = await peer(t, (request, socket) => {
+    if (request.method === 'account/read') {
+      if (request.params.refreshToken) refreshes++;
+      if (account === 'refresh-failed') { socket.send(JSON.stringify({ id: request.id, error: { code: -32603, message: 'Your access token could not be refreshed. Please log out and sign in again.' } })); return NO_RESPONSE; }
+      return { account, requiresOpenaiAuth: true };
+    }
+    if (request.method === 'account/rateLimits/read') {
+      const rejected = limits === '401' || (limits === '401-once' && refreshes === 0);
+      const message = rejected ? 'failed to fetch codex rate limits: GET https://chatgpt.com/backend-api/wham/usage failed: 401 Unauthorized; body={"detail":"x"}'
+        : limits === '500' ? 'failed to fetch codex rate limits: error sending request' : undefined;
+      if (message) { socket.send(JSON.stringify({ id: request.id, error: { code: -32603, message } })); return NO_RESPONSE; }
+      return { rateLimits: { primary: { usedPercent: 74, windowDurationMins: 10080, resetsAt: 1794443511 } } };
+    }
+    if (request.method === 'getAuthStatus') return { authMethod: stale ? 'chatgpt' : null, authToken: null, requiresOpenaiAuth: true };
+    if (request.method === 'account/login/start') return { type: 'chatgptDeviceCode', loginId: 'login-1', verificationUrl: 'https://auth.openai.com/codex/device', userCode: 'ABCD-EFGHJ' };
+    if (request.method === 'account/login/cancel') return { status: 'canceled' };
+    return undefined;
+  });
+  const signedIn = account; account = null;
+  assert.deepEqual(await p.adapter.account!(), { state: 'signed-out' }, 'no account and no stored credential');
+  stale = true;
+  assert.deepEqual(await p.adapter.account!(), { state: 'rejected' }, 'a stored credential that no longer yields an account is rejected');
+  stale = false; account = signedIn;
+  assert.deepEqual(await p.adapter.account!(), { state: 'valid', identity: 's***@example.com', plan: 'Pro', usage: { usedPercent: 74, resetsAt: 1794443511000, windowMinutes: 10080 } });
+  assert.deepEqual(p.calls.find(call => call.method === 'account/read')!.params, { refreshToken: false }, 'plain reads never force a refresh');
+  limits = '401-once'; refreshes = 0;
+  assert.equal((await p.adapter.account!()).state, 'valid', 'a renewable token is refreshed once, not reported as rejected');
+  assert.equal(refreshes, 1);
+  limits = '401';
+  assert.deepEqual(await p.adapter.account!(), { state: 'rejected', identity: 's***@example.com', plan: 'Pro' });
+  limits = '500';
+  assert.equal((await p.adapter.account!()).state, 'unverified');
+  account = 'refresh-failed';
+  assert.deepEqual(await p.adapter.account!(), { state: 'rejected' }, 'an unrenewable credential is reported as rejected');
+  account = null;
+  assert.deepEqual(await p.adapter.account!(), { state: 'rejected' }, 'later plain absence is still the lost credential');
+  assert.equal((await p.adapter.catalog()).reason, 'codex_login_required');
+  account = { type: 'chatgpt', email: 'someone@example.com', planType: 'pro' }; limits = 'ok';
+  await p.adapter.account!();
+  account = null;
+  assert.deepEqual(await p.adapter.account!(), { state: 'rejected' }, 'an account that disappears was rejected');
+  const events: unknown[] = []; p.adapter.onAccountEvent!(event => events.push(event));
+  assert.deepEqual(await p.adapter.startDeviceLogin!(), { loginId: 'login-1', verificationUrl: 'https://auth.openai.com/codex/device', userCode: 'ABCD-EFGHJ' });
+  assert.deepEqual(p.calls.find(call => call.method === 'account/login/start')!.params, { type: 'chatgptDeviceCode' });
+  p.notify('account/login/completed', { loginId: 'login-1', success: false, error: 'Login was not completed', onboardingEntrypoint: null });
+  p.notify('account/updated', { authMode: 'chatgpt', planType: 'pro' });
+  await until(() => events.length === 2);
+  assert.deepEqual(events, [{ type: 'login', loginId: 'login-1', success: false, reason: 'Login was not completed' }, { type: 'changed' }]);
+  assert.equal(await p.adapter.cancelDeviceLogin!('login-1'), 'canceled');
+});

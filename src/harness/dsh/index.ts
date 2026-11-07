@@ -3,7 +3,7 @@ import { z } from 'zod';
 import type { QueueDelivery, RequestAnswer, TeamView } from '../../shared/workbench.ts';
 import { subagentIdSchema, subagentLimit } from '../../shared/workbench.ts';
 import { HarnessError } from '../types.ts';
-import type { Binding, Catalog, Configuration, HarnessAdapter, HarnessInput, HistoryPage, NativeChange, NativeItem, NativeRequest, NativeState, NativeSubagent, Receipt, SubagentHistory, SubagentSnapshot } from '../types.ts';
+import type { Binding, Catalog, Configuration, HarnessAdapter, HarnessInput, HistoryPage, NativeAccount, NativeChange, NativeItem, NativeRequest, NativeState, NativeSubagent, Receipt, SubagentHistory, SubagentSnapshot } from '../types.ts';
 import { Connection, NativeRejection, type Interaction } from './connection.ts';
 import { parseInteraction, requestKey, toolCommand, type Parsed } from './requests.ts';
 import { LiveAssistant } from './live.ts';
@@ -203,6 +203,27 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
       return remember(binding, { ...result, ...(terminalStatus ? { terminalRunId: targetRunId, terminalStatus } : {}) });
     }
     catch (error) { if (error instanceof HarnessError && error.code === 'DSH_BINDING_INVALID') throw error; return disconnectedState(binding); }
+  }
+
+  /** Whether this process last saw a stored DeepSeek account; a stored-to-absent change means the platform rejected it. */
+  let accountStored: boolean | undefined;
+  /**
+   * ADR 0015. DSH keeps no expiry or refresh: when the platform rejects the grant, the Host clears it. A profile read
+   * asks the platform; it can fail for other reasons while inference still works, which is shown as unverified.
+   */
+  async function account(): Promise<NativeAccount> {
+    const stateSchema = z.object({ status: z.enum(['signed-out', 'credential-stored']) }).passthrough();
+    const absent = (): NativeAccount => { const rejected = accountStored === true; accountStored = false; return { state: rejected ? 'rejected' : 'signed-out' }; };
+    if (stateSchema.parse(await connection.call('account/getState')).status === 'signed-out') return absent();
+    accountStored = true;
+    const client = { version: 'zhongshu', locale: 'zh-CN', timezoneOffsetSeconds: -new Date().getTimezoneOffset() * 60 };
+    const profile = z.union([z.null(), z.object({ status: z.literal('failed') }).passthrough(),
+      z.object({ status: z.literal('ready'), value: z.object({ name: z.string().max(200).nullable().optional(), contact: z.string().max(200).nullable().optional() }).passthrough() })])
+      .parse(await connection.call('account/getProfile', { client }));
+    if (profile === null) return stateSchema.parse(await connection.call('account/getState')).status === 'signed-out' ? absent() : { state: 'unverified' };
+    if (profile.status === 'failed') return { state: 'unverified' };
+    const identity = profile.value.contact ?? profile.value.name ?? undefined;
+    return { state: 'valid', ...(identity ? { identity: `DeepSeek 账号 ${identity}` } : {}) };
   }
 
   async function catalog(): Promise<Catalog> {
@@ -615,7 +636,7 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
     await start(); return dispose;
   }
 
-  return { id: 'dsh', earlyInput: 'soon', planMode: 'native', setPlan, catalog,
+  return { id: 'dsh', earlyInput: 'soon', planMode: 'native', setPlan, catalog, account,
     normalizeConfiguration(configuration) {
       const selected = selectedModel(configuration);
       return { ...configuration, modelId: modelId({ provider: selected.provider, model: selected.model }),

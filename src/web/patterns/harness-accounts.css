@@ -1,0 +1,39 @@
+.account-list { display:grid; gap:12px; }
+.account-card { display:grid; gap:10px; padding:16px; border:1px solid var(--zs-line); border-radius:var(--zs-radius-item); background:var(--zs-surface); }
+.account-card[data-tone=danger] { border-color:color-mix(in srgb,var(--zs-danger) 35%,var(--zs-line)); }
+.account-head { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+.account-head strong { font-size:var(--zs-type-interface); font-weight:600; }
+.account-badge { display:inline-flex; align-items:center; gap:4px; padding:2px 8px; border-radius:999px; font-size:var(--zs-type-caption); font-weight:500; background:var(--zs-surface-subtle); color:var(--zs-text-secondary); }
+.account-badge[data-tone=ok] { background:color-mix(in srgb,var(--zs-success) 12%,transparent); color:var(--zs-success); }
+.account-badge[data-tone=warn] { background:var(--zs-warning-surface); color:var(--zs-warning); }
+.account-badge[data-tone=danger] { background:var(--zs-danger-surface); color:var(--zs-danger); }
+.account-identity { color:var(--zs-text-secondary); font-size:var(--zs-type-control); }
+.account-usage { display:grid; gap:6px; }
+.account-usage-line { display:flex; justify-content:space-between; gap:12px; color:var(--zs-text-secondary); font-size:var(--zs-type-caption); font-variant-numeric:tabular-nums; }
+.account-meter { height:6px; border-radius:999px; background:var(--zs-surface-subtle); overflow:hidden; }
+.account-meter i { display:block; height:100%; border-radius:inherit; background:var(--zs-accent); }
+.account-meter i[data-high] { background:var(--zs-warning); }
+.account-note { display:flex; gap:6px; align-items:flex-start; color:var(--zs-text-muted); font-size:var(--zs-type-control); line-height:1.6; }
+.account-note svg { flex:none; margin-top:4px; }
+.account-note.is-urgent { color:var(--zs-text); }
+.account-note.is-urgent svg { color:var(--zs-danger); }
+.account-note.is-warn svg { color:var(--zs-warning); }
+.account-foot { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; }
+.account-checked { color:var(--zs-text-muted); font-size:var(--zs-type-caption); }
+.account-actions { display:flex; gap:8px; flex-wrap:wrap; }
+.account-login { display:grid; gap:10px; padding:12px 14px; border-radius:var(--zs-radius-control); background:var(--zs-surface-subtle); font-size:var(--zs-type-control); line-height:1.6; }
+.account-login[role=status] { display:flex; align-items:center; gap:8px; color:var(--zs-text-secondary); }
+.account-login ol { margin:0; padding-left:20px; list-style:decimal; display:grid; gap:6px; }
+.account-login a { display:inline-flex; align-items:center; gap:3px; color:var(--zs-accent-text); text-decoration:underline; text-underline-offset:2px; word-break:break-all; }
+.account-code { display:flex; align-items:center; gap:8px; margin-top:6px; }
+.account-code code { padding:4px 10px; border-radius:var(--zs-radius-control); background:var(--zs-surface); border:1px solid var(--zs-line); font:600 18px/1.3 var(--zs-font-code); letter-spacing:.12em; }
+.account-waiting { display:flex; align-items:center; gap:8px; color:var(--zs-text-secondary); }
+.account-waiting span { flex:1; }
+.account-login.is-failed { background:var(--zs-danger-surface); }
+.account-spin { animation:zs-spin var(--zs-duration-activity) linear infinite; }
+.account-banner { display:flex; align-items:center; gap:8px; padding:8px 12px; border-radius:var(--zs-radius-control); background:var(--zs-danger-surface); color:var(--zs-text); font-size:var(--zs-type-control); }
+.account-banner svg { flex:none; color:var(--zs-danger); }
+.account-banner span { flex:1; min-width:0; }
+@media(prefers-reduced-motion:reduce) { .account-spin { animation:none; } }
+.account-banner-slot { flex:none; padding:10px max(16px,calc((100% - 760px) / 2 + 16px)) 0; }
+.account-banner-slot:empty { display:none; }

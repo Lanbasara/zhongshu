@@ -1,7 +1,7 @@
 import { basename, isAbsolute, normalize } from 'node:path';
 import { z } from 'zod';
 import { HarnessError } from '../types.ts';
-import type { Binding, Catalog, Configuration, HarnessAdapter, HarnessInput, HistoryPage, NativeChange, NativeItem, NativeRequest, NativeState, NativeSubagent, Receipt, SubagentHistory, SubagentSnapshot } from '../types.ts';
+import type { AccountEvent, Binding, Catalog, Configuration, DeviceLoginStart, HarnessAdapter, HarnessInput, NativeAccount, HistoryPage, NativeChange, NativeItem, NativeRequest, NativeState, NativeSubagent, Receipt, SubagentHistory, SubagentSnapshot } from '../types.ts';
 import { CodexRpc, RpcError, type ServerRequest } from './rpc.ts';
 import { answerableMethods, parseServerRequest, type Parsed } from './requests.ts';
 import { inputFields } from '../../shared/content.ts';
@@ -69,6 +69,23 @@ const permissionLabels: Record<string, string> = { ':read-only': '只读', ':wor
  * This boundary validates native IPC, fixes conversation configuration, never logs content,
  * never reads credentials, and never starts/stops the independently managed App Server.
  */
+const accountRead = z.object({
+  account: z.object({ type: z.string().max(100), email: z.string().max(320).nullable().optional(), planType: z.string().max(100).nullable().optional() }).nullable(),
+  requiresOpenaiAuth: z.boolean().default(true),
+});
+const rateLimitsRead = z.object({ rateLimits: z.object({ primary: z.object({ usedPercent: z.number().finite(), windowDurationMins: z.number().int().positive().nullable().optional(),
+  resetsAt: z.number().int().positive().nullable().optional() }).nullable().optional() }) });
+const loginIdSchema = z.string().min(1).max(200).regex(/^[A-Za-z0-9-]+$/);
+const deviceLogin = z.object({ type: z.literal('chatgptDeviceCode'), loginId: loginIdSchema,
+  verificationUrl: z.url().max(2048).refine(value => value.startsWith('https://')), userCode: z.string().min(4).max(64).regex(/^[A-Za-z0-9-]+$/) });
+/** "h***@example.com": enough to recognise the account in the admin page. */
+function maskEmail(email: string | null | undefined): string | undefined {
+  const match = email ? /^([^@\s]+)@([^@\s]+)$/.exec(email) : null;
+  return match ? `${match[1]!.slice(0, 1)}***@${match[2]}` : undefined;
+}
+const planNames: Record<string, string> = { free: 'Free', go: 'Go', plus: 'Plus', pro: 'Pro', team: 'Team', business: 'Business', enterprise: 'Enterprise', edu: 'Edu' };
+const planLabel = (plan: string | null | undefined) => plan && plan !== 'unknown' ? planNames[plan] ?? plan : undefined;
+
 class CodexAdapter implements HarnessAdapter {
   readonly id = 'codex' as const;
   readonly earlyInput = 'current' as const;
@@ -95,6 +112,10 @@ class CodexAdapter implements HarnessAdapter {
   private requestsByKey = new Map<string, Pending>();
   /** Recent file-change targets by item, to show which files an approval concerns. */
   private fileEdits = new Map<string, string[]>();
+  private accountListeners = new Set<(event: AccountEvent) => void>();
+  /** Whether this process last saw a stored ChatGPT account, and whether it was lost (could no longer be renewed). */
+  private hadAccount: boolean | undefined;
+  private accountLost = false;
 
   constructor(socketPath: string) {
     this.rpc = new CodexRpc(socketPath, {
@@ -268,9 +289,85 @@ class CodexAdapter implements HarnessAdapter {
     }
   }
 
+  /**
+   * ADR 0015: the stored account is only a claim; the rate-limit read asks the vendor. A 401/403 that survives one
+   * native refresh means the credential is rejected or cannot be renewed; any other failure means it cannot be checked now.
+   */
+  async account(): Promise<NativeAccount> {
+    let read: z.infer<typeof accountRead>;
+    try { read = await this.readAccount(); }
+    catch (error) { if (error instanceof RpcError && error.nativeKind === 'unauthorized') return { state: 'rejected' }; throw error; }
+    if (!read.requiresOpenaiAuth) return { state: 'valid', identity: '无需 OpenAI 登录的模型服务' };
+    if (!read.account) {
+      if (this.accountLost) return { state: 'rejected' };
+      // A stored credential Codex could not renew reads as no account; the auth status still names its method.
+      const stored = await this.rpc.request('getAuthStatus', { includeToken: false, refreshToken: false }).then(
+        value => z.object({ authMethod: z.string().max(100).nullable().optional() }).safeParse(value).data?.authMethod, () => undefined);
+      return { state: stored ? 'rejected' : 'signed-out' };
+    }
+    if (read.account.type !== 'chatgpt') return { state: 'unverified', identity: read.account.type === 'apiKey' ? 'API Key' : read.account.type };
+    const identity = maskEmail(read.account.email); const plan = planLabel(read.account.planType);
+    const known = { ...(identity ? { identity } : {}), ...(plan ? { plan } : {}) };
+    const readLimits = async () => parse(rateLimitsRead, await this.rpc.request('account/rateLimits/read', { excludeResetCreditDetails: true }));
+    try {
+      let limits;
+      try { limits = await readLimits(); }
+      catch (error) {
+        // An expired access token can still be renewable: ask Codex to refresh once, then ask the vendor again.
+        if (!(error instanceof RpcError && error.nativeKind === 'unauthorized')) throw error;
+        await this.rpc.request('account/read', { refreshToken: true });
+        limits = await readLimits();
+      }
+      const primary = limits.rateLimits.primary;
+      return { state: 'valid', ...known, ...(primary ? { usage: { usedPercent: Math.min(100, Math.max(0, primary.usedPercent)),
+        ...(primary.resetsAt ? { resetsAt: primary.resetsAt * 1000 } : {}), ...(primary.windowDurationMins ? { windowMinutes: primary.windowDurationMins } : {}) } } : {}) };
+    } catch (error) {
+      if (error instanceof RpcError && error.nativeKind === 'unauthorized') return { state: 'rejected', ...known };
+      if (error instanceof RpcError && error.nativeCode === -32600) return { state: 'signed-out' };
+      if (error instanceof RpcError && ['codex_disconnected', 'codex_unavailable', 'codex_adapter_closed'].includes(error.code)) throw error;
+      return { state: 'unverified', ...known };
+    }
+  }
+  /**
+   * Every account read goes through here. Codex reports an unrenewable credential once as an error and afterwards
+   * as no account at all, so whichever caller sees the error records it for the others.
+   */
+  private async readAccount(): Promise<z.infer<typeof accountRead>> {
+    try {
+      const read = parse(accountRead, await this.rpc.request('account/read', { refreshToken: false }));
+      if (read.account) this.accountLost = false; else if (this.hadAccount) this.accountLost = true;
+      this.hadAccount = !!read.account;
+      return read;
+    } catch (error) {
+      if (error instanceof RpcError && error.nativeKind === 'unauthorized') { this.accountLost = true; this.hadAccount = false; }
+      throw error;
+    }
+  }
+  async startDeviceLogin(): Promise<DeviceLoginStart> {
+    const started = parse(deviceLogin, await this.rpc.request('account/login/start', { type: 'chatgptDeviceCode' }));
+    return { loginId: started.loginId, verificationUrl: started.verificationUrl, userCode: started.userCode };
+  }
+  async cancelDeviceLogin(loginId: string): Promise<'canceled' | 'notFound'> {
+    return parse(z.object({ status: z.enum(['canceled', 'notFound']) }), await this.rpc.request('account/login/cancel', { loginId: parse(loginIdSchema, loginId) })).status;
+  }
+  onAccountEvent(listener: (event: AccountEvent) => void): () => void {
+    this.accountListeners.add(listener);
+    return () => { this.accountListeners.delete(listener); };
+  }
+  private accountEvent(method: string, raw: unknown): void {
+    let event: AccountEvent | undefined;
+    if (method === 'account/updated') event = { type: 'changed' };
+    else {
+      const completed = z.object({ loginId: loginIdSchema, success: z.boolean(), error: z.string().nullable().optional() }).safeParse(raw);
+      if (completed.success) event = { type: 'login', loginId: completed.data.loginId, success: completed.data.success,
+        ...(completed.data.error ? { reason: completed.data.error.slice(0, 200) } : {}) };
+    }
+    if (event) for (const listener of this.accountListeners) { try { listener(event); } catch { /* listeners never break routing */ } }
+  }
+
   async catalog(): Promise<Catalog> {
     try {
-      const account = parse(z.object({ account: z.object({ type: z.string().max(100) }).nullable() }), await this.rpc.request('account/read', { refreshToken: false }));
+      const account = await this.readAccount();
       if (!account.account) return { id: this.id, available: false, reason: 'codex_login_required', models: [], permissions: [] };
       const models: Catalog['models'] = []; const permissions: Catalog['permissions'] = [];
       let next: string | undefined; let defaultModelId: string | undefined;
@@ -750,6 +847,7 @@ class CodexAdapter implements HarnessAdapter {
   }
 
   private notification(method: string, raw: unknown): void {
+    if (method === 'account/updated' || method === 'account/login/completed') { this.accountEvent(method, raw); return; }
     if (!['item/started', 'item/completed', 'item/agentMessage/delta', 'turn/started', 'turn/completed', 'thread/status/changed', 'thread/queue/changed', 'thread/tokenUsage/updated', 'serverRequest/resolved'].includes(method)) return;
     const params = parse(record, raw); const threadId = parse(nativeId, params.threadId);
     if (method === 'serverRequest/resolved') { this.resolveRequest(threadId, params.requestId); return; }

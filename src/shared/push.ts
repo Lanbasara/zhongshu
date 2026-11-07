@@ -52,7 +52,7 @@ export function pushMessage(event: { kind: PushKind; conversationId?: string; ha
     failed: heading ? [heading, `${name} 失败了，点开查看原因。`, conversation] : [`${name} 对话失败了`, '点开查看原因。', conversation],
     interrupted: heading ? [heading, `${name} 中断了，点开查看。`, conversation] : [`${name} 对话中断了`, '点开查看。', conversation],
     waiting: heading ? [heading, `${name} 在等你回答或批准。`, conversation] : [`${name} 在等你回答或批准`, '点开处理。', conversation],
-    account: [`${name} 账号需要处理`, '点开设置查看。', '/'],
+    account: [`${name} 账号需要处理`, '点开设置查看并处理。', '/#settings:account'],
     test: ['中书测试通知', '这台设备能收到中书的通知。', '/'],
   };
   const [title, body, url] = words[event.kind];

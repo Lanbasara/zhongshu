@@ -7,6 +7,7 @@ import { Button, IconButton } from './ui/controls.tsx';
 import { ConnectionStatus } from './patterns/sidebar.tsx';
 import { PluginManagement } from './plugin-management.tsx';
 import { NotificationSettingsPanel } from './notification-settings.tsx';
+import { HarnessAccountsPanel, type Accounts } from './harness-accounts.tsx';
 import { StoragePanel, type useStorage } from './storage-status.tsx';
 import type { WorkspaceAction } from './workspace-management.tsx';
 
@@ -16,11 +17,11 @@ export const settingsTabs: { id: SettingsTab; label: string }[] = [
 ];
 
 /** Everything that configures the instance rather than a conversation lives here (decided 2026-11-07). */
-export function SettingsView({ tab, onTab, configuration, workspaceAction, csrf, report, storage, connection, logout, busy, revision, choose, manage }: {
+export function SettingsView({ tab, onTab, configuration, workspaceAction, csrf, report, storage, connection, logout, busy, revision, choose, manage, accounts }: {
   tab: SettingsTab; onTab(tab: SettingsTab): void; configuration?: WorkbenchConfiguration; workspaceAction(action: WorkspaceAction): void;
   revision: number; choose(id: string): void; manage(conversation: Conversation): void;
   csrf: string; report(reason: unknown): void; storage: ReturnType<typeof useStorage>;
-  connection: { text: string; state: 'online' | 'connecting' | 'offline' }; logout(): void; busy: boolean;
+  connection: { text: string; state: 'online' | 'connecting' | 'offline' }; logout(): void; busy: boolean; accounts: Accounts;
 }) {
   return <div className="settings">
     <div className="settings-tabs" role="tablist" aria-label="设置">
@@ -33,7 +34,7 @@ export function SettingsView({ tab, onTab, configuration, workspaceAction, csrf,
         {tab === 'plugins' && <section className="settings-section"><PluginManagement csrf={csrf} report={report}/></section>}
         {tab === 'storage' && <StoragePanel csrf={csrf} report={report} storage={storage}/>}
         {tab === 'notifications' && <NotificationSettingsPanel csrf={csrf} report={report}/>}
-        {tab === 'account' && <AccountSettings connection={connection} logout={logout} busy={busy}/>}
+        {tab === 'account' && <><HarnessAccountsPanel csrf={csrf} accounts={accounts}/><AccountSettings connection={connection} logout={logout} busy={busy}/></>}
       </div>
     </div>
   </div>;
@@ -82,8 +83,8 @@ function AccountSettings({ connection, logout, busy }: { connection: { text: str
       .then(async response => { if (response.ok) setVersion(versionSchema.parse(await response.json())); }).catch(() => {});
     return () => controller.abort();
   }, []);
-  return <section className="settings-section" aria-labelledby="account-title">
-    <h2 id="account-title">账户</h2>
+  return <section className="settings-section settings-admin" aria-labelledby="account-title">
+    <h2 id="account-title">管理员</h2>
     <p className="settings-lead">单管理员私人入口。</p>
     <div className="settings-card">
       <dl className="settings-facts">
