@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import { sessionSchema, versionSchema, errorSchema, type SessionView } from '../shared/http.ts';
 import './style.css';
 import { UIProvider } from './ui/provider.tsx';
+import { BrandMark, Button } from './ui/controls.tsx';
 import { WorkbenchView } from './workbench.tsx';
 import { clearDrafts } from './workbench-client.ts';
 
@@ -68,24 +69,23 @@ function App() {
     finally { authPending.current = false; setBusy(false); }
   };
   const expired = useCallback(() => { ++authEpoch.current; setSession({ authenticated: false, initialized: true }); }, []);
+  useEffect(() => { if (!session?.authenticated) document.title = '中书'; }, [session?.authenticated]);
   if (session?.authenticated) return <WorkbenchView csrf={session.csrfToken} logout={() => void logout()} expired={expired} busy={busy} authError={error} />;
   return <main className="entry">
-    <header className="brand"><img src="/icon.svg" width="36" height="36" alt="" /><span>中书 <small>ZHONGSHU</small></span></header>
-    <p className="eyebrow">YOUR WORK, CONTINUED</p>
-    <h1>从这里，接着做。</h1>
-    <p className="intro">让每一段思考，都有可以接续的地方。</p>
     <section className="entry-card" aria-label="登录中书">
-      {!session ? <><p role="status">正在连接服务…</p><button onClick={() => void refresh()}>重新连接</button></> : <form onSubmit={event => void login(event)}>
-        <h2>登录中书</h2>
-        {session.initialized === false ? <p>管理员尚未完成初始化。完成后即可登录。</p> : <>
-          <label htmlFor="password">管理员密码</label>
-          <input id="password" name="password" type="password" autoComplete="current-password" maxLength={1024} required value={password} onChange={e => setPassword(e.target.value)} aria-describedby={error ? 'entry-error' : undefined} autoFocus />
-          <button className="primary" type="submit" disabled={busy || !password}>{busy ? '正在登录…' : '进入工作台'}<span aria-hidden="true">↗</span></button>
+      <div className="entry-brand"><BrandMark size={22}/><span>中书</span></div>
+      <h1>登录</h1>
+      <p className="intro">个人 Agent 工作台。离开后回来，工作还在。</p>
+      {!session ? <form onSubmit={event => { event.preventDefault(); void refresh(); }}><p role="status">正在连接服务…</p><Button type="submit">重新连接</Button></form> : <form onSubmit={event => void login(event)}>
+        {session.initialized === false ? <p role="status">管理员尚未完成初始化。完成后即可登录。</p> : <>
+          <div className="field"><label htmlFor="password">管理员密码</label>
+            <input id="password" name="password" type="password" autoComplete="current-password" maxLength={1024} required value={password} onChange={e => setPassword(e.target.value)} aria-describedby={error ? 'entry-error' : undefined} autoFocus /></div>
+          <Button variant="primary" type="submit" disabled={busy || !password}>{busy ? '正在登录…' : '进入工作台'}</Button>
         </>}
       </form>}
       {error && <p className="error" id="entry-error" role="alert">{error}</p>}
+      <footer className="entry-footer">{version ? <><span className="connection">已连接</span><span>v{version.version} · {version.revision === 'development' ? '本地开发' : version.revision.slice(0, 8)}</span></> : <span>正在检查运行版本…</span>}</footer>
     </section>
-    <footer>{version ? <><span className="connection">前后端已连通</span><span>v{version.version} · {version.revision === 'development' ? '本地开发' : version.revision.slice(0, 8)}</span></> : '正在检查运行版本…'}</footer>
   </main>;
 }
 

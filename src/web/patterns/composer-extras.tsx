@@ -192,6 +192,12 @@ export function SkillEditor({ editor, spans = emptySpans, picker, onEdit }: {
 }
 
 const compact = new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 });
+/** A filled pie slice, so the meter never reads as a loading spinner. */
+function sector(progress: number) {
+  const angle = progress / 100 * Math.PI * 2;
+  const x = 8 + 4.5 * Math.sin(angle); const y = 8 - 4.5 * Math.cos(angle);
+  return `M8 8 L8 3.5 A4.5 4.5 0 ${angle > Math.PI ? 1 : 0} 1 ${x.toFixed(2)} ${y.toFixed(2)} Z`;
+}
 const exact = new Intl.NumberFormat('en');
 export function ComposerUsage({ usage }: { usage: { total?: number; context?: { used: number; capacity: number; estimated: boolean } } }) {
   const headingId = useId();
@@ -204,9 +210,9 @@ export function ComposerUsage({ usage }: { usage: { total?: number; context?: { 
         <button type="button" className="writing-usage-trigger">
           {total !== undefined && <span><Database size={13} aria-hidden="true"/>累计 {compact.format(total)} tokens</span>}
           {context && <span className="writing-usage-context">
-            <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
-              <circle cx="8" cy="8" r="6" className="writing-ring-track"/>
-              <circle cx="8" cy="8" r="6" pathLength="100" strokeDasharray={`${progress} 100`} transform="rotate(-90 8 8)"/>
+            <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" data-level={progress >= 90 ? 'high' : progress >= 70 ? 'warm' : undefined}>
+              <circle cx="8" cy="8" r="6.25" className="writing-ring-track"/>
+              {progress >= 99.5 ? <circle cx="8" cy="8" r="4.5" className="writing-ring-fill"/> : progress > 0 && <path className="writing-ring-fill" d={sector(progress)}/>}
             </svg>上下文 {percent}%
           </span>}
         </button>

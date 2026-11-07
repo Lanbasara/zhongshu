@@ -1,18 +1,41 @@
-/* Shared appearance for existing native modal workflows. */
-.create-dialog,.file-picker,.image-lightbox { position:fixed; inset:0; margin:auto; color:var(--zs-text); background:var(--zs-surface); border:1px solid var(--zs-border); border-radius:var(--zs-radius-surface); width:min(480px,calc(100% - 32px)); max-height:calc(100dvh - 40px); padding:28px; box-shadow:var(--zs-shadow-overlay); font-size:var(--zs-type-interface); }
-.create-dialog[open],.file-picker[open],.image-lightbox[open] { animation:zs-surface-in var(--zs-duration-surface) var(--zs-ease); }
-.create-dialog::backdrop,.file-picker::backdrop,.image-lightbox::backdrop { background:var(--zs-scrim); }
-.create-dialog header,.file-picker header { display:flex; align-items:center; justify-content:space-between; gap:12px; }
-.create-dialog h2,.file-picker h2 { margin:0; font-size:var(--zs-type-section); font-weight:550; }
-.create-dialog fieldset { padding:0; margin:20px 0 0; border:0; min-width:0; }
-.create-dialog label { display:block; font-size:var(--zs-type-control); color:var(--zs-text-secondary); margin:16px 0 8px; }
-.create-dialog input,.create-dialog select { width:100%; font-size:var(--zs-type-interface); }
-.create-dialog .primary { display:flex; justify-content:center; align-items:center; gap:8px; background:var(--zs-action); color:var(--zs-action-text); width:100%; margin-top:24px; padding:10px 16px; min-height:40px; border-radius:var(--zs-radius-control); font-size:var(--zs-type-control); }
-.create-dialog .primary:enabled:hover { background:var(--zs-action-hover); }
-.permission-note { font-size:var(--zs-type-control); color:var(--zs-text-secondary); line-height:1.7; margin-top:10px; }
-.create-dialog [role=alert],.file-picker [role=alert] { color:var(--zs-danger); font-size:var(--zs-type-control); line-height:1.7; margin-top:12px; }
-.file-picker { padding:20px; }.file-picker>p { font-size:var(--zs-type-control); color:var(--zs-text-secondary); line-height:1.7; margin:12px 0; }.file-parent { font-size:var(--zs-type-control); padding:8px; border-bottom:1px solid var(--zs-line); width:100%; text-align:left; }
-.file-list { max-height:50dvh; overflow:auto; }.file-list button { display:flex; align-items:center; width:100%; text-align:left; gap:10px; padding:12px 8px; border-radius:var(--zs-radius-control); font-size:var(--zs-type-control); overflow-wrap:anywhere; }.file-list button:hover { background:var(--zs-surface-hover); }.file-list button span { margin-left:auto; }
-.image-lightbox { width:min(1000px,calc(100% - 32px)); padding:40px 20px 20px; }.image-lightbox img { display:block; max-width:100%; max-height:75dvh; margin:auto; object-fit:contain; }.image-lightbox p { text-align:center; font-size:var(--zs-type-control); color:var(--zs-text-muted); margin-top:12px; }.lightbox-close { position:absolute; right:12px; top:12px; }
-@media(max-width:759px) { .create-dialog { padding:24px; }.create-dialog input,.create-dialog select { font-size:var(--zs-type-input); } }
+/* Native modal workflows: centred cards on desktop, bottom sheets on phones. */
+.create-dialog,.file-picker,.image-lightbox { position:fixed; inset:0; margin:auto; color:var(--zs-text); background:var(--zs-surface); border:0; border-radius:var(--zs-radius-surface); width:min(460px,calc(100% - 32px)); max-height:calc(100dvh - 48px); padding:20px; box-shadow:var(--zs-shadow-modal); font-size:var(--zs-type-interface); overflow:auto; }
+.create-dialog[open],.file-picker[open] { animation:zs-surface-in var(--zs-duration-surface) var(--zs-ease); }
+.image-lightbox[open] { animation:zs-fade-in var(--zs-duration-state) var(--zs-ease); }
+.create-dialog::backdrop,.file-picker::backdrop,.image-lightbox::backdrop { background:var(--zs-scrim); animation:zs-fade-in var(--zs-duration-state) var(--zs-ease); }
+.create-dialog header,.file-picker header { display:flex; align-items:center; justify-content:space-between; gap:12px; margin:-4px -6px 0 0; }
+.create-dialog h2,.file-picker h2 { margin:0; font-size:var(--zs-type-section); font-weight:600; letter-spacing:-.005em; }
+.create-dialog header button,.file-picker header button { display:grid; place-items:center; width:30px; height:30px; border-radius:var(--zs-radius-control); color:var(--zs-text-muted); font-size:18px; }
+.create-dialog header button:enabled:hover,.file-picker header button:enabled:hover { background:var(--zs-surface-hover); color:var(--zs-text); }
+.create-dialog fieldset { padding:0; margin:16px 0 0; border:0; min-width:0; }
+.create-dialog label { display:block; font-size:var(--zs-type-caption); font-weight:500; color:var(--zs-text-secondary); margin:14px 0 6px; }
+.create-dialog input,.create-dialog select { width:100%; height:34px; }
+.create-dialog .primary,.create-dialog button.primary { display:inline-flex; justify-content:center; align-items:center; gap:6px; background:var(--zs-accent); color:var(--zs-action-text); height:var(--zs-control-default); padding:0 14px; border-radius:var(--zs-radius-control); font-size:var(--zs-type-control); font-weight:500; box-shadow:var(--zs-elevation-action); transition:background var(--zs-duration-response); }
+.create-dialog .primary:enabled:hover { background:var(--zs-accent-hover); }
+.create-dialog button.danger { display:inline-flex; align-items:center; justify-content:center; height:var(--zs-control-default); padding:0 14px; border-radius:var(--zs-radius-control); background:var(--zs-danger-solid); color:var(--zs-text-inverse); font-size:var(--zs-type-control); font-weight:500; }
+.create-dialog button.danger:enabled:hover { background:var(--zs-danger); }
+.permission-note { font-size:var(--zs-type-caption); color:var(--zs-text-muted); line-height:1.6; margin-top:8px; }
+.create-dialog [role=alert],.file-picker [role=alert] { color:var(--zs-danger); font-size:var(--zs-type-control); line-height:1.6; margin-top:10px; }
+.create-dialog [role=status] { color:var(--zs-text-muted); font-size:var(--zs-type-caption); margin-top:10px; }
+.file-picker>p { font-size:var(--zs-type-caption); color:var(--zs-text-muted); line-height:1.6; margin:6px 0 12px; }
+.file-parent { display:flex; align-items:center; gap:6px; font-size:var(--zs-type-caption); color:var(--zs-text-muted); padding:6px 8px; border-radius:var(--zs-radius-control); width:100%; text-align:left; }
+.file-parent:enabled:hover { background:var(--zs-surface-hover); color:var(--zs-text); }
+.file-list { max-height:min(50dvh,420px); overflow:auto; margin:4px -6px 0; padding:0 6px; }
+.file-list button { display:flex; align-items:center; width:100%; text-align:left; gap:9px; height:34px; padding:0 8px; border-radius:var(--zs-radius-control); font-size:var(--zs-type-control); color:var(--zs-text-secondary); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.file-list button svg { color:var(--zs-text-muted); }
+.file-list button:hover { background:var(--zs-surface-hover); color:var(--zs-text); }
+.file-list button span { margin-left:auto; color:var(--zs-text-placeholder); }
+.image-lightbox { width:min(1100px,calc(100% - 32px)); padding:44px 16px 16px; background:var(--zs-surface); }
+.image-lightbox img { display:block; max-width:100%; max-height:76dvh; margin:auto; object-fit:contain; border-radius:var(--zs-radius-control); }
+.image-lightbox p { text-align:center; font-size:var(--zs-type-caption); color:var(--zs-text-muted); margin-top:10px; }
+.lightbox-close { position:absolute; right:8px; top:8px; display:grid; place-items:center; width:32px; height:32px; border-radius:var(--zs-radius-control); color:var(--zs-text-muted); }
+.lightbox-close:hover { background:var(--zs-surface-hover); color:var(--zs-text); }
+@media(max-width:759px) {
+  .create-dialog,.file-picker { inset:auto 0 0 0; margin:0; width:100%; max-width:none; max-height:88dvh; border-radius:16px 16px 0 0; padding:8px 16px calc(16px + env(safe-area-inset-bottom)); }
+  .create-dialog::before,.file-picker::before { content:""; display:block; width:36px; height:4px; border-radius:2px; background:var(--zs-border-strong); margin:0 auto 12px; }
+  .create-dialog[open],.file-picker[open] { animation:zs-sheet-in var(--zs-duration-surface) var(--zs-ease); }
+  .create-dialog input,.create-dialog select { height:42px; }
+  .file-list button { height:44px; font-size:var(--zs-type-interface); }
+  .create-dialog .primary,.create-dialog button.danger { height:42px; }
+}
 @media(prefers-reduced-motion:reduce) { .create-dialog[open],.file-picker[open],.image-lightbox[open] { animation:none; } }

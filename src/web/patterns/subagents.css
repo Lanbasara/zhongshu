@@ -1,22 +1,25 @@
+/* Activity dot shared by the trigger, rows and the sidebar mark. */
+.activity-dot { display:inline-block; width:6px; height:6px; border-radius:50%; background:var(--zs-text-placeholder); flex:none; }
+@keyframes zs-breathe { 50% { opacity:.35; } }
 .subagent-trigger {
   display:inline-flex;
   align-items:center;
   gap:var(--zs-space-2);
-  min-height:var(--zs-control-default);
-  padding:0 var(--zs-space-3);
+  height:28px;
+  padding:0 10px;
   border:1px solid var(--zs-border);
   border-radius:var(--zs-radius-control);
   background:var(--zs-surface);
   color:var(--zs-text-secondary);
-  font-size:var(--zs-type-control);
+  font-size:var(--zs-type-caption);
   white-space:nowrap;
   transition:background var(--zs-duration-response),border-color var(--zs-duration-response);
 }
-.subagent-trigger:hover { background:var(--zs-surface-hover); }
+.subagent-trigger:hover { border-color:var(--zs-border-hover); }
 .subagent-trigger[aria-expanded="true"] { background:var(--zs-surface-selected); border-color:var(--zs-text-placeholder); color:var(--zs-text); }
-.subagent-trigger-label { font-weight:550; color:var(--zs-text); }
+.subagent-trigger-label { font-weight:500; color:var(--zs-text); }
 .subagent-trigger-count { position:relative; display:inline-flex; align-items:center; gap:6px; color:var(--zs-text-secondary); }
-.subagent-trigger.is-running .activity-dot { background:var(--zs-action); animation:zs-breathe var(--zs-duration-breathing) ease-in-out infinite; }
+.subagent-trigger.is-running .activity-dot { background:var(--zs-status-running); animation:zs-breathe var(--zs-duration-breathing) ease-in-out infinite; }
 .subagent-attention { width:6px; height:6px; border-radius:50%; background:var(--zs-warning); }
 
 .subagent-bar { gap:var(--zs-space-2); }
@@ -77,12 +80,12 @@
 
 .subagent-status { display:inline-flex; align-items:center; gap:6px; color:var(--zs-text-secondary); font-size:var(--zs-type-caption); white-space:nowrap; }
 .subagent-status-mark { width:6px; height:6px; border-radius:50%; background:var(--zs-text-placeholder); flex:none; }
-.subagent-status-mark.is-running,.subagent-status-mark.is-in_progress { background:var(--zs-action); animation:zs-breathe var(--zs-duration-breathing) ease-in-out infinite; }
+.subagent-status-mark.is-running,.subagent-status-mark.is-in_progress { background:var(--zs-status-running); animation:zs-breathe var(--zs-duration-breathing) ease-in-out infinite; }
 .subagent-status-mark.is-stopping { background:var(--zs-warning); animation:zs-breathe var(--zs-duration-breathing) ease-in-out infinite; }
-.subagent-status-mark.is-completed { background:var(--zs-success); }
-.subagent-status-mark.is-failed { background:var(--zs-danger); }
-.subagent-status-mark.is-unknown { background:var(--zs-warning); }
-.subagent-status-mark.is-interrupted { background:var(--zs-text-muted); }
+.subagent-status-mark.is-completed { background:var(--zs-status-unread); }
+.subagent-status-mark.is-failed { background:var(--zs-status-failed); }
+.subagent-status-mark.is-unknown { background:transparent; box-shadow:inset 0 0 0 1.5px var(--zs-status-unknown); }
+.subagent-status-mark.is-interrupted { background:transparent; box-shadow:inset 0 0 0 1.5px var(--zs-status-interrupted); }
 
 .team-members { display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:var(--zs-space-2); }
 .team-member { width:100%; display:grid; gap:6px; padding:var(--zs-space-3); border:1px solid var(--zs-line); border-radius:var(--zs-radius-item); background:var(--zs-surface); text-align:left; }
@@ -110,9 +113,9 @@
 .subagent-transcript .message { margin:16px 0 22px; }
 .subagent-readonly { margin:var(--zs-space-4) 0 0; padding-top:var(--zs-space-3); border-top:1px solid var(--zs-line); color:var(--zs-text-muted); font-size:var(--zs-type-caption); }
 
-.subagent-activity { max-width:36rem; margin-block:var(--zs-space-3) var(--zs-space-5); padding:var(--zs-space-2); border:1px solid var(--zs-line); border-radius:var(--zs-radius-surface); background:var(--zs-canvas); }
+.subagent-activity { max-width:36rem; margin-block:var(--zs-space-3) var(--zs-space-5); padding:4px; border:1px solid var(--zs-line); border-radius:var(--zs-radius-item); background:var(--zs-surface); }
 .subagent-activity header { display:flex; align-items:center; gap:var(--zs-space-2); padding:var(--zs-space-1) var(--zs-space-2) var(--zs-space-2); color:var(--zs-text-secondary); }
-.subagent-activity h2 { font-size:var(--zs-type-interface); font-weight:600; color:var(--zs-text); }
+.subagent-activity h2 { font-size:var(--zs-type-caption); font-weight:500; color:var(--zs-text-muted); }
 .subagent-activity ul { list-style:none; margin:0; padding:0; }
 .subagent-activity-row { width:100%; min-height:var(--zs-control-touch); }
 .subagent-activity-row:hover { background:var(--zs-surface-hover); }
@@ -120,7 +123,7 @@
 .subagent-activity-toggle[aria-expanded="true"] svg { transform:rotate(180deg); }
 
 .subagent-background { display:inline-flex; align-items:center; gap:6px; color:var(--zs-text-secondary); }
-.subagent-background .activity-dot { background:var(--zs-action); animation:zs-breathe var(--zs-duration-breathing) ease-in-out infinite; }
+.subagent-background .activity-dot { background:var(--zs-status-running); animation:zs-breathe var(--zs-duration-breathing) ease-in-out infinite; }
 
 /* Narrow screens open the panel as a full page. */
 .workspace-reader.subagent-sheet { position:fixed; inset:0; z-index:var(--zs-layer-dialog); padding-bottom:env(safe-area-inset-bottom); border:0; overflow:hidden; }

@@ -2,12 +2,13 @@ import { Fragment, memo, useEffect, useMemo, useRef, useState, type ReactNode } 
 import { Streamdown, defaultRemarkPlugins } from 'streamdown';
 import { code } from '@streamdown/code';
 import { cjk } from '@streamdown/cjk';
-import { Check, ChevronDown, Copy, FileText, Quote, Terminal, X, ImageIcon } from 'lucide-react';
+import { Check, Copy, FileText, Info, Quote, X, ImageIcon } from 'lucide-react';
 import type { TurnFileSummary, WorkbenchItem } from '../shared/workbench.ts';
 import type { MessageReference, ImageAttachment } from '../shared/content.ts';
 import { referenceSchema } from '../shared/content.ts';
 import { workspaceImages } from './markdown.ts';
 import { TurnFiles } from './patterns/turn-files.tsx';
+import { ProcessBlock } from './patterns/process.tsx';
 
 export const imageUrl = (conversation: string, image: ImageAttachment) => `/api/private/workbench/conversations/${encodeURIComponent(conversation)}/resources/${image.id}`;
 
@@ -47,24 +48,39 @@ export function Message({ item, conversation, onQuote }: { item: WorkbenchItem; 
     if (text.trim()) onQuote({ type: 'quote', itemId: item.id, text: text.slice(0,8000) });
     else { setQuoteHint(true); setTimeout(() => setQuoteHint(false),3000); }
   }
-  return <article ref={ref} tabIndex={-1} className={`message message-${item.kind}`} data-message-id={item.id}>
-    {item.kind === 'notice' && <div className="message-author">状态</div>}
-    <div className="message-text">{item.kind === 'assistant' ? <Streamdown plugins={{ code, cjk }} remarkPlugins={remarkPlugins} components={components} skipHtml urlTransform={(url, key) => safeUrl(url) || (key === 'src' && imageSource(url) ? url : '')} isAnimating={item.status === 'running'}>{item.text || (item.status === 'running' ? '正在生成…' : '')}</Streamdown> : item.text}</div>
-    {item.images?.length ? <div className="message-images">{item.images.map(image => <ImageView key={image.id} src={imageUrl(conversation, image)} alt={image.name}/>)}</div> : null}
-    {item.references?.length ? <div className="message-references">{item.references.map((reference, index) => <div key={index} className="reference-card">{reference.type === 'file' ? <><FileText size={14}/><span>{reference.path}<small>工作区原文件</small></span></> : <><Quote size={14}/><blockquote>{reference.text}<small>引用消息片段</small></blockquote></>}</div>)}</div> : null}
-    {item.text && item.kind !== 'notice' && <div className="message-actions"><button type="button" aria-label="复制消息" onClick={() => { void navigator.clipboard.writeText(item.text).then(() => { setCopied(true); setTimeout(() => setCopied(false),1500); }).catch(() => {}); }}>{copied ? <Check size={14}/> : <Copy size={14}/>}</button><button type="button" aria-label="引用所选文字" onClick={quote}><Quote size={14}/></button></div>}
-    {item.status === 'failed' && <small className="quiet">此项未完成</small>}
-    {item.status === 'unknown' && <small className="quiet">原生状态未提供</small>}
-    {quoteHint && <small className="quiet" role="status">选中这条消息中的文字后，再点引用。</small>}
+  const actions = item.text && item.kind !== 'notice' && <div className="message-actions">
+    <button type="button" aria-label="复制消息" title={copied ? '已复制' : '复制'} onClick={() => { void navigator.clipboard.writeText(item.text).then(() => { setCopied(true); setTimeout(() => setCopied(false),1500); }).catch(() => {}); }}>{copied ? <Check size={14}/> : <Copy size={14}/>}</button>
+    <button type="button" aria-label="引用所选文字" title="引用所选文字" onClick={quote}><Quote size={14}/></button>
+  </div>;
+  if (item.kind === 'assistant' && !item.text && item.status !== 'running' && !item.images?.length && !item.references?.length) return null;
+  return <article ref={ref} tabIndex={-1} className={`message message-${item.kind}`} data-message-id={item.id} data-status={item.status}>
+    {item.kind === 'notice' && <Info size={14} className="message-notice-icon" aria-hidden="true"/>}
+    <div className="message-body">
+      {item.kind === 'user' ? <div className="message-bubble">
+        <div className="message-text">{item.text}</div>
+        {item.images?.length ? <div className="message-images">{item.images.map(image => <ImageView key={image.id} src={imageUrl(conversation, image)} alt={image.name}/>)}</div> : null}
+        {item.references?.length ? <div className="message-references">{item.references.map((reference, index) => <div key={index} className="reference-card">{reference.type === 'file' ? <><FileText size={14}/><span>{reference.path}<small>工作区原文件</small></span></> : <><Quote size={14}/><blockquote>{reference.text}<small>引用消息片段</small></blockquote></>}</div>)}</div> : null}
+      </div> : <>
+        <div className="message-text">{item.kind === 'assistant' ? <Streamdown plugins={{ code, cjk }} remarkPlugins={remarkPlugins} components={components} skipHtml urlTransform={(url, key) => safeUrl(url) || (key === 'src' && imageSource(url) ? url : '')} isAnimating={item.status === 'running'}>{item.text || (item.status === 'running' ? '正在生成…' : '')}</Streamdown> : item.text}</div>
+        {item.images?.length ? <div className="message-images">{item.images.map(image => <ImageView key={image.id} src={imageUrl(conversation, image)} alt={image.name}/>)}</div> : null}
+        {item.references?.length ? <div className="message-references">{item.references.map((reference, index) => <div key={index} className="reference-card">{reference.type === 'file' ? <><FileText size={14}/><span>{reference.path}<small>工作区原文件</small></span></> : <><Quote size={14}/><blockquote>{reference.text}<small>引用消息片段</small></blockquote></>}</div>)}</div> : null}
+      </>}
+      {item.status === 'failed' && <small className="message-state">此项未完成</small>}
+      {item.status === 'unknown' && <small className="message-state">原生状态未提供</small>}
+      {quoteHint && <small className="message-state" role="status">选中这条消息中的文字后，再点引用。</small>}
+      {item.status !== 'running' && actions}
+    </div>
   </article>;
 }
 
+/** Tool records of one native turn, shown as the process block. Records with nothing to show take no space. */
 export function ToolGroup({ items }: { items: WorkbenchItem[] }) {
-  const running = items.some(i => i.status === 'running');
-  const failed = items.filter(i => i.status === 'failed').length;
-  const unknown = items.filter(i => i.status === 'unknown').length;
-  const summary = running ? '正在执行' : unknown ? `状态未明 · ${unknown} 项待核对${failed ? ` · ${failed} 项未完成` : ''}` : failed ? `执行结束 · ${failed} 项未完成` : '已完成';
-  return <details className={`tool-group ${running ? 'is-running' : ''}`} data-anchor={items[0]?.id}><summary><span className="activity-dot"/>{summary}<span className="activity-count">{items.length} 项操作</span><ChevronDown size={14}/></summary><div className="tool-timeline">{items.map(item => <details key={item.id} className="tool-message"><summary><Terminal size={14}/><span>{item.tool?.name ?? '工具执行'}</span><small>{item.status === 'running' ? '进行中' : item.status === 'failed' ? '未完成' : item.status === 'unknown' ? '状态未明' : '已完成'}</small></summary>{item.tool?.input && <pre className="tool-input">{item.tool.input}</pre>}<pre>{item.tool?.output || item.text || '暂无输出'}</pre></details>)}</div></details>;
+  const steps = items.filter(item => item.tool?.name || item.tool?.input || item.tool?.output || item.text.trim() || item.status !== 'completed')
+    .map(item => ({ id: item.id, name: item.tool?.name || '工具执行', status: item.status,
+      ...(item.tool?.input ? { input: item.tool.input } : {}), ...(item.tool?.output || item.text ? { output: item.tool?.output || item.text } : {}),
+      ...(item.tool?.exitCode !== undefined ? { exitCode: item.tool.exitCode } : {}) }));
+  if (!steps.length) return null;
+  return <ProcessBlock steps={steps} running={items.some(item => item.status === 'running')} anchor={items[0]?.id}/>;
 }
 
 /** Group tools without reordering text or merging actions from separate native turns. */

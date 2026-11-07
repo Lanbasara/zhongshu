@@ -32,7 +32,7 @@ process.umask(0o077);
 const repository = fileURLToPath(new URL('../../', import.meta.url));
 const cliSchema = z.object({
   command: z.enum(['serve', 'init', 'reset', 'inspect', 'inspect-deletions', 'reject-delete-next', 'complete', 'prove', 'seed', 'disconnect', 'reconnect', 'unknown-receipt', 'reject-next', 'fail-create', 'repair', 'disable-skills', 'usage-full', 'usage-compact', 'usage-total-only',
-    'spawn-subagents', 'complete-subagents', 'subagent-team', 'unknown-subagent-stop', 'append']),
+    'spawn-subagents', 'complete-subagents', 'subagent-team', 'unknown-subagent-stop', 'append', 'tool-step', 'fail']),
   root: z.string().min(1).max(4096).refine(isAbsolute),
   port: z.coerce.number().int().min(1024).max(65535).default(4391),
   title: z.string().min(1).max(200).optional(),
@@ -179,9 +179,26 @@ async function main() {
             value.unknownReceipt = input.command === 'unknown-receipt'; value.rejectNext = input.command === 'reject-next';
           }
           if (input.command === 'prove' || input.command === 'complete') prove(value);
+          if (input.command === 'tool-step') {
+            // One more native tool step in the running turn; the previous step finishes.
+            if (value.state.status !== 'running') throw new Error('fixture_must_be_running');
+            const runId = value.state.runId!;
+            for (const item of value.items) if (item.kind === 'tool' && item.status === 'running' && item.runId === runId) item.status = 'completed';
+            const index = value.items.filter(item => item.kind === 'tool' && item.runId === runId).length;
+            const steps = [['读取文件', 'notes.md'], ['运行命令', 'rg -n fixture notes.md'], ['编辑文件', 'notes.md'], ['运行命令', 'npm test']] as const;
+            const [name, command] = steps[index % steps.length]!;
+            value.items.push({ id: `tool:${runId}:${index}`, kind: 'tool', text: '', status: 'running', runId, tool: { name, input: command, output: `FIXTURE TOOL OUTPUT ${index + 1}` } });
+          }
+          if (input.command === 'fail') {
+            if (value.state.status !== 'running') throw new Error('fixture_must_be_running');
+            const runId = value.state.runId!;
+            for (const item of value.items) if (item.kind === 'tool' && item.status === 'running' && item.runId === runId) item.status = 'failed';
+            value.state = { ...idle(), status: 'failed', runId };
+          }
           if (input.command === 'complete') {
             if (value.state.status !== 'running') throw new Error('fixture_must_be_running');
             const runId = value.state.runId!;
+            for (const item of value.items) if (item.kind === 'tool' && item.status === 'running' && item.runId === runId) item.status = 'completed';
             value.items.push({ id: 'assistant:' + runId, kind: 'assistant', text: 'FIXTURE COMPLETED ' + runId, status: 'completed', runId });
             value.state = { ...idle(), runId };
           }

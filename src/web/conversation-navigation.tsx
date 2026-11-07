@@ -4,6 +4,9 @@ import { memo, useEffect, useRef, useState, type CSSProperties } from 'react';
 import { conversationListSchema, conversationResponseSchema, conversationTitleSchema, type Conversation, type WorkbenchConfiguration } from '../shared/workbench.ts';
 import { RequestError, request } from './workbench-client.ts';
 import type { WorkspaceAction } from './workspace-management.tsx';
+import { ConversationRow, WorkspaceActions, WorkspaceGroup } from './patterns/sidebar.tsx';
+import { conversationStatus, harnessLabel } from './conversation-status.ts';
+import type { StatusKind } from './ui/controls.tsx';
 
 const widthKey = 'zhongshu:sidebar-width';
 const minWidth = 224;
@@ -16,7 +19,7 @@ export function useSidebarWidth() {
       const saved = Number(localStorage.getItem(widthKey));
       if (Number.isFinite(saved) && saved >= minWidth) return clampWidth(saved);
     } catch { /* Storage can be unavailable. */ }
-    return 264;
+    return 260;
   });
   const update = (value: number) => {
     const next = clampWidth(Math.round(value));
@@ -42,17 +45,16 @@ export function useSidebarWidth() {
 
 type NavigationProps = {
   workspaces?: WorkbenchConfiguration['workspaces'];
-  removedWorkspaces?: WorkbenchConfiguration['removedWorkspaces'];
-  canAddWorkspace?: boolean;
   workspaceAction(action: WorkspaceAction): void;
   selected?: string;
   revision: number;
   csrf: string;
   choose(id: string): void;
   create(workspaceId: string): void;
-  changed(): void;
+  manage(conversation: Conversation): void;
   report(reason: unknown): void;
-  stateLabel(conversation: Conversation): string;
+  /** Attention-worthy conversations across all workspaces; summarises closed groups. */
+  attention?: Conversation[];
 };
 
 type Query = { workspaceId?: string; unregistered?: true; title?: string; archived?: boolean };
@@ -60,12 +62,11 @@ type RowProps = {
   selected?: string;
   choose(id: string): void;
   manage(conversation: Conversation): void;
-  stateLabel(conversation: Conversation): string;
 };
 
-function Results({ query, revision, csrf, report, rows, hideEmpty, workspaceLabel, label, visible = true }: {
+export function ConversationResults({ query, revision, csrf, report, rows, hideEmpty, workspaceLabel, label, visible = true, empty = '暂无对话' }: {
   query: Query; revision: number; csrf: string; report(reason: unknown): void; rows: RowProps;
-  hideEmpty?: boolean; workspaceLabel?: (id: string) => string; label?: string; visible?: boolean;
+  hideEmpty?: boolean; workspaceLabel?: (id: string) => string; label?: string; visible?: boolean; empty?: string;
 }) {
   const [results, setResults] = useState<Conversation[]>([]);
   const [next, setNext] = useState<string | null>(null);
@@ -137,125 +138,70 @@ function Results({ query, revision, csrf, report, rows, hideEmpty, workspaceLabe
   }, [revision, visible]);
 
   return <>
-    {visible && loadingPage && !failed && <p className="navigation-empty" role="status">正在加载…</p>}
+    {visible && loadingPage && !failed && !results.length && <p className="navigation-empty" role="status">正在加载…</p>}
     {label && results.length > 0 && <p className="nav-label">{label}</p>}
     {failed && <p className="navigation-empty">读取失败。<button className="text-button" onClick={() => fetchResults.current()}>重试</button></p>}
-    {loaded && !failed && !results.length && !hideEmpty && <p className="navigation-empty">暂无对话</p>}
-    {visible && results.map(conversation => <div className="conversation-row" key={conversation.id}>
-      <button className={`conversation-link ${conversation.id === rows.selected ? 'selected' : ''}`}
-        aria-current={conversation.id === rows.selected ? 'page' : undefined} onClick={() => rows.choose(conversation.id)}>
-        <strong title={conversation.title}>{conversation.title}</strong>
-        <span>{conversation.harnessId === 'codex' ? 'Codex' : 'DSH'}{
-          // Delegated work that outlives the main turn matters more than the main agent's idle state.
-          !workspaceLabel && conversation.subagents && !['running', 'waiting'].includes(conversation.state.status) && (conversation.subagents.running || conversation.subagents.unverified)
-            ? <SubagentBackgroundMark running={conversation.subagents.running} unverified={conversation.subagents.unverified}/>
-            : <i title={workspaceLabel?.(conversation.workspaceId)}>{workspaceLabel?.(conversation.workspaceId) ?? rows.stateLabel(conversation)}</i>}</span>
-      </button>
-      <button className="icon-button conversation-options" aria-label={`管理对话：${conversation.title}`} onClick={() => rows.manage(conversation)}>⋯</button>
-    </div>)}
+    {loaded && !failed && !results.length && !hideEmpty && <p className="navigation-empty">{empty}</p>}
+    {visible && results.map(conversation => {
+      const { status, label: statusLabel } = conversationStatus(conversation);
+      // Delegated work that outlives the main turn matters more than the main agent's idle state.
+      const background = conversation.subagents && !['running', 'waiting'].includes(conversation.state.status) && (conversation.subagents.running || conversation.subagents.unverified);
+      return <ConversationRow key={conversation.id} title={conversation.title} status={status} statusLabel={statusLabel}
+        unread={conversation.unread} selected={conversation.id === rows.selected}
+        detail={workspaceLabel ? `${workspaceLabel(conversation.workspaceId)} · ${harnessLabel(conversation.harnessId)}` : undefined}
+        meta={background ? <SubagentBackgroundMark running={conversation.subagents!.running} unverified={conversation.subagents!.unverified}/> : undefined}
+        onOpen={() => rows.choose(conversation.id)} onManage={() => rows.manage(conversation)}/>;
+    })}
     {visible && next && <div className="conversation-pagination">
-      <button className="text-button" disabled={loadingPage} onClick={() => fetchResults.current(true)}>显示更多</button>
+      <button className="text-button" disabled={loadingPage} onClick={() => fetchResults.current(true)}>{loadingPage ? '正在加载…' : '显示更多'}</button>
     </div>}
   </>;
 }
 
-export const ConversationNavigation = memo(function ConversationNavigation(props: NavigationProps) {
-  const [search, setSearch] = useState('');
-  const [term, setTerm] = useState('');
-  const [archived, setArchived] = useState(false);
-  const [collapsed, setCollapsed] = useState<Map<string, boolean>>(new Map());
-  const [workspaceSearch, setWorkspaceSearch] = useState('');
-  const [showRemoved, setShowRemoved] = useState(false);
-  const [removedGroup, setRemovedGroup] = useState<string>();
-  const [managing, setManaging] = useState<Conversation>();
-  const [notice, setNotice] = useState('');
-  useEffect(() => { if (!props.removedWorkspaces?.length) setShowRemoved(false); }, [props.removedWorkspaces?.length]);
-  useEffect(() => {
-    const timer = setTimeout(() => setTerm(search.trim()), 180);
-    return () => clearTimeout(timer);
-  }, [search]);
-  // Keep expanded groups mounted while searching so their pagination survives a return.
-  const searchActive = !!search.trim();
-  const workspaceLabel = (id: string) => props.workspaces?.find(workspace => workspace.id === id)?.label ??
-    props.removedWorkspaces?.find(workspace => workspace.id === id)?.label ?? '未登记工作区';
-  const workspaceTerm = workspaceSearch.trim().toLocaleLowerCase();
-  const matchingWorkspaces = props.workspaces?.filter(workspace => !workspaceTerm ||
-    [workspace.label, workspace.directoryName].some(name => name?.toLocaleLowerCase().includes(workspaceTerm)));
-  const rows = { ...props, manage: setManaging };
-  const resultProps = { revision: props.revision, csrf: props.csrf, report: props.report, rows };
-  const scroll = useRef<HTMLElement>(null);
-  const normalScroll = useRef(0);
-  const alternate = showRemoved || archived || searchActive;
-  useEffect(() => { if (scroll.current) scroll.current.scrollTop = alternate ? 0 : normalScroll.current; }, [alternate]);
-  const changeView = (callback: () => void) => {
-    if (!alternate) normalScroll.current = scroll.current?.scrollTop ?? 0;
-    callback();
-  };
-  return <>
-    {props.removedWorkspaces && <div className="workspace-navigation-tools">
-      <div className="navigation-tools">
-        <input type="search" aria-label="搜索工作区" placeholder="搜索工作区" maxLength={100} value={workspaceSearch}
-          onChange={event => { setWorkspaceSearch(event.target.value); setShowRemoved(false); setArchived(false); setSearch(''); }} />
-        {props.canAddWorkspace && <button className="icon-button" aria-label="添加工作区" title="添加工作区" onClick={() => props.workspaceAction({ kind: 'add' })}>＋</button>}
-      </div>
-      {!!props.removedWorkspaces.length && <button className="text-button" aria-pressed={showRemoved} onClick={() =>
-        changeView(() => { setShowRemoved(!showRemoved); setArchived(false); setSearch(''); })}>已移除的工作区</button>}
-    </div>}
-    <div className="conversation-scopes" role="group" aria-label="对话范围">
-      <button aria-pressed={!archived && !showRemoved} onClick={() => changeView(() => { setArchived(false); setShowRemoved(false); })}>未归档</button>
-      <button aria-pressed={archived} onClick={() => changeView(() => { setArchived(true); setShowRemoved(false); })}>已归档</button>
-    </div>
-    <div className="navigation-tools">
-      <input type="search" aria-label="搜索对话标题" placeholder={archived ? "搜索已归档对话" : "搜索未归档对话"} maxLength={200} value={search}
-        onChange={event => changeView(() => { setSearch(event.target.value); setShowRemoved(false); })} />
+const summaryOrder: StatusKind[] = ['running', 'waiting', 'failed', 'unknown', 'unread'];
+function summarise(conversations: Conversation[] | undefined, workspaceId: string) {
+  const counts = new Map<StatusKind, number>();
+  for (const conversation of conversations ?? []) {
+    if (conversation.workspaceId !== workspaceId || conversation.archived) continue;
+    const { status } = conversationStatus(conversation);
+    if (summaryOrder.includes(status)) counts.set(status, (counts.get(status) ?? 0) + 1);
+  }
+  return summaryOrder.filter(status => counts.has(status)).map(status => ({ status, count: counts.get(status)! }));
+}
 
-    </div>
-    <div className="navigation-notice" role="status">{notice}</div>
-    <nav ref={scroll} aria-label="工作区与对话">
-      <div hidden={alternate}>
-        {matchingWorkspaces?.map((workspace, index) => {
-          const closed = collapsed.get(workspace.id) ?? index >= 16;
-          return <section key={workspace.id} className="workspace-group">
-            <header>
-              <button className="workspace-toggle" aria-expanded={!closed} onClick={() => setCollapsed(current => {
-                const next = new Map(current);
-                next.set(workspace.id, !closed);
-                return next;
-              })}><span aria-hidden="true">{closed ? '›' : '⌄'}</span><strong title={workspace.label}>{workspace.label}</strong>
-                {workspace.pinned && <span className="quiet">置顶</span>}</button>
-              <button className="icon-button" aria-label={`在 ${workspace.label} 新建对话`} onClick={() => props.create(workspace.id)}>＋</button>
-              {props.removedWorkspaces && <button className="icon-button" aria-label={`管理工作区：${workspace.label}`}
-                onClick={() => props.workspaceAction({ kind: 'manage', workspace })}>⋯</button>}
-            </header>
-            <div hidden={closed}><Results {...resultProps} visible={!alternate && !closed} query={{ workspaceId: workspace.id }} /></div>
-          </section>;
-        })}
-        {workspaceTerm && !matchingWorkspaces?.length && <p className="navigation-empty">没有匹配的工作区</p>}
-        {props.workspaces && !workspaceTerm && <section className="workspace-group">
-          <Results {...resultProps} visible={!alternate} query={{ unregistered: true }} hideEmpty label="未登记工作区" />
-        </section>}
-      </div>
-      {showRemoved && props.removedWorkspaces?.map(workspace => <section className="workspace-group" key={workspace.id}>
-        <header><button className="workspace-toggle" aria-expanded={removedGroup === workspace.id}
-          onClick={() => setRemovedGroup(removedGroup === workspace.id ? undefined : workspace.id)}>{workspace.label}</button>
-          <button className="text-button" aria-label={`恢复工作区：${workspace.label}`} onClick={() => props.workspaceAction({ kind: 'restore', workspace })}>恢复</button>
-        </header>
-        {removedGroup === workspace.id && <>
-          <Results {...resultProps} query={{ workspaceId: workspace.id }} />
-          <Results {...resultProps} query={{ workspaceId: workspace.id, archived: true }} hideEmpty label="已归档对话" />
-        </>}
-      </section>)}
-      {alternate && !showRemoved && <section className="workspace-group">
-        <p className="nav-label">{archived ? '已归档对话' : '搜索结果'}</p>
-        {searchActive && term !== search.trim() ? <p className="navigation-empty">正在搜索…</p> :
-          <Results key={JSON.stringify([archived, term])} {...resultProps} query={{ archived, title: searchActive ? term : undefined }} workspaceLabel={workspaceLabel} />}
-      </section>}
-    </nav>
-    {managing && <ManageDialog conversation={managing} workspaceLabel={workspaceLabel(managing.workspaceId)} csrf={props.csrf} close={() => setManaging(undefined)} changed={message => { setNotice(message); props.changed(); }} report={props.report} />}
-  </>;
+const collapsedKey = 'zhongshu:collapsed-workspaces';
+function readCollapsed(): Map<string, boolean> {
+  try { return new Map(z.array(z.tuple([z.string().max(1024), z.boolean()])).max(512).parse(JSON.parse(localStorage.getItem(collapsedKey) ?? '[]'))); }
+  catch { return new Map(); }
+}
+
+/** The workspace tree: the primary way to find a conversation (decided 2026-11-07). */
+export const ConversationNavigation = memo(function ConversationNavigation(props: NavigationProps) {
+  const [collapsed, setCollapsed] = useState<Map<string, boolean>>(readCollapsed);
+  const rows = { selected: props.selected, choose: props.choose, manage: props.manage };
+  const resultProps = { revision: props.revision, csrf: props.csrf, report: props.report, rows };
+  const toggle = (id: string, closed: boolean) => setCollapsed(current => {
+    const next = new Map(current); next.set(id, !closed);
+    try { localStorage.setItem(collapsedKey, JSON.stringify([...next].slice(-512))); } catch { /* the in-memory state still applies */ }
+    return next;
+  });
+  return <nav className="sidebar-tree" aria-label="工作区与对话">
+    {props.workspaces?.map((workspace, index) => {
+      const closed = collapsed.get(workspace.id) ?? index >= 16;
+      return <WorkspaceGroup key={workspace.id} label={workspace.label} pinned={workspace.pinned} open={!closed} onToggle={() => toggle(workspace.id, closed)}
+        summary={closed ? summarise(props.attention, workspace.id) : undefined}
+        actions={<WorkspaceActions label={workspace.label} onCreate={() => props.create(workspace.id)} onManage={() => props.workspaceAction({ kind: 'manage', workspace })}/>}>
+        <ConversationResults {...resultProps} visible={!closed} query={{ workspaceId: workspace.id }}/>
+      </WorkspaceGroup>;
+    })}
+    {props.workspaces && <section className="workspace-group workspace-unregistered">
+      <ConversationResults {...resultProps} query={{ unregistered: true }} hideEmpty label="未登记工作区"/>
+    </section>}
+    {props.workspaces?.length === 0 && <p className="navigation-empty">还没有工作区。可以在「设置 › 工作区」中添加。</p>}
+  </nav>;
 });
 
-function ManageDialog({ conversation, workspaceLabel, csrf, close, changed, report }: {
+export function ManageDialog({ conversation, workspaceLabel, csrf, close, changed, report }: {
   workspaceLabel: string; conversation: Conversation; csrf: string; close(): void; changed(message: string): void; report(reason: unknown): void;
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
