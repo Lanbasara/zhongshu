@@ -26,6 +26,12 @@ async function host() {
   let catalog: unknown = { groups: [{ id: 'deepseek-account', name: 'DeepSeek', models: [{ id: 'test-model', name: 'Test', reasoning: { efforts: [{ id: 'high', name: 'High' }] } }] }] };
   let signedIn = true;
   const wss = new WebSocketServer({ noServer: true });
+  // Answering clients (ADR 0016): forwarded requests park until settled and are replayed to every new $events stream.
+  const eventStreams = new Map<string, { socket: WebSocket; clientId: string }>(); let clients = 0;
+  const parked = new Map<string, { event: string; agentId: string; request: unknown }>(); const settled: { clientId: string; eventId: string; outcome: any }[] = [];
+  let failNextResult: 'drop' | undefined;
+  const forward = (streamId: string, socket: WebSocket, eventId: string, value: { event: string; agentId: string; request: unknown }) =>
+    socket.send(JSON.stringify({ type: 'item', streamId, value: { type: 'waterfall', eventId, ...value } }));
   function append(session: Session, type: string, data: Record<string, unknown>): Event {
     const event = { type, data, seq: session.events.length, time: Date.now() }; session.events.push(event);
     for (const [streamId, follow] of follows) if (follow.session === session.id && follow.socket.readyState === WebSocket.OPEN) follow.socket.send(JSON.stringify({ type: 'item', streamId, value: { type: 'event', event } }));
@@ -36,7 +42,7 @@ async function host() {
     const url = new URL(request.url ?? '/', 'http://127.0.0.1');
     if (url.pathname === '/connect') {
       if (url.searchParams.get('token') !== token) { response.writeHead(401).end(); return; }
-      assert.equal(url.searchParams.get('interactions'), 'none');
+      assert.equal(url.searchParams.get('interactions'), 'answer');
       const cookie = `peer-${++exchanges}`; peers.set(cookie, null); response.writeHead(302, { 'Set-Cookie': `peer=${cookie}; HttpOnly`, Location: '/api/remote.mux' }).end(); return;
     }
     const cookie = request.headers.cookie?.split('=')[1];
@@ -78,6 +84,14 @@ async function host() {
           append(session, 'agent/inbox/spliced', { inserted: [message] }); session.turn++; session.open = session.events.length; append(session, 'turn/start', { turn: session.turn }); append(session, 'user/message', message);
           if (losePromptReceipt) { response.destroy(); return; } value = { accepted: true }; break;
         }
+        case '$events/result': {
+          if (failNextResult === 'drop') { failNextResult = undefined; response.destroy(); return; }
+          if (![...eventStreams.values()].some(stream => stream.clientId === args.clientId)) {
+            response.setHeader('Content-Type', 'application/json'); response.end(JSON.stringify({ type: 'server-response', rpcId: body.rpcId, result: { ok: false, error: { code: 'gateway/interactions-forbidden' } } })); return;
+          }
+          if (parked.delete(args.eventId)) settled.push({ clientId: args.clientId, eventId: args.eventId, outcome: args.outcome });
+          value = null; break;
+        }
         case 'session/cancel': assert.ok(session); append(session, 'turn/end', { turn: session.turn, reason: { kind: 'aborted' } }); session.open = null; value = { accepted: true }; break;
         default: throw new Error('unexpected fixture endpoint');
       }
@@ -92,7 +106,15 @@ async function host() {
       ws.on('close', () => { peers.delete(cookie); for (const [id, follow] of follows) if (follow.socket === ws) follows.delete(id); });
       ws.on('message', bytes => {
         const message = JSON.parse(bytes.toString());
-        if (message.type === 'cancel') { follows.delete(message.streamId); return; }
+        if (message.type === 'cancel') { follows.delete(message.streamId); eventStreams.delete(message.streamId); return; }
+        if (message.endpoint === '$events') {
+          assert.deepEqual(message.payload.args, {});
+          const clientId = `client-${++clients}`; eventStreams.set(message.streamId, { socket: ws, clientId });
+          ws.on('close', () => eventStreams.delete(message.streamId));
+          ws.send(JSON.stringify({ type: 'item', streamId: message.streamId, value: { type: 'ready', clientId, host: { home: '/' } } }));
+          for (const [eventId, value] of parked) forward(message.streamId, ws, eventId, value);
+          return;
+        }
         assert.equal(message.endpoint, 'session/follow'); const input = message.payload.args.request; const session = sessions.get(input.address.sessionId); assert.ok(session);
         follows.set(message.streamId, { socket: ws, session: session.id }); followCalls++;
         const records = session.events.slice(-input.maxMessages).map(event => ({ type: 'event', event }));
@@ -102,7 +124,14 @@ async function host() {
   });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve)); const address = server.address(); assert.ok(address && typeof address !== 'string');
   const launch = `http://127.0.0.1:${address.port}/?token=${token}`;
-  return { launch, sessions, calls, peers, follows, append, followCalls: () => followCalls, setCatalog(value: unknown) { catalog = value; }, signOut() { signedIn = false; }, onNextPage(hook: () => void) { nextPage = hook; }, exchanges: () => exchanges, rejectModel: () => { rejectModel = true; }, losePromptReceipt: () => { losePromptReceipt = true; }, live(session: string, frame: unknown) { for (const [streamId, follow] of follows) if (follow.session === session) follow.socket.send(JSON.stringify({ type: 'item', streamId, value: { type: 'assistant-stream', frame } })); }, disconnect() { for (const peer of peers.values()) peer?.terminate(); }, async close() { for (const peer of peers.values()) peer?.terminate(); await new Promise<void>(resolve => wss.close(() => resolve())); await new Promise<void>(resolve => server.close(() => resolve())); } };
+  return { launch, sessions, calls, peers, follows, append, settled, eventStreams,
+    ask(agentId: string, event: string, request: unknown) {
+      const eventId = randomUUID(); parked.set(eventId, { event, agentId, request });
+      for (const [streamId, stream] of eventStreams) forward(streamId, stream.socket, eventId, { event, agentId, request });
+      return eventId;
+    },
+    withdraw(eventId: string) { parked.delete(eventId); for (const [streamId, stream] of eventStreams) stream.socket.send(JSON.stringify({ type: 'item', streamId, value: { type: 'cancel', eventId } })); },
+    dropNextResult() { failNextResult = 'drop'; }, followCalls: () => followCalls, setCatalog(value: unknown) { catalog = value; }, signOut() { signedIn = false; }, onNextPage(hook: () => void) { nextPage = hook; }, exchanges: () => exchanges, rejectModel: () => { rejectModel = true; }, losePromptReceipt: () => { losePromptReceipt = true; }, live(session: string, frame: unknown) { for (const [streamId, follow] of follows) if (follow.session === session) follow.socket.send(JSON.stringify({ type: 'item', streamId, value: { type: 'assistant-stream', frame } })); }, disconnect() { for (const peer of peers.values()) peer?.terminate(); }, async close() { for (const peer of peers.values()) peer?.terminate(); await new Promise<void>(resolve => wss.close(() => resolve())); await new Promise<void>(resolve => server.close(() => resolve())); } };
 }
 
 async function setup() {
@@ -334,7 +363,7 @@ test('DSH empty public turn outline means blank only without contradictory execu
     blank.records.push({ type: 'event', event: { type: 'turn/start', seq: 5, time: 1, data: { turn: 1 } } });
     assert.equal(stateFrom(binding, blank).status, 'unknown');
     const permission = (await context.adapter.catalog()).permissions.find(item => item.id === 'workspace-write')!;
-    assert.equal(permission.label, '工作区读写'); assert.match(permission.description, /交互式审批尚不支持/);
+    assert.equal(permission.label, '工作区读写'); assert.match(permission.description, /需要越界时会请求你批准/);
   } finally { await context.close(); }
 });
 
@@ -573,4 +602,80 @@ test('DSH prepares one named blank, adopts it with final configuration, and reje
     assert.equal(context.fixture.calls.filter(call=>call.method==='session/selectModel').length,before);
     assert.equal(context.fixture.sessions.size,1);
   } finally {await context.close();}
+});
+
+// ADR 0016: DSH forwards questions and approvals to answering clients; the Host keeps them until settled.
+test('DSH presents forwarded questions and approvals of the watched conversation and answers each once', async () => {
+  const context = await setup();
+  try {
+    const binding = await context.create(); const native = context.fixture.sessions.get(binding.id)!; const changes: NativeChange[] = [];
+    await context.adapter.watch(binding, change => changes.push(change));
+    await until(() => context.fixture.eventStreams.size === 1);
+    context.fixture.append(native, 'tool/call', { callId: 'call-1', name: 'bash', input: { command: 'curl -sS https://example.com' } });
+    const approval = context.fixture.ask(binding.id, 'approval/request', { toolName: 'bash', callId: 'call-1', reason: 'escalate sandbox to danger-full-access: network', displayReason: { zh: '需要联网' } });
+    const question = context.fixture.ask(binding.id, 'user-questions/request', { questions: [{ id: 'format', question: 'Which format?', header: 'Format', options: [{ label: 'Markdown' }, { label: 'HTML', description: 'Charts' }] }] });
+    context.fixture.ask('another-session', 'approval/request', { toolName: 'bash' });
+    let requests: Awaited<ReturnType<NonNullable<typeof context.adapter.requests>>> = [];
+    for (let tries = 0; tries < 100 && !(requests.length === 2 && requests.some(request => request.approval?.command)); tries++) { await delay(20); requests = await context.adapter.requests!(binding); }
+    assert.equal(requests.length, 2, 'only requests of this conversation');
+    const shownApproval = requests.find(request => request.kind === 'approval')!; const shownQuestion = requests.find(request => request.kind === 'question')!;
+    assert.deepEqual(shownApproval.approval, { action: 'command', decisions: ['accept', 'decline'], reason: '需要联网', command: 'curl -sS https://example.com' });
+    assert.deepEqual(shownQuestion.questions, [{ id: 'format', text: 'Which format?', header: 'Format', multiple: false, custom: true, options: [{ label: 'Markdown' }, { label: 'HTML', description: 'Charts' }] }]);
+    assert.ok(changes.some(change => change.type === 'requests'));
+    // Answers that do not fit are refused locally; nothing reaches the Host.
+    assert.deepEqual(await context.adapter.answer!(binding, shownApproval.id, { kind: 'approval', decision: 'acceptForSession' }), { outcome: 'rejected', reason: 'answer_invalid' });
+    assert.deepEqual(await context.adapter.answer!(binding, shownQuestion.id, { kind: 'question', answers: [{ id: 'format', selected: ['PDF'] }] }), { outcome: 'rejected', reason: 'answer_invalid' });
+    assert.equal(context.fixture.settled.length, 0);
+    assert.deepEqual(await context.adapter.answer!(binding, shownApproval.id, { kind: 'approval', decision: 'accept' }), { outcome: 'accepted' });
+    assert.deepEqual(await context.adapter.answer!(binding, shownQuestion.id, { kind: 'question', answers: [{ id: 'format', selected: ['Markdown'], custom: 'With a summary table' }] }), { outcome: 'accepted' });
+    assert.deepEqual(context.fixture.settled.map(row => [row.eventId, row.outcome]), [
+      [approval, { kind: 'result', value: 'allowed-once' }],
+      [question, { kind: 'result', value: { answers: [{ id: 'format', selected: [], custom: 'With a summary table' }] } }],
+    ], 'a typed single-choice answer replaces the selection, as the native UI sends it');
+    assert.deepEqual(await context.adapter.requests!(binding), []);
+    assert.deepEqual(await context.adapter.answer!(binding, shownApproval.id, { kind: 'approval', decision: 'accept' }), { outcome: 'rejected', reason: 'request_not_open' });
+  } finally { await context.close(); }
+});
+
+test('DSH replays open requests after reconnect, drops withdrawn ones, and leaves a lost answer unknown', async () => {
+  const context = await setup();
+  try {
+    const binding = await context.create(); const changes: NativeChange[] = [];
+    await context.adapter.watch(binding, change => changes.push(change));
+    await until(() => context.fixture.eventStreams.size === 1);
+    const first = context.fixture.ask(binding.id, 'approval/request', { toolName: 'write_file', callId: 'missing' });
+    let requests: Awaited<ReturnType<NonNullable<typeof context.adapter.requests>>> = [];
+    for (let tries = 0; tries < 100 && !requests.length; tries++) { await delay(20); requests = await context.adapter.requests!(binding); }
+    const id = requests[0]!.id;
+    assert.equal(requests[0]!.approval?.action, 'fileChange');
+    context.fixture.disconnect();
+    for (let tries = 0; tries < 100 && (await context.adapter.requests!(binding)).length; tries++) await delay(20);
+    assert.deepEqual(await context.adapter.requests!(binding), [], 'forwarded requests belong to the lost stream');
+    // Any call reconnects; the Host replays the parked request with the same identity.
+    await context.adapter.state(binding);
+    for (let tries = 0; tries < 100 && !(await context.adapter.requests!(binding)).length; tries++) await delay(20);
+    assert.equal((await context.adapter.requests!(binding))[0]?.id, id);
+    context.fixture.dropNextResult();
+    assert.deepEqual(await context.adapter.answer!(binding, id, { kind: 'approval', decision: 'decline' }), { outcome: 'unknown', reason: 'dsh_answer_unconfirmed' });
+    assert.equal(context.fixture.settled.length, 0);
+    assert.equal((await context.adapter.requests!(binding))[0]?.id, id, 'an unconfirmed answer keeps the request open for reconciliation');
+    context.fixture.withdraw(first);
+    for (let tries = 0; tries < 100 && (await context.adapter.requests!(binding)).length; tries++) await delay(20);
+    assert.deepEqual(await context.adapter.requests!(binding), []);
+  } finally { await context.close(); }
+});
+
+test('DSH refuses forwarded requests it cannot present instead of leaving the turn blocked', async () => {
+  const context = await setup();
+  try {
+    const binding = await context.create(); const changes: NativeChange[] = [];
+    await context.adapter.watch(binding, change => changes.push(change));
+    await until(() => context.fixture.eventStreams.size === 1);
+    const broken = context.fixture.ask(binding.id, 'user-questions/request', { questions: [] });
+    for (let tries = 0; tries < 100 && !context.fixture.settled.length; tries++) await delay(20);
+    assert.deepEqual(context.fixture.settled[0], { clientId: 'client-1', eventId: broken,
+      outcome: { kind: 'rejected', error: { name: 'UserQuestionError', message: 'the user cancelled ask_user_question', code: 'ASK_CANCELLED' } } });
+    assert.ok(changes.some(change => change.type === 'item' && change.item.kind === 'notice'));
+    assert.deepEqual(await context.adapter.requests!(binding), []);
+  } finally { await context.close(); }
 });

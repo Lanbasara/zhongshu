@@ -1,6 +1,6 @@
 # 执行与停止：feature map
 
-本页覆盖发送、停止、排队和提前发送。图文与引用的完整行为见[对话基本可用性](conversation-usability.md)。发送与恢复约定见 [ADR 0004](../adr/0004-recoverable-communication.md)，原生语义见 [ADR 0001](../adr/0001-native-harness-boundary.md)。
+本页覆盖发送、停止、排队、提前发送，以及回答 Agent 的提问与审批。图文与引用的完整行为见[对话基本可用性](conversation-usability.md)。发送与恢复约定见 [ADR 0004](../adr/0004-recoverable-communication.md)，原生语义见 [ADR 0001](../adr/0001-native-harness-boundary.md)。
 
 ## Sub-features
 
@@ -13,6 +13,9 @@
 | E05 | 两个真实 Harness 分别读写文件、同会话回忆，并核验真实停止 |
 | E06 | 两端的持久多条队列、编辑删除、逐条提前发送与暂停恢复 |
 | E07 | 点击后换轮、原生回执未知及原编号核对 |
+| E08 | DSH 主 Agent 的结构化提问在任何权限下出现在输入框上方；一次回答生效，其他设备同步显示已回答；应用重启后未答问题仍可回答 |
+| E09 | 审批只在工作区读写与只读时出现，按钮与原生给出的决定一致；完全访问不出现审批；Codex 子 Agent 的审批标明来源 |
+| E10 | 回答回执未知时不重发；原生仍在等待则重新打开，原生已不等待则显示已失效（[ADR 0016](../adr/0016-questions-and-approvals.md)） |
 
 ## How to get to it (user POV)
 
@@ -80,6 +83,17 @@ node test/support/feature-fixture.ts inspect --root "$zh_verify_root" --title '�
 3. 分别新建只有一个队列项的对话，浏览器拦截该对话的下一次 `POST /api/private/workbench/conversations/<id>/queue`，让按钮点击产生请求并暂存，核对它是该队列项的 `send`。在独立端结束原轮。为避免队首先被自动派发，先在第二个已登录页面点停止，使队列暂停，等待原生终态后才放行暂存的请求。Codex 应保留条目，原生历史没有该输入。DSH 应出现新轮和唯一输入，界面显示“提前发送的消息已送达后续轮”。保留点击时目标轮和实际历史轮的对应证据。正常结束与自动派发竞争由定向测试另测。
 4. fixture 中让原轮保持运行，排入一条消息后装载 `unknown-receipt`，点该条目的提前发送。核对队列显示“接收结果待核实”。刷新并点“查询原生结果”两次，原生 inspect 的提交计数不得增加。执行 `prove` 后核对用户条目恰好一次且属于正确轮。真实 Host 若只能丢弃浏览器 HTTP 响应，单独记录为浏览器重试证据，原生回执丢失仍需通过隔离的原生连接故障验证。
 
+### E08–E10 提问与审批
+
+只能用真实 Host 驱动；fixture 不产生原生请求。新建对话后在页面发送合成指令：
+
+| 场景 | 驱动 | 判据和独立观察 |
+| --- | --- | --- |
+| E08 DSH 提问 | DSH、任意权限（至少覆盖完全访问）。发送“用 ask_user_question 问我一次，id 为 X，选项 A、B；收到后只回复选择”。另一个已登录的隔离浏览器上下文打开同一对话 | 页头与侧栏为“等待处理”，两端都出现“Agent 在问你”卡片。在一端选择并提交：两端都变为“已回答「…」”，原生工具输出的 answers 与提交一致（单选时自己填写的文字以 `selected: []` 加 `custom` 送出）。另起一题后重启应用并刷新页面，卡片仍在、可回答 |
+| E09 Codex 审批 | Codex、工作区读写。要求运行联网命令，被沙箱拦下后请求更高权限 | 卡片标题为“Agent 请求运行命令”，显示原生理由、命令与目录；按钮只有原生 `availableDecisions` 中的普通决定。允许后原生历史出现提权重跑；同一指令在完全访问的对话中不产生卡片 |
+| E09 DSH 审批 | DSH、工作区读写，同样的联网指令 | 卡片只有“允许运行 / 拒绝”，理由来自原生中文说明，命令从会话记录按调用编号找回。拒绝后 Agent 报告提权被拒 |
+| E10 回执与失效 | 自动化覆盖，见下方回归命令；真实 Host 只能观察“正在提交 → 已回答” | 未知回执查询不增加原生回答次数；原生仍在等待时卡片重新可选，原生停止或结束本轮后显示已失效 |
+
 ## Gotchas
 
 - `accepted` 是原生接收，操作记录不会为了表示工作结束而改成 completed；终态来自对话 state/原生历史。
@@ -90,6 +104,12 @@ node test/support/feature-fixture.ts inspect --root "$zh_verify_root" --title '�
 - 最终文件只有一份不能证明没有重复执行。E02 必须检查调用数和操作身份。
 - 一般输入上限为 16,000 字符，服务端另有 UTF-8 与请求体上限；中文和特殊字符的编码长度可先触发拒绝。不能靠截断输入掩盖失败。
 - fixture 的正文、权限和停止都是确定性边界数据，不证明真实模型、工具权限或原生通知行为。
+- Codex 只在 Plan 模式下发出结构化提问；默认模式用文字提问，本切片不接 Codex 提问。审批策略在新建时随权限固定：完全访问为从不询问，其余为需要时询问；本切片之前创建的 Codex 对话仍从不询问。
+- Codex 每个审批给出的决定不同（联网提权常只有“允许”和“拒绝并停止本轮”）；“以后都允许”这类规则型决定不提供。DSH 审批只有允许一次和拒绝，子 Agent 不会向用户提问或要审批。
+- DSH 内置预设的提问没有截止时间。限时提问超时后，原生会转为可补答；中书显示为已失效，不接补答。
+- 请求内容只在应用内存中；已回答或已失效的卡片保留约 10 分钟，应用重启后消失。回答在送达后只保留摘要。
+- “没能确认上一次回答被采用”出现在回答回执未知、而原生仍在等待时；再选一次不会让原生执行两次，因为原生每个请求只采用一次回答。
+- 开发用容器可能没有 curl 或外网；命令失败不影响审批是否生效的判断，判据看原生历史中是否出现提权重跑或被拒。
 
 ## Implementation and regression
 
@@ -98,3 +118,4 @@ node test/support/feature-fixture.ts inspect --root "$zh_verify_root" --title '�
 - 原生派发/停止：[Codex](../../src/harness/codex/index.ts)、[DSH](../../src/harness/dsh/index.ts)。
 - E04 永久故障入口与真实HTTP/CLI回归：[feature-fixture.ts](../../test/support/feature-fixture.ts)、[browser-faults.js](../../test/support/browser-faults.js)、[feature-fixture.test.ts](../../test/feature-fixture.test.ts)。运行 `node --test test/feature-fixture.test.ts`；覆盖两个替身的单次拒绝/同ID不重派/新ID恢复、装载不失效、真实400/413及故障只消费一次；Node中的最小页面表面不证明DOM行为，仍须跑上述真实浏览器分支。
 - `node --test test/workbench.test.ts test/workbench-store.test.ts test/workbench-http.test.ts test/codex.test.ts test/dsh.test.ts`：覆盖 ACK 门禁、目标轮终态、目标变化、未知回执、重复提交、当前停止目标与派发中崩溃。实际浏览器判据仍是 E01–E04。
+- 提问与审批：原生请求的接收与回答在 [Codex 请求](../../src/harness/codex/requests.ts)、[DSH 请求](../../src/harness/dsh/requests.ts) 及各自 adapter；回答操作在 [request-store.ts](../../src/server/request-store.ts) 与 Workbench；卡片在 [requests.tsx](../../src/web/requests.tsx) 与 [展示组件](../../src/web/patterns/requests.tsx)，Storybook「工作台 / 提问与审批」展示各状态。`node --test test/requests.test.ts test/codex.test.ts test/dsh.test.ts test/workbench-http.test.ts` 覆盖送达确认、断线重发、未知回执不重发、失效、重启恢复、多端重复提交与认证/CSRF；真实判据仍是 E08–E09。

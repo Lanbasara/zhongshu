@@ -1,18 +1,21 @@
 import { basename, isAbsolute, normalize } from 'node:path';
 import { z } from 'zod';
 import { HarnessError } from '../types.ts';
-import type { Binding, Catalog, Configuration, HarnessAdapter, HarnessInput, HistoryPage, NativeChange, NativeItem, NativeState, NativeSubagent, Receipt, SubagentHistory, SubagentSnapshot } from '../types.ts';
-import { CodexRpc, RpcError } from './rpc.ts';
+import type { Binding, Catalog, Configuration, HarnessAdapter, HarnessInput, HistoryPage, NativeChange, NativeItem, NativeRequest, NativeState, NativeSubagent, Receipt, SubagentHistory, SubagentSnapshot } from '../types.ts';
+import { CodexRpc, RpcError, type ServerRequest } from './rpc.ts';
+import { answerableMethods, parseServerRequest, type Parsed } from './requests.ts';
 import { inputFields } from '../../shared/content.ts';
 import { revisionSchema, skillRequiresNextTurn, subagentIdSchema, subagentLimit } from '../../shared/workbench.ts';
-import type { QueueDelivery } from '../../shared/workbench.ts';
+import type { QueueDelivery, RequestAnswer } from '../../shared/workbench.ts';
 import { configuredThread, cursor, itemsPage, mapItem, nativeId, nativeItem, record, threadStatus, turn } from './protocol.ts';
 import { nativeSkill, resolveSkillInput, skillOptions, type NativeSkill } from '../skills.ts';
 
 const configuration = z.object({ modelId: nativeId, permissionId: nativeId, reasoningEffort: z.string().min(1).max(240).optional() });
 const workspace = z.string().min(1).max(4096).refine(path => isAbsolute(path) && normalize(path) === path && !path.includes('\0'));
 const titleSchema = z.string().min(1).max(200).refine(value => Buffer.byteLength(value) <= 200);
-const bindingSchema = z.object({ id: nativeId, cwd: workspace, configuration, details: z.object({ version: z.literal(1), approvalPolicy: z.literal('never'), title: titleSchema.optional() }) });
+const bindingSchema = z.object({ id: nativeId, cwd: workspace, configuration, details: z.object({ version: z.literal(1), approvalPolicy: z.enum(['never', 'on-request']), title: titleSchema.optional() }) });
+/** ADR 0016: full access never asks; every other permission asks when the agent needs more. Fixed at creation. */
+const approvalPolicyFor = (permissionId: string) => permissionId === ':danger-full-access' ? 'never' as const : 'on-request' as const;
 const operationSchema = z.object({ id: nativeId, text: z.string().max(100_000), skills: inputFields.skills, imageData: z.array(z.object({ mediaType: z.enum(['image/png', 'image/jpeg', 'image/webp']), data: z.string().max(3 * 1024 * 1024) })).max(4).optional() }).refine(v => v.text.trim() || v.imageData?.length);
 const nativeSkillRow = z.object({
   name: z.string().min(1).max(120).regex(/^[\p{L}\p{N}_.:-]+$/u), description: z.string().max(16_000), enabled: z.literal(true),
@@ -51,12 +54,14 @@ function reason(error: unknown): string {
 }
 function matches(binding: Binding, native: z.infer<typeof configuredThread>): boolean {
   return native.thread.id === binding.id && native.cwd === binding.cwd && native.model === binding.configuration.modelId
-    && native.activePermissionProfile?.id === binding.configuration.permissionId && native.approvalPolicy === 'never'
+    && native.activePermissionProfile?.id === binding.configuration.permissionId && native.approvalPolicy === binding.details.approvalPolicy
     && (binding.configuration.reasoningEffort === undefined || native.reasoningEffort === binding.configuration.reasoningEffort);
 }
 
 type Watch = { binding: Binding; listeners: Set<(change: NativeChange) => void>; verified: boolean };
 type Live = { threadId: string; item: NativeItem; overflow: boolean };
+/** One open App Server request. Its id is valid only on the connection that received it; a resume replays it. */
+type Pending = { key: string; threadId: string; turnId?: string; root?: string; rpc: Pick<ServerRequest, 'id' | 'connection'>; parsed: Parsed; answering: boolean; waiters: Set<(resolved: boolean) => void> };
 const permissionLabels: Record<string, string> = { ':read-only': '只读', ':workspace': '工作区读写', ':danger-full-access': '完全访问' };
 
 /**
@@ -84,22 +89,133 @@ class CodexAdapter implements HarnessAdapter {
   private discovering = new Set<string>();
   /** Children resumed after a reconnect. They are never unsubscribed: releasing a v1 child could shut it down natively. */
   private attachedChildren = new Set<string>();
+  /** Roots whose running children were attached on the current connection, so replayed child requests arrive. */
+  private attachedRoots = new Set<string>();
+  private requestsByKey = new Map<string, Pending>();
+  /** Recent file-change targets by item, to show which files an approval concerns. */
+  private fileEdits = new Map<string, string[]>();
 
   constructor(socketPath: string) {
     this.rpc = new CodexRpc(socketPath, {
       notification: (method, params) => this.notification(method, params),
-      unsupportedRequest: (_method, params) => {
-        const value = record.safeParse(params);
-        const threadId = value.success && typeof value.data.threadId === 'string' ? value.data.threadId : undefined;
-        const targets = threadId ? [threadId] : [...this.watches.keys()];
-        for (const id of targets) this.emit(id, { type: 'state', state: { status: 'waiting', pendingInputs: 0, configurationVerified: this.watches.get(id)?.verified ?? false, reason: 'codex_interaction_unsupported' } });
-      },
+      serverRequest: request => this.serverRequest(request),
       disconnected: () => {
-        this.live.clear(); this.liveBytes = 0; this.attachedChildren.clear();
-        for (const [id, watch] of this.watches) { watch.verified = false; this.emit(id, { type: 'unavailable', reason: 'codex_disconnected' }); }
+        this.live.clear(); this.liveBytes = 0; this.attachedChildren.clear(); this.attachedRoots.clear();
+        // Unanswered requests stay open natively and are replayed when the thread is resumed again.
+        const roots = this.clearRequests();
+        for (const [id, watch] of this.watches) { watch.verified = false; this.emit(id, { type: 'unavailable', reason: 'codex_disconnected' }); if (roots.has(id)) this.emit(id, { type: 'requests' }); }
         this.scheduleReconnect();
       },
     });
+  }
+
+  private clearRequests(): Set<string> {
+    const roots = new Set<string>();
+    for (const entry of this.requestsByKey.values()) { if (entry.root) roots.add(entry.root); for (const resolve of entry.waiters) resolve(false); }
+    this.requestsByKey.clear();
+    return roots;
+  }
+  private rootOf(threadId: string): string | undefined {
+    if (this.watches.has(threadId)) return threadId;
+    const root = this.childRoots.get(threadId);
+    return root && this.watches.has(root) ? root : undefined;
+  }
+  private serverRequest(request: ServerRequest): boolean {
+    if (!answerableMethods.has(request.method) || this.closed) return false;
+    const parsed = parseServerRequest(request.method, request.id, request.params, itemId => this.fileEdits.get(itemId));
+    if (!parsed) return false;
+    if ('unsupported' in parsed) {
+      // An MCP request this client cannot present faithfully is declined, and the conversation is told why.
+      void this.rpc.respond(request, { action: 'decline', content: null, _meta: null }).catch(() => {});
+      const root = this.rootOf(parsed.threadId);
+      if (root) this.emit(root, { type: 'item', item: { id: `request-declined-${String(request.id)}-${request.connection}`, kind: 'notice', text: parsed.notice, status: 'failed' } });
+      return true;
+    }
+    if (!this.requestsByKey.has(parsed.request.id) && this.requestsByKey.size >= 256) return false;
+    const params = record.safeParse(request.params);
+    const turnId = params.success && typeof params.data.turnId === 'string' ? params.data.turnId : undefined;
+    const previous = this.requestsByKey.get(parsed.request.id);
+    const entry: Pending = { key: parsed.request.id, threadId: parsed.threadId, ...(turnId ? { turnId } : {}), root: this.rootOf(parsed.threadId),
+      rpc: { id: request.id, connection: request.connection }, parsed, answering: previous?.answering ?? false, waiters: previous?.waiters ?? new Set() };
+    this.requestsByKey.set(entry.key, entry);
+    if (entry.root) this.emit(entry.root, { type: 'requests' });
+    else void this.routeRequest(entry);
+    return true;
+  }
+  /** A request from a thread not yet known to belong to an observed conversation: walk native parent links. */
+  private async routeRequest(entry: Pending): Promise<void> {
+    try {
+      let current = entry.threadId;
+      for (let hop = 0; hop < 8; hop++) {
+        const thread = parse(z.object({ thread: childThread }), await this.rpc.request('thread/read', { threadId: current, includeTurns: false })).thread;
+        const parent = thread.parentThreadId ?? spawnSource.safeParse(thread.source).data?.subAgent.thread_spawn.parent_thread_id;
+        if (!parent) return;
+        const root = this.watches.has(parent) ? parent : this.childRoots.get(parent);
+        if (root) {
+          this.rememberChild(entry.threadId, root);
+          if (this.requestsByKey.get(entry.key) === entry && this.watches.has(root)) { entry.root = root; this.emit(root, { type: 'requests' }); }
+          return;
+        }
+        current = parent;
+      }
+    } catch { /* The next resume replays the request and routing is attempted again. */ }
+  }
+  private resolveRequest(threadId: string, rpcId: unknown): void {
+    for (const [key, entry] of this.requestsByKey) {
+      if (entry.threadId !== threadId || entry.rpc.id !== rpcId) continue;
+      this.requestsByKey.delete(key);
+      for (const resolve of entry.waiters) resolve(true);
+      if (entry.root) { this.emit(entry.root, { type: 'requests' }); this.emit(entry.root, { type: 'invalidate' }); }
+    }
+  }
+  /** Requests of an ended turn can no longer be answered; the App Server resolves them itself. */
+  private dropTurnRequests(threadId: string, turnId: string | undefined): void {
+    const roots = new Set<string>();
+    for (const [key, entry] of this.requestsByKey) {
+      if (entry.threadId !== threadId || (turnId && entry.turnId && entry.turnId !== turnId) || entry.answering) continue;
+      this.requestsByKey.delete(key); if (entry.root) roots.add(entry.root);
+      for (const resolve of entry.waiters) resolve(false);
+    }
+    for (const root of roots) this.emit(root, { type: 'requests' });
+  }
+  /** After a reconnect, resume running children so their unanswered requests are replayed to this connection. */
+  private async attachActiveChildren(rootId: string): Promise<void> {
+    if (this.attachedRoots.has(rootId) || !this.rpc.connected) return;
+    this.attachedRoots.add(rootId);
+    try {
+      const page = parse(threadPage, await this.rpc.request('thread/list', { ancestorThreadId: rootId, archived: false, limit: 100, sortKey: 'created_at', sortDirection: 'desc' }));
+      for (const thread of page.data) {
+        if (thread.id === rootId || thread.status?.type !== 'active' || this.attachedChildren.has(thread.id) || !subagentIdSchema.safeParse(thread.id).success) continue;
+        this.rememberChild(thread.id, rootId);
+        await this.rpc.request('thread/resume', { threadId: thread.id, excludeTurns: true });
+        this.attachedChildren.add(thread.id);
+      }
+    } catch { this.attachedRoots.delete(rootId); }
+  }
+
+  async requests(input: Binding): Promise<NativeRequest[]> {
+    const binding = parse(bindingSchema, input);
+    return [...this.requestsByKey.values()].filter(entry => entry.root === binding.id)
+      .map(entry => ({ ...entry.parsed.request, ...(entry.threadId !== binding.id ? { agentId: entry.threadId } : {}) }))
+      .sort((left, right) => left.createdAt - right.createdAt);
+  }
+
+  async answer(input: Binding, key: string, answer: RequestAnswer): Promise<Receipt> {
+    const binding = parse(bindingSchema, input);
+    const entry = this.requestsByKey.get(key);
+    if (!entry || entry.root !== binding.id || entry.rpc.connection !== this.rpc.connection) return { outcome: 'rejected', reason: 'request_not_open' };
+    if (entry.answering) return { outcome: 'rejected', reason: 'request_answer_pending' };
+    const result = entry.parsed.result(answer);
+    if (result === undefined) return { outcome: 'rejected', reason: 'answer_invalid' };
+    entry.answering = true;
+    let timer: NodeJS.Timeout | undefined;
+    const resolved = new Promise<boolean>(resolve => { entry.waiters.add(resolve); timer = setTimeout(() => resolve(false), 15_000); timer.unref(); });
+    try { await this.rpc.respond(entry.rpc, result); }
+    catch { clearTimeout(timer); entry.answering = false; return { outcome: 'unknown', reason: 'codex_answer_unconfirmed' }; }
+    const confirmed = await resolved; clearTimeout(timer);
+    if (!confirmed) entry.answering = false;
+    // Resolution is the App Server's own confirmation; without it the answer may or may not have landed.
+    return confirmed ? { outcome: 'accepted' } : { outcome: 'unknown', reason: 'codex_answer_unconfirmed' };
   }
 
   private async load(binding: Binding): Promise<boolean> {
@@ -170,7 +286,7 @@ class CodexAdapter implements HarnessAdapter {
       if (next) throw new HarnessError('codex_catalog_limit');
       for (let page = 0; page < 10; page++) {
         const response = parse(z.object({ data: z.array(z.object({ id: nativeId, description: z.string().max(10_000).nullable(), allowed: z.boolean() })).max(200), nextCursor: cursor.nullable() }), await this.rpc.request('permissionProfile/list', { limit: 100, ...(next ? { cursor: next } : {}) }));
-        permissions.push(...response.data.filter(profile => profile.allowed).map(profile => ({ id: profile.id, label: permissionLabels[profile.id] ?? profile.id, description: `${profile.description ?? '实际权限由所选原生配置决定。'}\n此切片不支持额外审批请求；配置本身允许的权限仍按原生设置执行。` })));
+        permissions.push(...response.data.filter(profile => profile.allowed).map(profile => ({ id: profile.id, label: permissionLabels[profile.id] ?? profile.id, description: `${profile.description ?? '实际权限由所选原生配置决定。'}\n${profile.id === ':danger-full-access' ? '不会请求审批。' : '需要越界时会请求你批准。'}` })));
         next = response.nextCursor ?? undefined;
         if (!next) break;
       }
@@ -185,10 +301,11 @@ class CodexAdapter implements HarnessAdapter {
       const model = (await this.catalog()).models.find(value => value.id === selected.configuration.modelId);
       if (!model?.reasoningEfforts?.some(value => value.id === selected.configuration.reasoningEffort)) throw new HarnessError('codex_reasoning_effort_unavailable');
     }
-    const response = await this.rpc.request('thread/start', { ...(selected.configuration.reasoningEffort ? { config: { model_reasoning_effort: selected.configuration.reasoningEffort } } : {}), cwd: selected.cwd, model: selected.configuration.modelId, permissions: selected.configuration.permissionId, approvalPolicy: 'never', historyMode: 'paginated', ephemeral: false });
+    const approvalPolicy = approvalPolicyFor(selected.configuration.permissionId);
+    const response = await this.rpc.request('thread/start', { ...(selected.configuration.reasoningEffort ? { config: { model_reasoning_effort: selected.configuration.reasoningEffort } } : {}), cwd: selected.cwd, model: selected.configuration.modelId, permissions: selected.configuration.permissionId, approvalPolicy, historyMode: 'paginated', ephemeral: false });
     // Persist only identity and requested configuration before examining the remaining native response.
     const identity = parse(z.object({ thread: z.object({ id: nativeId }) }), response);
-    const binding: Binding = { id: identity.thread.id, cwd: selected.cwd, configuration: selected.configuration, details: { version: 1, approvalPolicy: 'never', ...(selected.title ? { title: selected.title } : {}) } };
+    const binding: Binding = { id: identity.thread.id, cwd: selected.cwd, configuration: selected.configuration, details: { version: 1, approvalPolicy, ...(selected.title ? { title: selected.title } : {}) } };
     let retained = false;
     try {
       try { onBound(binding); } catch { throw new HarnessError('codex_binding_persistence_failed'); }
@@ -320,7 +437,7 @@ class CodexAdapter implements HarnessAdapter {
       const nativeInput = await this.input(binding, operation).catch(() => undefined);
       if (!nativeInput) return { outcome: 'rejected', reason: 'skill_reference_unavailable' };
       // Every send pins the saved selection as well as checking the live native configuration.
-      const result = parse(z.object({ turn }), await this.rpc.request('turn/start', { threadId: binding.id, clientUserMessageId: operation.id, ...(binding.configuration.reasoningEffort ? { effort: binding.configuration.reasoningEffort } : {}), model: binding.configuration.modelId, permissions: binding.configuration.permissionId, approvalPolicy: 'never', input: nativeInput }));
+      const result = parse(z.object({ turn }), await this.rpc.request('turn/start', { threadId: binding.id, clientUserMessageId: operation.id, ...(binding.configuration.reasoningEffort ? { effort: binding.configuration.reasoningEffort } : {}), model: binding.configuration.modelId, permissions: binding.configuration.permissionId, approvalPolicy: binding.details.approvalPolicy, input: nativeInput }));
       return { outcome: 'accepted', runId: result.turn.id };
     } catch (error) {
       if (error instanceof RpcError && error.nativeCode === -32602) return { outcome: 'rejected', reason: 'codex_native_rejected' };
@@ -603,6 +720,7 @@ class CodexAdapter implements HarnessAdapter {
     watch.listeners.add(listener);
     try { await this.load(binding); }
     catch (error) { this.removeListener(binding.id, listener); throw new HarnessError(reason(error)); }
+    void this.attachActiveChildren(binding.id);
     this.emit(binding.id, { type: 'invalidate' });
     return () => { this.removeListener(binding.id, listener); };
   }
@@ -629,8 +747,10 @@ class CodexAdapter implements HarnessAdapter {
   }
 
   private notification(method: string, raw: unknown): void {
-    if (!['item/started', 'item/completed', 'item/agentMessage/delta', 'turn/started', 'turn/completed', 'thread/status/changed', 'thread/queue/changed', 'thread/tokenUsage/updated'].includes(method)) return;
+    if (!['item/started', 'item/completed', 'item/agentMessage/delta', 'turn/started', 'turn/completed', 'thread/status/changed', 'thread/queue/changed', 'thread/tokenUsage/updated', 'serverRequest/resolved'].includes(method)) return;
     const params = parse(record, raw); const threadId = parse(nativeId, params.threadId);
+    if (method === 'serverRequest/resolved') { this.resolveRequest(threadId, params.requestId); return; }
+    if (method === 'turn/completed') { const ended = z.object({ id: nativeId }).safeParse(params.turn); this.dropTurnRequests(threadId, ended.success ? ended.data.id : undefined); }
     const watch = this.watches.get(threadId);
     if (!watch) { this.childNotification(method, threadId); return; }
     if (method === 'thread/tokenUsage/updated') {
@@ -645,6 +765,10 @@ class CodexAdapter implements HarnessAdapter {
     if (method === 'item/started' || method === 'item/completed') {
       const item = parse(nativeItem, params.item); const runId = parse(nativeId, params.turnId);
       const normalized = mapItem(item, runId, watch.binding.cwd, method === 'item/started', method === 'item/completed'); const key = JSON.stringify([threadId, item.id]);
+      if (method === 'item/started' && normalized.fileEdits?.length) {
+        if (this.fileEdits.size >= 256) { const oldest = this.fileEdits.keys().next().value; if (oldest) this.fileEdits.delete(oldest); }
+        this.fileEdits.set(item.id, normalized.fileEdits);
+      }
       this.removeLive(key);
       if (method === 'item/started' && item.type === 'agentMessage' && Buffer.byteLength(normalized.text) <= 256 * 1024 && this.live.size < 128 && this.liveBytes + Buffer.byteLength(normalized.text) <= 2 * 1024 * 1024) {
         this.live.set(key, { threadId, item: normalized, overflow: false }); this.liveBytes += Buffer.byteLength(normalized.text);
@@ -680,7 +804,7 @@ class CodexAdapter implements HarnessAdapter {
         try {
           await this.rpc.connect(); this.reconnectAttempts = 0;
           for (const [id, watch] of this.watches) {
-            try { await this.load(watch.binding); }
+            try { await this.load(watch.binding); await this.attachActiveChildren(id); }
             catch (error) { this.emit(id, { type: 'state', state: unknownState(reason(error)) }); }
             finally { await this.releaseUnused(id); }
             this.emit(id, { type: 'invalidate' });
@@ -694,7 +818,7 @@ class CodexAdapter implements HarnessAdapter {
   async close(): Promise<void> {
     this.closed = true;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
-    this.watches.clear(); this.live.clear(); this.liveBytes = 0;
+    this.watches.clear(); this.live.clear(); this.liveBytes = 0; this.clearRequests();
     await this.rpc.close();
   }
 }

@@ -13,10 +13,15 @@ import type { Binding, NativeChange } from '../src/harness/types.ts';
 const NO_RESPONSE = Symbol('no-response');
 type Request = { id: number; method: string; params: Record<string, unknown> };
 const saved: Binding = { id: 'thread-1', cwd: '/workspace/synthetic', configuration: { modelId: 'model-a', permissionId: 'workspace' }, details: { version: 1, approvalPolicy: 'never' } };
-const nativeConfiguration = () => ({ thread: { id: saved.id, status: { type: 'idle' } }, cwd: saved.cwd, model: 'model-a', activePermissionProfile: { id: 'workspace' }, approvalPolicy: 'never' });
+/** The approval policy the synthetic App Server last started a thread with; a resume reports the same. */
+let startedPolicy = 'never';
+const nativeConfiguration = () => ({ thread: { id: saved.id, status: { type: 'idle' } }, cwd: saved.cwd, model: 'model-a', activePermissionProfile: { id: 'workspace' }, approvalPolicy: startedPolicy });
+/** A conversation created with a non-full-access permission asks for approval when needed (ADR 0016). */
+const created: Binding = { ...saved, details: { version: 1, approvalPolicy: 'on-request' } };
 function userItem(id: string, clientId = id) { return { turnId: 'run-1', item: { id, type: 'userMessage', clientId, content: [{ type: 'text', text: id }] }, completedAtMs: 1 }; }
 
 async function peer(t: TestContext, override?: (request: Request, socket: WebSocket) => unknown) {
+  startedPolicy = 'never';
   const dir = await mkdtemp(join(tmpdir(), 'zh codex test '));
   const socketPath = join(dir, 'rpc.sock');
   const http = createServer(); const sockets = new Set<WebSocket>(); const calls: Request[] = []; const clientResponses: unknown[] = [];
@@ -28,6 +33,7 @@ async function peer(t: TestContext, override?: (request: Request, socket: WebSoc
       if (!data.method) { clientResponses.push(data); return; }
       if (data.id === undefined) return;
       calls.push(data);
+      if (data.method === 'thread/start') startedPolicy = String((data.params as { approvalPolicy?: string }).approvalPolicy);
       const custom = override?.(data, socket);
       if (custom === NO_RESPONSE) return;
       let result = custom;
@@ -144,7 +150,7 @@ test('Codex persists the native identity before configuration verification can f
   const p = await peer(t, request => request.method === 'thread/start' ? { ...nativeConfiguration(), model: 'unexpected-model' } : undefined);
   let bound: Binding | undefined;
   await assert.rejects(p.adapter.create({ cwd: saved.cwd, configuration: saved.configuration }, value => { bound = value; }), { message: 'codex_configuration_mismatch' });
-  assert.deepEqual(bound, saved);
+  assert.deepEqual(bound, created);
   assert.equal(p.calls.filter(call => call.method === 'thread/start').length, 1);
   assert.equal(p.calls.some(call => call.method === 'turn/start'), false);
 });
@@ -156,7 +162,7 @@ test('Codex binds before naming, then names a new conversation before releasing 
     return undefined;
   });
   const binding = await p.adapter.create({ cwd: saved.cwd, configuration: saved.configuration, title: 'Synthetic empty conversation' }, () => { bound = true; });
-  assert.deepEqual(binding, { ...saved, details: { ...saved.details, title: 'Synthetic empty conversation' } });
+  assert.deepEqual(binding, { ...created, details: { ...created.details, title: 'Synthetic empty conversation' } });
   const methods = p.calls.map(call => call.method);
   assert.equal(methods.indexOf('thread/name/set') > methods.indexOf('thread/start'), true);
   assert.equal(methods.indexOf('thread/unsubscribe') > methods.indexOf('thread/name/set'), true);
@@ -172,7 +178,7 @@ test('A failed native name acknowledgement preserves the bound identity and neve
     return NO_RESPONSE;
   });
   await assert.rejects(p.adapter.create({ cwd: saved.cwd, configuration: saved.configuration, title: 'Synthetic empty conversation' }, value => { bound = value; }));
-  assert.deepEqual(bound, { ...saved, details: { ...saved.details, title: 'Synthetic empty conversation' } });
+  assert.deepEqual(bound, { ...created, details: { ...created.details, title: 'Synthetic empty conversation' } });
   assert.equal(p.calls.filter(call => call.method === 'thread/start').length, 1);
   assert.equal(p.calls.filter(call => call.method === 'thread/unsubscribe').length, 1);
   assert.equal(p.calls.some(call => call.method === 'turn/start'), false);
@@ -280,7 +286,8 @@ test('Permission labels translate known native profiles and retain custom names 
   const p = await peer(t, request => request.method === 'permissionProfile/list' ? { data: [':read-only', ':workspace', ':danger-full-access', 'custom-profile'].map(id => ({ id, allowed: true, description: 'Native permission definition.' })), nextCursor: null } : undefined);
   const catalog = await p.adapter.catalog();
   assert.deepEqual(catalog.permissions.map(profile => profile.label), ['只读', '工作区读写', '完全访问', 'custom-profile']);
-  assert.equal(catalog.permissions.every(profile => profile.description.includes('Native permission definition.') && profile.description.includes('不支持额外审批')), true);
+  assert.equal(catalog.permissions.every(profile => profile.description.includes('Native permission definition.')), true);
+  assert.deepEqual(catalog.permissions.map(profile => profile.description.endsWith(profile.id === ':danger-full-access' ? '不会请求审批。' : '需要越界时会请求你批准。')), [true, true, true, true], 'the description states whether the conversation asks for approval (ADR 0016)');
 });
 
 test('A lost send receipt is unknown and reconciliation finds the same native operation without another send', async t => {
@@ -373,7 +380,7 @@ test('Codex target proof requires an exact terminal record and remains bounded w
   assert.equal(missing.status, 'idle'); assert.equal(missing.terminalRunId, undefined); assert.equal(pages, 10);
 });
 
-test('Watch streams stable live items, rejects interactive requests, reports unavailability and releases without cancelling', async t => {
+test('Watch streams stable live items, refuses requests it cannot answer, reports unavailability and releases without cancelling', async t => {
   const p = await peer(t);
   const changes: NativeChange[] = [];
   const release = await p.adapter.watch(saved, change => changes.push(change));
@@ -382,10 +389,13 @@ test('Watch streams stable live items, rejects interactive requests, reports una
   p.notify('item/agentMessage/delta', { threadId: saved.id, turnId: 'run-1', itemId: 'reply-1', delta: ' world' });
   await until(() => changes.some(change => change.type === 'item' && change.item.text === 'hello world'));
   assert.equal(changes.filter(change => change.type === 'item').every(change => change.item.id === 'reply-1'), true);
+  // Dynamic client tools and malformed approvals are refused at once, granting nothing.
+  for (const socket of p.sockets) socket.send(JSON.stringify({ id: 'tool-1', method: 'item/tool/call', params: { threadId: saved.id } }));
   for (const socket of p.sockets) socket.send(JSON.stringify({ id: 'approval-1', method: 'item/commandExecution/requestApproval', params: { threadId: saved.id } }));
-  await until(() => p.clientResponses.length > 0);
-  assert.deepEqual(p.clientResponses[0], { id: 'approval-1', error: { code: -32601, message: 'This client does not support this interaction and grants no additional permissions.' } });
-  assert.equal(changes.some(change => change.type === 'state' && change.state.status === 'waiting'), true);
+  await until(() => p.clientResponses.length > 1);
+  const refusal = { code: -32601, message: 'This client does not support this interaction and grants no additional permissions.' };
+  assert.deepEqual(p.clientResponses, [{ id: 'tool-1', error: refusal }, { id: 'approval-1', error: refusal }]);
+  assert.deepEqual(await p.adapter.requests!(saved), []);
   const before = changes.filter(change => change.type === 'unavailable').length;
   for (const socket of p.sockets) socket.terminate();
   await until(() => changes.filter(change => change.type === 'unavailable').length > before);
@@ -502,4 +512,106 @@ test('Codex deletion requires observation release and never deletes through a li
   await p.adapter.delete!(saved);
   const methods = p.calls.map(call => call.method);
   assert.ok(methods.indexOf('thread/unsubscribe') < methods.indexOf('thread/delete'));
+});
+
+// ADR 0016: pending requests stay native-owned; answers travel on the connection that received them.
+const approvalParams = (threadId = saved.id, itemId = 'cmd-1') => ({ threadId, turnId: 'run-1', itemId, startedAtMs: 1000, reason: 'Sandbox blocked the network.',
+  command: 'curl -sS https://example.com', cwd: saved.cwd, availableDecisions: ['accept', { acceptWithExecpolicyAmendment: { execpolicy_amendment: ['curl'] } }, 'cancel'] });
+function sendRequest(p: Awaited<ReturnType<typeof peer>>, id: number | string, method: string, params: unknown) {
+  for (const socket of p.sockets) socket.send(JSON.stringify({ id, method, params }));
+}
+
+test('Codex holds an approval, answers on the receiving connection and reports accepted only after native resolution', async t => {
+  const p = await peer(t); const changes: NativeChange[] = [];
+  await p.adapter.watch(saved, change => changes.push(change));
+  sendRequest(p, 7, 'item/commandExecution/requestApproval', approvalParams());
+  await until(() => changes.some(change => change.type === 'requests'));
+  const [request] = await p.adapter.requests!(saved);
+  assert.ok(request);
+  assert.equal(request.kind, 'approval'); assert.equal(request.agentId, undefined);
+  assert.deepEqual(request.approval, { action: 'command', decisions: ['accept', 'cancel'], reason: 'Sandbox blocked the network.', command: 'curl -sS https://example.com', cwd: saved.cwd });
+  assert.equal(p.clientResponses.length, 0, 'an answerable request waits for the person');
+  // A decision the native request does not offer is refused locally and nothing is sent.
+  assert.deepEqual(await p.adapter.answer!(saved, request.id, { kind: 'approval', decision: 'decline' }), { outcome: 'rejected', reason: 'answer_invalid' });
+  assert.deepEqual(await p.adapter.answer!(saved, 'cx_unknown', { kind: 'approval', decision: 'accept' }), { outcome: 'rejected', reason: 'request_not_open' });
+  const receipt = p.adapter.answer!(saved, request.id, { kind: 'approval', decision: 'accept' });
+  await until(() => p.clientResponses.length === 1);
+  assert.deepEqual(p.clientResponses[0], { id: 7, result: { decision: 'accept' } });
+  assert.deepEqual(await p.adapter.answer!(saved, request.id, { kind: 'approval', decision: 'accept' }), { outcome: 'rejected', reason: 'request_answer_pending' });
+  p.notify('serverRequest/resolved', { threadId: saved.id, requestId: 7 });
+  assert.deepEqual(await receipt, { outcome: 'accepted' });
+  assert.deepEqual(await p.adapter.requests!(saved), []);
+});
+
+test('A lost connection clears open requests; the resume after reconnect replays them with the same identity', async t => {
+  const p = await peer(t, (request, socket) => {
+    if (request.method === 'thread/resume' && p.calls.filter(call => call.method === 'thread/resume').length > 1)
+      setTimeout(() => socket.send(JSON.stringify({ id: 3, method: 'item/commandExecution/requestApproval', params: approvalParams() })), 10);
+    return undefined;
+  });
+  const changes: NativeChange[] = [];
+  await p.adapter.watch(saved, change => changes.push(change));
+  sendRequest(p, 3, 'item/commandExecution/requestApproval', approvalParams());
+  await until(() => changes.some(change => change.type === 'requests'));
+  const [before] = await p.adapter.requests!(saved);
+  const requestHints = () => changes.filter(change => change.type === 'requests').length;
+  const hints = requestHints();
+  for (const socket of p.sockets) socket.terminate();
+  await until(() => requestHints() > hints);
+  assert.deepEqual(await p.adapter.requests!(saved), [], 'request ids are scoped to the lost connection');
+  await until(() => p.calls.filter(call => call.method === 'thread/resume').length > 1);
+  let replayed: Awaited<ReturnType<NonNullable<typeof p.adapter.requests>>> = [];
+  for (let tries = 0; tries < 100 && !replayed.length; tries++) { await delay(20); replayed = await p.adapter.requests!(saved); }
+  assert.equal(replayed[0]?.id, before?.id);
+  const receipt = p.adapter.answer!(saved, replayed[0]!.id, { kind: 'approval', decision: 'cancel' });
+  await until(() => p.clientResponses.length === 1);
+  p.notify('serverRequest/resolved', { threadId: saved.id, requestId: 3 });
+  assert.deepEqual(await receipt, { outcome: 'accepted' });
+});
+
+test('A sub-agent request routes to its conversation; a lost answer is unknown and an ended turn drops its requests', async t => {
+  const p = await peer(t, request => {
+    if (request.method === 'thread/read' && (request.params as { threadId: string }).threadId === 'child-1')
+      return { thread: { id: 'child-1', parentThreadId: saved.id, status: { type: 'active', activeFlags: ['waitingOnApproval'] } } };
+    return undefined;
+  });
+  const changes: NativeChange[] = [];
+  await p.adapter.watch(saved, change => changes.push(change));
+  sendRequest(p, 11, 'item/commandExecution/requestApproval', approvalParams('child-1', 'child-cmd'));
+  let routed: Awaited<ReturnType<NonNullable<typeof p.adapter.requests>>> = [];
+  for (let tries = 0; tries < 100 && !routed.length; tries++) { await delay(20); routed = await p.adapter.requests!(saved); }
+  assert.equal(routed[0]?.agentId, 'child-1');
+  const receipt = p.adapter.answer!(saved, routed[0]!.id, { kind: 'approval', decision: 'accept' });
+  await until(() => p.clientResponses.length === 1);
+  for (const socket of p.sockets) socket.terminate();
+  assert.deepEqual(await receipt, { outcome: 'unknown', reason: 'codex_answer_unconfirmed' }, 'no native resolution, no claim');
+  await until(() => p.calls.filter(call => call.method === 'initialize').length === 2);
+  sendRequest(p, 12, 'item/commandExecution/requestApproval', approvalParams());
+  for (let tries = 0; tries < 100 && !(await p.adapter.requests!(saved)).length; tries++) await delay(20);
+  p.notify('turn/completed', { threadId: saved.id, turn: { id: 'run-1', status: 'interrupted' } });
+  for (let tries = 0; tries < 100 && (await p.adapter.requests!(saved)).length; tries++) await delay(20);
+  assert.deepEqual(await p.adapter.requests!(saved), []);
+});
+
+test('An MCP request the product cannot present is declined at once and the conversation is told why', async t => {
+  const p = await peer(t); const changes: NativeChange[] = [];
+  await p.adapter.watch(saved, change => changes.push(change));
+  sendRequest(p, 'mcp-1', 'mcpServer/elicitation/request', { threadId: saved.id, turnId: 'run-1', serverName: 'synthetic', mode: 'openai/userVerification', title: 'T', description: 'D', challenge: 'C' });
+  await until(() => p.clientResponses.length === 1);
+  assert.deepEqual(p.clientResponses[0], { id: 'mcp-1', result: { action: 'decline', content: null, _meta: null } });
+  await until(() => changes.some(change => change.type === 'item' && change.item.kind === 'notice' && change.item.text.includes('synthetic')));
+  assert.deepEqual(await p.adapter.requests!(saved), []);
+});
+
+test('New conversations ask for approval unless they have full access, and every turn pins that policy', async t => {
+  const p = await peer(t, request => request.method === 'thread/start' || request.method === 'thread/resume'
+    ? { ...nativeConfiguration(), activePermissionProfile: { id: (request.params as { permissions?: string }).permissions ?? ':danger-full-access' } } : undefined);
+  const full = await p.adapter.create({ cwd: saved.cwd, configuration: { modelId: 'model-a', permissionId: ':danger-full-access' } }, () => {});
+  assert.equal(full.details.approvalPolicy, 'never');
+  assert.equal(p.calls.filter(call => call.method === 'thread/start').at(-1)?.params.approvalPolicy, 'never');
+  assert.equal((await p.adapter.submit(full, { id: 'full-send', text: 'Synthetic' })).outcome, 'accepted');
+  assert.equal(p.calls.filter(call => call.method === 'turn/start').at(-1)?.params.approvalPolicy, 'never');
+  const asking = await p.adapter.create({ cwd: saved.cwd, configuration: { modelId: 'model-a', permissionId: ':workspace' } }, () => {});
+  assert.equal(asking.details.approvalPolicy, 'on-request');
+  assert.equal(p.calls.filter(call => call.method === 'thread/start').at(-1)?.params.approvalPolicy, 'on-request');
 });

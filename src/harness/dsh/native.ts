@@ -175,7 +175,7 @@ export function stateFrom(binding: Binding, snapshot: Snapshot): NativeState {
     if (event.type === 'tool/result') { const id = object(data.message).toolCallId; if (typeof id === 'string') questions.delete(id); }
     if (event.type === 'turn/end' && data.turn === boundary.lastTurn) lastEnd = String(object(data.reason).kind);
   }
-  if (values.userQuestions?.active.length || (running && (approvals.size || questions.size))) return { status: 'waiting', runId: latestRun, pendingInputs, configurationVerified, reason: 'DSH 正等待原生交互；此版本不转发审批或回答，请在原生界面处理或停止。' };
+  if (values.userQuestions?.active.length || (running && (approvals.size || questions.size))) return { status: 'waiting', runId: latestRun, pendingInputs, configurationVerified, reason: 'DSH 正在等你回答或批准。' };
   if (running) return { status: 'running', runId: latestRun, pendingInputs, configurationVerified };
   if (lastEnd === 'interrupted' || lastEnd === 'aborted') return { status: 'interrupted', runId: latestRun, pendingInputs, configurationVerified, reason: lastEnd === 'aborted' ? '本轮已停止；原生排队输入可能仍保留。' : 'DSH 进程中断了本轮；工具副作用需要单独核对。' };
   if (lastEnd && lastEnd !== 'completed') return { status: 'failed', runId: latestRun, pendingInputs, configurationVerified, reason: '原生本轮未正常完成。' };
@@ -209,7 +209,7 @@ export function itemFrom(session: string, event: Event, live = false, inferredTu
     const message = object(data.message); if (typeof message.toolCallId !== 'string') return;
     return { ...base, id: `dsh:${session}:tool:${message.toolCallId}`, kind: 'tool', text: textContent(message.content) || (message.isError ? '工具执行失败或结果未知' : '工具已完成'), tool: { name: '工具执行', output: textContent(message.content).slice(0,128000) }, status: message.isError ? 'failed' : 'completed' };
   }
-  if (event.type === 'approval/asked') return { ...base, kind: 'notice', text: 'DSH 请求审批；此版本不自动批准，请在原生界面处理。' };
+  if (event.type === 'approval/asked') return { ...base, kind: 'notice', text: 'DSH 请求审批。' };
   if (event.type === 'approval/decided' && data.outcome === 'unavailable') return { ...base, kind: 'notice', text: 'DSH 没有可用的审批处理入口；本次请求未获授权。', status: 'failed' };
   if (event.type === 'turn/end' && object(data.reason).kind !== 'completed') return { ...base, kind: 'notice', text: object(data.reason).kind === 'interrupted' ? 'DSH 进程在本轮完成前退出，工具结果需核对。' : '原生本轮已停止或未正常完成。', status: 'failed' };
 }

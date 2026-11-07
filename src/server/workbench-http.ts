@@ -2,7 +2,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { ServerResponse } from 'node:http';
 import { z } from 'zod';
 import { attentionSchema, conversationManagementSchema, conversationSearchSchema, createConversationSchema, enqueueOperationSchema, historyCursorSchema, historyPageSchema, identifierSchema, queueCommandSchema, storageSchema, workbenchConfigurationSchema,
-  subagentHistorySchema, subagentIdSchema, subagentListSchema, subagentStopResponseSchema,
+  subagentHistorySchema, subagentIdSchema, subagentListSchema, subagentStopResponseSchema, answerRequestSchema, requestAnswerResponseSchema, requestIdSchema,
   workspaceAddSchema, workspaceBrowseSchema, workspaceDirectoryListSchema, workspaceIdSchema, workspaceManagementSchema } from '../shared/workbench.ts';
 import type { Conversation as ConversationView, WorkbenchOperation, WorkbenchSnapshot } from '../shared/workbench.ts';
 import type { PrivateContext } from './app.ts';
@@ -64,15 +64,17 @@ function snapshotView(value: ReturnType<Workbench['snapshot']>, unread: boolean)
   const conversation = conversationView(value.conversation, unread);
   const operations = newestWithin(value.operations.map(operationView), 1024 * 1024, true);
   const { queue, turnFiles } = value;
+  // Oldest open requests first: the agent waits on them. The list is bounded so it cannot crowd out the transcript.
+  const requests = value.requests.length ? newestWithin(value.requests, 2 * 1024 * 1024, true) : undefined;
   // A native latest page is whole: if it cannot fit, the older cursor still addresses everything before it.
   const items = newestWithin(history.items, 7 * 1024 * 1024);
-  const liveItems = newestWithin(history.liveItems, MAX_RESPONSE_BYTES - size({ conversation, operations, items, queue, turnFiles }) - 4096);
+  const liveItems = newestWithin(history.liveItems, MAX_RESPONSE_BYTES - size({ conversation, operations, items, queue, turnFiles, requests }) - 4096);
   const trimmed = items.length < history.items.length;
   return { conversation, history: {
     items: trimmed ? [] : items, liveItems, liveItemsLimited: history.liveItemsLimited || liveItems.length < history.liveItems.length,
     olderCursor: history.olderCursor, loaded: history.loaded && !trimmed,
     ...(trimmed ? { error: 'native_history_page_limit' } : history.error ? { error: history.error } : {}),
-  }, operations, queue, ...(turnFiles.length ? { turnFiles } : {}), ...(value.conversation.usage ? { usage: value.conversation.usage } : {}), revision: value.revision };
+  }, operations, queue, ...(turnFiles.length ? { turnFiles } : {}), ...(value.conversation.usage ? { usage: value.conversation.usage } : {}), ...(requests ? { requests } : {}), revision: value.revision };
 }
 function json(reply: FastifyReply, value: unknown): FastifyReply {
   const body = JSON.stringify(value);
@@ -312,6 +314,21 @@ export function createWorkbenchHttp(workbench: Workbench, input: Partial<z.input
         const { id, stop } = parse(z.object({ id: z.uuid(), stop: z.uuid() }).strict(), request.params);
         parse(noQuery, request.body ?? {});
         return json(reply, stopView(await workbench.reconcileSubagentStop(id, stop)));
+      });
+      // ADR 0016: one answer per native request; content is never logged.
+      privateApp.post('/conversations/:id/requests/:request/answer', { bodyLimit: 256 * 1024 }, async (request, reply) => {
+        parse(noQuery, request.query);
+        const { id, request: requestId } = parse(z.object({ id: z.uuid(), request: requestIdSchema }).strict(), request.params);
+        const input = parse(answerRequestSchema, request.body);
+        const answer = workbench.answerRequest(id, requestId, input.id, input.answer);
+        privateApp.log.info({ event: 'request_answer_submitted', kind: input.answer.kind });
+        return json(reply.code(202), requestAnswerResponseSchema.parse({ answer }));
+      });
+      privateApp.post('/conversations/:id/request-answers/:answer/reconcile', { bodyLimit: 4096 }, async (request, reply) => {
+        parse(noQuery, request.query);
+        const { id, answer } = parse(z.object({ id: z.uuid(), answer: z.uuid() }).strict(), request.params);
+        parse(noQuery, request.body ?? {});
+        return json(reply, requestAnswerResponseSchema.parse({ answer: await workbench.reconcileAnswer(id, answer) }));
       });
       privateApp.post('/conversations/:id/delete', { bodyLimit: 4096 }, async (request, reply) => {
         parse(noQuery, request.query);

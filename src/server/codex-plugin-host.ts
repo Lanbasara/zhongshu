@@ -88,7 +88,7 @@ export async function createCodexPluginHost(input: CodexPluginHostSettings) {
   let boundTarget: string | undefined;
   let connectingTarget: Promise<string> | undefined;
   const rpc = new CodexRpc(settings.nativeSocket, {
-    notification() {}, unsupportedRequest() {}, disconnected() { boundTarget = undefined; },
+    notification() {}, serverRequest: () => false, disconnected() { boundTarget = undefined; },
   });
   let busy = false;
   const completions = new Map<string, { command: PluginCommand; status: PluginResult }>();

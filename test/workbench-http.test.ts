@@ -61,6 +61,7 @@ async function fixture(t: TestContext, limits: Parameters<typeof createWorkbench
     async reconcile() { return { outcome: 'accepted', runId: 'synthetic-turn' }; },
     async stop() { return { outcome: 'accepted', runId: 'synthetic-turn' }; },
     async watch(_binding, value) { listener = value; return () => { listener = undefined; }; }, async close() {},
+    async requests() { return []; }, async answer() { return { outcome: 'rejected', reason: 'request_not_open' }; },
   };
   const root = join(await realpath(directory), 'folders');
   if (withRegistry) await mkdir(root);
@@ -575,4 +576,20 @@ test('change events mark only list-visible changes, so unopened conversations re
   assert.equal((await next()).summary, true, 'running to done reaches every list');
   f.store.renameConversation(id, '新的示例标题');
   assert.equal((await next()).summary, true);
+});
+
+test('answering a native request requires a session, CSRF and same origin, and validates identity and shape', async t => {
+  const f = await fixture(t); const id = f.seed();
+  const path = `/conversations/${id}/requests/cx_synthetic/answer`;
+  const body = { id: randomUUID(), answer: { kind: 'approval', decision: 'accept' } };
+  assert.equal((await f.request(path, { method: 'POST', body, authenticated: false })).status, 401);
+  assert.equal((await f.request(path, { method: 'POST', body, headers: { 'x-csrf-token': '' } })).status, 403);
+  assert.equal((await f.request(path, { method: 'POST', body, headers: { origin: 'https://attacker.example' } })).status, 403);
+  assert.equal((await f.request(`/conversations/${id}/requests/..%2Fescape/answer`, { method: 'POST', body })).status, 400);
+  assert.equal((await f.request(path, { method: 'POST', body: { ...body, answer: { kind: 'approval', decision: 'always' } } })).status, 400);
+  assert.equal((await f.request(path, { method: 'POST', body: { ...body, extra: true } })).status, 400);
+  const missing = await f.request(path, { method: 'POST', body });
+  assert.deepEqual([missing.status, missing.body.error], [404, 'request_not_found']);
+  assert.equal((await f.request(`/conversations/${id}/request-answers/${randomUUID()}/reconcile`, { method: 'POST', body: {} })).status, 404);
+  assert.equal((await f.request(`/conversations/${id}`)).body.requests, undefined, 'no open requests, no request list');
 });
