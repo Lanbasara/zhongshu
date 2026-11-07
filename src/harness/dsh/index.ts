@@ -217,6 +217,9 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
   /**
    * ADR 0015. DSH keeps no expiry or refresh: when the platform rejects the grant, the Host clears it. A profile read
    * asks the platform; it can fail for other reasons while inference still works, which is shown as unverified.
+   * The profile and balance reads use different Platform routes with the same grant, and either one being accepted
+   * proves the grant: DeepSeek's edge has refused the profile route from datacenter addresses while the balance
+   * route still answered, so a failed profile read falls back to the balance read before reporting unverified.
    */
   const https = z.string().max(2048).refine(value => { try { return new URL(value).protocol === 'https:'; } catch { return false; } });
   const accountState = z.object({
@@ -238,8 +241,13 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
     const profile = z.union([z.null(), z.object({ status: z.literal('failed') }).passthrough(),
       z.object({ status: z.literal('ready'), value: z.object({ name: z.string().max(200).nullable().optional(), contact: z.string().max(200).nullable().optional() }).passthrough() })])
       .parse(await connection.call('account/getProfile', { client }));
-    if (profile === null) return (await readAccountState()).status === 'signed-out' ? absent() : { state: 'unverified', ...links };
-    if (profile.status === 'failed') return { state: 'unverified', ...links };
+    const cleared = async (): Promise<NativeAccount> => (await readAccountState()).status === 'signed-out' ? absent() : { state: 'unverified', ...links };
+    if (profile === null) return cleared();
+    if (profile.status === 'failed') {
+      const balance = z.union([z.null(), z.object({ status: z.enum(['ready', 'failed']) }).passthrough()]).parse(await connection.call('account/getBalance', { client }));
+      if (balance === null) return cleared();
+      return { state: balance.status === 'ready' ? 'valid' : 'unverified', ...links };
+    }
     const identity = profile.value.contact ?? profile.value.name ?? undefined;
     return { state: 'valid', ...(identity ? { identity: `DeepSeek 账号 ${identity}` } : {}), ...links };
   }

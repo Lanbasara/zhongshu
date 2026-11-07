@@ -26,6 +26,7 @@ async function host() {
   let catalog: unknown = { groups: [{ id: 'deepseek-account', name: 'DeepSeek', models: [{ id: 'test-model', name: 'Test', reasoning: { efforts: [{ id: 'high', name: 'High' }] } }] }] };
   let signedIn = true;
   let profile: 'ready' | 'failed' | 'rejected' = 'ready';
+  let balance: 'ready' | 'failed' | 'rejected' = 'ready';
   const followRequests: { kind: string; activate?: boolean }[] = [];
   let presetIds = ['standard', 'ptc', 'minimal', 'cordis']; const brokenPresets = new Set<string>(); let lockedSelects = 0;
   let signIn: { id: string; phase: string; state: string; callbackOrigin: string } | null = null;
@@ -80,6 +81,7 @@ async function host() {
         case 'account/cancelSignIn': if (signIn && signIn.id === args.attemptId) signIn.phase = 'cancelled'; value = { status: signedIn ? 'credential-stored' : 'signed-out', links: {}, attempt: null }; break;
         // A rejected grant is cleared by the Host and the read yields null (DSH deepseek-account README).
         case 'account/getProfile': value = profile === 'rejected' ? (signedIn = false, null) : profile === 'failed' ? { status: 'failed' } : { status: 'ready', value: { id: 'u1', name: 'Synthetic', contact: '138****9119' } }; break;
+        case 'account/getBalance': value = balance === 'rejected' ? (signedIn = false, null) : balance === 'failed' ? { status: 'failed' } : { status: 'ready', value: [{ currency: 'CNY', totalBalance: '9.00' }], bonusWallets: [] }; break;
         case 'session/modelCatalog': value = catalog; break;
         case 'permissionPresets/catalog': value = { options: ['workspace-write', 'danger-full-access'].map(value => ({ value, name: value, description: 'Fixture permission' })) }; break;
         case 'session/list': assert.deepEqual(args, { _request: {} }); value = { items: [...sessions.values()].map(s => ({ sessionId: s.id, cwd: s.cwd, blank: !s.turn })) }; break;
@@ -170,7 +172,7 @@ async function host() {
       return eventId;
     },
     withdraw(eventId: string) { parked.delete(eventId); for (const [streamId, stream] of eventStreams) stream.socket.send(JSON.stringify({ type: 'item', streamId, value: { type: 'cancel', eventId } })); },
-    dropNextResult() { failNextResult = 'drop'; }, followCalls: () => followCalls, setCatalog(value: unknown) { catalog = value; }, signOut() { signedIn = false; }, signIn() { signedIn = true; }, signInAttempt: () => signIn, setPresets(ids: string[], broken: string[] = []) { presetIds = ids; brokenPresets.clear(); for (const id of broken) brokenPresets.add(id); }, lockedSelects: () => lockedSelects, setProfile(value: 'ready' | 'failed' | 'rejected') { profile = value; }, onNextPage(hook: () => void) { nextPage = hook; }, exchanges: () => exchanges, rejectModel: () => { rejectModel = true; }, losePromptReceipt: () => { losePromptReceipt = true; }, live(session: string, frame: unknown) { for (const [streamId, follow] of follows) if (follow.session === session) follow.socket.send(JSON.stringify({ type: 'item', streamId, value: { type: 'assistant-stream', frame } })); }, disconnect() { for (const peer of peers.values()) peer?.terminate(); }, async close() { for (const peer of peers.values()) peer?.terminate(); await new Promise<void>(resolve => wss.close(() => resolve())); await new Promise<void>(resolve => server.close(() => resolve())); } };
+    dropNextResult() { failNextResult = 'drop'; }, followCalls: () => followCalls, setCatalog(value: unknown) { catalog = value; }, signOut() { signedIn = false; }, signIn() { signedIn = true; }, signInAttempt: () => signIn, setPresets(ids: string[], broken: string[] = []) { presetIds = ids; brokenPresets.clear(); for (const id of broken) brokenPresets.add(id); }, lockedSelects: () => lockedSelects, setProfile(value: 'ready' | 'failed' | 'rejected') { profile = value; }, setBalance(value: 'ready' | 'failed' | 'rejected') { balance = value; }, onNextPage(hook: () => void) { nextPage = hook; }, exchanges: () => exchanges, rejectModel: () => { rejectModel = true; }, losePromptReceipt: () => { losePromptReceipt = true; }, live(session: string, frame: unknown) { for (const [streamId, follow] of follows) if (follow.session === session) follow.socket.send(JSON.stringify({ type: 'item', streamId, value: { type: 'assistant-stream', frame } })); }, disconnect() { for (const peer of peers.values()) peer?.terminate(); }, async close() { for (const peer of peers.values()) peer?.terminate(); await new Promise<void>(resolve => wss.close(() => resolve())); await new Promise<void>(resolve => server.close(() => resolve())); } };
 }
 
 async function setup() {
@@ -776,7 +778,15 @@ test('DSH account: a platform check makes it valid, a failed check unverified, a
   const profileCall = context.fixture.calls.find(call => call.method === 'account/getProfile');
   assert.deepEqual(Object.keys(profileCall!.args.client).sort(), ['locale', 'timezoneOffsetSeconds', 'version']);
   context.fixture.setProfile('failed');
-  assert.deepEqual(await context.adapter.account!(), { state: 'unverified', links });
+  assert.deepEqual(await context.adapter.account!(), { state: 'valid', links }, 'a blocked profile read falls back to the balance read, which proves the grant without naming it');
+  const balanceCall = context.fixture.calls.find(call => call.method === 'account/getBalance');
+  assert.deepEqual(Object.keys(balanceCall!.args.client).sort(), ['locale', 'timezoneOffsetSeconds', 'version']);
+  context.fixture.setBalance('failed');
+  assert.deepEqual(await context.adapter.account!(), { state: 'unverified', links }, 'both platform reads failing is unverified');
+  context.fixture.setBalance('rejected');
+  assert.deepEqual(await context.adapter.account!(), { state: 'rejected', links }, 'the balance read clearing the grant is a rejection');
+  context.fixture.signIn(); context.fixture.setBalance('ready');
+  assert.equal((await context.adapter.account!()).state, 'valid');
   context.fixture.setProfile('rejected');
   assert.deepEqual(await context.adapter.account!(), { state: 'rejected', links });
   assert.deepEqual(await context.adapter.account!(), { state: 'signed-out', links }, 'after the rejection is reported it is plainly signed out');

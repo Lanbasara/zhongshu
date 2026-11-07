@@ -29,7 +29,7 @@
 **读回。**
 
 - 中书侧：私有 `GET /api/private/accounts`（需登录会话），`POST /api/private/accounts/<codex|dsh>/check`（需 CSRF）。
-- 原生侧：Codex 用 `account/read`、`getAuthStatus`、`account/rateLimits/read`；DSH 用 `account/getState`、`account/getProfile`。
+- 原生侧：Codex 用 `account/read`、`getAuthStatus`、`account/rateLimits/read`；DSH 用 `account/getState`、`account/getProfile`，资料读取失败时再用 `account/getBalance`。
 - 输出前遮盖邮箱、用户码和账号 ID。
 
 **DSH 登录。** 需要一个没有凭据、数据目录可写、并且能访问 `platform.deepseek.com` 的 DSH Host。
@@ -48,6 +48,7 @@
 - **Codex 本地有凭据不等于可用。** 读账号即使要求刷新，刷新失败也不会出现在结果里，所以要靠读额度判断。读额度返回 401 时，中书会先让原生刷新一次再读；仍是 401 才判为失效，以免把“访问令牌刚过期、刷新令牌还有效”误报为失效。
 - **无法续期的 Codex 凭据只报一次错**，之后就像没有账号。所有读账号的地方都要记录这次报错。一个刚启动的进程靠 `getAuthStatus` 区分“从未登录”和“凭据还在但不能用”。失效状态一直保持到核实成功；凭据被删掉后，仍显示“登录已失效”。
 - **DSH 的核实资料可能失败而推理正常。** 原因见上一条。平台拒绝凭据时，原生会清除它，下次核实即为失效。
+- **DSH 的资料与余额走平台的两条不同路由。** 资料是 `GET /auth-api/v0/users/current`，余额是 `GET /api/v0/users/get_user_summary`，都带同一份凭据。2026-11-07 在数据中心地址的服务器上，DeepSeek 的 CloudFront 边缘拒绝资料路由（403 “Request blocked”，与请求头无关），余额路由和登录用的 `POST /auth-api/v0/dsh/*` 照常到达平台。所以资料读取失败时，中书再读余额：余额就绪即为可用（不显示账号名），两者都失败才是暂时无法核实。排查时在 DSH 容器内分别请求这两条路由，看响应来自 CloudFront 还是源站。
 - **DSH 访问 DeepSeek 平台可能被网络拦截。** 2026-11-07 在公司网络的本机上，容器访问 `platform.deepseek.com` 时证书链来自公司 Web 代理（`SELF_SIGNED_CERT_IN_CHAIN`），而 `api.deepseek.com` 不受影响。结果是：推理正常，但核实资料和余额一直失败，显示“暂时无法核实”；发起登录也立即失败（原生 `attempt.errorCode: no-response`）。排查时在 DSH 容器内分别请求这两个地址，比较结果。
 - **新发起的 Codex 登录会顶掉旧的**：旧的会收到 `account/login/completed {success:false}`，取消旧的返回 notFound。
 - **每次应用启动后，第一次核实如果是未登录或失效，会推送一次。**
