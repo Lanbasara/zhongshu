@@ -559,3 +559,20 @@ test('attention requires authentication, orders live, failed and unknown work be
   assert.equal(after.unread, 53);
   assert.equal(after.conversations.some(entry => entry.id === target), false);
 });
+
+test('change events mark only list-visible changes, so unopened conversations refresh lists on status changes, not on usage', async t => {
+  const f = await fixture(t); const id = f.seed();
+  const stream = await f.stream(); await stream.named('ready');
+  const next = async () => changeEventSchema.parse((await stream.named('change'))!.data);
+  f.store.setConversationState(id, { state: { ...nativeState, status: 'running', runId: 'summary-run' } });
+  assert.equal((await next()).summary, true, 'a page learns the first summary it has not seen');
+  f.store.setUsage(id, { total: 100 });
+  const usage = await next();
+  assert.equal(usage.conversationId, id); assert.equal(usage.summary, undefined, 'token usage alone does not touch the list');
+  f.store.setUsage(id, { total: 200 });
+  assert.equal((await next()).summary, undefined);
+  f.store.setConversationState(id, { state: { ...nativeState, status: 'idle', runId: 'summary-run', terminalRunId: 'summary-run', terminalStatus: 'completed' } });
+  assert.equal((await next()).summary, true, 'running to done reaches every list');
+  f.store.renameConversation(id, '新的示例标题');
+  assert.equal((await next()).summary, true);
+});

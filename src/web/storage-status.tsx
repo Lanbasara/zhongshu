@@ -11,13 +11,17 @@ function bytes(value: number): string {
 }
 
 /** The application's own storage against its instance budget (ADR 0014). History bodies live in the native Harness. */
-export function useStorage(signal: number) {
+export function useStorage() {
   const [value, setValue] = useState<StorageView>();
   const refresh = useCallback(() => {
     void request('/storage', storageSchema).then(setValue).catch(() => { /* keep the last known value */ });
   }, []);
-  useEffect(() => { const timer = setInterval(refresh, 120_000); return () => clearInterval(timer); }, [refresh]);
-  useEffect(() => { refresh(); }, [signal, refresh]);
+  // Storage barely moves: read on load, every two minutes while visible, and when the storage page opens.
+  useEffect(() => {
+    refresh();
+    const timer = setInterval(() => { if (document.visibilityState === 'visible') refresh(); }, 120_000);
+    return () => clearInterval(timer);
+  }, [refresh]);
   return { value, setValue, refresh };
 }
 export const storageState = (value?: StorageView) => value?.full ? 'full' : value?.warning ? 'warning' : undefined;

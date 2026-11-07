@@ -83,6 +83,8 @@ function json(reply: FastifyReply, value: unknown): FastifyReply {
 type Connection = {
   response: ServerResponse; sessionId: string; token: string; context: PrivateContext; cursor: number;
   closed: boolean; blocked: boolean; timeout?: NodeJS.Timeout; scheduled?: NodeJS.Immediate; drain: () => void;
+  /** Last list-visible summary sent per conversation; bounded, and a forgotten entry only costs one extra list refresh. */
+  summaries?: Map<string, string>;
 };
 
 /** One authenticated event stream per page. Durable cursors replace an in-memory replay queue. */
@@ -126,6 +128,22 @@ export function createWorkbenchHttp(workbench: Workbench, input: Partial<z.input
     if (closed || connection.closed || connection.blocked || connection.scheduled) return;
     connection.scheduled = setImmediate(() => { connection.scheduled = undefined; pump(connection); });
   }
+  /** What conversation lists show; usage, run identities and live content are deliberately left out. */
+  function listSummary(id: string): string | undefined {
+    const value = workbench.store.getConversation(id);
+    if (!value) return undefined;
+    const subagents = value.subagents && { running: value.subagents.running, unverified: value.subagents.unverified, total: value.subagents.total, resultsPending: value.subagents.resultsPending };
+    return JSON.stringify([value.title, value.workspaceId, value.archived, value.readiness, value.state.status, value.error, workbench.unread([value]).has(id), subagents]);
+  }
+  function summaryChanged(connection: Connection, id: string): boolean {
+    const summary = listSummary(id);
+    const summaries = connection.summaries ??= new Map();
+    if (summary !== undefined && summaries.get(id) === summary) return false;
+    summaries.delete(id);
+    if (summary !== undefined) summaries.set(id, summary);
+    if (summaries.size > 2048) summaries.delete(summaries.keys().next().value!);
+    return true;
+  }
   function pump(connection: Connection): void {
     if (closed || connection.blocked || !authorized(connection)) return;
     try {
@@ -135,10 +153,12 @@ export function createWorkbenchHttp(workbench: Workbench, input: Partial<z.input
         return;
       }
       for (const change of batch.events) {
-        const value: { type: 'change'; revision: number; conversationId: string; deleted?: boolean; item?: ReturnType<Workbench['liveItem']> } = {
+        const value: { type: 'change'; revision: number; conversationId: string; deleted?: boolean; summary?: true; item?: ReturnType<Workbench['liveItem']> } = {
           type: 'change', revision: change.sequence, conversationId: change.conversationId,
         };
         if (workbench.store.deletions.get(change.conversationId)?.status === 'completed') value.deleted = true;
+        // Live item deltas never alter list summaries; other changes are compared with what this page last saw.
+        if (value.deleted || (!change.itemId && summaryChanged(connection, change.conversationId))) value.summary = true;
         if (change.itemId && !value.deleted) {
           // Live bodies live in memory only; a settled item falls back to the snapshot read.
           const item = workbench.liveItem(change.conversationId, change.itemId);

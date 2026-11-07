@@ -98,6 +98,9 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
     return value;
   }), []);
   const [listRevision, refreshList] = useState(0);
+  /** Unread and attention follow summary changes even while the page is hidden, so the tab title stays current. */
+  const [attentionRevision, refreshAttention] = useState(0);
+  const attentionTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const sidebarWidth = useSidebarWidth();
   const [reader, setReader] = useState(false);
   /** Open sub-agent panel; `agentId` selects one sub-agent's transcript. Exclusive with the workspace reader. */
@@ -226,7 +229,9 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
   };
   const loadRef = useRef(load); loadRef.current = load;
   const scheduleRefresh = (id?: string, refreshNavigation = true) => {
-    if (refreshNavigation && !listTimer.current) listTimer.current = setTimeout(() => { listTimer.current = undefined; refreshList(value => value + 1); }, 700);
+    if (refreshNavigation && !attentionTimer.current) attentionTimer.current = setTimeout(() => { attentionTimer.current = undefined; refreshAttention(value => value + 1); }, 700);
+    // A hidden page skips list reloads; becoming visible again reconciles everything once.
+    if (refreshNavigation && !listTimer.current && document.visibilityState !== 'hidden') listTimer.current = setTimeout(() => { listTimer.current = undefined; refreshList(value => value + 1); }, 700);
     if (id && id !== selectedRef.current) return;
     if (!refreshTimer.current) refreshTimer.current = setTimeout(() => { refreshTimer.current = undefined; if (selectedRef.current) void loadRef.current(selectedRef.current); }, 180);
   };
@@ -234,7 +239,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
   useEffect(() => {
     alive.current = true;
     configurationRefresh.current();
-    return () => { alive.current = false; configurationSerial.current++; generation.current++; viewController.current?.abort(); if (refreshTimer.current) clearTimeout(refreshTimer.current); if (listTimer.current) clearTimeout(listTimer.current); };
+    return () => { alive.current = false; configurationSerial.current++; generation.current++; viewController.current?.abort(); if (refreshTimer.current) clearTimeout(refreshTimer.current); if (listTimer.current) clearTimeout(listTimer.current); if (attentionTimer.current) clearTimeout(attentionTimer.current); };
   }, []);
   useEffect(() => {
     generation.current++; requestSerial.current++; viewController.current?.abort(); viewController.current = new AbortController();
@@ -302,7 +307,8 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
             setSnapshot(current => current ? { ...current, history: { ...current.history, liveItems: [...current.history.liveItems.filter(old => old.id !== item.id), item].slice(-100) } } : current);
           }
           // History snapshots reconcile live and durable identities; this also catches missed terminal events.
-          scheduleRefresh(change.conversationId, !change.item);
+          // Only list-visible changes refresh lists; content and usage refresh just the open conversation.
+          scheduleRefresh(change.conversationId, !!change.summary);
         } catch { cursor = 0; reconnect(); }
       });
       source.addEventListener('reset', event => { if (source !== own || stopped) return; try { cursor = resetEventSchema.parse(JSON.parse((event as MessageEvent).data)).revision; scheduleRefresh(); } catch { cursor = 0; reconnect(); } });
@@ -529,8 +535,8 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
     onClose={closeSubagents} onReload={subagentList.reload} onQuote={quoteSubagent} report={report}/>;
   const configurationLabel = conversationConfigurationLabel(conversation, configuration?.harnesses);
   const permission = configuration?.harnesses.find(h => h.id === conversation?.harnessId)?.permissions.find(p => p.id === conversation?.configuration.permissionId);
-  const storage = useStorage(listRevision);
-  const attention = useAttention(listRevision, report);
+  const storage = useStorage();
+  const attention = useAttention(listRevision + attentionRevision, report);
   const connectionView = { text: connection, state: connection === '已连接' ? 'online' as const : connection.startsWith('离线') ? 'offline' as const : 'connecting' as const };
   const dismissToast = useCallback((id: string) => setToasts(current => current.filter(toast => toast.id !== id)), []);
   const pushToast = useCallback((toast: Omit<ToastView, 'id'>) => {

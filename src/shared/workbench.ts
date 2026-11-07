@@ -187,7 +187,8 @@ export const storageSchema = z.object({
   used: revisionSchema, budget: revisionSchema.min(1), warning: z.boolean(), full: z.boolean(),
   images: z.object({ owned: revisionSchema, cache: revisionSchema }).strict(),
 }).strict();
-export const changeEventSchema = z.object({ type: z.literal('change'), revision: revisionSchema, conversationId: z.uuid(), deleted: z.boolean().optional(), item: itemSchema.optional() }).strict();
+/** `summary` marks a change to what conversation lists show (status, unread, title, archive, sub-agent counts); content and usage changes omit it. */
+export const changeEventSchema = z.object({ type: z.literal('change'), revision: revisionSchema, conversationId: z.uuid(), deleted: z.boolean().optional(), summary: z.literal(true).optional(), item: itemSchema.optional() }).strict();
 export const resetEventSchema = z.object({ type: z.literal('reset'), revision: revisionSchema }).strict();
 export const readyEventSchema = z.object({ type: z.literal('ready'), revision: revisionSchema }).strict();
 export type WorkbenchConfiguration = z.infer<typeof workbenchConfigurationSchema>;
