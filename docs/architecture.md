@@ -38,7 +38,7 @@ React 浏览器 ──同源 HTTP / SSE──→ Fastify 应用
 
 Codex adapter 在已建立连接丢失时报告内部 `unavailable` 事件，由 Workbench 立即持久化“待核实”并撤销配置/终态证明，保留绑定、历史、操作及最后已知运行信息。离线连接尝试失败不重复发失联事件；旧连接事件和旧代次读取不能覆盖后来的状态。重新连接后按原绑定核实配置和原生状态，不自动重发未知操作。公开 HTTP/SSE 仍使用既有状态契约。
 
-Web manifest 提供独立窗口入口。界面以 Streamdown 渲染 Markdown/GFM/代码，用按轮折叠的工具组展示原生命令、输出和状态。运行中输入的路径见[执行功能地图](features/execution.md)。原始 HTML 不执行，链接协议受限。Agent 的提问与审批见下方[提问与审批](#提问与审批)。
+Web manifest 提供独立窗口入口，推送与安装见下方[通知与安装](#通知与安装)。界面以 Streamdown 渲染 Markdown/GFM/代码，用按轮折叠的工具组展示原生命令、输出和状态。运行中输入的路径见[执行功能地图](features/execution.md)。原始 HTML 不执行，链接协议受限。Agent 的提问与审批见下方[提问与审批](#提问与审批)。
 
 ## 新建草稿与配置归属
 
@@ -128,6 +128,18 @@ Codex 经专用 Unix socket 管理进程调用固定 CLI 和同一实例的 App 
 | 接口 | 快照带 `requests`；私有 `POST /conversations/:id/requests/:request/answer` 与 `/request-answers/:answer/reconcile`，沿用认证、来源与 CSRF 检查，日志不含内容 |
 | 界面 | [展示组件](../src/web/patterns/requests.tsx) 只接收数据（文案与服务端摘要由测试保持一致）；[功能层](../src/web/requests.tsx) 提交与核对，放在输入框上方 |
 | Plan 模式 | 共同语义以 `planMode` 区分：Codex 为 `per-turn`，开关存在对话行（迁移 19），派发消息时随 `turn/start.collaborationMode` 送出（沿用对话的模型与深度）；DSH 为 `native`，`setPlan` 执行原生命令，状态来自会话投影并存入 `NativeState.plan`。Workbench 只在轮次之间允许切换，`planReady` 由原生计划条目与本轮终态得出。DSH 的计划审核与 Codex Plan 中的结构化提问走上面的请求通道；界面为 [plan.tsx](../src/web/plan.tsx) 与 [展示组件](../src/web/patterns/plan.tsx) |
+
+## 通知与安装
+
+边界依据 [ADR 0018](adr/0018-push-notifications.md)：只负责推送的 service worker，没有离线缓存。
+
+| 层 | 当前职责 |
+| --- | --- |
+| 触发 | [push-triggers.ts](../src/server/push-triggers.ts) 接在 Store 的变更回调上，跳过实时条目增量，按对话状态得出事件：本进程看到的运行结束且结果未读（用户停止与正在阅读的不算），或开始等待且无人在读。只记住运行中的对话和有界的最近结果 |
+| 发送 | [push.ts](../src/server/push.ts) 为每台设备加密（[web-push.ts](../src/server/web-push.ts)，RFC 8291/8292，`node:crypto`）并发给浏览器推送服务；只接受主流厂商的推送域名，地址不进日志或接口；404/410 删除设备，其他失败记在设备上。消息文案在 [shared/push.ts](../src/shared/push.ts)：对话标题加固定事件文案，不含消息、提问或文件内容 |
+| 数据 | 迁移 20：`push_keys` 保存实例推送密钥（首次使用时生成），`push_subscriptions` 保存每台设备的地址、密钥、标签与最近送达情况 |
+| 接口 | 私有 `GET /api/private/push`、`POST /push/devices`、`/push/devices/:id/remove`、`/push/devices/:id/test`，沿用认证、来源与 CSRF 检查 |
+| 浏览器 | [sw.js](../src/web/public/sw.js) 只显示通知和处理点击（已打开页面就地切换，否则新开窗口）；[push-client.ts](../src/web/push-client.ts) 注册 worker、开启/关闭订阅、识别本设备、保存安装提示并设置角标；设置页「通知」由 [功能层](../src/web/notification-settings.tsx) 与 [展示组件](../src/web/patterns/notifications.tsx) 组成 |
 
 ## 对话观察与删除协调
 

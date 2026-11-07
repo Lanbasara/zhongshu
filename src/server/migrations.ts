@@ -260,6 +260,26 @@ export const productMigrations: Migration[] = [{ version: 2, sql: `
 ` }, { version: 19, sql: `
   -- ADR 0016: Plan mode chosen in Zhongshu for Harnesses that take the mode with every turn (Codex).
   ALTER TABLE workbench_conversations ADD COLUMN plan_mode INTEGER NOT NULL DEFAULT 0 CHECK (plan_mode IN (0, 1));
+` }, { version: 20, sql: `
+  -- ADR 0018: the instance's push key (created on first use) and one subscription per browser or device.
+  CREATE TABLE push_keys (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    public_key TEXT NOT NULL,
+    private_key TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+  ) STRICT;
+  CREATE TABLE push_subscriptions (
+    id TEXT PRIMARY KEY,
+    endpoint TEXT NOT NULL UNIQUE CHECK (length(endpoint) <= 2048),
+    p256dh TEXT NOT NULL,
+    auth TEXT NOT NULL,
+    label TEXT NOT NULL,
+    public_key TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    delivered_at INTEGER,
+    failed_at INTEGER,
+    failure TEXT
+  ) STRICT;
 ` }];
 
 /** Runs inside restoreDatabase's private staging transaction, before the database is published. */

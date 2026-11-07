@@ -1,0 +1,12 @@
+.notify-state { display:flex; align-items:center; gap:8px; font-size:var(--zs-type-control); }
+.notify-state svg { color:var(--zs-text-placeholder); }
+.notify-state[data-on] svg { color:var(--zs-accent); }
+.notify-state span { margin-left:auto; color:var(--zs-text-muted); }
+.notify-state[data-on] span { color:var(--zs-text); }
+.notify-ok { margin-top:12px; color:var(--zs-text-secondary); font-size:var(--zs-type-control); line-height:1.6; }
+.notify-install { margin-top:32px; }
+.notify-install .notify-ok,.notify-flush { margin-top:0; }
+.notify-device-icon { flex:none; color:var(--zs-text-placeholder); }
+.notify-chip { padding:1px 6px; border-radius:999px; background:var(--zs-accent-soft); color:var(--zs-accent-text); font-size:var(--zs-type-caption); font-weight:500; }
+.notify-android { margin-top:12px; font-size:var(--zs-type-control); line-height:1.6; }
+.notify-android ol { margin:6px 0 0; padding-left:20px; list-style:decimal; color:var(--zs-text-secondary); display:grid; gap:4px; }
