@@ -43,7 +43,7 @@ The controller takes one argument, `status`, `pause`, or `resume`, and prints on
 
 Codex uses a Unix socket; the operator owns its directory and permissions. DSH's `launchFile` must be a regular `0600` file owned by the runtime account, with a parent directory not writable by group or others; it must not be a symlink or a public address. The Host atomically updates it after a restart, and the adapter re-reads it on reconnect.
 
-Current compatibility is Codex CLI `0.166.0-alpha.5.1` and DSH `0.2.1-rc.4`. Re-run the real integration path after upgrading either host; a passing schema check is not a compatibility proof.
+Current compatibility is Codex CLI `0.166.0-alpha.5.1` and DSH `0.2.2-rc.1` (DSH `0.2.1-rc.4` is still supported). Re-run the real integration path after upgrading either host; a passing schema check is not a compatibility proof.
 
 To enable instance plugin management, see the [native connection setup](docs/features/plugin-management.md#准备原生连接).
 

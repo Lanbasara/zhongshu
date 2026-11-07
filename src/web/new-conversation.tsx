@@ -34,7 +34,14 @@ function StagedImage({item,disabled,onRemove}:{item:UploadDraft;disabled:boolean
 }
 function initialConfig(catalog:WorkbenchConfiguration['harnesses'][number]|undefined) {
   const model=catalog?.models.find(m=>m.id===catalog.defaultModelId);
-  return {modelId:model?.id??'',permissionId:'',...(model?.defaultReasoningEffort?{reasoningEffort:model.defaultReasoningEffort}:{})};
+  // Zhongshu's own default preset (ADR 0017), independent of the Host default.
+  const preset=catalog?.presets?.find(p=>p.id===catalog.defaultPresetId&&p.available);
+  return {modelId:model?.id??'',permissionId:'',...(model?.defaultReasoningEffort?{reasoningEffort:model.defaultReasoningEffort}:{}),...(preset?{agentPreset:preset.id}:{})};
+}
+/** A DSH draft without a chosen preset (for example one saved before presets) uses Zhongshu's default; Codex never carries one. */
+function withPreset(value:NewDraft):NewDraft['configuration'] {
+  if(value.harnessId!=='dsh'){const {agentPreset:_preset,...rest}=value.configuration;return rest;}
+  return value.configuration.agentPreset?value.configuration:{...value.configuration,agentPreset:'standard'};
 }
 /** Local draft owns preparation; existing server operations still own execution/reconciliation. */
 export function NewConversation(props:Props) {
@@ -81,7 +88,8 @@ export function NewConversation(props:Props) {
   const workspace=props.configuration.workspaces.find(w=>w.id===draft.workspaceId);
   const catalog=props.configuration.harnesses.find(h=>h.id===draft.harnessId);
   const model=catalog?.models.find(m=>m.id===draft.configuration.modelId);
-  const valid=!!workspace&&!!catalog?.available&&!!model&&catalog.permissions.some(p=>p.id===draft.configuration.permissionId)&&(!model.reasoningEfforts?.length||model.reasoningEfforts.some(e=>e.id===draft.configuration.reasoningEffort));
+  const presetValid=catalog?.presets?.length?catalog.presets.some(p=>p.available&&p.id===(draft.configuration.agentPreset??catalog.defaultPresetId)):draft.configuration.agentPreset===undefined;
+  const valid=!!workspace&&!!catalog?.available&&!!model&&catalog.permissions.some(p=>p.id===draft.configuration.permissionId)&&(!model.reasoningEfforts?.length||model.reasoningEfforts.some(e=>e.id===draft.configuration.reasoningEffort))&&presetValid;
   const locked=busy||!!draft.submission;
   async function prepareDraft(value:NewDraft,signal:AbortSignal) {
     const result=await request('/draft-preparation',preparationSchema,{csrf:props.csrf,body:{workspaceId:value.workspaceId,harnessId:'dsh',...(value.preparationId?{preparationId:value.preparationId}:{})},signal});
@@ -166,7 +174,7 @@ export function NewConversation(props:Props) {
         }
         // Verify selected skills against this exact workspace and Power before freezing.
         if(value.skills?.length){const skills=await loadSkills(abort.signal);if(value.skills.some(s=>!skills.some(item=>item.id===s.id)))throw Error('所选技能在当前 Power 或工作区已不可用，请重新选择。');}
-        value={...value,submission:{creation:{id:value.id,workspaceId:value.workspaceId,harnessId:value.harnessId,configuration:configurationSchema.parse(value.configuration),title:initialConversationTitle(value.text),...(value.harnessId==='dsh'&&value.preparationId?{preparationId:value.preparationId}:{})},operationId:crypto.randomUUID(),uploaded:{},dispatchStarted:false}};
+        value={...value,submission:{creation:{id:value.id,workspaceId:value.workspaceId,harnessId:value.harnessId,configuration:configurationSchema.parse(withPreset(value)),title:initialConversationTitle(value.text),...(value.harnessId==='dsh'&&value.preparationId?{preparationId:value.preparationId}:{})},operationId:crypto.randomUUID(),uploaded:{},dispatchStarted:false}};
         if(!persist(value,true))return;
       }
       const submission=value.submission!;

@@ -10,7 +10,7 @@ export type ComposerViewProps = {
   value: string; onChange(value: string): void; onSend(): void; onStop(): void;
   onImages(files: File[]): void; onFiles(): void;
   editDisabled: boolean; imagesDisabled: boolean; filesDisabled: boolean; sendDisabled: boolean;
-  sending: boolean; running: boolean; queueing?: boolean; model: string; reasoningEffort?: string; permission: string; configurationNote: string;
+  sending: boolean; running: boolean; queueing?: boolean; model: string; reasoningEffort?: string; agentPreset?: string; permission: string; configurationNote: string;
   queue?: ReactNode; materials?: ReactNode; hasMaterials: boolean; error?: string;
   renderEditor?(props: ComponentPropsWithRef<'textarea'>): ReactNode;
   footerDetails?: ReactNode;
@@ -82,7 +82,7 @@ export function ComposerView(props: ComposerViewProps) {
           <MenuItem disabled={filesDisabled} onSelect={onFiles}><FileText size={16}/>引用工作区文件</MenuItem>
         </Menu>
         <span className="writing-divider" aria-hidden="true"/>
-        {props.configurationControls ?? <Information label="当前对话配置" summary={<span>{model}{reasoningEffort && <> · {reasoningEffort}</>}</span>}><dl><div><dt>模型</dt><dd>{model}</dd></div>{reasoningEffort && <div><dt>思考深度</dt><dd>{reasoningEffort}</dd></div>}<div><dt>权限</dt><dd>{permission}</dd></div></dl><p>{configurationNote}</p></Information>}
+        {props.configurationControls ?? <Information label="当前对话配置" summary={<span>{model}{reasoningEffort && <> · {reasoningEffort}</>}</span>}><dl><div><dt>模型</dt><dd>{model}</dd></div>{reasoningEffort && <div><dt>思考深度</dt><dd>{reasoningEffort}</dd></div>}{props.agentPreset && <div><dt>Agent 预设</dt><dd>{props.agentPreset}</dd></div>}<div><dt>权限</dt><dd>{permission}</dd></div></dl><p>{configurationNote}</p></Information>}
         {props.toolbarExtras}
         <span className="writing-spacer"/>
         {running && <span className="sr-only" role="status">执行中</span>}

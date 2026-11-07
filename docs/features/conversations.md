@@ -16,6 +16,7 @@
 | C08 | 模型与 effort 联动，Power 独立，默认/复位不虚构能力 |
 | C09 | 两端首发图片、文件、技能和上传失败恢复不丢失、不重复 |
 | C10 | DSH 准备跨刷新、切换、失败与应用重启复用；占用冲突不串会话 |
+| C11 | DSH 新对话选择 Agent 预设（标准或 PTC，默认标准），首发后固定；原生读回一致，不可用的预设不可选、不被替换 |
 
 ## How to get to it (user POV)
 
@@ -68,6 +69,12 @@ C03 丢的是浏览器 HTTP 回执；C04 在 onBound 后失败。原生 Host 创
 - 工作区是登记 allowlist；目录隔离不等于操作系统权限沙箱。
 - DSH 技能以准备会话的原生目录为准。每工作区至多保留一份未占用准备，首发原子占用；旧草稿不能抢占已占用身份。失联时保留编号核对，不盲目回收。
 - 创建未知、准备失败、上传失败、发送回执未知是不同阶段；材料和编号的恢复要逐段记录。
+- **Agent 预设（C11，[ADR 0017](../adr/0017-dsh-agent-preset.md)）。**
+  - 驱动：输入框配置栏在 DSH 下多一个「Agent 预设」，默认「标准」，可改为 PTC。普通新建经 `session/create` 的 `agentPreset` 指定。
+  - 草稿提前准备的空会话，在首发时经 `agentPresets/select` 改为所选；首轮开始后原生会锁定。
+  - 读回：原生 `session/follow` 快照中 `projections.values.agentPreset` 应等于对话配置中的 `agentPreset`；不一致时对话停止派发并说明。
+  - 预设之前建的对话没有这个字段，按 Host 当时的默认运行，标签不显示预设。
+  - PTC 下，Agent 用 `run_code` 脚本调用工具。每次子调用（原生 `tool/ptc-dispatch`）在工具过程中单独显示，带工具名、参数和输出。
 
 ## Implementation and regression
 

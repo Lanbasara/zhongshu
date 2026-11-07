@@ -15,6 +15,11 @@ import { nativeSkill, resolveSkillInput, skillOptions, type NativeSkill } from '
 const modelCatalog = z.object({ default: modelSchema.optional(), groups: z.array(z.object({ id: identifier, name: z.string().max(240), models: z.array(z.object({ id: identifier, name: z.string().max(240), reasoning: z.object({ efforts: z.array(z.object({ id: identifier, name: z.string().max(240) })).max(32), defaultEffort: identifier.optional() }).optional() })).max(300) })).max(100) });
 const permissionCatalog = z.object({ options: z.array(z.object({ value: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/), name: z.string().max(240), description: z.string().max(2000).optional() })).max(100) });
 const permissionNames: Record<string, string> = { 'read-only': '只读', 'workspace-write': '工作区读写', 'danger-full-access': '完全访问' };
+/** The two Agent presets Zhongshu offers (ADR 0017); the Host's other presets are not offered. */
+const presetWords: Record<string, { label: string; description: string }> = {
+  standard: { label: '标准', description: 'DSH 的默认方式：Agent 逐个调用工具。' },
+  ptc: { label: 'PTC', description: 'Agent 写脚本批量调用工具，适合大量重复的读写与检索。' },
+};
 const nativeSkillRow = z.object({ name: z.string().min(1).max(120).regex(/^[a-z0-9][a-z0-9-]*$/), description: z.string().max(16_000), path: z.string().max(4096).optional() });
 const skillsResponse = z.object({ skills: z.array(z.unknown()).max(2000) });
 // `turn` is the native turn of the events just before `before`, so older pages need no snapshot (follow) to number turns.
@@ -41,7 +46,7 @@ function turnBeforeFirst(events: Event[], outline: TurnOutline): number {
   const turn = turnAt(outline, first.seq) ?? 0;
   return first.type === 'turn/start' ? Math.max(0, turn - 1) : turn;
 }
-const bindingSchema = z.object({ id: identifier, cwd: z.string().min(1).max(4096), configuration: z.object({ modelId: z.string().max(2048), permissionId: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/), reasoningEffort: identifier.optional() }), details: z.record(z.string(), z.unknown()) });
+const bindingSchema = z.object({ id: identifier, cwd: z.string().min(1).max(4096), configuration: z.object({ modelId: z.string().max(2048), permissionId: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/), reasoningEffort: identifier.optional(), agentPreset: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/).optional() }), details: z.record(z.string(), z.unknown()) });
 const unknown = (reason = 'DSH 连接中断，需要重新核对原生状态。'): NativeState => ({ status: 'unknown', pendingInputs: 0, configurationVerified: false, reason });
 const nativeError = (error: unknown): HarnessError => error instanceof HarnessError ? error : new HarnessError('DSH_PROTOCOL_INVALID');
 const catalogEntry = z.object({ id: identifier, createdAt: z.number().int().nonnegative().optional(), mode: z.enum(['one-shot', 'external', 'continuable', 'unknown']), label: z.string().max(64 * 1024).optional() }).passthrough();
@@ -141,7 +146,9 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
     try { const parsed = bindingSchema.parse(binding); selectedModel(parsed.configuration); if (!isAbsolute(parsed.cwd) || normalize(parsed.cwd) !== parsed.cwd) throw new Error(); return parsed; }
     catch { throw new HarnessError('DSH_BINDING_INVALID'); }
   };
-  const request = (binding: Binding, extra: Record<string, unknown> = {}) => ({ request: { address: { kind: 'session', sessionId: binding.id }, ...extra } });
+  // DSH 0.2.2 follows passively unless asked; a parent follow must wake the Agent as 0.2.1 always did, or an interrupted turn,
+  // queued input and cancel stay stuck after a Host restart. 0.2.1 ignores the field. Child follows stay passive.
+  const request = (binding: Binding, extra: Record<string, unknown> = {}) => ({ request: { address: { kind: 'session', sessionId: binding.id }, activate: true, ...extra } });
   const remember = (binding: Binding, value: NativeState): NativeState => { lastStates.delete(binding.id); lastStates.set(binding.id, value); if (lastStates.size > 128) { const oldest = lastStates.keys().next().value; if (oldest) lastStates.delete(oldest); } return value; };
   const disconnectedState = (binding: Binding): NativeState => ({ ...unknown(), pendingInputs: lastStates.get(binding.id)?.pendingInputs ?? 0 });
 
@@ -290,12 +297,19 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
 
   async function catalog(): Promise<Catalog> {
     try {
-      const [models, permissions, account] = await Promise.all([connection.call('session/modelCatalog'), connection.call('permissionPresets/catalog'), connection.call('account/getState')]);
+      const [models, permissions, account, presets] = await Promise.all([connection.call('session/modelCatalog'), connection.call('permissionPresets/catalog'), connection.call('account/getState'),
+        connection.call('agentPresets/list').catch(() => null)]);
       const signedIn = z.object({ status: z.enum(['signed-out', 'credential-stored']) }).parse(account).status === 'credential-stored';
       const nativeCatalog = modelCatalog.parse(models);
       const groups = nativeCatalog.groups.filter(group => group.id !== 'deepseek-account' || signedIn);
       const result: Catalog = { id: 'dsh', available: groups.length > 0, models: [], permissions: permissionCatalog.parse(permissions).options.map(option => ({ id: option.value, label: permissionNames[option.value] ?? option.name,
         description: `使用 DSH 原生 ${option.value} 权限；${option.value === 'danger-full-access' ? '不会请求审批。' : '需要越界时会请求你批准。'}${option.description ? ` ${option.description}` : ''}` })) };
+      const listed = z.object({ presets: z.array(z.object({ id: z.string().max(100), broken: z.boolean().optional() }).passthrough()).max(64) }).safeParse(presets);
+      result.presets = Object.entries(presetWords).map(([id, words]) => {
+        const row = listed.success ? listed.data.presets.find(item => item.id === id) : undefined;
+        return { id, ...words, available: !!row && !row.broken };
+      });
+      result.defaultPresetId = 'standard';
       for (const group of groups) for (const model of group.models) {
         if (result.models.length >= 2048) throw new HarnessError('DSH_CATALOG_TOO_LARGE');
         const efforts = model.reasoning?.efforts;
@@ -343,10 +357,15 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
       if (!model || (model.reasoningEfforts?.length ? !model.reasoningEfforts.some(effort => effort.id === selected.reasoningEffort) : selected.reasoningEffort !== undefined)) throw new HarnessError('DSH_REASONING_EFFORT_UNAVAILABLE');
       if (!available.available || !available.permissions.some(permission => permission.id === input.configuration.permissionId)) throw new HarnessError('DSH_CONFIGURATION_UNAVAILABLE');
       if (!isAbsolute(input.cwd) || normalize(input.cwd) !== input.cwd || input.cwd.length > 4096) throw new HarnessError('DSH_CWD_INVALID');
-      const native = input.preparedId ? { sessionId: z.uuid().parse(input.preparedId) } : z.object({ sessionId: identifier }).parse(await connection.call('session/create', { request: { cwd: input.cwd } }));
+      const preset = input.configuration.agentPreset;
+      if (preset !== undefined && !available.presets?.some(item => item.id === preset && item.available)) throw new HarnessError('DSH_PRESET_UNAVAILABLE');
+      const native = input.preparedId ? { sessionId: z.uuid().parse(input.preparedId) }
+        : z.object({ sessionId: identifier }).parse(await connection.call('session/create', { request: { cwd: input.cwd, ...(preset ? { agentPreset: preset } : {}) } }));
       const binding: Binding = { id: native.sessionId, cwd: input.cwd, configuration: { ...input.configuration }, details: { provider: selected.provider, model: selected.model, ...(selected.reasoningEffort ? { reasoningEffort: selected.reasoningEffort } : {}) } };
       if (input.preparedId) await assertBlank(binding);
       onBound(binding);
+      // A prepared draft session was created before the choice; its preset can still change until the first turn.
+      if (input.preparedId && preset) await connection.call('agentPresets/select', { agentId: binding.id, agentPreset: preset });
       await connection.call('session/selectModel', { request: { sessionId: binding.id, ...selected } });
       const permission = z.object({ result: z.object({ kind: z.literal('success') }) }).parse(await connection.call('commands/execute', { agentId: binding.id, line: `/permission ${input.configuration.permissionId}`, submittedAttachments: [] }));
       if (permission.result.kind !== 'success' || !(await state(binding)).configurationVerified) throw new HarnessError('DSH_CONFIGURATION_NOT_VERIFIED');

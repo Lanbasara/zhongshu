@@ -14,7 +14,7 @@ import { snapshotSchema, stateFrom, terminalRunFrom } from '../src/harness/dsh/n
 import type { Binding, NativeChange } from '../src/harness/types.ts';
 
 type Event = { type: string; seq: number; time: number; data: Record<string, unknown> };
-type Session = { id: string; cwd: string; model: { provider: string; model: string; reasoningEffort?: string }; permission: string; events: Event[]; turn: number; open: number | null; inbox: unknown[]; stepInbox: unknown[]; questions: unknown[]; plan?: { active: boolean; pending: boolean } };
+type Session = { id: string; cwd: string; model: { provider: string; model: string; reasoningEffort?: string }; permission: string; events: Event[]; turn: number; open: number | null; inbox: unknown[]; stepInbox: unknown[]; questions: unknown[]; plan?: { active: boolean; pending: boolean }; agentPreset?: string };
 async function until(predicate: () => boolean, timeout = 4000): Promise<void> { const end = Date.now() + timeout; while (!predicate()) { if (Date.now() > end) assert.fail('condition did not become true'); await delay(10); } }
 
 /** Protocol fixture only. These tests make no claim about real model execution. */
@@ -26,6 +26,8 @@ async function host() {
   let catalog: unknown = { groups: [{ id: 'deepseek-account', name: 'DeepSeek', models: [{ id: 'test-model', name: 'Test', reasoning: { efforts: [{ id: 'high', name: 'High' }] } }] }] };
   let signedIn = true;
   let profile: 'ready' | 'failed' | 'rejected' = 'ready';
+  const followRequests: { kind: string; activate?: boolean }[] = [];
+  let presetIds = ['standard', 'ptc', 'minimal', 'cordis']; const brokenPresets = new Set<string>(); let lockedSelects = 0;
   let signIn: { id: string; phase: string; state: string; callbackOrigin: string } | null = null;
   const wss = new WebSocketServer({ noServer: true });
   // Answering clients (ADR 0016): forwarded requests park until settled and are replayed to every new $events stream.
@@ -39,7 +41,7 @@ async function host() {
     for (const [streamId, follow] of follows) if (follow.session === session.id && follow.socket.readyState === WebSocket.OPEN) follow.socket.send(JSON.stringify({ type: 'item', streamId, value: { type: 'event', event } }));
     return event;
   }
-  const projections = (session: Session) => ({ asOfSeq: Math.max(0, session.events.length - 1), values: { permissions: { currentValue: session.permission }, modelSelection: { next: session.model, lastUsed: session.turn ? session.model : null }, inbox: { 'next-turn': session.inbox, 'next-step': session.stepInbox }, turnOutline: session.events.filter(event => event.type === 'turn/start').map(event => ({ turn: event.data.turn, seq: event.seq, prompt: '', response: '' })), userQuestions: { active: session.questions }, ...(session.plan ? { plan: session.plan } : {}) } });
+  const projections = (session: Session) => ({ asOfSeq: Math.max(0, session.events.length - 1), values: { permissions: { currentValue: session.permission }, modelSelection: { next: session.model, lastUsed: session.turn ? session.model : null }, inbox: { 'next-turn': session.inbox, 'next-step': session.stepInbox }, turnOutline: session.events.filter(event => event.type === 'turn/start').map(event => ({ turn: event.data.turn, seq: event.seq, prompt: '', response: '' })), userQuestions: { active: session.questions }, ...(session.plan ? { plan: session.plan } : {}), agentPreset: session.agentPreset ?? 'standard' } });
   const server = createServer(async (request, response) => {
     const url = new URL(request.url ?? '/', 'http://127.0.0.1');
     if (url.pathname === '/connect') {
@@ -64,6 +66,12 @@ async function host() {
       const session = sessions.get(args.request?.sessionId ?? args.agentId ?? args.request?.address?.sessionId);
       let value: unknown;
       switch (body.method) {
+        case 'agentPresets/list': value = { presets: presetIds.map((id, order) => ({ id, isDefault: id === 'standard', order: order + 1, ...(brokenPresets.has(id) ? { broken: true } : {}) })) }; break;
+        case 'agentPresets/select': {
+          const target = sessions.get(args.agentId);
+          if (!target || target.turn > 0 || target.open !== null) { lockedSelects++; { response.setHeader('Content-Type', 'application/json'); response.end(JSON.stringify({ type: 'server-response', rpcId: body.rpcId, result: { ok: false, error: { code: 'agent-preset/locked' } } })); return; } }
+          target.agentPreset = args.agentPreset; value = { agentPreset: args.agentPreset }; break;
+        }
         case 'account/getState': value = { status: signedIn ? 'credential-stored' : 'signed-out', links: { usageUrl: 'https://platform.example/usage', topUpUrl: 'https://platform.example/top_up' },
           attempt: signIn ? { id: signIn.id, phase: signIn.phase, ...(signIn.phase === 'waiting-browser' ? { authorizeUrl: `https://platform.example/sign_in?state=${signIn.state}` } : {}) } : null }; break;
         case 'account/startSignIn':
@@ -78,7 +86,11 @@ async function host() {
         case 'skills/list': assert.ok(session); value = { skills: [{ name: 'proof', description: 'Synthetic skill' }] }; break;
         case 'session/create': {
           const id = args.request.sessionId ?? `session-${sessions.size + 1}`; const created: Session = { id, cwd: args.request.cwd, model: { provider: 'deepseek-account', model: 'test-model', reasoningEffort: 'high' }, permission: 'workspace-write', events: [], turn: 0, open: null, inbox: [], stepInbox: [], questions: [] };
-          sessions.set(id, created); append(created, 'permission/preset', { preset: 'workspace-write' }); value = { sessionId: id }; break;
+          if (args.request.agentPreset !== undefined) {
+            if (!presetIds.includes(args.request.agentPreset)) { response.setHeader('Content-Type', 'application/json'); response.end(JSON.stringify({ type: 'server-response', rpcId: body.rpcId, result: { ok: false, error: { code: 'agent-preset/not-found' } } })); return; }
+            created.agentPreset = args.request.agentPreset;
+          }
+          sessions.set(id, created); append(created, 'permission/preset', { preset: 'workspace-write' }); value = { sessionId: id, ...(created.agentPreset ? { agentPreset: created.agentPreset } : {}) }; break;
         }
         case 'session/selectModel': {
           if (rejectModel) { response.setHeader('Content-Type', 'application/json'); response.end(JSON.stringify({ type: 'server-response', rpcId: body.rpcId, result: { ok: false, error: { code: 'session/model-unavailable' } } })); return; }
@@ -142,7 +154,7 @@ async function host() {
           for (const [eventId, value] of parked) forward(message.streamId, ws, eventId, value);
           return;
         }
-        assert.equal(message.endpoint, 'session/follow'); const input = message.payload.args.request; const session = sessions.get(input.address.sessionId); assert.ok(session);
+        assert.equal(message.endpoint, 'session/follow'); const input = message.payload.args.request; followRequests.push({ kind: input.address.kind, activate: input.activate }); const session = sessions.get(input.address.sessionId); assert.ok(session);
         follows.set(message.streamId, { socket: ws, session: session.id }); followCalls++;
         const records = session.events.slice(-input.maxMessages).map(event => ({ type: 'event', event }));
         ws.send(JSON.stringify({ type: 'item', streamId: message.streamId, value: { type: 'snapshot', header: { id: session.id, cwd: session.cwd }, cursor: session.events.length - 1, records, hasMore: session.events.length > records.length, projections: projections(session) } }));
@@ -151,14 +163,14 @@ async function host() {
   });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve)); const address = server.address(); assert.ok(address && typeof address !== 'string');
   const launch = `http://127.0.0.1:${address.port}/?token=${token}`;
-  return { launch, sessions, calls, peers, follows, append, settled, eventStreams,
+  return { launch, sessions, calls, peers, follows, followRequests, append, settled, eventStreams,
     ask(agentId: string, event: string, request: unknown) {
       const eventId = randomUUID(); parked.set(eventId, { event, agentId, request });
       for (const [streamId, stream] of eventStreams) forward(streamId, stream.socket, eventId, { event, agentId, request });
       return eventId;
     },
     withdraw(eventId: string) { parked.delete(eventId); for (const [streamId, stream] of eventStreams) stream.socket.send(JSON.stringify({ type: 'item', streamId, value: { type: 'cancel', eventId } })); },
-    dropNextResult() { failNextResult = 'drop'; }, followCalls: () => followCalls, setCatalog(value: unknown) { catalog = value; }, signOut() { signedIn = false; }, signIn() { signedIn = true; }, signInAttempt: () => signIn, setProfile(value: 'ready' | 'failed' | 'rejected') { profile = value; }, onNextPage(hook: () => void) { nextPage = hook; }, exchanges: () => exchanges, rejectModel: () => { rejectModel = true; }, losePromptReceipt: () => { losePromptReceipt = true; }, live(session: string, frame: unknown) { for (const [streamId, follow] of follows) if (follow.session === session) follow.socket.send(JSON.stringify({ type: 'item', streamId, value: { type: 'assistant-stream', frame } })); }, disconnect() { for (const peer of peers.values()) peer?.terminate(); }, async close() { for (const peer of peers.values()) peer?.terminate(); await new Promise<void>(resolve => wss.close(() => resolve())); await new Promise<void>(resolve => server.close(() => resolve())); } };
+    dropNextResult() { failNextResult = 'drop'; }, followCalls: () => followCalls, setCatalog(value: unknown) { catalog = value; }, signOut() { signedIn = false; }, signIn() { signedIn = true; }, signInAttempt: () => signIn, setPresets(ids: string[], broken: string[] = []) { presetIds = ids; brokenPresets.clear(); for (const id of broken) brokenPresets.add(id); }, lockedSelects: () => lockedSelects, setProfile(value: 'ready' | 'failed' | 'rejected') { profile = value; }, onNextPage(hook: () => void) { nextPage = hook; }, exchanges: () => exchanges, rejectModel: () => { rejectModel = true; }, losePromptReceipt: () => { losePromptReceipt = true; }, live(session: string, frame: unknown) { for (const [streamId, follow] of follows) if (follow.session === session) follow.socket.send(JSON.stringify({ type: 'item', streamId, value: { type: 'assistant-stream', frame } })); }, disconnect() { for (const peer of peers.values()) peer?.terminate(); }, async close() { for (const peer of peers.values()) peer?.terminate(); await new Promise<void>(resolve => wss.close(() => resolve())); await new Promise<void>(resolve => server.close(() => resolve())); } };
 }
 
 async function setup() {
@@ -791,4 +803,46 @@ test('DSH paste-back login: the Host loopback callback receives only code and st
   const again = await context.adapter.startLogin!();
   assert.equal(await context.adapter.cancelLogin!(again.loginId), 'canceled');
   assert.equal(await context.adapter.completeLogin!(again.loginId, `http://127.0.0.1:9/oauth/callback?code=good&state=${context.fixture.signInAttempt()!.state}`), 'failed', 'a cancelled attempt cannot complete');
+});
+
+test('DSH Agent presets: standard and PTC are offered, chosen at creation, verified natively and locked after the first turn', async t => {
+  const context = await setup(); t.after(() => context.close());
+  const catalog = await context.adapter.catalog();
+  assert.deepEqual(catalog.presets?.map(item => [item.id, item.label, item.available]), [['standard', '标准', true], ['ptc', 'PTC', true]]);
+  assert.equal(catalog.defaultPresetId, 'standard');
+  const model = catalog.models[0]!;
+  const configuration = { modelId: model.id, permissionId: 'workspace-write', reasoningEffort: 'high', agentPreset: 'ptc' };
+  const binding = await context.adapter.create({ cwd: '/workspace/project', configuration }, () => {});
+  assert.equal(context.fixture.sessions.get(binding.id)!.agentPreset, 'ptc');
+  assert.equal(context.fixture.calls.find(call => call.method === 'session/create')!.args.request.agentPreset, 'ptc');
+  assert.equal((await context.adapter.state(binding)).configurationVerified, true);
+  // Natively changed behind Zhongshu's back: the conversation stops dispatching instead of running with another preset.
+  context.fixture.sessions.get(binding.id)!.agentPreset = 'standard';
+  assert.equal((await context.adapter.state(binding)).configurationVerified, false);
+  // A conversation created before presets keeps working whatever the Host records.
+  const legacy = await context.adapter.create({ cwd: '/workspace/project', configuration: { modelId: model.id, permissionId: 'workspace-write', reasoningEffort: 'high' } }, () => {});
+  assert.equal(context.fixture.calls.filter(call => call.method === 'session/create').at(-1)!.args.request.agentPreset, undefined);
+  assert.equal((await context.adapter.state(legacy)).configurationVerified, true);
+  // Parent follows wake the Agent (DSH 0.2.2); 0.2.1 ignores the field.
+  const parents = context.fixture.followRequests.filter(item => item.kind === 'session');
+  assert.ok(parents.length > 0 && parents.every(item => item.activate === true));
+  // A missing or broken preset is listed as unavailable and refused, never swapped.
+  context.fixture.setPresets(['standard', 'ptc'], ['ptc']);
+  assert.deepEqual((await context.adapter.catalog()).presets?.map(item => [item.id, item.available]), [['standard', true], ['ptc', false]]);
+  await assert.rejects(context.adapter.create({ cwd: '/workspace/project', configuration }, () => {}));
+  context.fixture.setPresets(['standard']);
+  assert.deepEqual((await context.adapter.catalog()).presets?.map(item => [item.id, item.available]), [['standard', true], ['ptc', false]]);
+});
+
+test('DSH prepared draft: the preset is selected on the blank session before the first turn', async t => {
+  const context = await setup(); t.after(() => context.close());
+  const preparationId = randomUUID();
+  await context.adapter.prepareDraft!({ id: preparationId, cwd: '/workspace/project' });
+  assert.equal(context.fixture.sessions.get(preparationId)!.agentPreset, undefined);
+  const model = (await context.adapter.catalog()).models[0]!;
+  const binding = await context.adapter.create({ cwd: '/workspace/project', preparedId: preparationId, configuration: { modelId: model.id, permissionId: 'workspace-write', reasoningEffort: 'high', agentPreset: 'ptc' } }, () => {});
+  assert.equal(binding.id, preparationId);
+  assert.equal(context.fixture.sessions.get(preparationId)!.agentPreset, 'ptc');
+  assert.deepEqual(context.fixture.calls.find(call => call.method === 'agentPresets/select')!.args, { agentId: preparationId, agentPreset: 'ptc' });
+  assert.equal((await context.adapter.state(binding)).configurationVerified, true);
 });

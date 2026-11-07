@@ -116,5 +116,7 @@ export const NoReliableDefault: Story = { name: '原生没有可靠默认', args
 export const NoCatalogs: Story = { name: '没有可用 Power', args: { availability: 'no-catalogs' } };
 export const SkillsPreparing: Story = { name: '首发技能准备中', args: { preparation: 'loading' } };
 export const SkillsFailed: Story = { name: '首发技能准备失败', args: { preparation: 'failed' } };
+export const DshPreset: Story = { name: 'DSH · Agent 预设（标准 / PTC）', args: { harness: 'dsh', model: 'default', permission: 'workspace-write' } };
+export const DshPresetPhone: Story = { name: '手机 · DSH · Agent 预设', args: { harness: 'dsh', model: 'default', permission: 'workspace-write' }, globals: { viewport: { value: 'phone', isRotated: false } } };
 export const SubmissionPending: Story = { name: '首条消息待核对（锁定）', args: { submission: true, reference: true } };
 export const Phone: Story = { name: '手机', globals: phone };

@@ -107,7 +107,7 @@ const MAX_TEXT_BYTES = 1_048_576;
 const boundedText = (bytes: number) => z.string().max(bytes).refine(value => Buffer.byteLength(value, 'utf8') <= bytes);
 const identifier = boundedText(1024).min(1).refine(value => !value.includes('\0'));
 const uuid = z.uuid();
-const configurationSchema = z.object({ modelId: identifier, permissionId: identifier, reasoningEffort: identifier.optional() }).strict();
+const configurationSchema = z.object({ modelId: identifier, permissionId: identifier, reasoningEffort: identifier.optional(), agentPreset: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/).optional() }).strict();
 const nativeStateSchema = stateSchema;
 const itemSchema = z.object({
   id: identifier, kind: z.enum(['user', 'assistant', 'tool', 'notice']), text: boundedText(MAX_TEXT_BYTES),
@@ -335,7 +335,9 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
     createConversation(value) {
       const input = parse(createConversationSchema, value);
       const creationDigest = digest([input.harnessId, input.workspaceId, input.cwd, input.configuration.modelId, input.configuration.permissionId,
-        ...(input.configuration.reasoningEffort === undefined ? [] : [input.configuration.reasoningEffort]), ...(input.preparationId ? ['prepared', input.preparationId] : [])]);
+        ...(input.configuration.reasoningEffort === undefined ? [] : [input.configuration.reasoningEffort]), ...(input.preparationId ? ['prepared', input.preparationId] : []),
+        // Appended only when chosen, so digests of conversations created before presets stay the same (ADR 0017).
+        ...(input.configuration.agentPreset === undefined ? [] : ['preset', input.configuration.agentPreset])]);
       return mutate(changed => {
         if (db.prepare('SELECT 1 FROM workbench_deletions WHERE id=?').get(input.id)) throw new StoreError('conversation_deleted', 409);
         const existing = conversationRow(input.id);
@@ -467,7 +469,8 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
       parse(uuid, id); const binding = parse(bindingSchema, value); const json = bindingJson(binding);
       return mutate(changed => {
         const conversation = requireConversation(id);
-        if (binding.cwd !== conversation.cwd || binding.configuration.modelId !== conversation.configuration.modelId || binding.configuration.permissionId !== conversation.configuration.permissionId || binding.configuration.reasoningEffort !== conversation.configuration.reasoningEffort)
+        if (binding.cwd !== conversation.cwd || binding.configuration.modelId !== conversation.configuration.modelId || binding.configuration.permissionId !== conversation.configuration.permissionId || binding.configuration.reasoningEffort !== conversation.configuration.reasoningEffort
+          || binding.configuration.agentPreset !== conversation.configuration.agentPreset)
           throw new StoreError('binding_configuration_conflict', 409);
         if (conversation.binding && conversation.binding.id !== binding.id) throw new StoreError('native_binding_conflict', 409);
         if (conversation.binding && bindingJson(conversation.binding) === json) return conversation;

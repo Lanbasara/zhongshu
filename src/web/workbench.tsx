@@ -709,7 +709,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
               target={running && usable && !unresolved ? conversation.state.runId : undefined} canResume={!!usable && !unresolved} onCommand={changeQueue}/>}
             permission={conversation?.state.configurationVerified ? permission?.label ?? '配置按对话固定' : '配置待核实'}
             configurationNote={conversation?.state.configurationVerified ? permission?.description ?? '配置在本对话中保持不变。' : '正在核实当前对话的原生配置，核实后可继续工作。'}
-            model={configurationLabel.model} reasoningEffort={configurationLabel.reasoningEffort}
+            model={configurationLabel.model} reasoningEffort={configurationLabel.reasoningEffort} agentPreset={configurationLabel.agentPreset}
             toolbarExtras={conversation?.id === selected && <PlanToolbarToggle plan={conversation.plan} changing={planning.changing}
               busy={running || sending || ['waiting', 'unknown'].includes(conversation.state.status)} onChange={active => void planning.change(active)}/>}/>}
         </div>
