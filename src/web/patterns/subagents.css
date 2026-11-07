@@ -122,7 +122,7 @@
 .subagent-activity-toggle { margin:var(--zs-space-1) 0 0 var(--zs-space-1); }
 .subagent-activity-toggle[aria-expanded="true"] svg { transform:rotate(180deg); }
 
-.subagent-background { display:inline-flex; align-items:center; gap:6px; color:var(--zs-text-secondary); }
+.subagent-background { display:inline-flex; align-items:center; gap:6px; font-style:normal; color:var(--zs-text-muted); }
 .subagent-background .activity-dot { background:var(--zs-status-running); animation:zs-breathe var(--zs-duration-breathing) ease-in-out infinite; }
 
 /* Narrow screens open the panel as a full page. */

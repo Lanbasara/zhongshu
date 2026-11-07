@@ -52,3 +52,4 @@
   .workspace-reader.turn-file-reader { position:fixed; inset:0; width:100%; height:100dvh; z-index:var(--zs-layer-dialog); padding-top:env(safe-area-inset-top); animation:zs-sheet-in var(--zs-duration-surface) var(--zs-ease); }
 }
 @media(prefers-reduced-motion:reduce) { .workspace-file-popover,.workspace-reader.turn-file-reader { animation:none; } }
+.workspace-reader-content h1:first-child,.workspace-reader-content h2:first-child,.workspace-reader-content [data-streamdown]>:first-child { margin-top:0; }
