@@ -171,6 +171,7 @@
 .sch-label { font-size:var(--zs-type-control); font-weight:500; color:var(--zs-text); display:flex; align-items:baseline; gap:6px; }
 .sch-label small { font-weight:400; color:var(--zs-text-placeholder); font-size:var(--zs-type-caption); }
 .sch-help { font-size:var(--zs-type-caption); color:var(--zs-text-muted); line-height:1.55; margin:0; }
+.sch-help code { font-family:var(--zs-font-code); font-size:.95em; background:var(--zs-surface-subtle); padding:0 4px; border-radius:4px; overflow-wrap:anywhere; }
 .sch-static { margin:0; font-size:var(--zs-type-control); color:var(--zs-text-body); }
 .sch-static-row { display:flex; align-items:center; justify-content:space-between; gap:12px; color:var(--zs-text-body); }
 .sch-field input, .sch-field textarea, .sch-select select { font:inherit; font-size:var(--zs-type-interface); border:1px solid var(--zs-border-strong); border-radius:var(--zs-radius-control); padding:9px 12px; color:var(--zs-text); background:var(--zs-surface-input); min-width:0; transition:border-color var(--zs-duration-state) var(--zs-ease), box-shadow var(--zs-duration-state) var(--zs-ease); }

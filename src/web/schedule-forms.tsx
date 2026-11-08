@@ -59,7 +59,7 @@ function TimingFields({ draft, change }: { draft: TimingDraft; change(draft: Tim
 }
 
 /** The skills of the workspace or conversation the runs will happen in; choosing one names it at the start of the instruction. */
-function SkillPicker({ scope, csrf, value, change }: { scope?: { workspaceId: string } | { conversationId: string }; csrf: string; value?: SkillOption; change(skill?: SkillOption): void }) {
+function SkillPicker({ scope, where, csrf, value, change }: { scope?: { workspaceId: string } | { conversationId: string }; where: string; csrf: string; value?: SkillOption; change(skill?: SkillOption): void }) {
   const [open, setOpen] = useState(false);
   const [skills, setSkills] = useState<SkillOption[]>(); const [failed, setFailed] = useState(false);
   const key = !scope ? '' : 'conversationId' in scope ? `c:${scope.conversationId}` : `w:${scope.workspaceId}`;
@@ -73,7 +73,7 @@ function SkillPicker({ scope, csrf, value, change }: { scope?: { workspaceId: st
       setSkills(value.skills);
     } catch { setFailed(true); }
   };
-  return <Field label="运行技能" optional hint="中书会在指令开头写上“使用技能 …”，Agent 运行时自己加载它。技能需要允许模型调用。">
+  return <Field label="运行技能" optional hint={`列出${where}里 Agent 能用的技能。中书会在指令开头写上“使用技能 …”，Agent 运行时自己加载它；技能需要允许模型调用。`}>
     <button type="button" className="sch-picker" aria-expanded={open} disabled={!scope} onClick={() => { setOpen(!open); if (!skills) void load(); }}>
       {value ? <span className="sch-picker-value"><Sparkles size={14} aria-hidden="true"/>{value.label}</span> : <span className="sch-picker-empty">不使用技能</span>}
       <ChevronDown size={14} aria-hidden="true"/>
@@ -84,7 +84,7 @@ function SkillPicker({ scope, csrf, value, change }: { scope?: { workspaceId: st
       {skills && <button type="button" role="option" aria-selected={!value} onClick={() => { change(undefined); setOpen(false); }}><span><b>不使用技能</b></span>{!value && <Check size={14}/>}</button>}
       {skills?.map(skill => <button key={skill.id} type="button" role="option" aria-selected={value?.id === skill.id} onClick={() => { change(skill); setOpen(false); }}>
         <span><b>{skill.label}</b>{skill.description && <small>{skill.description}</small>}</span>{value?.id === skill.id && <Check size={14}/>}</button>)}
-      {skills && !skills.length && <p className="sch-help">这里还没有技能。</p>}
+      {skills && !skills.length && <p className="sch-help">{where}里还没有可用的技能。工作区技能放在 <code>.dsh/skills/名称/SKILL.md</code>；已安装插件带的技能也会列在这里。</p>}
     </div>}
   </Field>;
 }
@@ -150,19 +150,19 @@ export function CreateForm({ configuration, csrf, report, close, reload, convers
   return <form className="sch-form-shell" noValidate onSubmit={event => { event.preventDefault(); void submit(); }}>
     <div className="sch-panel-body sch-form">
       <Field label="名称"><input aria-invalid={tried && !title.trim() || undefined} maxLength={120} value={title} onChange={event => setTitle(event.target.value)} placeholder="例如：收盘后研判"/></Field>
+      {target !== 'conversation' && <Field label="工作区" hint="任务在这个工作区里运行，下面的技能也来自这里。">
+        <span className="sch-select"><select aria-label="工作区" value={workspace} onChange={event => setPicked(event.target.value)}>
+          {configuration?.workspaces.map(entry => <option key={entry.id} value={entry.id}>{entry.label}</option>)}</select><ChevronDown size={14} aria-hidden="true"/></span>
+      </Field>}
       <Field label="交给 Agent 的指令"><textarea aria-invalid={tried && !prompt.trim() && !skill || undefined} maxLength={32000} value={prompt} onChange={event => setPrompt(event.target.value)}
         placeholder="先确认今天是否开市；读最近的计划文件，写研判；需要我关注时用一句话通知我。"/></Field>
-      <SkillPicker scope={scope} csrf={csrf} value={skill} change={setSkill}/>
+      <SkillPicker scope={scope} where={target === 'conversation' ? '这段对话' : `「${configuration?.workspaces.find(entry => entry.id === workspace)?.label ?? '工作区'}」`} csrf={csrf} value={skill} change={setSkill}/>
       <TimingFields draft={timing} change={setTiming}/>
       <div className="sch-field" role="radiogroup" aria-label="结果放哪"><span className="sch-label">结果放哪</span>
         {(Object.keys(targets) as (keyof typeof targets)[]).filter(id => id !== 'conversation' || conversationId).map(id =>
           <button key={id} type="button" role="radio" aria-checked={target === id} className="sch-choice" onClick={() => setTarget(id)}>
             <span><b>{targets[id][0]}</b><small>{targets[id][1]}</small></span>{target === id && <Check size={15} aria-hidden="true"/>}</button>)}
       </div>
-      {target !== 'conversation' && <Field label="工作区">
-        <span className="sch-select"><select aria-label="工作区" value={workspace} onChange={event => setPicked(event.target.value)}>
-          {configuration?.workspaces.map(entry => <option key={entry.id} value={entry.id}>{entry.label}</option>)}</select><ChevronDown size={14} aria-hidden="true"/></span>
-      </Field>}
       <Field label="Agent 配置" hint={target === 'new' ? '每次运行的对话由宿主新建，只能选预设；模型、思考深度和权限用宿主默认。要指定模型，选“首次新开，之后回到那段”。'
         : target === 'new_once' ? '中书现在就按这个配置建好那段对话，之后每次运行都投递到那里。' : undefined}>
         {target === 'conversation' && <p className="sch-static">沿用这段对话的配置。</p>}
