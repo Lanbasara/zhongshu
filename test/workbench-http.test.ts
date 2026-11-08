@@ -14,7 +14,7 @@ import { createWorkbenchStore } from '../src/server/workbench-store.ts';
 import { Workbench } from '../src/server/workbench.ts';
 import { createWorkbenchHttp } from '../src/server/workbench-http.ts';
 import { WorkspaceRegistry } from '../src/server/workspace-registry.ts';
-import { attentionSchema, changeEventSchema, conversationListSchema, heartbeatEventSchema, historyPageSchema, liveEventSchema, readyEventSchema, snapshotSchema, workbenchConfigurationSchema } from '../src/shared/workbench.ts';
+import { attentionSchema, changeEventSchema, conversationListSchema, conversationStateSchema, heartbeatEventSchema, historyPageSchema, liveEventSchema, readyEventSchema, snapshotSchema, workbenchConfigurationSchema } from '../src/shared/workbench.ts';
 
 const origin = 'https://workbench.example';
 const configuration = { modelId: 'synthetic-model', permissionId: 'workspace-write' };
@@ -612,4 +612,22 @@ test('answering a native request requires a session, CSRF and same origin, and v
   assert.deepEqual([missing.status, missing.body.error], [404, 'request_not_found']);
   assert.equal((await f.request(`/conversations/${id}/request-answers/${randomUUID()}/reconcile`, { method: 'POST', body: {} })).status, 404);
   assert.equal((await f.request(`/conversations/${id}`)).body.requests, undefined, 'no open requests, no request list');
+});
+
+test('state-only changes say so on the stream, and the state endpoint carries no history (ADR 0020)', async t => {
+  const f = await fixture(t); const id = f.seed();
+  f.setHistory([{ id: 'history-1', kind: 'assistant', status: 'completed', text: 'History body that a state read must not carry' }]);
+  const stream = await f.stream(); await stream.named('ready');
+  f.store.setConversationState(id, { error: 'synthetic-state-change' });
+  const state = changeEventSchema.parse((await stream.named('change'))!.data); assert.equal(state.scope, 'state');
+  f.store.markNative(id, 'page:synthetic-change');
+  const content = changeEventSchema.parse((await stream.named('change'))!.data); assert.equal(content.scope, undefined);
+  const response = await f.request(`/conversations/${id}/state`); assert.equal(response.status, 200);
+  const body = conversationStateSchema.parse(response.body);
+  assert.equal(body.conversation.id, id); assert.equal(body.conversation.error, 'synthetic-state-change');
+  assert.ok(!('history' in response.body) && !('turnFiles' in response.body) && !('live' in response.body));
+  assert.ok(!JSON.stringify(response.body).includes('History body'), 'no history text leaks into a state read');
+  assert.equal((await f.request(`/conversations/${id}/state`, { authenticated: false })).status, 401);
+  assert.equal((await f.request(`/conversations/${randomUUID()}/state`)).status, 404);
+  assert.equal((await f.request(`/conversations/${id}/state?extra=1`)).status, 400);
 });

@@ -546,3 +546,15 @@ test('the native page mark announces only a different page, and survives reopeni
   assert.equal(store.markNative(input.id, 'page:first'), false, 'a restarted server does not re-announce an unchanged page');
   assert.equal(store.version(), reopened);
 });
+test('state-only changes are scoped, while changes that may touch history stay unscoped (ADR 0020)', t => {
+  const f = fixture(t); const db = f.open(); const store = createWorkbenchStore(db);
+  const input = conversation(); store.createConversation(input); store.saveBinding(input.id, binding(input));
+  const scopeOf = (action: () => void) => { const before = store.version(); action(); const events = store.changes(before).events; assert.equal(events.length, 1); return events[0]!.scope; };
+  assert.equal(scopeOf(() => store.setConversationState(input.id, { readiness: 'ready', state: { status: 'running', runId: 'run-1', pendingInputs: 0, configurationVerified: true } })), 'state');
+  assert.equal(scopeOf(() => store.setUsage(input.id, { total: 10 })), 'state');
+  assert.equal(scopeOf(() => store.renameConversation(input.id, 'Renamed')), 'state');
+  assert.equal(scopeOf(() => store.touch(input.id, undefined, 'state')), 'state');
+  assert.equal(scopeOf(() => store.markNative(input.id, 'page:new')), undefined, 'a changed native page may touch history');
+  assert.equal(scopeOf(() => store.touch(input.id)), undefined, 'an unclassified change counts as history');
+  assert.equal(scopeOf(() => store.recordTurnFiles(input.id, [{ ...item('edit'), kind: 'tool', runId: 'run-1', fileEdits: ['a.ts'] }])), undefined);
+});

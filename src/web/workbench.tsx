@@ -12,10 +12,11 @@ import { WorkspaceReader } from './workspace-reader.tsx';
 import { useCallback, useEffect, useMemo, useLayoutEffect, useRef, useState } from 'react';
 import {
   workbenchConfigurationSchema, conversationResponseSchema, operationResponseSchema,
-  snapshotSchema, historyPageSchema, changeEventSchema, resetEventSchema, readyEventSchema, heartbeatEventSchema, liveEventSchema, queueViewSchema,
+  snapshotSchema, conversationStateSchema, historyPageSchema, changeEventSchema, resetEventSchema, readyEventSchema, heartbeatEventSchema, liveEventSchema, queueViewSchema,
   type WorkbenchConfiguration, type Conversation, type WorkbenchSnapshot, type WorkbenchItem, type QueueCommand, type TurnFileSummary, type LiveCursor, type LiveEvent,
 } from '../shared/workbench.ts';
 import { applyLiveFrame } from './live-items.ts';
+import { adoptFull, applyState } from './snapshot-merge.ts';
 import { request, RequestError, readDraft, sameInput, saveDraft, type Draft } from './workbench-client.ts';
 import { sessionSchema } from '../shared/http.ts';
 import './workbench.css';
@@ -166,9 +167,16 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
       if (!limited || items.some(item => item.id === itemId)) { gap = true; break; }
     }
     liveView.current = { id, items, cursor: result.live, limited };
-    setSnapshot(items === result.history.liveItems ? result : { ...result, history: { ...result.history, liveItems: items } });
+    const full = items === result.history.liveItems ? result : { ...result, history: { ...result.history, liveItems: items } };
+    // A full read that is older than the last state read keeps that newer state (ADR 0020).
+    const floor = stateRevision.current; stateRevision.current = Math.max(floor, result.revision);
+    setSnapshot(current => adoptFull(current, full, floor));
     if (gap) scheduleRefresh(id, false);
   };
+  /** Revision of the newest conversation state applied, from a full read or a state read. */
+  const stateRevision = useRef(0);
+  /** What the scheduled refresh reads: only the state (ADR 0020), or the full snapshot. */
+  const pendingScope = useRef<'state' | 'full' | undefined>(undefined);
   const draftRef = useRef(draft); draftRef.current = draft;
   const generation = useRef(0);
   const requestSerial = useRef(0);
@@ -231,15 +239,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
         // The reader is in older content and new output no longer touches the window: keep it and offer the way back.
         else setNewer([null]);
       }
-      const pending = draftRef.current.pending;
-      if (pending && !pending.queued) {
-        const operation = result.operations.find(op => op.id === pending.id);
-        if (operation?.status === 'accepted') {
-          rememberConversation(result.conversation);
-          setDraft(current => { const { pending: _pending, ...editable } = current; const next = sameInput(editable, pending) ? { text: '' } : editable; saveDraft(id, next); return next; });
-          setError('');
-        } else if (operation?.status === 'rejected') setError(operation.reason ? failures[operation.reason] ?? operation.reason : '本次发送未被接受，输入已保留。');
-      }
+      reconcilePending(id, result);
     } catch (reason) {
       if (gen === generation.current) {
         if (reason instanceof RequestError && reason.status === 404) {
@@ -253,18 +253,51 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
       if (activeRead.current === job) activeRead.current = undefined;
       if (job.dirty && alive.current && generation.current === gen && selectedRef.current === id) {
         if (refreshTimer.current) clearTimeout(refreshTimer.current);
-        refreshTimer.current = setTimeout(() => { refreshTimer.current = undefined; void loadRef.current(id, job.latest); }, 180);
+        refreshTimer.current = setTimeout(() => { refreshTimer.current = undefined; pendingScope.current = undefined; void loadRef.current(id, job.latest); }, 180);
       }
     });
     return job.task;
   };
   const loadRef = useRef(load); loadRef.current = load;
-  const scheduleRefresh = (id?: string, refreshNavigation = true) => {
+  /** A sent message whose operation settled: clear the draft it came from, or keep it with the reason. */
+  const reconcilePending = (id: string, result: { operations: WorkbenchSnapshot['operations']; conversation: Conversation }) => {
+    const pending = draftRef.current.pending;
+    if (!pending || pending.queued) return;
+    const operation = result.operations.find(op => op.id === pending.id);
+    if (operation?.status === 'accepted') {
+      rememberConversation(result.conversation);
+      setDraft(current => { const { pending: _pending, ...editable } = current; const next = sameInput(editable, pending) ? { text: '' } : editable; saveDraft(id, next); return next; });
+      setError('');
+    } else if (operation?.status === 'rejected') setError(operation.reason ? failures[operation.reason] ?? operation.reason : '本次发送未被接受，输入已保留。');
+  };
+  /** Re-read only the conversation's state; history and live items stay as they are (ADR 0020). */
+  const loadState = async (id: string) => {
+    const gen = generation.current;
+    try {
+      const result = await request(`/conversations/${id}/state`, conversationStateSchema, { signal: viewController.current?.signal });
+      if (!alive.current || gen !== generation.current || id !== selectedRef.current || result.revision < stateRevision.current) return;
+      stateRevision.current = result.revision;
+      setSnapshot(current => current && current.conversation.id === id ? applyState(current, result) : current);
+      reconcilePending(id, result);
+    } catch (reason) {
+      if (gen !== generation.current) return;
+      // The full read owns the unavailable-conversation path.
+      if (reason instanceof RequestError && reason.status === 404) { void loadRef.current(id); return; }
+      report(reason);
+    }
+  };
+  const loadStateRef = useRef(loadState); loadStateRef.current = loadState;
+  const scheduleRefresh = (id?: string, refreshNavigation = true, scope: 'state' | 'full' = 'full') => {
     if (refreshNavigation && !attentionTimer.current) attentionTimer.current = setTimeout(() => { attentionTimer.current = undefined; refreshAttention(value => value + 1); }, 700);
     // A hidden page skips list reloads; becoming visible again reconciles everything once.
     if (refreshNavigation && !listTimer.current && document.visibilityState !== 'hidden') listTimer.current = setTimeout(() => { listTimer.current = undefined; refreshList(value => value + 1); }, 700);
     if (id && id !== selectedRef.current) return;
-    if (!refreshTimer.current) refreshTimer.current = setTimeout(() => { refreshTimer.current = undefined; if (selectedRef.current) void loadRef.current(selectedRef.current); }, 180);
+    pendingScope.current = scope === 'full' || pendingScope.current === 'full' ? 'full' : 'state';
+    if (!refreshTimer.current) refreshTimer.current = setTimeout(() => {
+      refreshTimer.current = undefined; const target = selectedRef.current; const kind = pendingScope.current; pendingScope.current = undefined;
+      if (!target) return;
+      if (kind === 'state') void loadStateRef.current(target); else void loadRef.current(target);
+    }, 180);
   };
   useEffect(() => { setSubagentPanel(undefined); }, [selected]);
   useEffect(() => {
@@ -274,7 +307,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
   }, []);
   useEffect(() => {
     generation.current++; requestSerial.current++; viewController.current?.abort(); viewController.current = new AbortController();
-    setSnapshot(undefined); snapshotRef.current = undefined; liveView.current = undefined; liveLog.current = []; setPages([]); setNewer([]); pagesRef.current = []; newerRef.current = []; setUnavailableFiles(new Set()); setError(''); setMoreOutput(false); atBottom.current = true;
+    setSnapshot(undefined); snapshotRef.current = undefined; liveView.current = undefined; liveLog.current = []; stateRevision.current = 0; pendingScope.current = undefined; setPages([]); setNewer([]); pagesRef.current = []; newerRef.current = []; setUnavailableFiles(new Set()); setError(''); setMoreOutput(false); atBottom.current = true;
     const next = selected ? readDraft(selected) : { text: '' }; draftRef.current = next; setDraft(next);
     if (selected) { setUnavailableNotice(''); void loadRef.current(selected, true); }
     return () => viewController.current?.abort();
@@ -372,9 +405,9 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
             refreshList(value => value + 1);
             return;
           }
-          // History snapshots reconcile live and durable identities; this also catches missed terminal events.
-          // Only list-visible changes refresh lists; content and usage refresh just the open conversation.
-          scheduleRefresh(change.conversationId, !!change.summary);
+          // A change that may touch history re-reads the full snapshot; a state-only change re-reads just the state (ADR 0020).
+          // Only list-visible changes refresh lists.
+          scheduleRefresh(change.conversationId, !!change.summary, change.scope === 'state' ? 'state' : 'full');
         } catch { cursor = 0; reconnect(); }
       });
       source.addEventListener('reset', event => { if (source !== own || stopped) return; try { cursor = resetEventSchema.parse(JSON.parse((event as MessageEvent).data)).revision; scheduleRefresh(); } catch { cursor = 0; reconnect(); } });

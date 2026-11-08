@@ -33,7 +33,9 @@ export type Operation = OperationInput & {
   digest: string; status: OperationStatus; runId: string | null; reason: string | null;
   createdAt: number; updatedAt: number;
 };
-export type WorkbenchChange = { sequence: number; conversationId: string; itemId?: string };
+/** `state`: the change leaves history untouched, so pages refresh only the conversation's state (ADR 0020). */
+export type ChangeScope = 'state';
+export type WorkbenchChange = { sequence: number; conversationId: string; itemId?: string; scope?: ChangeScope };
 export type ListOperations = { conversationId?: string; status?: OperationStatus; type?: 'message' | 'stop'; order?: 'asc' | 'desc'; afterId?: string; limit?: number };
 export type ConversationList = {
   beforeId?: string; limit?: number; workspaceId?: string; archived?: boolean;
@@ -84,7 +86,7 @@ export interface WorkbenchStore {
   changes(after: number, limit?: number): { events: WorkbenchChange[]; latest: number; reset: boolean };
   version(): number;
   /** Record a change hint (optionally naming a live item) without persisting any history body (ADR 0014). */
-  touch(conversationId: string, itemId?: string): void;
+  touch(conversationId: string, itemId?: string, scope?: ChangeScope): void;
   /**
    * Record what the native latest page looks like now; announces a change only when it differs from the last
    * recorded mark, so reading unchanged history is never a change (ADR 0019). Returns whether it announced.
@@ -237,18 +239,20 @@ function operationFromRow(row: Row): Operation {
 export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => number; onChange?: (event: WorkbenchChange) => void; storageBudget?: number } = {}): WorkbenchStore {
   const now = options.now ?? Date.now;
   const version = (): number => Number(db.prepare('SELECT COALESCE(MAX(sequence),0) AS version FROM workbench_changes').get()!.version);
-  const mutate = <T>(action: (changed: (conversationId: string, itemId?: string) => void) => T): T => {
+  const mutate = <T>(action: (changed: (conversationId: string, itemId?: string, scope?: ChangeScope) => void) => T): T => {
     const events: WorkbenchChange[] = [];
     const value = transaction(db, () => {
-      const changed = new Map<string, string | undefined>();
-      const result = action((id, itemId) => {
-        if (!changed.has(id)) changed.set(id, itemId);
-        else if (changed.get(id) !== itemId) changed.set(id, undefined);
+      const changed = new Map<string, { itemId?: string; scope?: ChangeScope }>();
+      const result = action((id, itemId, scope) => {
+        const previous = changed.get(id);
+        if (!previous) { changed.set(id, { itemId, scope }); return; }
+        // Several changes in one transaction: a differing item names none, and any change that may touch history wins.
+        changed.set(id, { itemId: previous.itemId === itemId ? itemId : undefined, scope: previous.scope === 'state' && scope === 'state' ? 'state' : undefined });
       });
-      const insert = db.prepare('INSERT INTO workbench_changes(conversation_id,item_id,created_at) VALUES(?,?,?)');
-      for (const [conversationId, itemId] of changed) {
-        const row = insert.run(conversationId, itemId ?? null, now());
-        events.push({ sequence: Number(row.lastInsertRowid), conversationId, ...(itemId === undefined ? {} : { itemId }) });
+      const insert = db.prepare('INSERT INTO workbench_changes(conversation_id,item_id,scope,created_at) VALUES(?,?,?,?)');
+      for (const [conversationId, { itemId, scope }] of changed) {
+        const row = insert.run(conversationId, itemId ?? null, scope ?? null, now());
+        events.push({ sequence: Number(row.lastInsertRowid), conversationId, ...(itemId === undefined ? {} : { itemId }), ...(scope ? { scope } : {}) });
       }
       if (changed.size) db.exec('DELETE FROM workbench_changes WHERE sequence <= (SELECT sequence FROM workbench_changes ORDER BY sequence DESC LIMIT 1 OFFSET 2000)');
       return result;
@@ -445,7 +449,7 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
         const current = requireConversation(id);
         if (current.title === title) return current;
         db.prepare('UPDATE workbench_conversations SET title=? WHERE id=?').run(title, id);
-        changed(id);
+        changed(id, undefined, 'state');
         return requireConversation(id);
       });
     },
@@ -455,7 +459,7 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
         const current = requireConversation(id);
         if (!!current.planMode === active) return current;
         db.prepare('UPDATE workbench_conversations SET plan_mode=? WHERE id=?').run(active ? 1 : 0, id);
-        changed(id);
+        changed(id, undefined, 'state');
         return requireConversation(id);
       });
     },
@@ -467,7 +471,7 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
         if (current.archived === archived) return current;
         if (archived && !canArchive(current)) throw new StoreError('conversation_archive_busy', 409);
         db.prepare('UPDATE workbench_conversations SET archived=? WHERE id=?').run(Number(archived), id);
-        changed(id);
+        changed(id, undefined, 'state');
         return requireConversation(id);
       });
     },
@@ -496,7 +500,7 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
         const error = change.error === undefined ? conversation.error : change.error;
         if (readiness === conversation.readiness && JSON.stringify(state) === JSON.stringify(conversation.state) && error === conversation.error) return conversation;
         db.prepare('UPDATE workbench_conversations SET readiness=?,state_json=?,error=? WHERE id=?').run(readiness, JSON.stringify(state), error, id);
-        changed(id);
+        changed(id, undefined, 'state');
         return requireConversation(id);
       });
     },
@@ -510,7 +514,7 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
         const json = JSON.stringify(usage);
         if (json === JSON.stringify(current)) return;
         db.prepare('UPDATE workbench_conversations SET usage_json=? WHERE id=?').run(json, id);
-        changed(id);
+        changed(id, undefined, 'state');
       });
     },
     enqueueOperation(value) {
@@ -534,7 +538,7 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
         db.prepare(`INSERT INTO workbench_operations(id,conversation_id,type,payload_json,digest,status,created_at,updated_at)
           VALUES(?,?,?,?,?,'queued',?,?)`).run(input.id, input.conversationId, input.type, JSON.stringify(input.payload), contentDigest, at, at);
         if (input.type === 'stop' && hasQueue(input.conversationId)) setPause(input.conversationId, 'stopped');
-        changed(input.conversationId);
+        changed(input.conversationId, undefined, 'state');
         return { operation: requireOperation(input.id), created: true };
       });
     },
@@ -570,7 +574,7 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
       parse(uuid, id);
       return mutate(changed => {
         const row = db.prepare("UPDATE workbench_operations SET status='dispatching',updated_at=? WHERE id=? AND status='queued' RETURNING *").get(now(), id);
-        if (row) changed(String(row.conversation_id));
+        if (row) changed(String(row.conversation_id), undefined, 'state');
         return row ? operationFromRow(row) : null;
       });
     },
@@ -585,7 +589,7 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
           throw new StoreError('operation_result_conflict', 409);
         if (operation.status === 'queued' && receipt.outcome !== 'rejected') throw new StoreError('operation_not_claimed', 409);
         if (operation.status === receipt.outcome && operation.runId === runId && operation.reason === reason) return operation;
-        changed(operation.conversationId);
+        changed(operation.conversationId, undefined, 'state');
         db.prepare('UPDATE workbench_operations SET status=?,run_id=?,reason=?,updated_at=? WHERE id=?').run(receipt.outcome, runId, reason, now(), id);
         if (operation.type === 'message' && receipt.outcome === 'accepted') {
           db.prepare('UPDATE workbench_conversations SET last_activity_at=MAX(last_activity_at,?) WHERE id=?')
@@ -611,7 +615,7 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
       return mutate(changed => {
         const conversations = db.prepare("SELECT DISTINCT conversation_id FROM workbench_operations WHERE status='dispatching' LIMIT 10000").all();
         const count = Number(db.prepare("UPDATE workbench_operations SET status='unknown',reason='application_restarted_during_dispatch',updated_at=? WHERE status='dispatching'").run(now()).changes);
-        for (const conversation of conversations) changed(String(conversation.conversation_id));
+        for (const conversation of conversations) changed(String(conversation.conversation_id), undefined, 'state');
         return count;
       });
     },
@@ -699,7 +703,7 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
             .run(content ? JSON.stringify(content) : null, command.entryId, id);
         }
         bumpQueue(id);
-        changed(id);
+        changed(id, undefined, 'state');
       });
     },
     claimQueue(id, entryId, version, operationId, rawDelivery) {
@@ -727,13 +731,13 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
             JSON.stringify({ queueRecord: true, content, queuedInput }), digest([id, content, queuedInput]), at, at);
         db.prepare('UPDATE workbench_queue_entries SET operation_id=?,held=0,skill_unavailable=0 WHERE id=? AND conversation_id=?').run(operationId, entryId, id);
         bumpQueue(id);
-        changed(id);
+        changed(id, undefined, 'state');
         return requireOperation(operationId);
       });
     },
     pauseQueue(id, reason) {
       parse(uuid, id); parse(queuePauseSchema, reason);
-      return mutate(changed => { if (hasQueue(id) && setPause(id, reason)) changed(id); });
+      return mutate(changed => { if (hasQueue(id) && setPause(id, reason)) changed(id, undefined, 'state'); });
     },
     version() { return storage(version); },
     changes(after, limit = 200) {
@@ -744,14 +748,14 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
         const first = db.prepare('SELECT sequence FROM workbench_changes ORDER BY sequence LIMIT 1').get();
         const oldest = first ? Number(first.sequence) : 1;
         const reset = after > latest || after < oldest - 1;
-        const events = reset ? [] : db.prepare('SELECT sequence,conversation_id,item_id FROM workbench_changes WHERE sequence>? ORDER BY sequence LIMIT ?')
-          .all(after, limit).map(row => ({ sequence: Number(row.sequence), conversationId: String(row.conversation_id), ...(row.item_id === null ? {} : { itemId: String(row.item_id) }) }));
+        const events = reset ? [] : db.prepare('SELECT sequence,conversation_id,item_id,scope FROM workbench_changes WHERE sequence>? ORDER BY sequence LIMIT ?')
+          .all(after, limit).map(row => ({ sequence: Number(row.sequence), conversationId: String(row.conversation_id), ...(row.item_id === null ? {} : { itemId: String(row.item_id) }), ...(row.scope === 'state' ? { scope: 'state' as const } : {}) }));
         return { events, latest, reset };
       }, 'read');
     },
-    touch(conversationId, itemId) {
+    touch(conversationId, itemId, scope) {
       parse(uuid, conversationId); if (itemId !== undefined) parse(identifier, itemId);
-      mutate(changed => { requireConversation(conversationId); changed(conversationId, itemId); });
+      mutate(changed => { requireConversation(conversationId); changed(conversationId, itemId, scope); });
     },
     markNative(conversationId, mark) {
       parse(uuid, conversationId); parse(nativeMark, mark);
@@ -812,7 +816,7 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
         const unseen = key !== row.seen_key && key !== row.seen_result_key;
         if (result) db.prepare('UPDATE workbench_conversations SET seen_key=?,seen_result_key=? WHERE id=?').run(key, key, id);
         else db.prepare('UPDATE workbench_conversations SET seen_key=? WHERE id=?').run(key, id);
-        if (unseen) changed(id);
+        if (unseen) changed(id, undefined, 'state');
         return unseen;
       });
     },

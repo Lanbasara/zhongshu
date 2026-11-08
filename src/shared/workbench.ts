@@ -256,6 +256,8 @@ export const snapshotSchema = z.object({
   /** The live-stream position this snapshot's `liveItems` already reflect (ADR 0019). */
   live: liveCursorSchema.optional(),
 }).strict();
+/** A snapshot without its history (ADR 0020): everything a `state` change can alter. */
+export const conversationStateSchema = snapshotSchema.pick({ conversation: true, operations: true, queue: true, usage: true, requests: true, planReady: true, revision: true }).strict();
 /** One older native page. `olderCursor` is null at the first message of the conversation. */
 export const historyPageSchema = z.object({
   items: z.array(itemSchema).max(historyPageItemLimit), olderCursor: historyCursorSchema.nullable(), turnFiles: z.array(turnFilesSchema).max(200),
@@ -265,7 +267,8 @@ export const storageSchema = z.object({
   images: z.object({ owned: revisionSchema, cache: revisionSchema }).strict(),
 }).strict();
 /** `summary` marks a change to what conversation lists show (status, unread, title, archive, sub-agent counts); content and usage changes omit it. */
-export const changeEventSchema = z.object({ type: z.literal('change'), revision: revisionSchema, conversationId: z.uuid(), deleted: z.boolean().optional(), summary: z.literal(true).optional() }).strict();
+/** `scope: 'state'` marks a change that leaves history untouched; the page then re-reads only the conversation's state (ADR 0020). */
+export const changeEventSchema = z.object({ type: z.literal('change'), revision: revisionSchema, conversationId: z.uuid(), deleted: z.boolean().optional(), summary: z.literal(true).optional(), scope: z.literal('state').optional() }).strict();
 export const resetEventSchema = z.object({ type: z.literal('reset'), revision: revisionSchema }).strict();
 export const readyEventSchema = z.object({ type: z.literal('ready'), revision: revisionSchema, live: liveCursorSchema }).strict();
 /** Heartbeats carry the latest live sequence, so a page notices a frame it never received. */
@@ -295,6 +298,7 @@ export type ChangeEvent = z.infer<typeof changeEventSchema>;
 export type LiveCursor = z.infer<typeof liveCursorSchema>;
 export type BodyPatch = z.infer<typeof bodyPatchSchema>;
 export type LiveEvent = z.infer<typeof liveEventSchema>;
+export type ConversationState = z.infer<typeof conversationStateSchema>;
 export type Collaboration = z.infer<typeof collaborationSchema>;
 export type SubagentStatus = z.infer<typeof subagentStatusSchema>;
 export type SubagentView = z.infer<typeof subagentSchema>;
