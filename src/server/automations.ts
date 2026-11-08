@@ -18,6 +18,9 @@ import { readWorkspaceTimeline } from './workspace-documents.ts';
 
 const LATE_MS = 5 * 60_000;
 const POLL_MS = 60_000;
+/** A session the Harness just created may not have its configuration yet; adoption is retried this often, this long. */
+const ADOPT_RETRY_MS = 3_000;
+const ADOPT_WINDOW_MS = 10 * 60_000;
 const FRESH_MS = 3_000;
 class AutomationError extends Error {
   readonly statusCode: number;
@@ -33,7 +36,7 @@ export function createAutomations(db: DatabaseSync, workbench: Workbench, adapte
   const executing = new Set<string>();
   const unsubscribe: (() => void)[] = [];
   let refreshing: Promise<void> | undefined; let again = false;
-  let debounce: NodeJS.Timeout | undefined; let poll: NodeJS.Timeout | undefined; let closed = false;
+  let debounce: NodeJS.Timeout | undefined; let poll: NodeJS.Timeout | undefined; let retry: NodeJS.Timeout | undefined; let closed = false;
 
   const handled = (id: string) => db.prepare('SELECT message_id FROM automation_deliveries WHERE automation_id=?').get(id) as { message_id: string } | undefined;
   const remember = (id: string, delivery: AutomationDelivery) => db.prepare(`INSERT INTO automation_deliveries(automation_id,message_id,session_id,scheduled_at,delivered_at,handled_at)
@@ -55,13 +58,16 @@ export function createAutomations(db: DatabaseSync, workbench: Workbench, adapte
   /** The session a task created for itself: every run of a "new" task, or the one a "new once" task reserved. */
   const createdFor = (task: NativeAutomation, sessionId: string) => task.target.kind === 'new' || task.target.kind === 'new_once' || reserved(task.id) === sessionId;
 
-  /** A session a task created becomes a conversation only inside a registered workspace, with the configuration it runs with. */
-  async function adopt(source: HarnessAutomations, task: NativeAutomation, sessionId: string): Promise<string | undefined> {
+  /**
+   * A session a task created becomes a conversation only inside a registered workspace, with the configuration it runs
+   * with. `later` means the Harness has not recorded that configuration yet (a session it just created), so try again.
+   */
+  async function adopt(source: HarnessAutomations, task: NativeAutomation, sessionId: string): Promise<string | 'later' | undefined> {
     const known = workbench.store.conversationForNative('dsh', sessionId);
     if (known) return known.id;
     if (!createdFor(task, sessionId)) return undefined; // a session Zhongshu never knew stays the Harness's own
     const native = await source.inspect(sessionId);
-    if (!native) return undefined;
+    if (!native) return 'later';
     const workspace = workbench.workspaces.find(entry => entry.directory === native.cwd);
     if (!workspace) return undefined;
     const conversation = workbench.store.adoptConversation({ id: randomUUID(), harnessId: 'dsh', workspaceId: workspace.id, cwd: native.cwd, title: task.title.slice(0, 200) || '自动任务',
@@ -80,8 +86,9 @@ export function createAutomations(db: DatabaseSync, workbench: Workbench, adapte
         const started = task.executing && !executing.has(task.id);
         if (task.executing) executing.add(task.id); else executing.delete(task.id);
         if (!fresh && !started) continue;
-        const conversationId = target ? (delivery && target === delivery.sessionId ? await adopt(source, task, target) : workbench.store.conversationForNative('dsh', target)?.id) : undefined;
-        if (conversationId) await workbench.noticeActivity(conversationId).catch(() => {});
+        const adopted = target ? (delivery && target === delivery.sessionId ? await adopt(source, task, target) : workbench.store.conversationForNative('dsh', target)?.id) : undefined;
+        if (adopted === 'later' && delivery && Date.now() - Date.parse(delivery.deliveredAt) < ADOPT_WINDOW_MS) { retrySoon(); continue; }
+        if (adopted && adopted !== 'later') await workbench.noticeActivity(adopted).catch(() => {});
         if (fresh && delivery) remember(task.id, delivery);
       } catch { log({ event: 'automation_delivery_unhandled' }); }
     }
@@ -102,6 +109,11 @@ export function createAutomations(db: DatabaseSync, workbench: Workbench, adapte
       } while (again && !closed);
     })().finally(() => { refreshing = undefined; });
     return refreshing;
+  }
+  /** A delivery whose new session is not ready to adopt is looked at again shortly, not at the next slow poll. */
+  function retrySoon(): void {
+    if (closed || retry) return;
+    retry = setTimeout(() => { retry = undefined; void refresh(); }, ADOPT_RETRY_MS); retry.unref();
   }
   function changed(): void {
     if (closed || debounce) return;
@@ -285,7 +297,7 @@ export function createAutomations(db: DatabaseSync, workbench: Workbench, adapte
     },
     close(): void {
       closed = true;
-      if (debounce) clearTimeout(debounce); if (poll) clearInterval(poll);
+      if (debounce) clearTimeout(debounce); if (poll) clearInterval(poll); if (retry) clearTimeout(retry);
       for (const stop of unsubscribe.splice(0)) stop();
       notifications.close();
     },

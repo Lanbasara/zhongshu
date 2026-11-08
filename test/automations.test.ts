@@ -197,7 +197,7 @@ test('the automation service shows native tasks in product terms, adopts session
       lastDelivery: { scheduledAt: at(40), deliveredAt: at(40), messageId: 'm-x', sessionId: 's-unknown' } },
     { id: 'once', title: '持续跟踪', prompt: '跟踪', timing: { kind: 'every', seconds: 3600 }, scheduledAt: at(50), status: 'active', target: { kind: 'new_once', sessionId: 's-once', cwd: directory }, involved: [], executing: false },
   ];
-  const edits: unknown[] = []; const created: unknown[] = []; const sessions: unknown[] = [];
+  const edits: unknown[] = []; const created: unknown[] = []; const sessions: unknown[] = []; let lateReady = false;
   const source = {
     list: async () => tasks, view: async (id: string) => tasks.find(task => task.id === id), history: async () => undefined,
     create: async (input: { title: string; prompt: string; target?: { kind: string; sessionId?: string } }) => {
@@ -207,7 +207,7 @@ test('the automation service shows native tasks in product terms, adopts session
     }, remove: async () => 'notFound' as const, run: async (id: string) => (tasks.some(task => task.id === id) ? 'pending' as const : 'notFound' as const),
     update: async (id: string, patch: unknown, expected?: string) => { edits.push({ id, patch, expected }); return expected === at(1) ? { ...tasks[1]!, title: '回看（改）', updatedAt: at(2) } : 'conflict' as const; },
     onChange: () => () => {},
-    inspect: async (sessionId: string) => (['s-run-1', 's-once', 's-unknown'].includes(sessionId) ? { cwd: directory, configuration } : undefined),
+    inspect: async (sessionId: string) => (['s-run-1', 's-once', 's-unknown'].includes(sessionId) || (sessionId === 's-late' && lateReady) ? { cwd: directory, configuration } : undefined),
   };
   const adapters = new Map([['dsh', { automations: source, create: async (input: { cwd: string; configuration: typeof configuration }) => { sessions.push(input); return { id: 's-made', cwd: input.cwd, configuration: input.configuration, details: {} }; } }]]) as unknown as Parameters<typeof createAutomations>[2];
   const notifications = createAgentNotifications(db, { push: () => {}, title: () => undefined });
@@ -246,6 +246,18 @@ test('the automation service shows native tasks in product terms, adopts session
   const fresh = (await app.inject({ method: 'POST', url: '/automations/follow/edit', payload: { patch: { title: '回看（改）' }, expectedUpdatedAt: at(1) } })).json();
   assert.equal(fresh.outcome, 'ok'); assert.equal(fresh.automation.title, '回看（改）');
   assert.equal((await app.inject({ method: 'POST', url: '/automations/follow/edit', payload: { patch: {} } })).statusCode, 400, 'an empty change is refused');
+  // A session the Harness just created may not report its configuration yet: adoption is retried shortly, not dropped.
+  tasks = [...tasks, { id: 'late', title: '刚建的会话', prompt: 'x', timing: { kind: 'every', seconds: 3600 }, scheduledAt: at(70), status: 'active', target: { kind: 'new', cwd: directory },
+    involved: [], executing: false, lastDelivery: { scheduledAt: new Date().toISOString(), deliveredAt: new Date().toISOString(), messageId: 'm-late', sessionId: 's-late' } }];
+  await new Promise(resolve => setTimeout(resolve, 3_100));
+  await app.inject({ method: 'GET', url: '/automations' });
+  assert.equal(store.conversationForNative('dsh', 's-late'), null, 'not ready yet');
+  lateReady = true;
+  await new Promise(resolve => setTimeout(resolve, 3_500));
+  const late = store.conversationForNative('dsh', 's-late');
+  assert.equal(late?.automationId, 'late', 'adopted on the quick retry');
+  assert.ok(noticed.includes(late!.id), 'and observed, so its notices can still be placed');
+
   // Deleting a task elsewhere leaves its results as ordinary conversations.
   tasks = tasks.filter(task => task.id !== 'routine');
   await new Promise(resolve => setTimeout(resolve, 3_100));
