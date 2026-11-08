@@ -1039,7 +1039,10 @@ export class Workbench {
     }
     runtime.tail = { items, olderCursor, at: Date.now() };
     // Compared with the durable mark, not this runtime's previous page: a fresh runtime re-reading unchanged history announces nothing.
-    this.store.markNative(id, pageMark(items, olderCursor));
+    const changed = this.store.markNative(id, pageMark(items, olderCursor));
+    // A run can finish before observation starts (a fast automation run in a new session); what it did is then only in
+    // history, so a changed latest page is shown to the observers too (ADR 0021).
+    if (changed) for (const listener of this.observedListeners) { try { listener(id, items); } catch { /* a matcher cannot break observation */ } }
     this.enrichReceipts(id);
   }
   private retireLive(runtime: Runtime, key: string): void { runtime.live.delete(key); runtime.flushed.delete(key); runtime.liveAt.delete(key); runtime.sent.delete(key); }
