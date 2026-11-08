@@ -797,7 +797,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
           {configuration?.workspaces.length === 0 && <p className="quiet">还没有工作区。可以在「设置 › 工作区」中添加。</p>}
         </section> : <>
         {conversation && conversation.automationId && <AutomationRunBar conversation={conversation} automations={automationData.automations} revision={listRevision} choose={choose} openTasks={() => openSchedule('tasks')}/>}
-        {conversation && <AutomationStrip conversation={conversation} automations={automationData.automations} notifications={automationData.notifications} openTasks={() => openSchedule('tasks')}/>}
+        {conversation && !conversation.automationId && <AutomationStrip conversation={conversation} automations={automationData.automations} notifications={automationData.notifications} openTasks={() => openSchedule('tasks')}/>}
         <div className="message-scroll" ref={scroll} onScroll={() => {
           const node = scroll.current!; const remaining = node.scrollHeight - node.scrollTop - node.clientHeight;
           atBottom.current = remaining < 80 && !newerRef.current.length; if (atBottom.current) setMoreOutput(false);

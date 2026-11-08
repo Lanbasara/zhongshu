@@ -185,7 +185,9 @@ test('the automation service shows native tasks in product terms, adopts session
       target: { kind: 'new', cwd: directory }, involved: [], executing: false, updatedAt: at(0),
       lastDelivery: { scheduledAt: at(0), deliveredAt: at(20), messageId: 'm-1', sessionId: 's-run-1' } },
     { id: 'follow', title: '回看', prompt: '复核', timing: { kind: 'once', at: at(30) }, scheduledAt: at(30), status: 'active', target: { kind: 'session', sessionId: 's-existing' }, involved: [], executing: false, updatedAt: at(1) },
-    { id: 'elsewhere', title: '外部', prompt: 'x', timing: { kind: 'every', seconds: 3600 }, scheduledAt: at(40), status: 'active', target: { kind: 'session', sessionId: 's-unknown' }, involved: [], executing: false },
+    { id: 'elsewhere', title: '外部', prompt: 'x', timing: { kind: 'every', seconds: 3600 }, scheduledAt: at(40), status: 'active', target: { kind: 'session', sessionId: 's-unknown' }, involved: [], executing: false,
+      lastDelivery: { scheduledAt: at(40), deliveredAt: at(40), messageId: 'm-x', sessionId: 's-unknown' } },
+    { id: 'once', title: '持续跟踪', prompt: '跟踪', timing: { kind: 'every', seconds: 3600 }, scheduledAt: at(50), status: 'active', target: { kind: 'new_once', sessionId: 's-once', cwd: directory }, involved: [], executing: false },
   ];
   const edits: unknown[] = [];
   const source = {
@@ -193,7 +195,7 @@ test('the automation service shows native tasks in product terms, adopts session
     create: async () => { throw new Error('unused'); }, remove: async () => 'notFound' as const, run: async (id: string) => (tasks.some(task => task.id === id) ? 'pending' as const : 'notFound' as const),
     update: async (id: string, patch: unknown, expected?: string) => { edits.push({ id, patch, expected }); return expected === at(1) ? { ...tasks[1]!, title: '回看（改）', updatedAt: at(2) } : 'conflict' as const; },
     onChange: () => () => {},
-    inspect: async (sessionId: string) => (sessionId === 's-run-1' ? { cwd: directory, configuration } : undefined),
+    inspect: async (sessionId: string) => (['s-run-1', 's-once', 's-unknown'].includes(sessionId) ? { cwd: directory, configuration } : undefined),
   };
   const adapters = new Map([['dsh', { automations: source }]]) as unknown as Parameters<typeof createAutomations>[2];
   const notifications = createAgentNotifications(db, { push: () => {}, title: () => undefined });
@@ -214,6 +216,15 @@ test('the automation service shows native tasks in product terms, adopts session
 
   await app.inject({ method: 'GET', url: '/automations' });
   assert.equal(noticed.length, 1, 'a delivery is handled once');
+  assert.equal(store.conversationForNative('dsh', 's-unknown'), null, 'a session the task did not create stays the Harness\'s own');
+
+  // After its first delivery the Harness rewrites a "new once" target to a plain session; the reservation still adopts it.
+  tasks = tasks.map(task => (task.id === 'once' ? { ...task, target: { kind: 'session', sessionId: 's-once' }, lastDelivery: { scheduledAt: at(50), deliveredAt: at(50), messageId: 'm-once', sessionId: 's-once' } } : task));
+  await new Promise(resolve => setTimeout(resolve, 3_100)); // past the list cache
+  const later = (await app.inject({ method: 'GET', url: '/automations' })).json();
+  const tracked = store.conversationForNative('dsh', 's-once');
+  assert.ok(tracked, 'the reserved session is adopted at its first delivery');
+  assert.deepEqual(later.automations.find((task: { id: string }) => task.id === 'once').target, { kind: 'new_once', conversationId: tracked.id, workspaceId: 'stock', workspaceLabel: 'Stock' });
   const runs = (await app.inject({ method: 'GET', url: '/automations/routine/runs' })).json();
   assert.deepEqual(runs.conversations.map((entry: { id: string }) => entry.id), [adopted.id]);
 

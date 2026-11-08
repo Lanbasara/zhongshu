@@ -40,11 +40,22 @@ export function createAutomations(db: DatabaseSync, workbench: Workbench, adapte
     VALUES(?,?,?,?,?,?) ON CONFLICT(automation_id) DO UPDATE SET message_id=excluded.message_id,session_id=excluded.session_id,scheduled_at=excluded.scheduled_at,
     delivered_at=excluded.delivered_at,handled_at=excluded.handled_at`).run(id, delivery.messageId, delivery.sessionId, delivery.scheduledAt, delivery.deliveredAt, Date.now());
 
+  const reserved = (id: string) => (db.prepare('SELECT session_id FROM automation_reservations WHERE automation_id=?').get(id) as { session_id: string } | undefined)?.session_id;
+  const reserve = (id: string, sessionId: string) => db.prepare(`INSERT INTO automation_reservations(automation_id,session_id,seen_at) VALUES(?,?,?)
+    ON CONFLICT(automation_id) DO UPDATE SET session_id=excluded.session_id,seen_at=excluded.seen_at WHERE session_id<>excluded.session_id`).run(id, sessionId, Date.now());
+  /** Reservations of tasks the Harness no longer lists (deleted) are dropped; the list is complete when it succeeds. */
+  const forget = (present: Set<string>) => {
+    const rows = db.prepare('SELECT automation_id FROM automation_reservations').all() as { automation_id: string }[];
+    for (const row of rows) if (!present.has(row.automation_id)) db.prepare('DELETE FROM automation_reservations WHERE automation_id=?').run(row.automation_id);
+  };
+  /** The session a task created for itself: every run of a "new" task, or the one a "new once" task reserved. */
+  const createdFor = (task: NativeAutomation, sessionId: string) => task.target.kind === 'new' || task.target.kind === 'new_once' || reserved(task.id) === sessionId;
+
   /** A session a task created becomes a conversation only inside a registered workspace, with the configuration it runs with. */
   async function adopt(source: HarnessAutomations, task: NativeAutomation, sessionId: string): Promise<string | undefined> {
     const known = workbench.store.conversationForNative('dsh', sessionId);
     if (known) return known.id;
-    if (task.target.kind === 'session') return undefined; // a session Zhongshu never knew stays the Harness's own
+    if (!createdFor(task, sessionId)) return undefined; // a session Zhongshu never knew stays the Harness's own
     const native = await source.inspect(sessionId);
     if (!native) return undefined;
     const workspace = workbench.workspaces.find(entry => entry.directory === native.cwd);
@@ -58,6 +69,7 @@ export function createAutomations(db: DatabaseSync, workbench: Workbench, adapte
     for (const task of tasks) {
       if (closed) return;
       try {
+        if (task.target.kind === 'new_once' && task.target.sessionId) reserve(task.id, task.target.sessionId);
         const delivery = task.lastDelivery;
         const target = delivery?.sessionId ?? (task.target.kind === 'session' ? task.target.sessionId : undefined);
         const fresh = delivery && handled(task.id)?.message_id !== delivery.messageId;
@@ -80,6 +92,7 @@ export function createAutomations(db: DatabaseSync, workbench: Workbench, adapte
             const tasks = await source.list();
             cache.set(harness, { at: Date.now(), tasks });
             await deliveries(source, tasks);
+            forget(new Set(tasks.map(task => task.id)));
           } catch (error) { if (!(error instanceof HarnessError)) log({ event: 'automation_refresh_failed' }); }
         }
       } while (again && !closed);
@@ -100,7 +113,10 @@ export function createAutomations(db: DatabaseSync, workbench: Workbench, adapte
     let target: AutomationView['target'];
     if (task.target.kind === 'session') {
       const conversation = workbench.store.conversationForNative('dsh', task.target.sessionId);
-      target = conversation ? { kind: 'conversation', conversationId: conversation.id, conversationTitle: conversation.title } : { kind: 'unknown' };
+      const workspace = conversation && workbench.workspaceView().workspaces.find(entry => entry.id === conversation.workspaceId);
+      // A "new once" task after its first run: still shown as such, with the conversation it created and reuses.
+      target = conversation?.automationId === task.id ? { kind: 'new_once', conversationId: conversation.id, workspaceId: conversation.workspaceId, ...(workspace ? { workspaceLabel: workspace.label } : {}) }
+        : conversation ? { kind: 'conversation', conversationId: conversation.id, conversationTitle: conversation.title } : { kind: 'unknown' };
     } else {
       const workspace = workspaceOf(task.target.cwd);
       target = { kind: task.target.kind, ...(workspace ? { workspaceId: workspace.id, workspaceLabel: workspace.label } : {}) };

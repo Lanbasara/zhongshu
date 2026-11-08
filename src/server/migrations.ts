@@ -310,6 +310,14 @@ export const productMigrations: Migration[] = [{ version: 2, sql: `
     delivered_at TEXT NOT NULL,
     handled_at INTEGER NOT NULL
   ) STRICT;
+` }, { version: 24, sql: `
+  -- ADR 0021: the session a "new once" automation reserved. The Harness rewrites that target to a plain session after
+  -- the first delivery, so this is how Zhongshu still knows the session was created for the automation.
+  CREATE TABLE automation_reservations (
+    automation_id TEXT PRIMARY KEY CHECK (length(automation_id) <= 240),
+    session_id TEXT NOT NULL CHECK (length(session_id) <= 240),
+    seen_at INTEGER NOT NULL
+  ) STRICT;
 ` }];
 
 /** Runs inside restoreDatabase's private staging transaction, before the database is published. */
