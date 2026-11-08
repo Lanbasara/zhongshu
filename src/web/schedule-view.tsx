@@ -46,9 +46,9 @@ function useScheduleData(csrf: string, revision: number, report: (reason: unknow
   return { automations, available, timeline, notifications, loaded, reload };
 }
 
-export function ScheduleView({ csrf, report, configuration, revision, tab, onTab, openConversation, createFor, onCreateHandled }: {
+export function ScheduleView({ csrf, report, configuration, revision, tab, onTab, openConversation, openFile, createFor, onCreateHandled }: {
   csrf: string; report(reason: unknown): void; configuration?: WorkbenchConfiguration; revision: number;
-  tab: ScheduleTab; onTab(tab: ScheduleTab): void; openConversation(id: string): void;
+  tab: ScheduleTab; onTab(tab: ScheduleTab): void; openConversation(id: string): void; openFile(workspaceId: string, path: string): void;
   /** Open the form already pointed at this conversation (from its automations strip). */
   createFor?: string; onCreateHandled?(): void;
 }) {
@@ -96,7 +96,7 @@ export function ScheduleView({ csrf, report, configuration, revision, tab, onTab
     <div className="schedule-tabs" role="tablist" aria-label="日程视图">
       {scheduleTabs.map(entry => <button key={entry.id} type="button" role="tab" aria-selected={tab === entry.id} className="schedule-tab" onClick={() => onTab(entry.id)}>{entry.label}</button>)}
       <span className="schedule-tabs-spacer"/>
-      {data.available && <Button size="small" onClick={() => setPanel({ kind: 'create' })}><Plus size={14}/>新建自动任务</Button>}
+      {data.available && <Button size="small" aria-label="新建自动任务" onClick={() => setPanel({ kind: 'create' })}><Plus size={14}/><span className="sch-new-label">新建自动任务</span></Button>}
     </div>
     <div className="schedule-body">
       {notice && !panel && <p className="sch-notice" role="status">{notice}</p>}
@@ -104,7 +104,7 @@ export function ScheduleView({ csrf, report, configuration, revision, tab, onTab
       {content}
     </div>
     {panel && <SchedulePanel panel={panel} automations={data.automations} configuration={configuration} csrf={csrf} report={report} close={() => setPanel(undefined)}
-      notice={notice} notify={setNotice} reload={data.reload} edit={edit} openConversation={id => { setPanel(undefined); openConversation(id); }} notifications={data.notifications}/>}
+      notice={notice} notify={setNotice} reload={data.reload} edit={edit} openConversation={id => { setPanel(undefined); openConversation(id); }} openFile={(workspaceId, path) => { setPanel(undefined); openFile(workspaceId, path); }} notifications={data.notifications}/>}
   </div>;
 }
 
@@ -216,7 +216,7 @@ function MonthGrid({ items, month, today, selected, busy, select }: { items: Sch
           <StatusMark item={item}/>{item.time && <span className="sch-ev-time">{item.time}</span>}<span className="sch-ev-name">{item.title}</span></span>)}
         {ordered.length > 3 && <span className="sch-more">还有 {ordered.length - 3} 项</span>}
         {routine.length > 0 && <span className="sch-routine-dots">{routine.slice(0, 6).map(item => <i key={item.key}/>)}<span>例行</span></span>}
-        <span className="sch-mini" aria-hidden="true">{list.slice(0, 6).map(item => <i key={item.key} className={`sch-kind-bg-${item.kind}${item.routine ? ' sch-routine' : ''}`}/>)}</span>
+        <span className="sch-mini" aria-hidden="true">{list.slice(0, 5).map(item => <i key={item.key} className={`sch-kind-bg-${item.kind}${item.routine ? ' sch-routine' : ''}`}/>)}</span>
       </button>;
     })}</div>
   </div>;
@@ -237,9 +237,17 @@ function WeekGrid({ items, from, today, now, open, automations, edit, select }: 
   const days = Array.from({ length: 7 }, (_, index) => addDays(from, index));
   const wrap = useRef<HTMLDivElement>(null);
   const toMinutes = (time: string) => Number(time.slice(0, 2)) * 60 + Number(time.slice(3, 5));
+  // Open on today's column and on the hours that matter: an hour before now this week, else the week's first timed item.
+  // The header, all-day row and hour labels stay put, so nothing is hidden by the scroll.
   useEffect(() => {
-    const column = wrap.current?.querySelector<HTMLElement>(`[data-date="${today}"]`);
-    if (column && wrap.current && wrap.current.scrollWidth > wrap.current.clientWidth) wrap.current.scrollLeft = Math.max(0, column.offsetLeft - 52);
+    const element = wrap.current; if (!element) return;
+    const column = element.querySelector<HTMLElement>(`.sch-wk-col[data-date="${today}"]`);
+    const hours = element.querySelector<HTMLElement>('.sch-wk-hours');
+    if (column && element.scrollWidth > element.clientWidth) element.scrollLeft = Math.max(0, column.offsetLeft - (hours?.offsetWidth ?? 0));
+    const timed = items.filter(item => item.time && item.date >= from && item.date <= addDays(from, 6) && toMinutes(item.time) >= START * 60).map(item => toMinutes(item.time!));
+    const focus = days.includes(today) ? toMinutes(localTime(new Date(now))) - 60 : timed.length ? Math.min(...timed) - 30 : START * 60;
+    element.scrollTop = Math.max(0, (Math.min(focus, END * 60 - 120) - START * 60) / 60 * HOUR);
+    // Only when the week or the day changes; a data refresh keeps where the reader scrolled.
   }, [today, from]);
   const drag = (item: ScheduleItem, event: ReactPointerEvent<HTMLButtonElement>) => {
     const task = automations.find(entry => entry.id === item.automationId);
@@ -365,10 +373,11 @@ function TasksTab({ automations, open, openConversation }: { automations: Automa
   </section>;
 }
 
-function SchedulePanel({ panel, automations, configuration, csrf, report, close, notice, notify, reload, edit, openConversation, notifications }: {
+function SchedulePanel({ panel, automations, configuration, csrf, report, close, notice, notify, reload, edit, openConversation, openFile, notifications }: {
   panel: Panel; automations: AutomationView[]; configuration?: WorkbenchConfiguration; csrf: string; report(reason: unknown): void; close(): void;
   notice?: string; notify(message: string): void;
-  reload(): Promise<void>; edit(task: AutomationView, body: { patch: Record<string, unknown> }): Promise<boolean>; openConversation(id: string): void; notifications: AgentNotificationView[];
+  reload(): Promise<void>; edit(task: AutomationView, body: { patch: Record<string, unknown> }): Promise<boolean>; openConversation(id: string): void;
+  openFile(workspaceId: string, path: string): void; notifications: AgentNotificationView[];
 }) {
   const ref = useRef<HTMLElement>(null);
   useEffect(() => { ref.current?.querySelector<HTMLElement>('button, input, textarea')?.focus(); const key = (event: KeyboardEvent) => { if (event.key === 'Escape') close(); }; window.addEventListener('keydown', key); return () => window.removeEventListener('keydown', key); }, [close]);
@@ -377,7 +386,7 @@ function SchedulePanel({ panel, automations, configuration, csrf, report, close,
     <aside className="sch-panel" ref={ref} role="dialog" aria-modal="true" aria-label={panel.kind === 'create' ? '新建自动任务' : '详情'}>
       {panel.kind === 'task' ? <TaskDetail task={automations.find(task => task.id === panel.id)} csrf={csrf} report={report} close={close} notice={notice} notify={notify} reload={reload} edit={edit} openConversation={openConversation} notifications={notifications}/>
         : panel.kind === 'create' ? <CreateForm configuration={configuration} csrf={csrf} report={report} close={close} reload={reload} conversationId={panel.conversationId}/>
-        : <EntryDetail item={panel.item} close={close}/>}
+        : <EntryDetail item={panel.item} close={close} openFile={openFile}/>}
     </aside>
   </>;
 }
@@ -528,13 +537,13 @@ function CreateForm({ configuration, csrf, report, close, reload, conversationId
     </form>
   </>;
 }
-function EntryDetail({ item, close }: { item: ScheduleItem; close(): void }) {
+function EntryDetail({ item, close, openFile }: { item: ScheduleItem; close(): void; openFile(workspaceId: string, path: string): void }) {
   return <>
     <PanelHead title={item.title} close={close}/>
     <div className="sch-panel-body">
       <dl className="sch-kv"><dt>类型</dt><dd>{kindLabel[item.kind]}</dd><dt>时间</dt><dd>{dayLabel(item.date)}{item.time ? ` ${item.time}` : ' · 全天'}</dd>
         {item.entry && <><dt>工作区</dt><dd>{item.entry.workspaceLabel}</dd></>}{item.detail && <><dt>说明</dt><dd>{item.detail}</dd></>}
-        {item.entry?.link && <><dt>链接</dt><dd className="sch-mono">{item.entry.link}</dd></>}
+        {item.entry?.link && <><dt>链接</dt><dd><button type="button" className="text-button sch-mono" onClick={() => openFile(item.entry!.workspaceId, item.entry!.link!)}>{item.entry.link}</button></dd></>}
         {item.entry?.status && <><dt>状态</dt><dd>{item.entry.status === 'done' ? '已完成' : '已取消'}</dd></>}</dl>
       <p className="schedule-note">这一条来自工作区的时间轴文件 <code>.zhongshu/timeline.jsonl</code>：Agent 建操作提醒、整理事件或写完研究和决定时记下一条。中书只读；要改它，在对话里告诉 Agent。</p>
     </div>

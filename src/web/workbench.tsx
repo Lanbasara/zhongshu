@@ -90,7 +90,8 @@ const stateReasons: Record<string, string> = {
   native_run_changed: '当前运行已经变化，请先刷新状态。',
 };
 const explain = (value: string) => stateReasons[value] ?? (/^[a-z0-9_]+$/.test(value) ? '暂时无法核对原生状态；已有内容保留，任务不会自动重发。' : value);
-type ReaderTarget = { conversationId: string; runId: string; workspaceId: string; path: string };
+/** A file opened from a turn's file list, or from elsewhere (a timeline entry) with no turn behind it. */
+type ReaderTarget = { conversationId: string; runId: string; workspaceId: string; path: string } | { conversationId?: undefined; runId?: undefined; workspaceId: string; path: string };
 
 export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf: string; logout(): void; expired(): void; busy: boolean; authError: string }) {
   const [configuration, setConfiguration] = useState<WorkbenchConfiguration>();
@@ -696,6 +697,8 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
   }), [choose]);
   const openSchedule = (tab?: ScheduleTab) => { if (tab) setScheduleTab(tab); history.replaceState(null, '', '#schedule'); setView('schedule'); setReader(false); setSubagentPanel(undefined); setNavigation(false); };
   const openScheduleRef = useRef(openSchedule); openScheduleRef.current = openSchedule;
+  /** A workspace file named by a timeline entry: a new draft in that workspace with the file open beside it. */
+  const openWorkspaceFile = (workspaceId: string, path: string) => { startDraft(workspaceId); readerOrigin.current = null; setSubagentPanel(undefined); setReaderTarget({ workspaceId, path }); setReader(true); };
   const openArchive = () => { setView('archive'); setReader(false); setSubagentPanel(undefined); setNavigation(false); };
   const searchActions: SearchActions = { open: choose, draft: startDraft, files: openFiles, archive: openArchive, settings: openSettings,
     ...(narrow ? {} : { toggleSidebar: () => setCollapsed(current => !current) }) };
@@ -775,7 +778,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
   </SidebarShell>;
   const panel = view ? undefined : subagentPanel && conversation && !narrow ? subagentHost : reader && configuration ? <WorkspaceReader workspaces={configuration.workspaces} initialWorkspace={conversation?.workspaceId}
       target={readerTarget} onTargetUnavailable={target => {
-        if (target === readerTarget && readerTarget.conversationId === selectedRef.current)
+        if (target === readerTarget && readerTarget.runId !== undefined && readerTarget.conversationId === selectedRef.current)
           setUnavailableFiles(previous => new Set(previous).add(JSON.stringify([readerTarget.runId, target.path])));
       }}
       csrf={csrf} editStatusSignal={JSON.stringify([conversation?.id, conversation?.state.status, conversation?.state.pendingInputs, unresolved])} expanded={readerExpanded} onExpand={setReaderExpanded} onClose={closeReader}/> : undefined;
@@ -786,7 +789,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
           storage={storage} connection={connectionView} logout={logout} busy={busy} revision={listRevision} choose={choose} manage={setManaging} accounts={accounts}/>
         : view === 'archive' ? <ArchiveView configuration={configuration} revision={listRevision} csrf={csrf} report={report} choose={choose} manage={setManaging}/>
         : view === 'schedule' ? <ScheduleView csrf={csrf} report={report} configuration={configuration} revision={listRevision} tab={scheduleTab}
-          onTab={tab => { setScheduleTab(tab); history.replaceState(null, '', tab === 'calendar' ? '#schedule' : `#schedule:${tab}`); }} openConversation={choose}
+          onTab={tab => { setScheduleTab(tab); history.replaceState(null, '', tab === 'calendar' ? '#schedule' : `#schedule:${tab}`); }} openConversation={choose} openFile={openWorkspaceFile}
           createFor={createFor} onCreateHandled={() => setCreateFor(undefined)}/>
         : creating ? configuration ? <NewConversation key={String(creating)} configuration={configuration} initialWorkspace={typeof creating==='string'?creating:undefined} addedWorkspace={addedWorkspace} csrf={csrf} onWorkspace={startDraft} onAddWorkspace={()=>setWorkspaceAction({kind:'add'})} onCreated={c=>{refreshList(value=>value+1);choose(c.id);}} report={report}/> : <p className="view-status" role="status">正在读取工作区与配置…</p>
         : !selected ? <section className="empty-workbench">
@@ -814,7 +817,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
             {snapshot && visible.length === 0 && !snapshot.history.error && <p className="quiet conversation-start">{conversation?.readiness !== 'ready' ? '正在准备原生会话…' : snapshot.history.loaded ? '对话已准备好。说说你希望完成什么。' : '正在读取原生历史…'}</p>}
             <AutomationTitles.Provider value={automationTitles}>
               <Transcript items={visible} conversation={selected} onQuote={quote} turnFiles={turnFiles} renderCollaboration={collaboration}
-                activeRun={running ? conversation?.state.runId : undefined} activeFile={readerTarget?.conversationId === selected ? readerTarget : undefined}
+                activeRun={running ? conversation?.state.runId : undefined} activeFile={readerTarget?.runId !== undefined && readerTarget.conversationId === selected ? { runId: readerTarget.runId, path: readerTarget.path } : undefined}
                 workspaceUnavailable={workspaceRemoved} unavailableFiles={unavailableFiles} onOpenFile={openTurnFile}/>
             </AutomationTitles.Provider>
             {windowed && <button className="load-history" disabled={loadingNewer} onClick={() => void loadNewer()}>{loadingNewer ? '正在读取…' : '查看更新的内容'}</button>}

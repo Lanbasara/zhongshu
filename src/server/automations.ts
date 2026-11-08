@@ -265,6 +265,8 @@ export function createAutomations(db: DatabaseSync, workbench: Workbench, adapte
 }
 export type Automations = ReturnType<typeof createAutomations>;
 
+/** A calendar date that exists: JavaScript would roll 2026-02-30 over to March. */
+const realDate = (value: string) => { const [y, m, d] = value.split('-').map(Number); const date = new Date(Date.UTC(y!, m! - 1, d!)); return date.getUTCFullYear() === y && date.getUTCMonth() === m! - 1 && date.getUTCDate() === d; };
 const byWhen = (a: TimelineEntry, b: TimelineEntry) => (a.date + (a.time ?? '')).localeCompare(b.date + (b.time ?? ''));
 /** One workspace's `.zhongshu/timeline.jsonl`. The last line with an id wins, so agents append corrections instead of rewriting. */
 export function parseTimeline(text: string, workspace: { id: string; label: string }): Pick<TimelineView, 'entries' | 'problems'> {
@@ -278,11 +280,17 @@ export function parseTimeline(text: string, workspace: { id: string; label: stri
     const parsed = timelineLineSchema.safeParse(raw);
     if (!parsed.success) { report(index + 1, 'invalid_fields'); continue; }
     const value = parsed.data;
-    if (Number.isNaN(Date.parse(value.date + 'T00:00:00Z'))) { report(index + 1, 'invalid_date'); continue; }
-    if (value.link !== undefined && (!value.link || value.link.startsWith('/') || value.link.includes('\\') || /^[a-z][a-z0-9+.-]*:/i.test(value.link) || value.link.split('/').some(part => part === '..'))) {
-      report(index + 1, 'link_outside_workspace'); continue;
+    if (!realDate(value.date)) { report(index + 1, 'invalid_date'); continue; }
+    let link: string | undefined;
+    if (value.link !== undefined) {
+      // A path inside the workspace, written relative to its root; "./" and doubled slashes are tidied, anything else is refused.
+      const parts = value.link.split('/').filter(part => part && part !== '.');
+      if (!parts.length || value.link.startsWith('/') || value.link.includes('\\') || /^[a-z][a-z0-9+.-]*:/i.test(value.link) || parts.includes('..')) {
+        report(index + 1, 'link_outside_workspace'); continue;
+      }
+      link = parts.join('/');
     }
-    entries.set(value.id, { ...value, workspaceId: workspace.id, workspaceLabel: workspace.label });
+    entries.set(value.id, { ...value, ...(link ? { link } : {}), workspaceId: workspace.id, workspaceLabel: workspace.label });
   }
   return { entries: [...entries.values()].sort(byWhen), problems };
 }

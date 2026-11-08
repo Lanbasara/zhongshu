@@ -96,11 +96,14 @@
 
 .sch-week-wrap { border:1px solid var(--zs-border); border-radius:var(--zs-radius-surface); overflow:auto; max-height:calc(100dvh - 330px); min-height:420px; }
 .sch-week { display:grid; grid-template-columns:52px repeat(7, minmax(96px, 1fr)); min-width:720px; position:relative; }
-.sch-wk-head { position:sticky; top:0; z-index:6; background:var(--zs-neutral-25); border:0; border-bottom:1px solid var(--zs-border); padding:6px; font:inherit; font-size:var(--zs-type-caption); color:var(--zs-text-muted); text-align:left; display:flex; flex-direction:column; cursor:pointer; }
+.sch-wk-head { position:sticky; top:0; z-index:6; height:52px; box-sizing:border-box; background:var(--zs-neutral-25); border:0; border-bottom:1px solid var(--zs-border); padding:6px; font:inherit; font-size:var(--zs-type-caption); color:var(--zs-text-muted); text-align:left; display:flex; flex-direction:column; cursor:pointer; }
 .sch-wk-head b { font-size:var(--zs-type-section); color:var(--zs-text); font-variant-numeric:tabular-nums; }
 .sch-wk-head.sch-today, .sch-wk-head.sch-today b { color:var(--zs-accent-text); }
-.sch-wk-label { border-bottom:1px solid var(--zs-border); font-size:10px; color:var(--zs-text-muted); padding:6px 4px; text-align:right; }
-.sch-wk-allday { border-bottom:1px solid var(--zs-border); border-left:1px solid var(--zs-border); padding:4px; display:flex; flex-direction:column; gap:2px; min-height:28px; min-width:0; }
+/* The corner, all-day row and hour labels stay in view while the week scrolls both ways. */
+.sch-week > .sch-wk-head:first-child { left:0; z-index:8; }
+.sch-wk-label { position:sticky; top:52px; left:0; z-index:7; background:var(--zs-neutral-25); border-bottom:1px solid var(--zs-border); font-size:10px; color:var(--zs-text-muted); padding:6px 4px; text-align:right; }
+.sch-wk-allday { position:sticky; top:52px; z-index:5; background:var(--zs-surface); max-height:76px; overflow:auto; border-bottom:1px solid var(--zs-border); border-left:1px solid var(--zs-border); padding:4px; display:flex; flex-direction:column; gap:2px; min-height:28px; min-width:0; }
+.sch-wk-hours { position:sticky; left:0; z-index:4; background:var(--zs-surface); }
 .sch-wk-hours div { height:var(--sch-hour); font-size:10px; color:var(--zs-text-placeholder); text-align:right; padding:0 6px; transform:translateY(-6px); }
 .sch-wk-col { position:relative; border-left:1px solid var(--zs-border); background-image:repeating-linear-gradient(to bottom, var(--zs-neutral-100) 0, var(--zs-neutral-100) 1px, transparent 1px, transparent var(--sch-hour)); }
 .sch-wk-col.sch-before { background-color:var(--zs-neutral-25); }
@@ -168,7 +171,8 @@
   .schedule-body { padding:12px 12px 72px; }
   .sch-cell { min-height:58px; padding:4px 3px; }
   .sch-cell .sch-ev, .sch-cell .sch-more, .sch-cell .sch-busy-tag, .sch-cell .sch-routine-dots { display:none; }
-  .sch-cell .sch-mini { display:flex; gap:2px; flex-wrap:wrap; }
+  .sch-cell .sch-mini { display:flex; gap:2px; flex-wrap:wrap; max-width:100%; overflow:hidden; }
+  .sch-new-label { display:none; }
   .sch-mini i { width:6px; height:6px; border-radius:50%; }
   .sch-weeks { grid-template-columns:repeat(4, minmax(0, 1fr)); }
   .sch-week { grid-template-columns:44px repeat(7, minmax(118px, 1fr)); }

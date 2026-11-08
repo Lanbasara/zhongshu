@@ -143,6 +143,19 @@ Codex 经专用 Unix socket 管理进程调用固定 CLI 和同一实例的 App 
 | 接口 | 私有 `GET /api/private/push`、`POST /push/devices`、`/push/devices/:id/remove`、`/push/devices/:id/test`，沿用认证、来源与 CSRF 检查 |
 | 浏览器 | [sw.js](../src/web/public/sw.js) 只显示通知和处理点击（已打开页面就地切换，否则新开窗口）；[push-client.ts](../src/web/push-client.ts) 注册 worker、开启/关闭订阅、识别本设备、保存安装提示并设置角标；设置页「通知」由 [功能层](../src/web/notification-settings.tsx) 与 [展示组件](../src/web/patterns/notifications.tsx) 组成 |
 
+## 自动任务与日程
+
+边界依据 [ADR 0021](adr/0021-automations.md)：调度、持久化与投递归原生 Harness；中书让任务可见、可管理，接住运行结果，并给 Agent 一个“叫用户”的通道。用户路径见[自动任务功能地图](features/automations.md)。
+
+| 层 | 当前职责 |
+| --- | --- |
+| 接入 | [共同语义](../src/harness/types.ts) 增加可选的 `automations`。[DSH](../src/harness/dsh/automations.ts) 把原生 `schedule/*` 远程方法映射成列出、读取、投递历史、新建、修改（含暂停与恢复，带 `expectedUpdatedAt`）、删除、立即运行，以及读取任务新建的会话（目录与配置）。[连接](../src/harness/dsh/connection.ts) 把 `schedule/changed` 转为变更提示；[历史映射](../src/harness/dsh/native.ts) 把来源为 `schedule` 的用户消息标为投递。Codex 不提供 |
+| 服务 | [automations.ts](../src/server/automations.ts) 缓存任务列表（变更提示去抖、每 60 秒兜底重读）。发现新的投递时，让 Workbench 开始观察那段对话；任务在已登记工作区新建的会话，作为属于该任务的对话接入；“首次新开后复用”的任务第一次被列出时，记下它预留的会话。Workbench 对不是自己发起的运行记下 `state.latest`，用于运行中、未读与推送，不改动自己消息的核对依据；[push-triggers.ts](../src/server/push-triggers.ts) 不推送这类运行的完成。时间轴由 [workspace-documents.ts](../src/server/workspace-documents.ts) 读取每个工作区的 `.zhongshu/timeline.jsonl`（不跟随符号链接，2 MiB 上限），逐行校验 |
+| 叫用户 | [agent-tools.ts](../src/server/agent-tools.ts) 在 `127.0.0.1` 的独立端口提供最小 MCP（`initialize`、`tools/list`、`tools/call`），只有 `notify_user` 一个工具，Bearer 令牌比对、拒绝带 `Origin` 的请求。[agent-notifications.ts](../src/server/agent-notifications.ts) 保存通知（有频率上限），从 Workbench 观察到的工具记录认出所在对话与条目后推送；20 秒内认不出，就推送到日程 |
+| 数据 | 迁移 23：对话行的 `automation_id`；`agent_notifications`（摘要、可选文件、落位）；`automation_deliveries`（每个任务处理过的最近一次投递，重启不重复不遗漏）。迁移 24：`automation_reservations`（预留会话）。任务本身不入库 |
+| 接口 | 私有 `GET /automations`、`/automations/:id/history`、`/automations/:id/runs`、`/notifications`、`/notifications/:id`、`/timeline`；`POST /automations`、`/automations/:id/edit`、`/delete`、`/run`。沿用认证、来源与 CSRF 检查 |
+| 界面 | 侧栏「日程」进入 [schedule-view.tsx](../src/web/schedule-view.tsx)，日期展开与汇总在纯模型 [schedule-model.ts](../src/web/schedule-model.ts)。对话顶部的任务条与运行条在 [conversation-automations.tsx](../src/web/conversation-automations.tsx)，投递消息解析在 [automation-delivery.ts](../src/web/automation-delivery.ts)，侧栏每个任务一行在 [conversation-navigation.tsx](../src/web/conversation-navigation.tsx)。推送点开 `#<对话>:notice:<通知>` 时滚到那一轮并高亮 |
+
 ## Harness 账号
 
 边界依据 [ADR 0015](adr/0015-harness-account-status.md)：凭据留在原生 Harness，中书只核实、提醒并发起登录。Codex 用设备码登录；DSH 由用户把跳转地址粘贴回来，中书把其中的 code 和 state 交给 Host 自己的回调。

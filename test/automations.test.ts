@@ -134,6 +134,10 @@ test('the workspace timeline file is read whole from its fixed hidden path; bad 
   assert.deepEqual(parsed.entries.map(entry => [entry.id, entry.date, entry.time, entry.status]), [['a-1127', '2026-11-28', '10:00', 'done'], ['e-fomc', '2026-12-10', undefined, undefined]]);
   assert.deepEqual(parsed.problems.map(problem => problem.reason), ['not_json', 'invalid_fields', 'link_outside_workspace', 'link_outside_workspace']);
   assert.equal(parsed.entries[0]!.workspaceLabel, 'haokun-stock');
+  const tidy = parseTimeline([JSON.stringify({ id: 'l', date: '2026-11-01', kind: 'research', title: 'l', link: './reports//2026-11.md' }),
+    JSON.stringify({ id: 'f', date: '2026-02-30', kind: 'event', title: 'no such day' }), JSON.stringify({ id: 'e', date: '2026-11-01', kind: 'event', title: 'e', link: './' })].join('\n'), { id: 'w', label: 'W' });
+  assert.deepEqual(tidy.entries.map(entry => entry.link), ['reports/2026-11.md'], 'links are kept relative to the workspace root');
+  assert.deepEqual(tidy.problems.map(problem => problem.reason), ['invalid_date', 'link_outside_workspace']);
   // A symlinked directory is never followed out of the workspace.
   const outside = mkdtempSync(join(tmpdir(), 'zhongshu-outside-')); t.after(() => rmSync(outside, { recursive: true, force: true }));
   const other = realpathSync(mkdtempSync(join(tmpdir(), 'zhongshu-timeline-link-'))); t.after(() => rmSync(other, { recursive: true, force: true }));
