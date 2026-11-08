@@ -12,7 +12,8 @@ import {
 import type { WorkbenchConfiguration } from '../shared/workbench.ts';
 import { Button, IconButton } from './ui/controls.tsx';
 import { request } from './workbench-client.ts';
-import { addDays, dayLabel, localDate, localTime, mondayOf, parseDate, scheduleItems, summarize, timingText, WEEKDAYS, type ScheduleItem } from './schedule-model.ts';
+import { CreateForm, EditForm } from './schedule-forms.tsx';
+import { addDays, dayLabel, localDate, localTime, mondayOf, parseDate, runConfigurationText, scheduleItems, summarize, timingText, WEEKDAYS, type ScheduleItem } from './schedule-model.ts';
 import './schedule.css';
 
 export type ScheduleTab = 'calendar' | 'today' | 'future' | 'past' | 'tasks';
@@ -384,8 +385,8 @@ function SchedulePanel({ panel, automations, configuration, csrf, report, close,
   return <>
     <div className="sch-scrim" onClick={close}/>
     <aside className="sch-panel" ref={ref} role="dialog" aria-modal="true" aria-label={panel.kind === 'create' ? '新建自动任务' : '详情'}>
-      {panel.kind === 'task' ? <TaskDetail task={automations.find(task => task.id === panel.id)} csrf={csrf} report={report} close={close} notice={notice} notify={notify} reload={reload} edit={edit} openConversation={openConversation} notifications={notifications}/>
-        : panel.kind === 'create' ? <CreateForm configuration={configuration} csrf={csrf} report={report} close={close} reload={reload} conversationId={panel.conversationId}/>
+      {panel.kind === 'task' ? <TaskDetail task={automations.find(task => task.id === panel.id)} configuration={configuration} csrf={csrf} report={report} close={close} notice={notice} notify={notify} reload={reload} edit={edit} openConversation={openConversation} notifications={notifications}/>
+        : panel.kind === 'create' ? <><PanelHead title="新建自动任务" close={close}/><CreateForm configuration={configuration} csrf={csrf} report={report} close={close} reload={reload} conversationId={panel.conversationId}/></>
         : <EntryDetail item={panel.item} close={close} openFile={openFile}/>}
     </aside>
   </>;
@@ -399,8 +400,8 @@ const refusals: Record<string, string> & { conflict: string; not_found: string }
 function PanelHead({ title, close }: { title: string; close(): void }) {
   return <header className="sch-panel-head"><Clock size={15}/><h2>{title}</h2><IconButton label="关闭" onClick={close}><X size={16}/></IconButton></header>;
 }
-function TaskDetail({ task, csrf, report, close, notice, notify, reload, edit, openConversation, notifications }: {
-  task?: AutomationView; csrf: string; report(reason: unknown): void; close(): void; notice?: string; notify(message: string): void; reload(): Promise<void>;
+function TaskDetail({ task, configuration, csrf, report, close, notice, notify, reload, edit, openConversation, notifications }: {
+  task?: AutomationView; configuration?: WorkbenchConfiguration; csrf: string; report(reason: unknown): void; close(): void; notice?: string; notify(message: string): void; reload(): Promise<void>;
   edit(task: AutomationView, body: { patch: Record<string, unknown> }): Promise<boolean>; openConversation(id: string): void; notifications: AgentNotificationView[];
 }) {
   const [history, setHistory] = useState<AutomationDeliveryView[]>();
@@ -427,17 +428,22 @@ function TaskDetail({ task, csrf, report, close, notice, notify, reload, edit, o
   const target = task.target.kind === 'conversation' ? `回到对话：${task.target.conversationTitle ?? ''}` : task.target.kind === 'new' ? `每次新开一段对话${task.target.workspaceLabel ? `（${task.target.workspaceLabel}）` : ''}`
     : task.target.kind === 'new_once' ? `首次新开，之后都回到那段${task.target.workspaceLabel ? `（${task.target.workspaceLabel}）` : ''}` : '中书之外的原生会话';
   const noticeFor = (record: AutomationDeliveryView) => record.conversationId ? notifications.filter(entry => entry.conversationId === record.conversationId && entry.createdAt >= Date.parse(record.deliveredAt) - 60_000).at(-1)?.summary : undefined;
+  if (editing) return <>
+    <PanelHead title="修改任务" close={close}/>
+    {notice && <p className="sch-notice sch-notice-panel" role="status">{notice}</p>}
+    <EditForm task={task} save={async patch => { if (await edit(task, { patch })) setEditing(false); }} cancel={() => setEditing(false)}/>
+  </>;
   return <>
     <PanelHead title={task.title} close={close}/>
     <div className="sch-panel-body">
       {notice && <p className="sch-notice" role="status">{notice}</p>}
-      {editing ? <EditForm task={task} save={async patch => { if (await edit(task, { patch })) setEditing(false); }} cancel={() => setEditing(false)}/> : <>
+      <>
         <dl className="sch-kv">
           <dt>状态</dt><dd>{task.status === 'paused' ? '已暂停' : task.status === 'ended' ? '已跑完' : task.executing ? '运行中' : '进行中'}</dd>
           <dt>时间</dt><dd>{timingText(task)}</dd>
           {task.status === 'active' && <><dt>下一次</dt><dd>{dayLabel(localDate(new Date(task.scheduledAt)))} {localTime(new Date(task.scheduledAt))}</dd></>}
           <dt>结果去哪</dt><dd>{target}</dd>
-          <dt>执行</dt><dd>DSH 原生自动任务</dd>
+          <dt>运行配置</dt><dd>{runConfigurationText(task, configuration)}</dd>
         </dl>
         <h3 className="sch-sub">交给 Agent 的指令</h3>
         <div className="sch-prompt">{task.prompt}</div>
@@ -448,93 +454,15 @@ function TaskDetail({ task, csrf, report, close, notice, notify, reload, edit, o
             {record.late && <span className="sch-chip sch-chip-late">迟到 {Math.round((Date.parse(record.deliveredAt) - Date.parse(record.scheduledAt)) / 60_000)} 分钟</span>}
             {noticeFor(record) && <small><Bell size={10}/> “{noticeFor(record)}”</small>}
           </button>)}</div>}
-      </>}
+      </>
     </div>
-    {!editing && <footer className="sch-panel-actions">
+    <footer className="sch-panel-actions">
       {task.status !== 'ended' && <Button size="small" disabled={busy} onClick={() => act(async () => { await edit(task, { patch: { active: task.status === 'paused' } }); })}>{task.status === 'paused' ? <><Play size={13}/>恢复</> : <><Pause size={13}/>暂停</>}</Button>}
       <Button size="small" disabled={busy || task.executing} onClick={() => void run()}><Play size={13}/>立即运行</Button>
       {task.status !== 'ended' && <Button size="small" disabled={busy} onClick={() => setEditing(true)}><Pencil size={13}/>修改</Button>}
       {confirmDelete ? <Button size="small" variant="danger" disabled={busy} onClick={() => void remove()}>确认删除</Button>
         : <Button size="small" variant="quiet" disabled={busy} onClick={() => setConfirmDelete(true)}><Trash2 size={13}/>删除</Button>}
-    </footer>}
-  </>;
-}
-const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-type TimingDraft = { kind: 'at' | 'daily' | 'weekly' | 'every'; date: string; time: string; weekdays: number[]; minutes: number };
-function timingFrom(draft: TimingDraft) {
-  if (draft.kind === 'at') { const [y, m, d] = draft.date.split('-').map(Number); const [hh, mm] = draft.time.split(':').map(Number); return { kind: 'at', at: new Date(y!, m! - 1, d!, hh!, mm!).toISOString() }; }
-  if (draft.kind === 'every') return { kind: 'every', seconds: Math.max(1, draft.minutes) * 60 };
-  if (draft.kind === 'weekly') return { kind: 'weekly', time: draft.time, timeZone: zone, weekdays: draft.weekdays.length ? draft.weekdays : [1, 2, 3, 4, 5] };
-  return { kind: 'daily', time: draft.time, timeZone: zone };
-}
-function TimingFields({ draft, change }: { draft: TimingDraft; change(draft: TimingDraft): void }) {
-  return <>
-    <div className="sch-field"><span>什么时候</span><div className="sch-seg" role="group" aria-label="什么时候">
-      {([['at', '一次'], ['daily', '每天'], ['weekly', '每周'], ['every', '固定间隔']] as const).map(([kind, label]) =>
-        <button key={kind} type="button" aria-pressed={draft.kind === kind} onClick={() => change({ ...draft, kind })}>{label}</button>)}
-    </div></div>
-    <div className="sch-field-row">
-      {draft.kind === 'at' && <label className="sch-field"><span>日期</span><input type="date" value={draft.date} onChange={event => change({ ...draft, date: event.target.value })}/></label>}
-      {draft.kind !== 'every' && <label className="sch-field"><span>时间（{zone}）</span><input type="time" value={draft.time} onChange={event => change({ ...draft, time: event.target.value })}/></label>}
-      {draft.kind === 'every' && <label className="sch-field"><span>每隔几分钟</span><input type="number" min={1} max={1440} value={draft.minutes} onChange={event => change({ ...draft, minutes: Number(event.target.value) })}/></label>}
-    </div>
-    {draft.kind === 'weekly' && <div className="sch-seg" role="group" aria-label="星期">{WEEKDAYS.map((day, index) =>
-      <button key={day} type="button" aria-pressed={draft.weekdays.includes(index + 1)} onClick={() => change({ ...draft, weekdays: draft.weekdays.includes(index + 1) ? draft.weekdays.filter(value => value !== index + 1) : [...draft.weekdays, index + 1].sort() })}>周{day}</button>)}</div>}
-  </>;
-}
-function initialTiming(task?: AutomationView): TimingDraft {
-  const soon = new Date(Date.now() + 3600_000);
-  const base: TimingDraft = { kind: 'daily', date: localDate(soon), time: localTime(soon).slice(0, 3) + '00', weekdays: [1, 2, 3, 4, 5], minutes: 15 };
-  if (!task) return base;
-  const timing = task.timing;
-  if (timing.kind === 'daily') return { ...base, time: timing.time };
-  if (timing.kind === 'weekly') return { ...base, kind: 'weekly', time: timing.time, weekdays: timing.weekdays };
-  if (timing.kind === 'every') return { ...base, kind: 'every', minutes: Math.round(timing.seconds / 60) };
-  const at = new Date(task.scheduledAt); return { ...base, kind: 'at', date: localDate(at), time: localTime(at) };
-}
-function EditForm({ task, save, cancel }: { task: AutomationView; save(patch: Record<string, unknown>): Promise<void>; cancel(): void }) {
-  const [title, setTitle] = useState(task.title); const [prompt, setPrompt] = useState(task.prompt);
-  const editableTiming = task.timing.kind !== 'cron' && !(task.timing.kind === 'rrule' && !/COUNT=1/.test(task.timing.rrule));
-  const [timing, setTiming] = useState(initialTiming(task)); const [changeTiming, setChangeTiming] = useState(false);
-  return <form className="sch-form" onSubmit={event => { event.preventDefault(); void save({ ...(title !== task.title ? { title } : {}), ...(prompt !== task.prompt ? { prompt } : {}), ...(changeTiming ? { timing: timingFrom(timing) } : {}) }); }}>
-    <label className="sch-field"><span>名称</span><input value={title} maxLength={120} onChange={event => setTitle(event.target.value)}/></label>
-    <label className="sch-field"><span>交给 Agent 的指令</span><textarea value={prompt} maxLength={32000} onChange={event => setPrompt(event.target.value)}/></label>
-    {editableTiming ? (changeTiming ? <TimingFields draft={timing} change={setTiming}/> : <Button size="small" onClick={() => setChangeTiming(true)}>改时间</Button>)
-      : <p className="schedule-note">这条任务用的是高级规则（{timingText(task)}），时间请在对话里让 Agent 改。</p>}
-    <div className="sch-form-actions"><Button type="submit" variant="primary">保存</Button><Button variant="quiet" onClick={cancel}>取消</Button></div>
-  </form>;
-}
-function CreateForm({ configuration, csrf, report, close, reload, conversationId }: { configuration?: WorkbenchConfiguration; csrf: string; report(reason: unknown): void; close(): void; reload(): Promise<void>; conversationId?: string }) {
-  const [title, setTitle] = useState(''); const [prompt, setPrompt] = useState('');
-  const [timing, setTiming] = useState(initialTiming());
-  const [target, setTarget] = useState<'new' | 'new_once' | 'conversation'>(conversationId ? 'conversation' : 'new');
-  const [workspace, setWorkspace] = useState(configuration?.workspaces[0]?.id ?? '');
-  const [busy, setBusy] = useState(false);
-  const submit = async () => {
-    setBusy(true);
-    try {
-      const body = { harnessId: 'dsh', title: title.trim(), prompt: prompt.trim(), timing: timingFrom(timing),
-        target: target === 'conversation' && conversationId ? { kind: 'conversation', conversationId } : { kind: target === 'conversation' ? 'new' : target, workspaceId: workspace } };
-      await request('/automations', automationResultSchema, { csrf, body });
-      await reload(); close();
-    } catch (error) { report(error); } finally { setBusy(false); }
-  };
-  return <>
-    <PanelHead title="新建自动任务" close={close}/>
-    <form className="sch-panel-body sch-form" onSubmit={event => { event.preventDefault(); void submit(); }}>
-      <p className="schedule-note">多数任务是在对话里让 Agent 按计划建的；这里留一个手动入口。</p>
-      <label className="sch-field"><span>名称</span><input required maxLength={120} value={title} onChange={event => setTitle(event.target.value)} placeholder="例如：收盘后研判"/></label>
-      <label className="sch-field"><span>交给 Agent 的指令</span><textarea required maxLength={32000} value={prompt} onChange={event => setPrompt(event.target.value)} placeholder="先确认今天是否开市；读最近的计划文件，写研判；需要我关注时用一句话通知我。"/></label>
-      <TimingFields draft={timing} change={setTiming}/>
-      <div className="sch-field"><span>结果放哪</span><div className="sch-seg" role="group" aria-label="结果放哪">
-        {conversationId && <button type="button" aria-pressed={target === 'conversation'} onClick={() => setTarget('conversation')}>回到这段对话</button>}
-        <button type="button" aria-pressed={target === 'new'} onClick={() => setTarget('new')}>每次新开一段对话</button>
-        <button type="button" aria-pressed={target === 'new_once'} onClick={() => setTarget('new_once')}>首次新开，之后都回到那段</button>
-      </div></div>
-      {target !== 'conversation' && <label className="sch-field"><span>工作区</span><select value={workspace} onChange={event => setWorkspace(event.target.value)}>
-        {configuration?.workspaces.map(entry => <option key={entry.id} value={entry.id}>{entry.label}</option>)}</select></label>}
-      <div className="sch-form-actions"><Button type="submit" variant="primary" disabled={busy || !title.trim() || !prompt.trim() || (target !== 'conversation' && !workspace)}>创建</Button><Button variant="quiet" onClick={close}>取消</Button></div>
-    </form>
+    </footer>
   </>;
 }
 function EntryDetail({ item, close, openFile }: { item: ScheduleItem; close(): void; openFile(workspaceId: string, path: string): void }) {

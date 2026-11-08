@@ -4,6 +4,8 @@
  * recurring rules show only the occurrence the Harness reports, so nothing here guesses a native rule.
  */
 import type { AgentNotificationView, AutomationView, TimelineEntry } from '../shared/automations.ts';
+import type { WorkbenchConfiguration } from '../shared/workbench.ts';
+import { conversationConfigurationLabel } from './conversation-configuration-label.ts';
 
 export type ItemKind = 'agent' | 'action' | 'event' | 'decision' | 'research';
 export type ItemStatus = 'done' | 'running' | 'next' | 'todo' | 'paused';
@@ -127,4 +129,26 @@ export function timingText(task: AutomationView): string {
     case 'cron': return `按规则 ${timing.expression}${zone(timing.timeZone)}`;
     case 'rrule': return /COUNT=1\b/.test(timing.rrule) ? `一次 · ${localTime(new Date(task.scheduledAt))}` : '按 RRULE 规则';
   }
+}
+
+/** The instruction a task delivers: an optional skill named first, so the agent loads it before anything else. */
+export function instructionWithSkill(prompt: string, skill?: { name: string }) {
+  const text = prompt.trim();
+  return skill ? `使用技能 ${skill.name}（/${skill.name}）。${text ? `\n\n${text}` : ''}` : text;
+}
+
+/** What the runs of a task use, in words: the conversation's fixed configuration, or the Harness defaults with a preset. */
+export function runConfigurationText(task: AutomationView, configuration?: WorkbenchConfiguration) {
+  const dsh = configuration?.harnesses.find(item => item.id === 'dsh');
+  const fixed = task.target.configuration;
+  if (fixed) {
+    const label = conversationConfigurationLabel({ harnessId: 'dsh', configuration: fixed }, configuration?.harnesses);
+    const permission = dsh?.permissions.find(item => item.id === fixed.permissionId)?.label ?? fixed.permissionId;
+    return [label.model, label.reasoningEffort, permission, label.agentPreset].filter(Boolean).join(' · ');
+  }
+  if (task.target.kind === 'new' || task.target.kind === 'new_once') {
+    const preset = task.target.preset ? dsh?.presets?.find(item => item.id === task.target.preset)?.label ?? task.target.preset : '默认预设';
+    return `${preset} · 模型、思考深度和权限用宿主默认`;
+  }
+  return '中书之外的会话';
 }

@@ -193,15 +193,19 @@ test('the automation service shows native tasks in product terms, adopts session
       lastDelivery: { scheduledAt: at(40), deliveredAt: at(40), messageId: 'm-x', sessionId: 's-unknown' } },
     { id: 'once', title: '持续跟踪', prompt: '跟踪', timing: { kind: 'every', seconds: 3600 }, scheduledAt: at(50), status: 'active', target: { kind: 'new_once', sessionId: 's-once', cwd: directory }, involved: [], executing: false },
   ];
-  const edits: unknown[] = [];
+  const edits: unknown[] = []; const created: unknown[] = []; const sessions: unknown[] = [];
   const source = {
     list: async () => tasks, view: async (id: string) => tasks.find(task => task.id === id), history: async () => undefined,
-    create: async () => { throw new Error('unused'); }, remove: async () => 'notFound' as const, run: async (id: string) => (tasks.some(task => task.id === id) ? 'pending' as const : 'notFound' as const),
+    create: async (input: { title: string; prompt: string; target?: { kind: string; sessionId?: string } }) => {
+      const made: Native = { id: 'made', title: input.title, prompt: input.prompt, timing: { kind: 'daily', time: '09:30', timeZone: 'Asia/Shanghai' }, scheduledAt: at(90), status: 'active',
+        target: { kind: 'session', sessionId: input.target!.sessionId! }, involved: [], executing: false, updatedAt: at(5) };
+      created.push(input); tasks = [...tasks, made]; return made;
+    }, remove: async () => 'notFound' as const, run: async (id: string) => (tasks.some(task => task.id === id) ? 'pending' as const : 'notFound' as const),
     update: async (id: string, patch: unknown, expected?: string) => { edits.push({ id, patch, expected }); return expected === at(1) ? { ...tasks[1]!, title: '回看（改）', updatedAt: at(2) } : 'conflict' as const; },
     onChange: () => () => {},
     inspect: async (sessionId: string) => (['s-run-1', 's-once', 's-unknown'].includes(sessionId) ? { cwd: directory, configuration } : undefined),
   };
-  const adapters = new Map([['dsh', { automations: source }]]) as unknown as Parameters<typeof createAutomations>[2];
+  const adapters = new Map([['dsh', { automations: source, create: async (input: { cwd: string; configuration: typeof configuration }) => { sessions.push(input); return { id: 's-made', cwd: input.cwd, configuration: input.configuration, details: {} }; } }]]) as unknown as Parameters<typeof createAutomations>[2];
   const notifications = createAgentNotifications(db, { push: () => {}, title: () => undefined });
   const service = createAutomations(db, workbench, adapters, notifications, () => {});
   const app = Fastify(); await app.register(service.routes); t.after(() => { service.close(); return app.close(); });
@@ -215,7 +219,8 @@ test('the automation service shows native tasks in product terms, adopts session
   assert.deepEqual(byId.get('routine'), { ...byId.get('routine') as object, target: { kind: 'new', workspaceId: 'stock', workspaceLabel: 'Stock' }, runs: 1,
     latestRun: { conversationId: adopted.id, status: adopted.state.status, unread: adopted.state.status === 'idle' } });
   assert.equal((byId.get('routine') as { lastDelivery: { late: boolean; conversationId: string } }).lastDelivery.late, true, 'twenty minutes after its time is late');
-  assert.deepEqual((byId.get('follow') as { target: unknown }).target, { kind: 'conversation', conversationId: existing.id, conversationTitle: existing.title });
+  assert.deepEqual((byId.get('follow') as { target: unknown }).target, { kind: 'conversation', conversationId: existing.id, conversationTitle: existing.title, configuration },
+    'runs into a conversation use its configuration');
   assert.deepEqual((byId.get('elsewhere') as { target: unknown }).target, { kind: 'unknown' });
 
   await app.inject({ method: 'GET', url: '/automations' });
@@ -228,7 +233,7 @@ test('the automation service shows native tasks in product terms, adopts session
   const later = (await app.inject({ method: 'GET', url: '/automations' })).json();
   const tracked = store.conversationForNative('dsh', 's-once');
   assert.ok(tracked, 'the reserved session is adopted at its first delivery');
-  assert.deepEqual(later.automations.find((task: { id: string }) => task.id === 'once').target, { kind: 'new_once', conversationId: tracked.id, workspaceId: 'stock', workspaceLabel: 'Stock' });
+  assert.deepEqual(later.automations.find((task: { id: string }) => task.id === 'once').target, { kind: 'new_once', conversationId: tracked.id, workspaceId: 'stock', workspaceLabel: 'Stock', configuration });
   const runs = (await app.inject({ method: 'GET', url: '/automations/routine/runs' })).json();
   assert.deepEqual(runs.conversations.map((entry: { id: string }) => entry.id), [adopted.id]);
 
@@ -245,5 +250,19 @@ test('the automation service shows native tasks in product terms, adopts session
   assert.ok(store.listConversations().some(entry => entry.id === adopted.id), 'the released run is back in the sidebar list');
   assert.equal(store.getConversation(tracked.id)?.automationId, 'once', 'conversations of tasks still listed stay with them');
   assert.deepEqual((await app.inject({ method: 'POST', url: '/automations/once/run' })).json(), { outcome: 'pending' });
+
+  // "First new, then reuse" with a chosen configuration: the conversation exists, configured, before the first run.
+  const chosen = { modelId: 'deep-model', reasoningEffort: 'high', permissionId: 'danger-full-access', agentPreset: 'ptc' };
+  const made = (await app.inject({ method: 'POST', url: '/automations', payload: { harnessId: 'dsh', title: '每日研判', prompt: '使用技能 jianwei-brief（/jianwei-brief）。',
+    timing: { kind: 'daily', time: '09:30', timeZone: 'Asia/Shanghai' }, target: { kind: 'new_once', workspaceId: 'stock', configuration: chosen } } })).json();
+  assert.equal(made.outcome, 'ok');
+  assert.deepEqual(sessions, [{ cwd: directory, configuration: chosen, title: '每日研判' }]);
+  assert.deepEqual((created.at(-1) as { target: unknown }).target, { kind: 'session', sessionId: 's-made' }, 'the task points at the conversation Zhongshu made');
+  const own = store.conversationForNative('dsh', 's-made');
+  assert.equal(own?.automationId, 'made'); assert.deepEqual(own?.configuration, chosen);
+  assert.deepEqual(made.automation.target, { kind: 'new_once', conversationId: own!.id, workspaceId: 'stock', workspaceLabel: 'Stock', configuration: chosen });
+  const plain = await app.inject({ method: 'POST', url: '/automations', payload: { harnessId: 'dsh', title: 'x', prompt: 'x', timing: { kind: 'every', seconds: 3600 },
+    target: { kind: 'new', workspaceId: 'stock', configuration: chosen } } });
+  assert.equal(plain.statusCode, 400, 'a new session per run cannot carry a configuration the Harness would not apply');
   assert.deepEqual((await app.inject({ method: 'POST', url: '/automations/missing/run' })).json(), { outcome: 'not_found' });
 });

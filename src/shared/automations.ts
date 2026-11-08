@@ -1,5 +1,6 @@
 /** Browser contract for automations, agent notifications and the workspace timeline (ADR 0021). */
 import { z } from 'zod';
+import { configurationSchema } from './workbench.ts';
 
 const instant = z.string().min(20).max(40);
 const clock = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/);
@@ -21,9 +22,14 @@ export const automationTimingInputSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('cron'), expression: z.string().min(9).max(200), timeZone: zone }).strict(),
 ]);
 /** A target in product terms: a conversation, or a new conversation in a registered workspace. */
+const presetId = z.string().regex(/^[a-z][a-z0-9-]{0,63}$/);
 export const automationTargetInputSchema = z.discriminatedUnion('kind', [
+  /** Runs use that conversation's configuration. */
   z.object({ kind: z.literal('conversation'), conversationId: z.uuid() }).strict(),
-  z.object({ kind: z.enum(['new', 'new_once']), workspaceId: z.string().min(1).max(64), preset: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/).optional() }).strict(),
+  /** The Harness creates each session with the workspace and preset; model, effort and permission are its defaults. */
+  z.object({ kind: z.literal('new'), workspaceId: z.string().min(1).max(64), preset: presetId.optional() }).strict(),
+  /** With a configuration, Zhongshu creates that one conversation now and points the task at it. */
+  z.object({ kind: z.literal('new_once'), workspaceId: z.string().min(1).max(64), preset: presetId.optional(), configuration: configurationSchema.optional() }).strict(),
 ]);
 const title = z.string().trim().min(1).max(120);
 const prompt = z.string().trim().min(1).max(32_000);
@@ -45,6 +51,10 @@ export const automationTargetSchema = z.object({
   kind: z.enum(['conversation', 'new', 'new_once', 'unknown']),
   conversationId: z.uuid().optional(), conversationTitle: z.string().max(200).optional(),
   workspaceId: z.string().max(64).optional(), workspaceLabel: z.string().max(100).optional(),
+  /** Preset the Harness gives each new session. */
+  preset: presetId.optional(),
+  /** What runs use when they go to a known conversation: that conversation's fixed configuration. */
+  configuration: configurationSchema.optional(),
 }).strict();
 export const automationSchema = z.object({
   id: z.string().min(1).max(240), harnessId: z.enum(['dsh']), title: z.string().max(200), prompt: z.string().max(64_000),
