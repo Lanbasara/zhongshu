@@ -30,8 +30,7 @@ spec 是与用户讨论后确认的临时约定：它回答“接下来建什么
 | 原生历史读取与存储边界 | 任意长度对话都能打开即最新、连续回溯到第一条，不因缺口卡死；存储有预算与清理入口 | done | 已实现并经用户手动验证；未做独立验收（用户决定）；退役正文表已由迁移 16 删除 | 本地 main `0e7a193` 及后续迁移提交；作者自测覆盖 fixture 与真实 Codex/DSH 的 H01–H05 · [ADR 0014](../adr/0014-native-history-source.md) · [continuity](../features/continuity.md) · [M09](../features/conversation-management.md#存储预算与清理) | 2026-11-06 |
 | 同步瘦身 | 读取不再引起空转；运行中只推新增内容、逐帧不重读快照、不落盘（[ADR 0019](../adr/0019-live-deltas-and-pure-reads.md)） | done | 测试实例上用真实 Harness 重测：推送量、快照重读与变更表写入显著下降，离开对话后任务结束不再空转；全部检查通过；用户确认 ADR 0019 | [PR #47](https://github.com/Lanbasara/zhongshu/pull/47)；测试实例重测（Codex 前后对比、DSH 之后）与逐字核对见 PR 评论；用户 2026-11-08 确认 ADR 0019；未做独立执行验收；后台标签页未实测 | 2026-11-08 |
 | 快照按范围重读 | 只动状态的变化只重读状态，历史仍整页从原生读取（[ADR 0020](../adr/0020-state-only-refresh.md)） | done | 测试实例长对话重测：每轮完整重读次数与下载量下降，消息与原生逐字节一致；全部检查通过 | [PR #49](https://github.com/Lanbasara/zhongshu/pull/49)、[PR #50](https://github.com/Lanbasara/zhongshu/pull/50)；测试实例第 17–27 轮：每轮完整重读从 3–5 次降到 2 次，消息逐字节一致；2026-11-08 随同步瘦身一起发布；未做独立执行验收 | 2026-11-08 |
-| 自动任务 | 在中书看见并管理 DSH 原生自动任务；自动投递引起的运行像用户发送一样显示、计未读和推送；Agent 能用一句话主动叫用户，点开直达结果（[ADR 0021](../adr/0021-automations.md)） | next | 界面原型经用户确认后写入工作单 | none yet；界面原型待用户确认 | 2026-11-08 |
-| 日历与时间轴 | 未来总览、回看、今天三个视图，读原生自动任务与工作区时间轴文件（[ADR 0021](../adr/0021-automations.md)） | next | 排在自动任务之后，格式与退出条件待定 | none yet | 2026-11-08 |
+| [自动任务与日程](automations.md) | 在中书看见并管理 DSH 原生自动任务，接住运行结果，Agent 主动通知直达结果，日历合并原生任务与工作区时间轴（[ADR 0021](../adr/0021-automations.md)） | next | 见工作单 | none yet；界面原型已获用户认可，工作单待确认 | 2026-11-08 |
 | 语音与安装后恢复 | 语音转文字、安装后恢复工作 | next | 分成独立小切片，各自有真实证据 | none yet | 2026-10-31 |
 
 Ledger 状态只允许 `next / active / blocked / done`；spec front matter 使用 `draft / active / blocked / done`。`done` 行在一轮发布后删除；耐久知识已经折入 feature map / ADR。
@@ -48,6 +47,7 @@ Ledger 状态只允许 `next / active / blocked / done`；spec front matter 使�
 - [workspace-management.md](workspace-management.md) — 已授权实施，按工作单验收
 - [workspace-file-reading-editing.md](workspace-file-reading-editing.md) — 真实 Harness 与浏览器已验证，手机真机待验收
 - [integration-probes.md](integration-probes.md) — next
+- [automations.md](automations.md) — 草案，待用户确认
 - [native-subagents.md](native-subagents.md) — 已实现（PR #37），独立验收通过；剩余未覆盖分支见工作单
 
 ## spec 模板
