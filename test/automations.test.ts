@@ -237,6 +237,13 @@ test('the automation service shows native tasks in product terms, adopts session
   const fresh = (await app.inject({ method: 'POST', url: '/automations/follow/edit', payload: { patch: { title: '回看（改）' }, expectedUpdatedAt: at(1) } })).json();
   assert.equal(fresh.outcome, 'ok'); assert.equal(fresh.automation.title, '回看（改）');
   assert.equal((await app.inject({ method: 'POST', url: '/automations/follow/edit', payload: { patch: {} } })).statusCode, 400, 'an empty change is refused');
-  assert.deepEqual((await app.inject({ method: 'POST', url: '/automations/routine/run' })).json(), { outcome: 'pending' });
+  // Deleting a task elsewhere leaves its results as ordinary conversations.
+  tasks = tasks.filter(task => task.id !== 'routine');
+  await new Promise(resolve => setTimeout(resolve, 3_100));
+  await app.inject({ method: 'GET', url: '/automations' });
+  assert.equal(store.getConversation(adopted.id)?.automationId, undefined);
+  assert.ok(store.listConversations().some(entry => entry.id === adopted.id), 'the released run is back in the sidebar list');
+  assert.equal(store.getConversation(tracked.id)?.automationId, 'once', 'conversations of tasks still listed stay with them');
+  assert.deepEqual((await app.inject({ method: 'POST', url: '/automations/once/run' })).json(), { outcome: 'pending' });
   assert.deepEqual((await app.inject({ method: 'POST', url: '/automations/missing/run' })).json(), { outcome: 'not_found' });
 });

@@ -43,10 +43,14 @@ export function createAutomations(db: DatabaseSync, workbench: Workbench, adapte
   const reserved = (id: string) => (db.prepare('SELECT session_id FROM automation_reservations WHERE automation_id=?').get(id) as { session_id: string } | undefined)?.session_id;
   const reserve = (id: string, sessionId: string) => db.prepare(`INSERT INTO automation_reservations(automation_id,session_id,seen_at) VALUES(?,?,?)
     ON CONFLICT(automation_id) DO UPDATE SET session_id=excluded.session_id,seen_at=excluded.seen_at WHERE session_id<>excluded.session_id`).run(id, sessionId, Date.now());
-  /** Reservations of tasks the Harness no longer lists (deleted) are dropped; the list is complete when it succeeds. */
+  /**
+   * A task the Harness no longer lists was deleted: drop its reservation, and turn the conversations it created into
+   * ordinary ones so its results do not disappear with it. A successful list is complete.
+   */
   const forget = (present: Set<string>) => {
     const rows = db.prepare('SELECT automation_id FROM automation_reservations').all() as { automation_id: string }[];
     for (const row of rows) if (!present.has(row.automation_id)) db.prepare('DELETE FROM automation_reservations WHERE automation_id=?').run(row.automation_id);
+    for (const owner of workbench.store.automationOwners()) if (!present.has(owner)) { workbench.store.releaseAutomation(owner); log({ event: 'automation_conversations_released' }); }
   };
   /** The session a task created for itself: every run of a "new" task, or the one a "new once" task reserved. */
   const createdFor = (task: NativeAutomation, sessionId: string) => task.target.kind === 'new' || task.target.kind === 'new_once' || reserved(task.id) === sessionId;

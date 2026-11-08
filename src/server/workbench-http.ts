@@ -143,7 +143,7 @@ export function createWorkbenchHttp(workbench: Workbench, input: Partial<z.input
     const value = workbench.store.getConversation(id);
     if (!value) return undefined;
     const subagents = value.subagents && { running: value.subagents.running, unverified: value.subagents.unverified, total: value.subagents.total, resultsPending: value.subagents.resultsPending };
-    return JSON.stringify([value.title, value.workspaceId, value.archived, value.readiness, value.state.status, value.error, workbench.unread([value]).has(id), subagents]);
+    return JSON.stringify([value.title, value.workspaceId, value.archived, value.readiness, value.state.status, value.error, workbench.unread([value]).has(id), subagents, value.automationId]);
   }
   function summaryChanged(connection: Connection, id: string): boolean {
     const summary = listSummary(id);

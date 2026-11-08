@@ -71,6 +71,10 @@ export interface WorkbenchStore {
   adoptConversation(input: { id: string; harnessId: HarnessId; workspaceId: string; cwd: string; title: string; configuration: Configuration; binding: Binding; automationId: string }): Conversation;
   /** The conversation bound to a native session, if Zhongshu knows it. */
   conversationForNative(harnessId: HarnessId, nativeId: string): Conversation | null;
+  /** Automations that own at least one adopted conversation. */
+  automationOwners(): string[];
+  /** The automation is gone: its conversations become ordinary ones, so the results stay in the sidebar. */
+  releaseAutomation(automationId: string): void;
   getConversation(id: string): Conversation | null;
   listConversations(options?: ConversationList): Conversation[];
   recentAcceptedConversation(workspaces: { id: string; directory: string }[], harnessIds: HarnessId[]): Conversation | null;
@@ -394,6 +398,17 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
       });
     },
     getConversation(id) { parse(uuid, id); return storage(() => { const row = conversationRow(id); return row ? conversationFromRow(row) : null; }); },
+    automationOwners() {
+      return (db.prepare('SELECT DISTINCT automation_id FROM workbench_conversations WHERE automation_id IS NOT NULL LIMIT 10000').all() as { automation_id: string }[]).map(row => row.automation_id);
+    },
+    releaseAutomation(automationId) {
+      parse(z.string().min(1).max(240), automationId);
+      mutate(changed => {
+        const rows = db.prepare('SELECT id FROM workbench_conversations WHERE automation_id=?').all(automationId) as { id: string }[];
+        db.prepare('UPDATE workbench_conversations SET automation_id=NULL WHERE automation_id=?').run(automationId);
+        for (const row of rows) changed(row.id);
+      });
+    },
     adoptConversation(value) {
       const input = parse(createConversationSchema.omit({ preparationId: true }).extend({ title: boundedText(200).min(1), binding: bindingSchema, automationId: z.string().min(1).max(240) }).strict(), value);
       return mutate(changed => {
