@@ -1,5 +1,5 @@
 ---
-status: draft
+status: active
 started: 2026-11-08
 exit: 在预发实例的真实 DSH 上，Agent 建的自动任务在中书可见、可管理；无人阅读的对话收到投递后会显示运行、计未读、推送；主动通知点开直达那一轮；工作区时间轴文件出现在日历上；用户在测试实例用手机验收通过
 evidence: none yet
