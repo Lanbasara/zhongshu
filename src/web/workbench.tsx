@@ -472,7 +472,10 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
         const reason = result.operation.reason;
         setError(reason ? failures[reason] ?? reason : '操作结果待核实。');
       }
-      atBottom.current = true; await load(id, newerRef.current.length > 0);
+      atBottom.current = true;
+      // The sent message arrives on the live stream and with the next history change; only the operation state is read now.
+      // A reader in older content still needs the full read that brings the window back to the latest page (ADR 0020).
+      if (newerRef.current.length > 0) await load(id, true); else await loadState(id);
     } catch (reason) {
       if (gen === generation.current && reason instanceof RequestError && ([400, 413].includes(reason.status) || ['conversation_archived','workspace_save_in_progress','workspace_execution_blocked','workspace_removed','workspace_remove_busy','workspace_directory_changed','workspace_directory_unavailable','workspace_identity_unavailable','operation_needs_reconciliation','file_reference_unavailable','file_reference_forbidden','quote_source_changed','image_reference_changed','image_unavailable','queue_full','queue_mode_unavailable'].includes(reason.code))) {
         setDraft(current => { const { pending: _pending, ...editable } = current; saveDraft(id, editable); return editable; });
