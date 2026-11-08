@@ -7,7 +7,7 @@ import { conversationListSchema, conversationResponseSchema, conversationTitleSc
 import { RequestError, request } from './workbench-client.ts';
 import type { WorkspaceAction } from './workspace-management.tsx';
 import { ConversationRow, WorkspaceActions, WorkspaceGroup } from './patterns/sidebar.tsx';
-import { conversationStatus, harnessLabel } from './conversation-status.ts';
+import { conversationStatus, harnessLabel, runStatus } from './conversation-status.ts';
 import type { StatusKind } from './ui/controls.tsx';
 
 const widthKey = 'zhongshu:sidebar-width';
@@ -49,6 +49,8 @@ type NavigationProps = {
   /** Automations that open a new conversation per run (ADR 0021); each takes one row under its workspace. */
   automations?: AutomationView[];
   openRuns?(automationId: string): void;
+  /** The automation the open conversation belongs to, so its row reads as selected. */
+  selectedAutomation?: string;
   workspaces?: WorkbenchConfiguration['workspaces'];
   workspaceAction(action: WorkspaceAction): void;
   selected?: string;
@@ -198,9 +200,10 @@ export const ConversationNavigation = memo(function ConversationNavigation(props
         actions={<WorkspaceActions label={workspace.label} onCreate={() => props.create(workspace.id)} onManage={() => props.workspaceAction({ kind: 'manage', workspace })}/>}>
         <ConversationResults {...resultProps} visible={!closed} query={{ workspaceId: workspace.id }}/>
         {!closed && props.automations?.filter(task => (task.target.kind === 'new' || task.target.kind === 'new_once') && task.target.workspaceId === workspace.id && (task.runs > 0 || task.status !== 'ended'))
-          .map(task => <ConversationRow key={task.id} title={task.title} status={task.executing ? 'running' : 'idle'} statusLabel={task.executing ? '运行中' : ''}
-            detail={task.runs ? `自动任务 · ${task.runs} 次运行` : '自动任务 · 还没跑过'} meta={<Clock size={12} aria-label="自动任务"/>}
-            onOpen={() => props.openRuns?.(task.id)}/>)}
+          .map(task => { const run = task.executing ? runStatus('running', false) : task.latestRun ? runStatus(task.latestRun.status, task.latestRun.unread) : runStatus('idle', false);
+            return <ConversationRow key={task.id} title={task.title} status={run.status} statusLabel={`最近一次运行：${run.label}`} unread={task.latestRun?.unread}
+              selected={task.id === props.selectedAutomation} detail={task.runs ? `自动任务 · ${task.runs} 次运行` : '自动任务 · 还没跑过'} meta={<Clock size={12} aria-label="自动任务"/>}
+              onOpen={() => props.openRuns?.(task.id)}/>; })}
       </WorkspaceGroup>;
     })}
     {props.workspaces && <section className="workspace-group workspace-unregistered">

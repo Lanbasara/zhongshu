@@ -51,8 +51,9 @@ export const automationSchema = z.object({
   timing: automationTimingSchema, scheduledAt: instant, status: z.enum(['active', 'paused', 'ended']),
   target: automationTargetSchema, executing: z.boolean(), createdAt: instant.optional(), updatedAt: instant.optional(),
   lastDelivery: automationDeliverySchema.optional(),
-  /** Conversations this automation created and Zhongshu adopted. */
+  /** Conversations this automation created and Zhongshu adopted, and the newest one's state for the sidebar row. */
   runs: z.number().int().nonnegative(),
+  latestRun: z.object({ conversationId: z.uuid(), status: z.enum(['idle', 'running', 'waiting', 'interrupted', 'failed', 'unknown']), unread: z.boolean() }).strict().optional(),
 }).strict();
 export const automationListSchema = z.object({ available: z.boolean(), automations: z.array(automationSchema).max(5000) }).strict();
 export const automationHistorySchema = z.object({ records: z.array(automationDeliverySchema).max(100), before: z.string().max(240).optional(), earlierUnavailable: z.boolean() }).strict();

@@ -7,8 +7,10 @@ const labels: Record<Conversation['state']['status'], string> = { idle: '就绪'
 export function conversationStatus(conversation: Conversation): { status: StatusKind; label: string } {
   if (conversation.readiness === 'preparing') return { status: 'running', label: '正在准备' };
   if (conversation.readiness === 'blocked') return { status: 'unknown', label: '准备未完成' };
-  const status = conversation.state.status;
-  const unread = !!conversation.unread;
+  return runStatus(conversation.state.status, !!conversation.unread);
+}
+/** A native run state and whether its result is unread, as lists show it; also used for an automation's latest run. */
+export function runStatus(status: Conversation['state']['status'], unread: boolean): { status: StatusKind; label: string } {
   if (status === 'idle') return unread ? { status: 'unread', label: '已完成，还没看' } : { status: 'idle', label: labels.idle };
   return { status, label: unread ? `${labels[status]}，还没看` : labels[status] };
 }

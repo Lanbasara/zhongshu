@@ -105,10 +105,12 @@ export function createAutomations(db: DatabaseSync, workbench: Workbench, adapte
       const workspace = workspaceOf(task.target.cwd);
       target = { kind: task.target.kind, ...(workspace ? { workspaceId: workspace.id, workspaceLabel: workspace.label } : {}) };
     }
-    const runs = workbench.store.listConversations({ automationId: task.id, limit: 1000 }).length;
+    const runs = workbench.store.listConversations({ automationId: task.id, limit: 1000 });
+    const latest = runs[0];
     return { id: task.id, harnessId: 'dsh', title: task.title, prompt: task.prompt, timing: task.timing, scheduledAt: task.scheduledAt, status: task.status, target,
       executing: task.executing, ...(task.createdAt ? { createdAt: task.createdAt } : {}), ...(task.updatedAt ? { updatedAt: task.updatedAt } : {}),
-      ...(task.lastDelivery ? { lastDelivery: deliveryView(task.lastDelivery) } : {}), runs };
+      ...(task.lastDelivery ? { lastDelivery: deliveryView(task.lastDelivery) } : {}), runs: runs.length,
+      ...(latest ? { latestRun: { conversationId: latest.id, status: latest.state.status, unread: workbench.unread([latest]).has(latest.id) } } : {}) };
   }
   function source(harness: string): HarnessAutomations {
     const value = harness === 'dsh' ? sources.get('dsh') : undefined;

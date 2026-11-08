@@ -9,6 +9,7 @@ import { SettingsView, settingsTabs, type SettingsTab } from './settings-view.ts
 import { ArchiveView } from './archive-view.tsx';
 import { ScheduleView, scheduleTabs, type ScheduleTab } from './schedule-view.tsx';
 import { AutomationRunBar, AutomationStrip, useAutomations } from './conversation-automations.tsx';
+import { AutomationTitles } from './automation-delivery.ts';
 import { agentNotificationSchema } from '../shared/automations.ts';
 import { WorkbenchSearch, useAttention, type SearchActions } from './workbench-search.tsx';
 import { WorkspaceReader } from './workspace-reader.tsx';
@@ -704,6 +705,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
   const searchButton = <IconButton className="header-search" label="搜索与跳转" onClick={() => setSearching(true)}><Search size={18}/></IconButton>;
   // One read serves the sidebar rows and the conversation strip; the sidebar opens an automation's latest run.
   const automationData = useAutomations(listRevision, true);
+  const automationTitles = useMemo(() => new Map(automationData.automations.map(task => [task.id, task.title])), [automationData.automations]);
   const openRuns = useCallback((automationId: string) => {
     request(`/automations/${encodeURIComponent(automationId)}/runs`, z.object({ conversations: z.array(z.object({ id: z.uuid() }).passthrough()).max(200) }))
       .then(value => { const latest = value.conversations[0]; if (latest) choose(latest.id); else openScheduleRef.current('tasks'); })
@@ -768,7 +770,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
         badge={storageState(storage.value) && <span className="sidebar-badge" data-state={storageState(storage.value)} aria-label={storage.value?.full ? '存储已满' : '存储接近上限'}/>}/>
       {!narrow && <div className="sidebar-status"><ConnectionStatus {...connectionView}/></div>}
     </>}>
-    <ConversationNavigation automations={automationData.automations} openRuns={openRuns} workspaces={configuration?.workspaces} workspaceAction={setWorkspaceAction} selected={view ? undefined : selected}
+    <ConversationNavigation automations={automationData.automations} openRuns={openRuns} selectedAutomation={view ? undefined : conversation?.automationId} workspaces={configuration?.workspaces} workspaceAction={setWorkspaceAction} selected={view ? undefined : selected}
       revision={listRevision} csrf={csrf} choose={choose} create={createInWorkspace} manage={setManaging} report={report} attention={attention?.conversations}/>
   </SidebarShell>;
   const panel = view ? undefined : subagentPanel && conversation && !narrow ? subagentHost : reader && configuration ? <WorkspaceReader workspaces={configuration.workspaces} initialWorkspace={conversation?.workspaceId}
@@ -810,9 +812,11 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
             {snapshot?.history.error && <p className="history-note" role="status">{historyNotes[snapshot.history.error] ?? failures[snapshot.history.error] ?? historyNotes.native_history_unavailable}<button className="text-button" onClick={() => { if (selected) void load(selected); }}>重试</button></p>}
             {!snapshot && <p role="status" className="quiet">正在核对远端状态与历史…</p>}
             {snapshot && visible.length === 0 && !snapshot.history.error && <p className="quiet conversation-start">{conversation?.readiness !== 'ready' ? '正在准备原生会话…' : snapshot.history.loaded ? '对话已准备好。说说你希望完成什么。' : '正在读取原生历史…'}</p>}
-            <Transcript items={visible} conversation={selected} onQuote={quote} turnFiles={turnFiles} renderCollaboration={collaboration}
-              activeRun={running ? conversation?.state.runId : undefined} activeFile={readerTarget?.conversationId === selected ? readerTarget : undefined}
-              workspaceUnavailable={workspaceRemoved} unavailableFiles={unavailableFiles} onOpenFile={openTurnFile}/>
+            <AutomationTitles.Provider value={automationTitles}>
+              <Transcript items={visible} conversation={selected} onQuote={quote} turnFiles={turnFiles} renderCollaboration={collaboration}
+                activeRun={running ? conversation?.state.runId : undefined} activeFile={readerTarget?.conversationId === selected ? readerTarget : undefined}
+                workspaceUnavailable={workspaceRemoved} unavailableFiles={unavailableFiles} onOpenFile={openTurnFile}/>
+            </AutomationTitles.Provider>
             {windowed && <button className="load-history" disabled={loadingNewer} onClick={() => void loadNewer()}>{loadingNewer ? '正在读取…' : '查看更新的内容'}</button>}
           </div>
         </div>

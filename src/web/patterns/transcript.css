@@ -116,6 +116,7 @@
 /* ADR 0021: a message a native automation delivered. Dashed, so it never reads as something the user typed. */
 .message-bubble.message-automation { background:var(--zs-surface); border:1px dashed var(--zs-accent-line); font-size:var(--zs-type-control); color:var(--zs-text-body); }
 .message-automation-label { display:flex; align-items:center; gap:5px; font-size:var(--zs-type-micro); color:var(--zs-accent-text); margin-bottom:3px; }
+.message-automation .message-text + .message-automation-label { margin-top:8px; }
 .message-automation-raw { margin-top:6px; font-size:var(--zs-type-micro); color:var(--zs-text-muted); }
 .message-automation-raw summary { cursor:pointer; }
 .message-automation-raw pre { white-space:pre-wrap; overflow-wrap:anywhere; font-family:var(--zs-font-code); margin:6px 0 0; }

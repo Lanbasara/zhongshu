@@ -162,3 +162,66 @@ test('a run an automation started does not push its completion, since the agent 
   assert.deepEqual(pushed.map(event => event.kind), ['failed']);
   triggers.close();
 });
+
+test('the automation service shows native tasks in product terms, adopts sessions a task created, and passes edits through', async t => {
+  const { default: Fastify } = await import('fastify');
+  const { createAutomations } = await import('../src/server/automations.ts');
+  type Native = import('../src/harness/types.ts').NativeAutomation;
+  const db = database(t); const store = createWorkbenchStore(db);
+  const directory = realpathSync(mkdtempSync(join(tmpdir(), 'zhongshu-automation-ws-')));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const configuration = { modelId: 'fixture-model', permissionId: 'danger-full-access' };
+  const existing = store.createConversation({ id: randomUUID(), harnessId: 'dsh', workspaceId: 'stock', cwd: directory, configuration }).conversation;
+  store.saveBinding(existing.id, { id: 's-existing', cwd: directory, configuration, details: {} });
+  const noticed: string[] = [];
+  const workbench = {
+    store, workspaces: [{ id: 'stock', label: 'Stock', directory }], workspaceView: () => ({ workspaces: [{ id: 'stock', label: 'Stock' }] }),
+    unread: (list: { id: string; state: { status: string } }[]) => new Set(list.filter(entry => entry.state.status === 'idle').map(entry => entry.id)),
+    noticeActivity: async (id: string) => { noticed.push(id); }, onObserved: () => () => {},
+  } as unknown as import('../src/server/workbench.ts').Workbench;
+  const at = (minutes: number) => new Date(Date.UTC(2026, 10, 9, 1, minutes)).toISOString();
+  let tasks: Native[] = [
+    { id: 'routine', title: '盘前简报', prompt: '写简报', timing: { kind: 'daily', time: '09:00', timeZone: 'Asia/Shanghai' }, scheduledAt: at(0), status: 'active',
+      target: { kind: 'new', cwd: directory }, involved: [], executing: false, updatedAt: at(0),
+      lastDelivery: { scheduledAt: at(0), deliveredAt: at(20), messageId: 'm-1', sessionId: 's-run-1' } },
+    { id: 'follow', title: '回看', prompt: '复核', timing: { kind: 'once', at: at(30) }, scheduledAt: at(30), status: 'active', target: { kind: 'session', sessionId: 's-existing' }, involved: [], executing: false, updatedAt: at(1) },
+    { id: 'elsewhere', title: '外部', prompt: 'x', timing: { kind: 'every', seconds: 3600 }, scheduledAt: at(40), status: 'active', target: { kind: 'session', sessionId: 's-unknown' }, involved: [], executing: false },
+  ];
+  const edits: unknown[] = [];
+  const source = {
+    list: async () => tasks, view: async (id: string) => tasks.find(task => task.id === id), history: async () => undefined,
+    create: async () => { throw new Error('unused'); }, remove: async () => 'notFound' as const, run: async (id: string) => (tasks.some(task => task.id === id) ? 'pending' as const : 'notFound' as const),
+    update: async (id: string, patch: unknown, expected?: string) => { edits.push({ id, patch, expected }); return expected === at(1) ? { ...tasks[1]!, title: '回看（改）', updatedAt: at(2) } : 'conflict' as const; },
+    onChange: () => () => {},
+    inspect: async (sessionId: string) => (sessionId === 's-run-1' ? { cwd: directory, configuration } : undefined),
+  };
+  const adapters = new Map([['dsh', { automations: source }]]) as unknown as Parameters<typeof createAutomations>[2];
+  const notifications = createAgentNotifications(db, { push: () => {}, title: () => undefined });
+  const service = createAutomations(db, workbench, adapters, notifications, () => {});
+  const app = Fastify(); await app.register(service.routes); t.after(() => { service.close(); return app.close(); });
+
+  const first = (await app.inject({ method: 'GET', url: '/automations' })).json();
+  const byId = new Map(first.automations.map((task: { id: string }) => [task.id, task]));
+  const adopted = store.conversationForNative('dsh', 's-run-1');
+  assert.ok(adopted, 'the session a routine task created is adopted into its workspace');
+  assert.equal(adopted.automationId, 'routine');
+  assert.deepEqual(noticed, [adopted.id], 'the delivery starts observation of the run');
+  assert.deepEqual(byId.get('routine'), { ...byId.get('routine') as object, target: { kind: 'new', workspaceId: 'stock', workspaceLabel: 'Stock' }, runs: 1,
+    latestRun: { conversationId: adopted.id, status: adopted.state.status, unread: adopted.state.status === 'idle' } });
+  assert.equal((byId.get('routine') as { lastDelivery: { late: boolean; conversationId: string } }).lastDelivery.late, true, 'twenty minutes after its time is late');
+  assert.deepEqual((byId.get('follow') as { target: unknown }).target, { kind: 'conversation', conversationId: existing.id, conversationTitle: existing.title });
+  assert.deepEqual((byId.get('elsewhere') as { target: unknown }).target, { kind: 'unknown' });
+
+  await app.inject({ method: 'GET', url: '/automations' });
+  assert.equal(noticed.length, 1, 'a delivery is handled once');
+  const runs = (await app.inject({ method: 'GET', url: '/automations/routine/runs' })).json();
+  assert.deepEqual(runs.conversations.map((entry: { id: string }) => entry.id), [adopted.id]);
+
+  const stale = (await app.inject({ method: 'POST', url: '/automations/follow/edit', payload: { patch: { title: '回看（改）' }, expectedUpdatedAt: at(0) } })).json();
+  assert.deepEqual(stale, { outcome: 'conflict' });
+  const fresh = (await app.inject({ method: 'POST', url: '/automations/follow/edit', payload: { patch: { title: '回看（改）' }, expectedUpdatedAt: at(1) } })).json();
+  assert.equal(fresh.outcome, 'ok'); assert.equal(fresh.automation.title, '回看（改）');
+  assert.equal((await app.inject({ method: 'POST', url: '/automations/follow/edit', payload: { patch: {} } })).statusCode, 400, 'an empty change is refused');
+  assert.deepEqual((await app.inject({ method: 'POST', url: '/automations/routine/run' })).json(), { outcome: 'pending' });
+  assert.deepEqual((await app.inject({ method: 'POST', url: '/automations/missing/run' })).json(), { outcome: 'not_found' });
+});

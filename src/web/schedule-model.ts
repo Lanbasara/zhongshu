@@ -33,12 +33,11 @@ function zoned(instant: number, timeZone: string) {
 export function zonedInstant(date: string, time: string, timeZone: string): number {
   const [y, m, d] = date.split('-').map(Number); const [hh, mm] = time.split(':').map(Number);
   const wanted = Date.UTC(y!, m! - 1, d!, hh!, mm!);
-  let guess = wanted;
-  for (let pass = 0; pass < 2; pass++) {
-    const seen = zoned(guess, timeZone); const [sy, sm, sd] = seen.date.split('-').map(Number); const [sh, smm] = seen.time.split(':').map(Number);
-    guess += wanted - Date.UTC(sy!, sm! - 1, sd!, sh!, smm!);
-  }
-  return guess;
+  const drift = (instant: number) => { const seen = zoned(instant, timeZone); const [sy, sm, sd] = seen.date.split('-').map(Number); const [sh, smm] = seen.time.split(':').map(Number); return wanted - Date.UTC(sy!, sm! - 1, sd!, sh!, smm!); };
+  const first = wanted + drift(wanted);
+  const second = first + drift(first);
+  // In a skipped hour neither guess shows the wanted time; the later one lies just after the gap.
+  return drift(second) === 0 ? second : Math.max(first, second);
 }
 function validZone(timeZone: string): boolean { try { new Intl.DateTimeFormat('en', { timeZone }); return true; } catch { return false; } }
 
