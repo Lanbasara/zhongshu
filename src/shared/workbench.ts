@@ -19,6 +19,8 @@ export const stateSchema = z.object({
   configurationVerified: z.boolean(), reason: boundedText(4096).optional(),
   /** Native Plan mode, for Harnesses that keep it as session state (DSH). */
   plan: z.object({ active: z.boolean(), pending: z.boolean() }).strict().optional(),
+  /** The verified result of the latest native run when Zhongshu did not start it, such as an automation delivery (ADR 0021). */
+  latest: z.object({ runId: identifierSchema, status: z.enum(['completed', 'interrupted', 'failed']) }).strict().optional(),
 }).strict();
 /** Native identities of sub-agents are opaque, URL-safe values verified against the owning conversation. */
 /** Native sub-agent identity as it may appear in a URL path; dot segments are refused outright. */

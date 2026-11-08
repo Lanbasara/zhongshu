@@ -136,6 +136,8 @@ export type NativeState = {
   reason?: string;
   /** Native Plan mode, when the Harness keeps it as session state. */
   plan?: { active: boolean; pending: boolean };
+  /** Set by Workbench, never by an adapter: the verified result of a later run Zhongshu did not start (ADR 0021). */
+  latest?: { runId: string; status: 'completed' | 'interrupted' | 'failed' };
 };
 export type HistoryPage = {
   /** Chronological within each page. Default is the latest page. */

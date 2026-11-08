@@ -141,3 +141,22 @@ test('the workspace timeline file is read whole from its fixed hidden path; bad 
   symlinkSync(join(outside, 'data'), join(other, '.zhongshu'));
   assert.equal(await readWorkspaceTimeline(other), null, 'nothing is read through the link');
 });
+
+test('a run an automation started does not push its completion, since the agent decides; its failure still pushes', async () => {
+  const { createPushTriggers } = await import('../src/server/push-triggers.ts');
+  const conversation = { id: 'c-1', harnessId: 'dsh' as const, title: '盘中跟踪', archived: false,
+    state: { status: 'running' as const, runId: 'turn-7', pendingInputs: 0, configurationVerified: true, terminalRunId: 'turn-6', terminalStatus: 'completed' as const } };
+  const pushed: PushEvent[] = [];
+  let current: typeof conversation & { state: Record<string, unknown> } = conversation;
+  const triggers = createPushTriggers({ conversation: () => current as never, unread: () => new Set(['c-1']), isReading: () => false, active: () => [current as never] }, event => pushed.push(event));
+  const settle = () => new Promise(resolve => setImmediate(resolve));
+  current = { ...conversation, state: { ...conversation.state, status: 'idle', latest: { runId: 'turn-7', status: 'completed' } } };
+  triggers.changed({ conversationId: 'c-1' } as never); await settle();
+  assert.deepEqual(pushed, [], 'completion of an automation run is left to notify_user');
+  current = { ...conversation, state: { ...conversation.state, status: 'running', runId: 'turn-8' } };
+  triggers.changed({ conversationId: 'c-1' } as never); await settle();
+  current = { ...conversation, state: { ...conversation.state, status: 'failed', runId: 'turn-8', latest: { runId: 'turn-8', status: 'failed' } } };
+  triggers.changed({ conversationId: 'c-1' } as never); await settle();
+  assert.deepEqual(pushed.map(event => event.kind), ['failed']);
+  triggers.close();
+});

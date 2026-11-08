@@ -1272,6 +1272,11 @@ export class Workbench {
       if (!(error instanceof StoreError) || !['operation_needs_reconciliation', 'queue_entry_changed'].includes(error.code)) this.store.pauseQueue(id, 'rejected');
     }
   }
+  /** A run no message, queue delivery or pending operation of Zhongshu accounts for. */
+  private startedElsewhere(id: string, runId: string): boolean {
+    for (const status of ['queued', 'dispatching', 'unknown'] as const) if (this.store.listOperations({ conversationId: id, status, limit: 1 }).length) return false;
+    return !this.store.listOperations({ conversationId: id, status: 'accepted', type: 'message', order: 'desc', limit: 50 }).some(operation => operation.runId === runId);
+  }
   private observationTarget(id: string) {
     const queue = this.store.readQueue(id);
     return (queue.entries.length ? queue.afterRunId : null) ?? this.latestAcceptedMessage(id)?.runId ?? undefined;
@@ -1800,7 +1805,9 @@ export class Workbench {
           } else {
             runtime.stateGeneration++;
             if (change.type === 'state') {
-              this.store.setConversationState(id, { state: change.state });
+              // A live event never carries the result Workbench verified for a later run; keep it while that run is current.
+              const kept = this.store.getConversation(id)?.state.latest;
+              this.store.setConversationState(id, { state: kept && kept.runId === change.state.runId && !change.state.latest ? { ...change.state, latest: kept } : change.state });
               // An unknown native state means the same observation cannot vouch for its sub-agents either.
               if (change.state.status === 'unknown') { this.store.subagents.markUnverified(id); runtime.subagentsDirty = true; }
               if (change.state.configurationVerified && ['running', 'waiting'].includes(change.state.status)) return;
@@ -1846,6 +1853,15 @@ export class Workbench {
           // An unverified unknown read never erases last-known run and pending facts; it takes the recovery path.
           if (state.value.status === 'unknown' && !state.value.configurationVerified)
             throw new StoreError(/^[a-z][a-z0-9_]{0,99}$/.test(state.value.reason ?? '') ? state.value.reason! : 'native_state_unavailable', 502);
+          // ADR 0021: a later run nobody here started (an automation delivery) has its own verified result. It is read
+          // for that exact run and kept apart, so the settled checks of Zhongshu's own messages stay as they were.
+          const later = state.value.runId;
+          const own = this.latestAcceptedMessage(id);
+          if (later && later !== target && later !== state.value.terminalRunId && TERMINAL.has(state.value.status) && (!own || own.runId === state.value.terminalRunId) && this.startedElsewhere(id, later)) {
+            const verified = await adapter.state(current.binding!, later).catch(() => undefined);
+            if (this.closed || this.runtimes.get(id) !== runtime) return;
+            if (verified?.terminalRunId === later && verified.terminalStatus) state.value.latest = { runId: later, status: verified.terminalStatus };
+          }
           this.adapter(this.conversation(id));
           // Text can arrive faster than native reads. It invalidates history, not a
           // verified state read; newer state/invalidate events still fence both.

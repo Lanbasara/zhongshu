@@ -166,7 +166,12 @@ const ATTENTION_KEY = `(CASE
   WHEN json_extract(c.state_json,'$.terminalStatus') = 'interrupted' AND EXISTS (SELECT 1 FROM workbench_operations o
     WHERE o.conversation_id = c.id AND o.type = 'stop' AND o.status IN ('dispatching','accepted','unknown')
       AND json_extract(o.payload_json,'$.runId') = json_extract(c.state_json,'$.terminalRunId')) THEN NULL
-  ELSE json_extract(c.state_json,'$.terminalStatus') || ':' || json_extract(c.state_json,'$.terminalRunId')
+  WHEN json_extract(c.state_json,'$.latest.status') = 'interrupted' AND EXISTS (SELECT 1 FROM workbench_operations o
+    WHERE o.conversation_id = c.id AND o.type = 'stop' AND o.status IN ('dispatching','accepted','unknown')
+      AND json_extract(o.payload_json,'$.runId') = json_extract(c.state_json,'$.latest.runId')) THEN NULL
+  -- ADR 0021: a later run Zhongshu did not start (an automation delivery) is the newest result.
+  ELSE COALESCE(json_extract(c.state_json,'$.latest.status') || ':' || json_extract(c.state_json,'$.latest.runId'),
+    json_extract(c.state_json,'$.terminalStatus') || ':' || json_extract(c.state_json,'$.terminalRunId'))
 END)`;
 const ATTENTION_ROWS = `SELECT c.id, c.last_activity_at, json_extract(c.state_json,'$.status') AS status,
   c.seen_key, c.seen_result_key, ${ATTENTION_KEY} AS attention_key FROM workbench_conversations c`;
