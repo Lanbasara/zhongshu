@@ -2,13 +2,28 @@ import { Fragment, memo, useEffect, useMemo, useRef, useState, type ReactNode } 
 import { Streamdown, defaultRemarkPlugins } from 'streamdown';
 import { code } from '@streamdown/code';
 import { cjk } from '@streamdown/cjk';
-import { Check, ClipboardList, Copy, FileText, Info, Quote, X, ImageIcon } from 'lucide-react';
+import { Check, ClipboardList, Clock, Copy, FileText, Info, Quote, X, ImageIcon } from 'lucide-react';
 import type { TurnFileSummary, WorkbenchItem } from '../shared/workbench.ts';
 import type { MessageReference, ImageAttachment } from '../shared/content.ts';
 import { referenceSchema } from '../shared/content.ts';
 import { workspaceImages } from './markdown.ts';
 import { TurnFiles } from './patterns/turn-files.tsx';
 import { ProcessBlock } from './patterns/process.tsx';
+
+/**
+ * The instructions inside a native automation delivery (ADR 0021). DSH wraps them as a reminder batch; the page shows
+ * the instructions and keeps the exact native text one click away. Anything it cannot read is shown as it is.
+ */
+export function automationPrompts(text: string): string[] | undefined {
+  const marker = text.indexOf('reminders_json:');
+  if (!text.startsWith('[SCHEDULE REMINDER BATCH]') || marker < 0) return undefined;
+  try {
+    const value: unknown = JSON.parse(text.slice(marker + 'reminders_json:'.length).trim());
+    if (!Array.isArray(value) || !value.length || value.length > 50) return undefined;
+    const prompts = value.map(entry => (entry && typeof entry === 'object' && typeof (entry as { reminder_prompt?: unknown }).reminder_prompt === 'string' ? (entry as { reminder_prompt: string }).reminder_prompt : undefined));
+    return prompts.every(prompt => prompt !== undefined) ? prompts as string[] : undefined;
+  } catch { return undefined; }
+}
 import './patterns/plan.css';
 
 export const imageUrl = (conversation: string, image: ImageAttachment) => `/api/private/workbench/conversations/${encodeURIComponent(conversation)}/resources/${image.id}`;
@@ -64,8 +79,12 @@ export function Message({ item, conversation, onQuote }: { item: WorkbenchItem; 
   return <article ref={ref} tabIndex={-1} className={`message message-${item.kind}`} data-message-id={item.id} data-status={item.status}>
     {item.kind === 'notice' && <Info size={14} className="message-notice-icon" aria-hidden="true"/>}
     <div className="message-body">
-      {item.kind === 'user' ? <div className="message-bubble">
-        <div className="message-text">{item.text}</div>
+      {item.kind === 'user' ? <div className={`message-bubble${item.automation ? ' message-automation' : ''}`}>
+        {item.automation ? <>
+          <div className="message-automation-label"><Clock size={12} aria-hidden="true"/>自动任务投递</div>
+          {(automationPrompts(item.text) ?? [item.text]).map((prompt, index) => <div key={index} className="message-text">{prompt}</div>)}
+          {automationPrompts(item.text) && <details className="message-automation-raw"><summary>原文</summary><pre>{item.text}</pre></details>}
+        </> : <div className="message-text">{item.text}</div>}
         {item.images?.length ? <div className="message-images">{item.images.map(image => <ImageView key={image.id} src={imageUrl(conversation, image)} alt={image.name}/>)}</div> : null}
         {item.references?.length ? <div className="message-references">{item.references.map((reference, index) => <div key={index} className="reference-card">{reference.type === 'file' ? <><FileText size={14}/><span>{reference.path}<small>工作区原文件</small></span></> : <><Quote size={14}/><blockquote>{reference.text}<small>引用消息片段</small></blockquote></>}</div>)}</div> : null}
       </div> : <>

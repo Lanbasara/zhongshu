@@ -144,19 +144,21 @@ test('the workspace timeline file is read whole from its fixed hidden path; bad 
 
 test('a run an automation started does not push its completion, since the agent decides; its failure still pushes', async () => {
   const { createPushTriggers } = await import('../src/server/push-triggers.ts');
-  const conversation = { id: 'c-1', harnessId: 'dsh' as const, title: '盘中跟踪', archived: false,
-    state: { status: 'running' as const, runId: 'turn-7', pendingInputs: 0, configurationVerified: true, terminalRunId: 'turn-6', terminalStatus: 'completed' as const } };
+  type State = import('../src/harness/types.ts').NativeState;
+  const base: State = { status: 'running', runId: 'turn-7', pendingInputs: 0, configurationVerified: true, terminalRunId: 'turn-6', terminalStatus: 'completed' };
+  let state: State = base;
+  const conversation = () => ({ id: 'c-1', harnessId: 'dsh', title: '盘中跟踪', archived: false, state }) as unknown as import('../src/server/workbench-store.ts').Conversation;
   const pushed: PushEvent[] = [];
-  let current: typeof conversation & { state: Record<string, unknown> } = conversation;
-  const triggers = createPushTriggers({ conversation: () => current as never, unread: () => new Set(['c-1']), isReading: () => false, active: () => [current as never] }, event => pushed.push(event));
+  const triggers = createPushTriggers({ conversation, unread: () => new Set(['c-1']), isReading: () => false, active: () => [conversation()] }, event => pushed.push(event));
   const settle = () => new Promise(resolve => setImmediate(resolve));
-  current = { ...conversation, state: { ...conversation.state, status: 'idle', latest: { runId: 'turn-7', status: 'completed' } } };
-  triggers.changed({ conversationId: 'c-1' } as never); await settle();
-  assert.deepEqual(pushed, [], 'completion of an automation run is left to notify_user');
-  current = { ...conversation, state: { ...conversation.state, status: 'running', runId: 'turn-8' } };
-  triggers.changed({ conversationId: 'c-1' } as never); await settle();
-  current = { ...conversation, state: { ...conversation.state, status: 'failed', runId: 'turn-8', latest: { runId: 'turn-8', status: 'failed' } } };
-  triggers.changed({ conversationId: 'c-1' } as never); await settle();
+  const change = { conversationId: 'c-1' } as unknown as import('../src/server/workbench-store.ts').WorkbenchChange;
+  state = { ...base, status: 'idle', latest: { runId: 'turn-7', status: 'completed' } };
+  triggers.changed(change); await settle();
+  assert.equal(pushed.length, 0, 'completion of an automation run is left to notify_user');
+  state = { ...base, status: 'running', runId: 'turn-8' };
+  triggers.changed(change); await settle();
+  state = { ...base, status: 'failed', runId: 'turn-8', latest: { runId: 'turn-8', status: 'failed' } };
+  triggers.changed(change); await settle();
   assert.deepEqual(pushed.map(event => event.kind), ['failed']);
   triggers.close();
 });

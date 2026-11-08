@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { Archive, FolderOpen, MoreHorizontal, PanelLeft, Pencil, RefreshCw, Search, Settings, SquarePen } from 'lucide-react';
+import { Archive, CalendarDays, FolderOpen, MoreHorizontal, PanelLeft, Pencil, RefreshCw, Search, Settings, SquarePen } from 'lucide-react';
 import { Button, IconButton, Kbd, Menu, MenuItem, StatusDot, modifierKey, type StatusKind } from './ui/controls.tsx';
 import { WorkbenchFrame, useNarrow } from './patterns/workbench-frame.tsx';
 import { ConnectionStatus, SidebarAction, SidebarShell } from './patterns/sidebar.tsx';
@@ -7,6 +7,9 @@ import { Toasts, type ToastView } from './patterns/toasts.tsx';
 import { conversationStatus, harnessLabel, stateLabel } from './conversation-status.ts';
 import { SettingsView, settingsTabs, type SettingsTab } from './settings-view.tsx';
 import { ArchiveView } from './archive-view.tsx';
+import { ScheduleView, scheduleTabs, type ScheduleTab } from './schedule-view.tsx';
+import { AutomationRunBar, AutomationStrip, useAutomations } from './conversation-automations.tsx';
+import { agentNotificationSchema } from '../shared/automations.ts';
 import { WorkbenchSearch, useAttention, type SearchActions } from './workbench-search.tsx';
 import { WorkspaceReader } from './workspace-reader.tsx';
 import { useCallback, useEffect, useMemo, useLayoutEffect, useRef, useState } from 'react';
@@ -93,8 +96,14 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
   const [workspaceAction, setWorkspaceAction] = useState<WorkspaceAction>();
   /** Instance-level pages replace the conversation column; the selected conversation stays selected underneath. */
   /** `#settings` or `#settings:<tab>` opens Settings, so a notification can open it in a new window. */
-  const entry = useMemo(() => { const value = parseEntry(location.hash); return value?.kind === 'settings' ? value : undefined; }, []);
-  const [view, setView] = useState<'settings' | 'archive' | undefined>(() => entry ? 'settings' : undefined);
+  const opened = useMemo(() => parseEntry(location.hash), []);
+  const entry = opened?.kind === 'settings' ? opened : undefined;
+  const [view, setView] = useState<'settings' | 'archive' | 'schedule' | undefined>(() => entry ? 'settings' : opened?.kind === 'schedule' ? 'schedule' : undefined);
+  /** `#schedule` or `#schedule:<tab>` opens the schedule (ADR 0021). */
+  const [scheduleTab, setScheduleTab] = useState<ScheduleTab>(() => scheduleTabs.find(tab => opened?.kind === 'schedule' && tab.id === opened.tab)?.id ?? 'calendar');
+  /** An agent notification to show in place once its conversation is open (`#<conversation>:notice:<id>`). */
+  const [pendingNotice, setPendingNotice] = useState<string | undefined>(() => opened?.kind === 'conversation' ? opened.notice : undefined);
+  const [createFor, setCreateFor] = useState<string>();
   const [settingsTab, setSettingsTab] = useState<SettingsTab>(() => settingsTabs.find(tab => tab.id === entry?.tab)?.id ?? 'workspaces');
   const [searching, setSearching] = useState(false);
   const [managing, setManaging] = useState<Conversation>();
@@ -121,7 +130,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
   const [readerTarget, setReaderTarget] = useState<ReaderTarget>();
   const [unavailableFiles, setUnavailableFiles] = useState<ReadonlySet<string>>(new Set());
   const readerOrigin = useRef<{ button: HTMLButtonElement; row: HTMLLIElement | null }>(null);
-  const [selected, setSelected] = useState<string | undefined>(() => /^#[0-9a-f-]{36}$/i.test(location.hash) ? location.hash.slice(1) : undefined);
+  const [selected, setSelected] = useState<string | undefined>(() => opened?.kind === 'conversation' ? opened.id : undefined);
   const [snapshot, setSnapshot] = useState<WorkbenchSnapshot>();
   const [pages, setPages] = useState<Page[]>([]);
   /** Cursors of pages dropped from the newer end, nearest last; empty means the window ends at the latest page. */
@@ -680,9 +689,12 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
   const openSettingsRef = useRef(openSettings); openSettingsRef.current = openSettings;
   // A notification clicked while this page is open switches it in place (ADR 0018).
   useEffect(() => onNotificationOpen(request => {
-    if (request.kind === 'conversation') choose(request.id);
+    if (request.kind === 'conversation') { choose(request.id); if (request.notice) setPendingNotice(request.notice); }
     else if (request.kind === 'settings') openSettingsRef.current(settingsTabs.find(tab => tab.id === request.tab)?.id);
+    else if (request.kind === 'schedule') openScheduleRef.current(scheduleTabs.find(tab => tab.id === request.tab)?.id);
   }), [choose]);
+  const openSchedule = (tab?: ScheduleTab) => { if (tab) setScheduleTab(tab); history.replaceState(null, '', '#schedule'); setView('schedule'); setReader(false); setSubagentPanel(undefined); setNavigation(false); };
+  const openScheduleRef = useRef(openSchedule); openScheduleRef.current = openSchedule;
   const openArchive = () => { setView('archive'); setReader(false); setSubagentPanel(undefined); setNavigation(false); };
   const searchActions: SearchActions = { open: choose, draft: startDraft, files: openFiles, archive: openArchive, settings: openSettings,
     ...(narrow ? {} : { toggleSidebar: () => setCollapsed(current => !current) }) };
@@ -690,8 +702,37 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
   const status = conversation ? conversationStatus(conversation) : undefined;
   const statusText = workspaceRemoved ? '工作区已移除' : conversation ? stateLabel(conversation) : '';
   const searchButton = <IconButton className="header-search" label="搜索与跳转" onClick={() => setSearching(true)}><Search size={18}/></IconButton>;
+  // One read serves the sidebar rows and the conversation strip; the sidebar opens an automation's latest run.
+  const automationData = useAutomations(listRevision, true);
+  const openRuns = useCallback((automationId: string) => {
+    request(`/automations/${encodeURIComponent(automationId)}/runs`, z.object({ conversations: z.array(z.object({ id: z.uuid() }).passthrough()).max(200) }))
+      .then(value => { const latest = value.conversations[0]; if (latest) choose(latest.id); else openScheduleRef.current('tasks'); })
+      .catch(() => openScheduleRef.current('tasks'));
+  }, [choose]);
+  // An agent notification opens its turn (ADR 0021): scroll to the tool record, or the reply after it, and mark it briefly.
+  useEffect(() => {
+    if (!pendingNotice || !selected || !snapshot || snapshot.conversation.id !== selected) return;
+    let alive = true;
+    request(`/notifications/${pendingNotice}`, agentNotificationSchema).then(notice => {
+      if (!alive) return;
+      setPendingNotice(undefined);
+      const root = scroll.current;
+      if (notice.conversationId !== selected || !notice.itemId || !root) return;
+      let target = root.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(notice.itemId)}"]`);
+      if (!target) {
+        const index = items.findIndex(item => item.id === notice.itemId);
+        const reply = index >= 0 ? items.slice(index).find(item => item.kind === 'assistant') ?? items.slice(0, index).reverse().find(item => item.kind === 'assistant') : undefined;
+        if (reply) target = root.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(reply.id)}"]`);
+      }
+      if (!target) return;
+      atBottom.current = false;
+      target.scrollIntoView({ block: 'center' });
+      target.classList.remove('message-noticed'); void target.offsetWidth; target.classList.add('message-noticed');
+    }).catch(() => { if (alive) setPendingNotice(undefined); });
+    return () => { alive = false; };
+  }, [pendingNotice, selected, snapshot, items]);
   const conversationView = !view && !creating && selected;
-  const header = view ? <div className="header-title"><h1>{view === 'settings' ? '设置' : '已归档'}</h1>{view === 'settings' && <span className="header-meta">{settingsTabs.find(tab => tab.id === settingsTab)?.label}</span>}</div>
+  const header = view ? <div className="header-title"><h1>{view === 'settings' ? '设置' : view === 'schedule' ? '日程' : '已归档'}</h1>{view === 'settings' && <span className="header-meta">{settingsTabs.find(tab => tab.id === settingsTab)?.label}</span>}</div>
     : creating ? <div className="header-title"><h1>新对话</h1></div>
     : !selected ? <div className="header-title"><h1>中书</h1></div>
     : <div className="header-title">
@@ -718,6 +759,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
     actions={<>
       <SidebarAction icon={<SquarePen size={16}/>} label="新对话" current={!!creating && !view} onClick={() => startDraft()}/>
       <SidebarAction icon={<Search size={16}/>} label={narrow ? '搜索对话、工作区和操作' : '搜索与跳转'} ariaLabel="搜索与跳转" shortcut={narrow ? undefined : [modifierKey, 'K']} onClick={() => { setNavigation(false); setSearching(true); }}/>
+      <SidebarAction icon={<CalendarDays size={16}/>} label="日程" current={view === 'schedule'} onClick={() => openSchedule()}/>
     </>}
     footer={<>
       <SidebarAction icon={<FolderOpen size={16}/>} label="工作区文件" disabled={!configuration?.workspaces.length} onClick={openFiles}/>
@@ -726,7 +768,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
         badge={storageState(storage.value) && <span className="sidebar-badge" data-state={storageState(storage.value)} aria-label={storage.value?.full ? '存储已满' : '存储接近上限'}/>}/>
       {!narrow && <div className="sidebar-status"><ConnectionStatus {...connectionView}/></div>}
     </>}>
-    <ConversationNavigation workspaces={configuration?.workspaces} workspaceAction={setWorkspaceAction} selected={view ? undefined : selected}
+    <ConversationNavigation automations={automationData.automations} openRuns={openRuns} workspaces={configuration?.workspaces} workspaceAction={setWorkspaceAction} selected={view ? undefined : selected}
       revision={listRevision} csrf={csrf} choose={choose} create={createInWorkspace} manage={setManaging} report={report} attention={attention?.conversations}/>
   </SidebarShell>;
   const panel = view ? undefined : subagentPanel && conversation && !narrow ? subagentHost : reader && configuration ? <WorkspaceReader workspaces={configuration.workspaces} initialWorkspace={conversation?.workspaceId}
@@ -741,6 +783,9 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
       {view === 'settings' ? <SettingsView tab={settingsTab} onTab={setSettingsTab} configuration={configuration} workspaceAction={setWorkspaceAction} csrf={csrf} report={report}
           storage={storage} connection={connectionView} logout={logout} busy={busy} revision={listRevision} choose={choose} manage={setManaging} accounts={accounts}/>
         : view === 'archive' ? <ArchiveView configuration={configuration} revision={listRevision} csrf={csrf} report={report} choose={choose} manage={setManaging}/>
+        : view === 'schedule' ? <ScheduleView csrf={csrf} report={report} configuration={configuration} revision={listRevision} tab={scheduleTab}
+          onTab={tab => { setScheduleTab(tab); history.replaceState(null, '', tab === 'calendar' ? '#schedule' : `#schedule:${tab}`); }} openConversation={choose}
+          createFor={createFor} onCreateHandled={() => setCreateFor(undefined)}/>
         : creating ? configuration ? <NewConversation key={String(creating)} configuration={configuration} initialWorkspace={typeof creating==='string'?creating:undefined} addedWorkspace={addedWorkspace} csrf={csrf} onWorkspace={startDraft} onAddWorkspace={()=>setWorkspaceAction({kind:'add'})} onCreated={c=>{refreshList(value=>value+1);choose(c.id);}} report={report}/> : <p className="view-status" role="status">正在读取工作区与配置…</p>
         : !selected ? <section className="empty-workbench">
           <h2>选择一段对话，或开始新的工作</h2>
@@ -749,6 +794,8 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
             <Button onClick={() => setSearching(true)}><Search size={15}/>搜索{!narrow && <Kbd keys={[modifierKey, 'K']}/>}</Button></div>
           {configuration?.workspaces.length === 0 && <p className="quiet">还没有工作区。可以在「设置 › 工作区」中添加。</p>}
         </section> : <>
+        {conversation && conversation.automationId && <AutomationRunBar conversation={conversation} automations={automationData.automations} revision={listRevision} choose={choose} openTasks={() => openSchedule('tasks')}/>}
+        {conversation && <AutomationStrip conversation={conversation} automations={automationData.automations} notifications={automationData.notifications} openTasks={() => openSchedule('tasks')}/>}
         <div className="message-scroll" ref={scroll} onScroll={() => {
           const node = scroll.current!; const remaining = node.scrollHeight - node.scrollTop - node.clientHeight;
           atBottom.current = remaining < 80 && !newerRef.current.length; if (atBottom.current) setMoreOutput(false);

@@ -1,4 +1,6 @@
 import { SubagentBackgroundMark } from './patterns/subagents.tsx';
+import { Clock } from 'lucide-react';
+import type { AutomationView } from '../shared/automations.ts';
 import { z } from 'zod';
 import { memo, useEffect, useRef, useState, type CSSProperties } from 'react';
 import { conversationListSchema, conversationResponseSchema, conversationTitleSchema, type Conversation, type WorkbenchConfiguration } from '../shared/workbench.ts';
@@ -44,6 +46,9 @@ export function useSidebarWidth() {
 }
 
 type NavigationProps = {
+  /** Automations that open a new conversation per run (ADR 0021); each takes one row under its workspace. */
+  automations?: AutomationView[];
+  openRuns?(automationId: string): void;
   workspaces?: WorkbenchConfiguration['workspaces'];
   workspaceAction(action: WorkspaceAction): void;
   selected?: string;
@@ -192,6 +197,10 @@ export const ConversationNavigation = memo(function ConversationNavigation(props
         summary={closed ? summarise(props.attention, workspace.id) : undefined}
         actions={<WorkspaceActions label={workspace.label} onCreate={() => props.create(workspace.id)} onManage={() => props.workspaceAction({ kind: 'manage', workspace })}/>}>
         <ConversationResults {...resultProps} visible={!closed} query={{ workspaceId: workspace.id }}/>
+        {!closed && props.automations?.filter(task => (task.target.kind === 'new' || task.target.kind === 'new_once') && task.target.workspaceId === workspace.id && (task.runs > 0 || task.status !== 'ended'))
+          .map(task => <ConversationRow key={task.id} title={task.title} status={task.executing ? 'running' : 'idle'} statusLabel={task.executing ? '运行中' : ''}
+            detail={task.runs ? `自动任务 · ${task.runs} 次运行` : '自动任务 · 还没跑过'} meta={<Clock size={12} aria-label="自动任务"/>}
+            onOpen={() => props.openRuns?.(task.id)}/>)}
       </WorkspaceGroup>;
     })}
     {props.workspaces && <section className="workspace-group workspace-unregistered">
