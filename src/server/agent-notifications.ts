@@ -74,7 +74,10 @@ export function createAgentNotifications(db: DatabaseSync, options: {
       for (const item of items) {
         if (item.kind !== 'tool' || !item.tool || !toolNames.has(item.tool.name)) continue;
         const id = numbered.exec(item.tool.output ?? '')?.[1];
-        if (!id || !settle(id, 'placed', conversationId, item.id)) continue;
+        if (!id) continue;
+        // Found only after its push already went to the schedule: record where it belongs for the lists, without a second push.
+        db.prepare("UPDATE agent_notifications SET state='placed', conversation_id=?, item_id=? WHERE id=? AND state='unplaced' AND conversation_id IS NULL").run(conversationId, item.id, id);
+        if (!settle(id, 'placed', conversationId, item.id)) continue;
         const notification = get(id);
         if (notification) options.push({ kind: 'agent', conversationId, title: options.title(conversationId), body: notification.summary, notice: id });
       }

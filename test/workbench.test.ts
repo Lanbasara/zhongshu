@@ -966,3 +966,17 @@ test('live growth reaches listeners as appended text and writes no change rows (
   assert.equal(f.store.version(), before, 'in-flight growth is not a durable change');
   assert.equal(f.service.snapshot(f.id).live?.sequence, start + 3);
 });
+
+test('what a run did before observation started reaches the observers through the next changed history read (ADR 0021)', async t => {
+  const f = fixture(t);
+  const seen: string[][] = [];
+  f.service.onObserved((id, items) => { if (id === f.id) seen.push(items.map(item => item.id)); });
+  const notice: NativeItem = { id: 'tool-1', kind: 'tool', text: '', status: 'completed', tool: { name: 'mcp__zhongshu__notify_user', output: '已通知用户。' } };
+  f.peer.historyRead = async () => ({ items: [nativeItem('reply'), notice], olderCursor: null });
+  await f.service.noticeActivity(f.id);
+  await until(() => seen.some(ids => ids.includes('tool-1')));
+  const reports = seen.length;
+  await f.service.noticeActivity(f.id);
+  await delay(30);
+  assert.equal(seen.length, reports, 'reading an unchanged page reports nothing again');
+});

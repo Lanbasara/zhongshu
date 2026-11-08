@@ -98,6 +98,10 @@ test('a notification is pushed with a direct link once its tool record is observ
   assert.equal(notifications.get(second.id)?.state, 'unplaced');
   assert.equal(pushMessage(pushed[0]!).url, `/#c-1:notice:${first.id}`);
   assert.equal(pushMessage(pushed[1]!).url, '/#schedule');
+  // Found in history after its push went to the schedule: it now points at its turn, with no second push.
+  notifications.observed('c-2', [{ id: 'dsh:s2:tool:call-9', kind: 'tool', text: '', status: 'completed', tool: { name: 'mcp__zhongshu__notify_user', output: `已通知用户。通知编号 ${second.id}` } }]);
+  assert.deepEqual([notifications.get(second.id)?.state, notifications.get(second.id)?.conversationId, notifications.get(second.id)?.itemId], ['placed', 'c-2', 'dsh:s2:tool:call-9']);
+  assert.equal(pushed.length, 2);
   assert.equal(pushMessage(pushed[0]!).body, 'T2 临近：A50 下探 12,710');
   for (let index = 0; index < 28; index++) notifications.notify(`n${index}`, undefined);
   assert.ok('refused' in notifications.notify('one too many', undefined), 'a looping agent cannot flood the phone');
