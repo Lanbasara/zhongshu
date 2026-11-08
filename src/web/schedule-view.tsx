@@ -381,10 +381,14 @@ function SchedulePanel({ panel, automations, configuration, csrf, report, close,
   openFile(workspaceId: string, path: string): void; notifications: AgentNotificationView[];
 }) {
   const ref = useRef<HTMLElement>(null);
-  useEffect(() => { ref.current?.querySelector<HTMLElement>('button, input, textarea')?.focus(); const key = (event: KeyboardEvent) => { if (event.key === 'Escape') close(); }; window.addEventListener('keydown', key); return () => window.removeEventListener('keydown', key); }, [close]);
+  // Focus moves into the panel itself: not the close button, and no field that would pop up a phone keyboard.
+  useEffect(() => { ref.current?.focus({ preventScroll: true }); const key = (event: KeyboardEvent) => {
+    // Escape first closes an open picker inside the panel (rendered in a portal); only then the panel.
+    if (event.key === 'Escape' && !event.defaultPrevented && !document.querySelector('[data-radix-popper-content-wrapper]')) close();
+  }; window.addEventListener('keydown', key); return () => window.removeEventListener('keydown', key); }, [close]);
   return <>
     <div className="sch-scrim" onClick={close}/>
-    <aside className="sch-panel" ref={ref} role="dialog" aria-modal="true" aria-label={panel.kind === 'create' ? '新建自动任务' : '详情'}>
+    <aside className="sch-panel" ref={ref} tabIndex={-1} role="dialog" aria-modal="true" aria-label={panel.kind === 'create' ? '新建自动任务' : '详情'}>
       {panel.kind === 'task' ? <TaskDetail task={automations.find(task => task.id === panel.id)} configuration={configuration} csrf={csrf} report={report} close={close} notice={notice} notify={notify} reload={reload} edit={edit} openConversation={openConversation} notifications={notifications}/>
         : panel.kind === 'create' ? <><PanelHead title="新建自动任务" close={close}/><CreateForm configuration={configuration} csrf={csrf} report={report} close={close} reload={reload} conversationId={panel.conversationId}/></>
         : <EntryDetail item={panel.item} close={close} openFile={openFile}/>}

@@ -143,6 +143,7 @@
 
 /* Side panel: task detail, create and edit. One header, a scrolling body and a fixed action bar. */
 .sch-scrim { position:fixed; inset:0; background:var(--zs-scrim); z-index:var(--zs-layer-overlay); }
+.sch-panel:focus { outline:none; }
 .sch-panel { position:fixed; top:0; right:0; bottom:0; width:480px; max-width:100%; background:var(--zs-surface); z-index:var(--zs-layer-dialog); box-shadow:var(--zs-shadow-modal); display:flex; flex-direction:column; }
 .sch-panel-head { height:56px; display:flex; align-items:center; gap:10px; padding:0 12px 0 20px; border-bottom:1px solid var(--zs-border); flex:none; color:var(--zs-text-muted); }
 .sch-panel-head h2 { font-size:var(--zs-type-section); font-weight:600; color:var(--zs-text); margin:0; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }

@@ -110,7 +110,9 @@ export function CreateForm({ configuration, csrf, report, close, reload, convers
   const [title, setTitle] = useState(''); const [prompt, setPrompt] = useState('');
   const [timing, setTiming] = useState(initialTiming());
   const [target, setTarget] = useState<keyof typeof targets>(conversationId ? 'conversation' : 'new');
-  const [workspace, setWorkspace] = useState(configuration?.workspaces[0]?.id ?? '');
+  // The settings may arrive after the form opens; until the user picks, the first workspace is the choice shown and used.
+  const [picked, setPicked] = useState('');
+  const workspace = configuration?.workspaces.some(entry => entry.id === picked) ? picked : configuration?.workspaces[0]?.id ?? '';
   const [preset, setPreset] = useState(dsh?.defaultPresetId ?? presets.find(item => item.available)?.id ?? '');
   const [agent, setAgent] = useState<DraftConfigurationValue>(() => nativeDefaults(dsh));
   const [skill, setSkill] = useState<SkillOption>();
@@ -158,7 +160,7 @@ export function CreateForm({ configuration, csrf, report, close, reload, convers
             <span><b>{targets[id][0]}</b><small>{targets[id][1]}</small></span>{target === id && <Check size={15} aria-hidden="true"/>}</button>)}
       </div>
       {target !== 'conversation' && <Field label="工作区">
-        <span className="sch-select"><select aria-label="工作区" value={workspace} onChange={event => setWorkspace(event.target.value)}>
+        <span className="sch-select"><select aria-label="工作区" value={workspace} onChange={event => setPicked(event.target.value)}>
           {configuration?.workspaces.map(entry => <option key={entry.id} value={entry.id}>{entry.label}</option>)}</select><ChevronDown size={14} aria-hidden="true"/></span>
       </Field>}
       <Field label="Agent 配置" hint={target === 'new' ? '每次运行的对话由宿主新建，只能选预设；模型、思考深度和权限用宿主默认。要指定模型，选“首次新开，之后回到那段”。'
