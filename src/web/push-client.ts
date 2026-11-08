@@ -121,12 +121,17 @@ export function setBadge(count: number): void {
 }
 
 /** Entries a notification click may ask an open page to show. */
-export type OpenRequest = { kind: 'conversation'; id: string } | { kind: 'settings'; tab?: string } | { kind: 'home' };
-const conversationEntry = /^#([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
+export type OpenRequest = { kind: 'conversation'; id: string; notice?: string } | { kind: 'settings'; tab?: string } | { kind: 'schedule'; tab?: string } | { kind: 'home' };
+const uuid = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
+/** A conversation, optionally at the turn an agent notification points to (ADR 0021). */
+const conversationEntry = new RegExp(`^#(${uuid})(?::notice:(${uuid}))?$`);
 const settingsEntry = /^#settings(?::([a-z]{1,32}))?$/;
+const scheduleEntry = /^#schedule(?::([a-z]{1,32}))?$/;
 export function parseEntry(hash: string): OpenRequest | undefined {
-  const conversation = conversationEntry.exec(hash)?.[1];
-  if (conversation) return { kind: 'conversation', id: conversation };
+  const conversation = conversationEntry.exec(hash);
+  if (conversation) return { kind: 'conversation', id: conversation[1]!, ...(conversation[2] ? { notice: conversation[2] } : {}) };
+  const schedule = scheduleEntry.exec(hash);
+  if (schedule) return schedule[1] ? { kind: 'schedule', tab: schedule[1] } : { kind: 'schedule' };
   const settings = settingsEntry.exec(hash);
   if (settings) return settings[1] ? { kind: 'settings', tab: settings[1] } : { kind: 'settings' };
   return undefined;

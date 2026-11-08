@@ -209,6 +209,8 @@ test('a later native notification turn permits another message only with exact t
   assert.equal(f.peer.stateTargets.at(-1), 'user-run');
   await assert.rejects(f.service.enqueue(operation(f.id)), { code: 'operation_needs_reconciliation' });
   f.peer.current = { ...terminal('notification-run'), terminalRunId: 'user-run' }; await f.service.reconcile(f.id);
+  // ADR 0021: once the user run is proven, the later run nobody here started is read for its own result.
+  assert.equal(f.peer.stateTargets.at(-1), 'notification-run');
   const before = f.peer.stateCalls; const second = operation(f.id); await f.service.enqueue(second); await until(() => f.peer.submitCalls.length === 1);
   assert.ok(f.peer.stateCalls > before, 'dispatch rechecks the native target immediately before submit');
   assert.equal(f.peer.stateTargets[before], 'user-run');

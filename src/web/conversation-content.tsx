@@ -1,14 +1,15 @@
-import { Fragment, memo, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { Fragment, memo, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Streamdown, defaultRemarkPlugins } from 'streamdown';
 import { code } from '@streamdown/code';
 import { cjk } from '@streamdown/cjk';
-import { Check, ClipboardList, Copy, FileText, Info, Quote, X, ImageIcon } from 'lucide-react';
+import { Check, ClipboardList, Clock, Copy, FileText, Info, Quote, X, ImageIcon } from 'lucide-react';
 import type { TurnFileSummary, WorkbenchItem } from '../shared/workbench.ts';
 import type { MessageReference, ImageAttachment } from '../shared/content.ts';
 import { referenceSchema } from '../shared/content.ts';
 import { workspaceImages } from './markdown.ts';
 import { TurnFiles } from './patterns/turn-files.tsx';
 import { ProcessBlock } from './patterns/process.tsx';
+import { AutomationTitles, deliveredReminders } from './automation-delivery.ts';
 import './patterns/plan.css';
 
 export const imageUrl = (conversation: string, image: ImageAttachment) => `/api/private/workbench/conversations/${encodeURIComponent(conversation)}/resources/${image.id}`;
@@ -41,6 +42,8 @@ export function Message({ item, conversation, onQuote }: { item: WorkbenchItem; 
   const ref = useRef<HTMLElement>(null);
   const [copied, setCopied] = useState(false);
   const [quoteHint, setQuoteHint] = useState(false);
+  const titles = useContext(AutomationTitles);
+  const reminders = useMemo(() => (item.automation ? deliveredReminders(item.text) : undefined), [item.automation, item.text]);
   // The explicit options also distinguish Streamdown's shared processor cache.
   const remarkPlugins = useMemo(() => [...Object.values(defaultRemarkPlugins), [workspaceImages, { conversation, item: item.id }] as [typeof workspaceImages, { conversation: string; item: string }]], [conversation, item.id]);
   const components = useMemo(() => ({ ...markdownComponents,
@@ -64,8 +67,19 @@ export function Message({ item, conversation, onQuote }: { item: WorkbenchItem; 
   return <article ref={ref} tabIndex={-1} className={`message message-${item.kind}`} data-message-id={item.id} data-status={item.status}>
     {item.kind === 'notice' && <Info size={14} className="message-notice-icon" aria-hidden="true"/>}
     <div className="message-body">
-      {item.kind === 'user' ? <div className="message-bubble">
-        <div className="message-text">{item.text}</div>
+      {item.kind === 'user' ? <div className={`message-bubble${item.automation ? ' message-automation' : ''}`}>
+        {item.automation ? <>
+          {reminders ? <>
+            {reminders.map((reminder, index) => <Fragment key={index}>
+              <div className="message-automation-label"><Clock size={12} aria-hidden="true"/>自动任务投递{titles.get(reminder.scheduleId) ? ` · ${titles.get(reminder.scheduleId)}` : ''}</div>
+              <div className="message-text">{reminder.prompt}</div>
+            </Fragment>)}
+            <details className="message-automation-raw"><summary>原文</summary><pre>{item.text}</pre></details>
+          </> : <>
+            <div className="message-automation-label"><Clock size={12} aria-hidden="true"/>自动任务投递</div>
+            <div className="message-text">{item.text}</div>
+          </>}
+        </> : <div className="message-text">{item.text}</div>}
         {item.images?.length ? <div className="message-images">{item.images.map(image => <ImageView key={image.id} src={imageUrl(conversation, image)} alt={image.name}/>)}</div> : null}
         {item.references?.length ? <div className="message-references">{item.references.map((reference, index) => <div key={index} className="reference-card">{reference.type === 'file' ? <><FileText size={14}/><span>{reference.path}<small>工作区原文件</small></span></> : <><Quote size={14}/><blockquote>{reference.text}<small>引用消息片段</small></blockquote></>}</div>)}</div> : null}
       </div> : <>

@@ -18,12 +18,14 @@ type Stream = { item: (value: unknown) => void; failed: (error: HarnessError) =>
 /** A request the Host forwards to answering clients (ADR 0016). `agentId` is the asking session. */
 export type Interaction = { eventId: string; event: string; agentId: string; request: unknown };
 /** Receives forwarded interactions. `reset` means every forwarded request of the old connection is void; the Host replays open ones. */
-export type InteractionSink = { request(interaction: Interaction): void; cancel(eventId: string): void; reset(): void };
+export type InteractionSink = { request(interaction: Interaction): void; cancel(eventId: string): void; reset(): void;
+  /** A forwarded one-way Host event such as payload-free `schedule/changed` (ADR 0021); also called with `reset` semantics after reconnect. */
+  emit?(event: string): void };
 const eventItem = z.discriminatedUnion('type', [
   z.object({ type: z.literal('ready'), clientId: z.string().min(1).max(200) }).passthrough(),
   z.object({ type: z.literal('waterfall'), event: z.string().max(120), eventId: z.string().min(1).max(200), agentId: z.string().min(1).max(240), request: z.unknown() }).passthrough(),
   z.object({ type: z.literal('cancel'), eventId: z.string().min(1).max(200) }).passthrough(),
-  z.object({ type: z.literal('emit') }).passthrough(),
+  z.object({ type: z.literal('emit'), event: z.string().max(120).optional(), name: z.string().max(120).optional() }).passthrough(),
 ]);
 
 export async function readLaunchFile(path: string): Promise<URL> {
@@ -134,9 +136,10 @@ export class Connection {
         const parsed = eventItem.safeParse(value);
         if (!parsed.success || this.socket !== socket) return;
         const item = parsed.data;
-        if (item.type === 'ready') this.clientId = item.clientId;
+        if (item.type === 'ready') { this.clientId = item.clientId; this.sink?.emit?.('$ready'); }
         else if (item.type === 'waterfall') this.sink?.request({ eventId: item.eventId, event: item.event, agentId: item.agentId, request: item.request });
         else if (item.type === 'cancel') this.sink?.cancel(item.eventId);
+        else if (item.type === 'emit') { const event = item.event ?? item.name; if (event) this.sink?.emit?.(event); }
       },
       // Without the stream nothing can be answered; other calls keep working and the next connection retries.
       failed: () => { if (this.socket === socket) this.clientId = undefined; },

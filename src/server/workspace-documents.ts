@@ -57,13 +57,13 @@ function format(path: string) {
   return kind;
 }
 
-async function readDocument(directory: string, name: string, kind: ReturnType<typeof format>) {
+async function readDocument(directory: string, name: string, kind: ReturnType<typeof format>, maximum?: number) {
   const file = join(directory, name);
   const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const before = await handle.stat({ bigint: true });
     if (!before.isFile() || before.nlink !== 1n) throw new ResourceError('file_reference_forbidden', 403);
-    const limit = kind === 'html' ? htmlLimit : textLimit;
+    const limit = maximum ?? (kind === 'html' ? htmlLimit : textLimit);
     if (before.size > limit) throw new ResourceError('file_too_large', 413);
     const buffer = Buffer.alloc(Number(before.size) + 1);
     let length = 0;
@@ -94,6 +94,20 @@ export function openWorkspaceDocument(root: string, path: string, identity?: str
     const { mode: _mode, uid: _uid, gid: _gid, ...document } = await readDocument(directory, basename(path), kind);
     return document;
   }, identity);
+}
+
+/**
+ * The workspace timeline (ADR 0021): agents append `.zhongshu/timeline.jsonl`; Zhongshu only reads it. The hidden
+ * path is fixed here and never served by the document reader. A workspace without the file has no timeline.
+ */
+export async function readWorkspaceTimeline(root: string, identity?: string): Promise<string | null> {
+  try {
+    return await withWorkspaceDirectory(root, ['.zhongshu'], async directory => (await readDocument(directory, 'timeline.jsonl', 'text', 2 * 1024 * 1024)).text, identity);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || (error instanceof ResourceError && error.message === 'file_reference_unavailable')) return null;
+    throw error;
+  }
 }
 
 export function saveWorkspaceDocument(root: string, path: string, version: string, text: string, assertWritable: () => void, identity?: string) {

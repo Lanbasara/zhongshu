@@ -47,13 +47,17 @@ export function createPushTriggers(source: Source, notify: (event: PushEvent) =>
     if (status === 'unknown') { if (previous) active.set(id, { status }); return; }
     // A settled result. It is new when it follows a run seen here, or replaces the result last seen here
     // (a run can start and end between two observations). Repeats of the same result never notify twice.
-    const terminal = conversation.state.terminalStatus;
-    const key = terminal ? `${terminal}:${conversation.state.terminalRunId ?? ''}` : '';
+    // ADR 0021: a later run nobody here started (an automation delivery) is the newest result. Its completion is not
+    // pushed: the agent decides with notify_user whether the user should look. Failures still are.
+    const latest = conversation.state.latest;
+    const terminal = latest?.status ?? conversation.state.terminalStatus;
+    const key = terminal ? `${terminal}:${latest?.runId ?? conversation.state.terminalRunId ?? ''}` : '';
     const known = results.has(id); const before = results.get(id);
     results.delete(id); results.set(id, key);
     if (results.size > 4096) results.delete(results.keys().next().value!);
     const followedRun = active.delete(id);
     if (!terminal || key === before || (!followedRun && !known)) return;
+    if (latest && terminal === 'completed') return;
     if (source.unread([conversation]).has(id)) notify({ kind: terminal, ...event });
   }
   function flush(): void {

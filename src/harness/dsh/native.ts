@@ -210,6 +210,11 @@ export function itemFrom(session: string, event: Event, live = false, inferredTu
   if (event.type === 'user/message' && source.kind === 'subagent-settled' && subagentIdSchema.safeParse(source.senderSessionId).success)
     return { ...base, kind: 'notice', text: typeof source.summary === 'string' ? source.summary.slice(0, 2000) : '子 Agent 已结束', collaboration: { action: 'completed', agentIds: [String(source.senderSessionId)] } };
   if (event.type === 'user/message' && typeof object(data.source).rpcId === 'string') return { ...base, kind: 'user', text: textContent(data.content), operationId: String(object(data.source).rpcId) };
+  // An automation delivery (ADR 0021): a native user message the Host wrote, shown as it is and marked with its origin.
+  if (event.type === 'user/message' && source.kind === 'schedule') {
+    const messageId = typeof data.id === 'string' ? data.id : typeof object(data.message).id === 'string' ? String(object(data.message).id) : undefined;
+    return { ...base, kind: 'user', text: textContent(data.content ?? object(data.message).content), automation: messageId && messageId.length <= 240 ? { messageId } : {} };
+  }
   if (event.type === 'assistant/message' && turn !== undefined && typeof data.step === 'number') {
     const text = textContent(object(data.message).content); if (!text) return;
     return { ...base, id: assistantId(session, turn, data.step), kind: 'assistant', text, status: data.interrupted === true ? 'failed' : 'completed' };

@@ -47,6 +47,8 @@ Current compatibility is Codex CLI `0.166.0-alpha.5.1` and DSH `0.2.2-rc.1` (DSH
 
 To enable instance plugin management, see the [native connection setup](docs/features/plugin-management.md#准备原生连接).
 
+Native automations (DSH `0.2.2-rc.1` and later) need no extra configuration. To let agents notify the user ([automations](docs/features/automations.md)), add `"agentTools": { "port": 3100, "tokenFile": "/run/private-zhongshu/agent-tool-token" }`. The app then serves a minimal MCP endpoint at `http://127.0.0.1:<port>/mcp` on loopback only. The token file must be a regular file owned by the app account with no group or other permissions, holding 24 to 512 token characters (letters, digits and `._~+/=-`). Register that endpoint in the DSH profile as an MCP server named `zhongshu` with the header `Authorization: Bearer <token>`; agents then see `mcp__zhongshu__notify_user`. The Host must reach the app's loopback address, for example by sharing its network namespace. Never publish the port or put the token in the repository or logs.
+
 For a production build, run `npm run build`, set `ZHONGSHU_ORIGIN` to the public HTTPS origin, then `npm start`.
 
 The administrator password comes from `ZHONGSHU_ADMIN_PASSWORD` (at least 8 characters). It is applied at startup, and changing it signs out every session. A local instance (HTTP on loopback) without it uses `zhongshu-local`. A remote instance without it keeps the password set with `npm run admin -- init` or `reset`. Keep each instance's value in that instance's own configuration, never in this repository.

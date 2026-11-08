@@ -5,6 +5,7 @@ import { subagentIdSchema, subagentLimit } from '../../shared/workbench.ts';
 import { HarnessError } from '../types.ts';
 import type { Binding, Catalog, Configuration, HarnessAdapter, HarnessInput, HistoryPage, LoginCompletion, LoginStart, NativeAccount, NativeChange, NativeItem, NativeRequest, NativeState, NativeSubagent, Receipt, SubagentHistory, SubagentSnapshot } from '../types.ts';
 import { Connection, NativeRejection, readLaunchFile, type Interaction } from './connection.ts';
+import { dshAutomations } from './automations.ts';
 import { parseInteraction, requestKey, toolCommand, type Parsed } from './requests.ts';
 import { LiveAssistant } from './live.ts';
 import { boundaryFrom, decodeModel, selectedModel, eventSchema, historyItems, identifier, inboxSenders, itemFrom, modelId, modelSchema, object, pageSchema, snapshotSchema, stateFrom, targetTurnRange, terminalStatusFrom, textBlocks, textContent, turnAt, usageFrom } from './native.ts';
@@ -69,6 +70,8 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
     request(interaction) { receive(interaction); },
     cancel(eventId) { const key = requestKey(eventId); const entry = interactions.get(key); if (!entry) return; interactions.delete(key); hint(entry.agentId, { type: 'requests' }); },
     reset() { const agents = new Set([...interactions.values()].map(entry => entry.agentId)); interactions.clear(); for (const agentId of agents) hint(agentId, { type: 'requests' }); },
+    // Payload-free task invalidation (ADR 0021); a fresh events stream may have missed some, so it counts too.
+    emit(event) { if (event === 'schedule/changed' || event === '$ready') schedules.changed(); },
   });
   const subscriptions = new Set<() => void>();
   /** Conversation watches by native session, so child observation can hint the owning conversation. */
@@ -142,6 +145,24 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
   }
   const lastStates = new Map<string, NativeState>();
   let closed = false;
+  /** Read a session a schedule created, without a binding: its directory and the configuration it runs with. */
+  async function inspectSession(sessionId: string): Promise<{ cwd: string; configuration: Configuration } | undefined> {
+    const value = await new Promise<Snapshot>((resolve, reject) => {
+      let cancel: (() => void) | undefined; let settled = false;
+      const finish = (error?: unknown, snap?: Snapshot) => { if (settled) return; settled = true; clearTimeout(timer); cancel?.(); if (error) reject(nativeError(error)); else if (snap) resolve(snap); };
+      const timer = setTimeout(() => finish(new HarnessError('DSH_SNAPSHOT_TIMEOUT')), 15000);
+      void connection.follow({ request: { address: { kind: 'session', sessionId }, activate: false, maxMessages: 1 } }, {
+        item(item) { if (settled) return; try { const parsed = snapshotSchema.parse(item); if (parsed.header.id !== sessionId) throw new HarnessError('DSH_BINDING_MISMATCH'); finish(undefined, parsed); } catch (error) { finish(error); } },
+        failed: finish,
+      }).then(stop => { cancel = stop; if (settled) stop(); }, finish);
+    });
+    const values = value.projections.values; const model = values.modelSelection?.next ?? values.modelSelection?.lastUsed;
+    const permissionId = values.permissions?.currentValue;
+    if (!value.header.cwd || !model || !permissionId || !/^[a-z][a-z0-9-]{0,63}$/.test(permissionId)) return undefined;
+    return { cwd: value.header.cwd, configuration: { modelId: modelId({ provider: model.provider, model: model.model }), permissionId,
+      ...(model.reasoningEffort ? { reasoningEffort: model.reasoningEffort } : {}), ...(values.agentPreset ? { agentPreset: values.agentPreset } : {}) } };
+  }
+  const schedules = dshAutomations(connection, inspectSession);
   const checkBinding = (binding: Binding): Binding => {
     try { const parsed = bindingSchema.parse(binding); selectedModel(parsed.configuration); if (!isAbsolute(parsed.cwd) || normalize(parsed.cwd) !== parsed.cwd) throw new Error(); return parsed; }
     catch { throw new HarnessError('DSH_BINDING_INVALID'); }
@@ -731,6 +752,6 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
       return { ...configuration, modelId: modelId({ provider: selected.provider, model: selected.model }),
         ...(selected.reasoningEffort === undefined ? {} : { reasoningEffort: selected.reasoningEffort }) };
     }, prepareDraft, skills: async binding => skillOptions(await skillCatalog(binding)), create, state, history, submit, submitQueued: submit, readImage, reconcile, stop, watch,
-    subagents, subagentHistory, observeSubagent, stopSubagent, requests, answer,
+    subagents, subagentHistory, observeSubagent, stopSubagent, requests, answer, automations: schedules,
     async close() { closed = true; for (const dispose of [...subscriptions]) dispose(); lastStates.clear(); interactions.clear(); await connection.close(); } };
 }
