@@ -40,7 +40,63 @@ export type NativeItem = {
   collaboration?: Collaboration;
   /** A plan proposed in Plan mode. */
   plan?: true;
+  /** A message an automation delivered (ADR 0021); `messageId` matches the delivery receipt when the Harness reports one. */
+  automation?: { messageId?: string };
 };
+/** When a native automation fires (ADR 0021). Instants are UTC RFC 3339; clock rules carry an IANA zone. */
+export type AutomationTiming =
+  | { kind: 'once'; at: string }
+  | { kind: 'every'; seconds: number }
+  | { kind: 'daily'; time: string; timeZone: string }
+  | { kind: 'weekly'; time: string; timeZone: string; weekdays: number[] }
+  | { kind: 'cron'; expression: string; timeZone: string }
+  | { kind: 'rrule'; rrule: string };
+/** Where each delivery goes: one existing session, one session created at the first delivery, or a new session every time. */
+export type AutomationTarget =
+  | { kind: 'session'; sessionId: string }
+  | { kind: 'new_once'; sessionId?: string; cwd?: string; preset?: string }
+  | { kind: 'new'; cwd?: string; preset?: string };
+export type AutomationDelivery = { scheduledAt: string; deliveredAt: string; messageId: string; sessionId: string; prompt?: string };
+/** One native automation as the Harness stores it; Zhongshu keeps no copy (ADR 0021). */
+export type NativeAutomation = {
+  id: string; title: string; prompt: string; timing: AutomationTiming;
+  /** Next occurrence while active; the final one once ended. */
+  scheduledAt: string;
+  status: 'active' | 'paused' | 'ended';
+  target: AutomationTarget;
+  /** Sessions the Harness tells about later changes: creators, editors and session targets. */
+  involved: string[];
+  createdAt?: string;
+  /** Revision for optimistic edits; an edit with an older value is refused as a conflict. */
+  updatedAt?: string;
+  /** A delivery is queued or running in its reused session. */
+  executing: boolean;
+  lastDelivery?: AutomationDelivery;
+};
+export type AutomationTimingInput =
+  | { kind: 'at'; at: string }
+  | { kind: 'every'; seconds: number }
+  | { kind: 'daily'; time: string; timeZone: string }
+  | { kind: 'weekly'; time: string; timeZone: string; weekdays: number[] }
+  | { kind: 'cron'; expression: string; timeZone: string };
+export type AutomationTargetInput = { kind: 'session'; sessionId: string } | { kind: 'new_once' | 'new'; cwd?: string; preset?: string };
+export type AutomationPatch = { title?: string; prompt?: string; timing?: AutomationTimingInput; target?: AutomationTargetInput; active?: boolean };
+export type AutomationEdit = NativeAutomation | 'conflict' | 'notFound' | 'ended';
+/** Native automations of one Harness. Every call reads or writes the Harness; nothing is cached here. */
+export interface HarnessAutomations {
+  list(): Promise<NativeAutomation[]>;
+  view(id: string): Promise<NativeAutomation | undefined>;
+  history(id: string, limit: number, before?: string): Promise<{ records: AutomationDelivery[]; before?: string; earlierUnavailable: boolean } | undefined>;
+  create(input: { title: string; prompt: string; timing: AutomationTimingInput; target?: AutomationTargetInput }): Promise<NativeAutomation>;
+  update(id: string, patch: AutomationPatch, expectedUpdatedAt?: string): Promise<AutomationEdit>;
+  remove(id: string, expectedUpdatedAt?: string): Promise<'deleted' | 'conflict' | 'notFound'>;
+  /** Deliver now without moving the planned occurrence. */
+  run(id: string): Promise<NativeAutomation | 'pending' | 'notFound'>;
+  /** A hint that the set of automations or a delivery changed; re-list to learn what. */
+  onChange(listener: () => void): () => void;
+  /** Read a session the Harness created for an automation, so Zhongshu can adopt it. */
+  inspect(sessionId: string): Promise<{ cwd: string; configuration: Configuration } | undefined>;
+}
 /** One native sub-agent in the conversation's spawn tree, as verified by this read. */
 export type NativeSubagent = {
   id: string;
@@ -195,6 +251,8 @@ export interface HarnessAdapter {
    * request is not open (or the answer is invalid) and nothing was delivered. Never resend after `unknown`.
    */
   answer?(binding: Binding, requestId: string, answer: RequestAnswer): Promise<Receipt>;
+  /** Native automations (ADR 0021); absent when the Harness has none Zhongshu can use. */
+  readonly automations?: HarnessAutomations;
   /** Changes are hints/live items; history and state are re-read on reconnect. */
   watch(binding: Binding, listener: (change: NativeChange) => void): Promise<() => void>;
   /** Close app-owned connections only; native hosts and their work have independent lifetimes. */

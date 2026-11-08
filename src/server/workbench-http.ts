@@ -40,7 +40,7 @@ function parse<T>(schema: z.ZodType<T>, value: unknown): T {
 function conversationView(value: Conversation, unread: boolean, plan: ConversationView['plan']): ConversationView {
   return { id: value.id, title: value.title, harnessId: value.harnessId, workspaceId: value.workspaceId, archived: value.archived,
     configuration: value.configuration, readiness: value.readiness, state: value.state, error: value.error, createdAt: value.createdAt,
-    ...(value.subagents ? { subagents: value.subagents } : {}), ...(plan ? { plan } : {}), unread };
+    ...(value.subagents ? { subagents: value.subagents } : {}), ...(plan ? { plan } : {}), ...(value.automationId ? { automationId: value.automationId } : {}), unread };
 }
 function stopView(value: SubagentStop) {
   return subagentStopResponseSchema.parse({ stop: { id: value.id, status: value.status, reason: value.reason, updatedAt: value.updatedAt } });

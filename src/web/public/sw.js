@@ -1,8 +1,8 @@
 // Push-only service worker (ADR 0018). It shows notifications and opens their entry, nothing else:
 // no fetch handler and no caches, so every page and API request still goes to the server.
-const kinds = new Set(['completed', 'failed', 'interrupted', 'waiting', 'account', 'test']);
-/** Entries a notification may open: the app root, a conversation, or a settings tab. */
-const entry = /^\/(#([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|settings(:[a-z]{1,32})?))?$/;
+const kinds = new Set(['completed', 'failed', 'interrupted', 'waiting', 'account', 'test', 'agent']);
+/** Entries a notification may open: the app root, a conversation (optionally at an agent notice), a settings tab, or the schedule. */
+const entry = /^\/(#([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(:notice:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?|settings(:[a-z]{1,32})?|schedule(:[a-z]{1,32})?))?$/;
 const text = (value, limit) => (typeof value === 'string' && value.length <= limit ? value : '');
 const safeEntry = value => (typeof value === 'string' && entry.test(value) ? value : '/');
 

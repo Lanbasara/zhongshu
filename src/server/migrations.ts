@@ -286,6 +286,30 @@ export const productMigrations: Migration[] = [{ version: 2, sql: `
 ` }, { version: 22, sql: `
   -- ADR 0020: 'state' marks a change that leaves the conversation's history untouched; NULL may touch history.
   ALTER TABLE workbench_changes ADD COLUMN scope TEXT CHECK (scope IS NULL OR scope = 'state');
+` }, { version: 23, sql: `
+  -- ADR 0021: a conversation a native automation created; it is listed under that automation, not in the sidebar.
+  ALTER TABLE workbench_conversations ADD COLUMN automation_id TEXT CHECK (automation_id IS NULL OR length(automation_id) <= 240);
+  -- ADR 0021: one-line notifications agents send through the notify tool, kept so the page can list and open them.
+  CREATE TABLE agent_notifications (
+    id TEXT PRIMARY KEY,
+    summary TEXT NOT NULL CHECK (length(summary) <= 400),
+    file TEXT CHECK (file IS NULL OR length(file) <= 1024),
+    created_at INTEGER NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('pending', 'placed', 'unplaced')),
+    conversation_id TEXT,
+    item_id TEXT CHECK (item_id IS NULL OR length(item_id) <= 600),
+    sent_at INTEGER
+  ) STRICT;
+  CREATE INDEX agent_notifications_created ON agent_notifications(created_at);
+  -- ADR 0021: the last delivery of each automation Zhongshu acted on, so a restart neither repeats nor misses one.
+  CREATE TABLE automation_deliveries (
+    automation_id TEXT PRIMARY KEY CHECK (length(automation_id) <= 240),
+    message_id TEXT NOT NULL CHECK (length(message_id) <= 240),
+    session_id TEXT NOT NULL CHECK (length(session_id) <= 240),
+    scheduled_at TEXT NOT NULL,
+    delivered_at TEXT NOT NULL,
+    handled_at INTEGER NOT NULL
+  ) STRICT;
 ` }];
 
 /** Runs inside restoreDatabase's private staging transaction, before the database is published. */

@@ -23,8 +23,11 @@ export const pushTestResponseSchema = z.object({ delivered: z.boolean(), failure
 export type PushDevice = z.infer<typeof pushDeviceSchema>;
 export type PushState = z.infer<typeof pushStateSchema>;
 
-/** Events that reach a device. Notifications name the event and the conversation title, never message, question or file content (ADR 0018). */
-export type PushKind = 'completed' | 'failed' | 'interrupted' | 'waiting' | 'account' | 'test';
+/**
+ * Events that reach a device. Notifications name the event and the conversation title, never message, question or file content (ADR 0018);
+ * the one exception is `agent`: the one line an agent wrote for the user with `notify_user` (ADR 0021).
+ */
+export type PushKind = 'completed' | 'failed' | 'interrupted' | 'waiting' | 'account' | 'test' | 'agent';
 export type PushHarness = 'codex' | 'dsh';
 const harnessNames: Record<PushHarness, string> = { codex: 'Codex', dsh: 'DSH' };
 
@@ -42,7 +45,14 @@ export function notificationTitle(value: string): string {
  * The message for one event. With a conversation title (ADR 0018, 2026-11-07) the title heads the notification
  * and the body names the event; message, question and file content never appear.
  */
-export function pushMessage(event: { kind: PushKind; conversationId?: string; harnessId?: PushHarness; title?: string }, badge?: number): PushMessage {
+export function pushMessage(event: { kind: PushKind; conversationId?: string; harnessId?: PushHarness; title?: string; body?: string; notice?: string }, badge?: number): PushMessage {
+  if (event.kind === 'agent') {
+    // The agent's one line, opening the turn that sent it; without a known conversation the schedule page lists it.
+    const notice = event.notice && /^[0-9a-f-]{36}$/.test(event.notice) ? event.notice : undefined;
+    const url = event.conversationId && notice ? `/#${event.conversationId}:notice:${notice}` : '/#schedule';
+    const heading = event.title === undefined ? '' : notificationTitle(event.title);
+    return { v: 1, kind: 'agent', title: heading || '中书', body: notificationTitle(event.body ?? '') || '有一条新的通知。', url, tag: notice ? `notice:${notice}` : 'zhongshu:agent', ...(badge === undefined ? {} : { badge }) };
+  }
   const name = event.harnessId ? harnessNames[event.harnessId] : 'Agent';
   const conversation = event.conversationId ? `/#${event.conversationId}` : '/';
   const tag = event.conversationId ? `conversation:${event.conversationId}` : `zhongshu:${event.kind}`;
@@ -54,6 +64,7 @@ export function pushMessage(event: { kind: PushKind; conversationId?: string; ha
     waiting: heading ? [heading, `${name} 在等你回答或批准。`, conversation] : [`${name} 在等你回答或批准`, '点开处理。', conversation],
     account: [`${name} 账号需要处理`, '点开设置查看并处理。', '/#settings:account'],
     test: ['中书测试通知', '这台设备能收到中书的通知。', '/'],
+    agent: ['中书', '', '/#schedule'],
   };
   const [title, body, url] = words[event.kind];
   return { v: 1, kind: event.kind, title, body, url, tag, ...(badge === undefined ? {} : { badge }) };

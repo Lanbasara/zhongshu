@@ -7,7 +7,7 @@ import { pushDeviceLimit, pushMessage, pushStateSchema, pushSubscribeResponseSch
 import { allowedEndpoint, encryptPayload, generateVapidKeys, validSubscriptionKeys, vapidAuthorization, type VapidKeys } from './web-push.ts';
 
 /** `title` is the conversation title (ADR 0018, 2026-11-07); it travels only inside the encrypted message. */
-export type PushEvent = { kind: PushKind; conversationId?: string; harnessId?: PushHarness; title?: string };
+export type PushEvent = { kind: PushKind; conversationId?: string; harnessId?: PushHarness; title?: string; body?: string; notice?: string };
 type Device = { id: string; endpoint: string; p256dh: string; auth: string; label: string; publicKey: string; createdAt: number;
   deliveredAt: number | null; failedAt: number | null; failure: string | null };
 type Delivery = { delivered: boolean; failure: string | null };

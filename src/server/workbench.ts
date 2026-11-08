@@ -132,6 +132,8 @@ export class Workbench {
   private readonly liveEpoch = randomBytes(12).toString('base64url');
   private liveSequence = 0;
   private readonly liveListeners = new Set<(frames: LiveEvent[]) => void>();
+  /** Items observed in a conversation, for matchers such as agent notifications (ADR 0021). Never stores bodies. */
+  private readonly observedListeners = new Set<(id: string, items: NativeItem[]) => void>();
 
   constructor(store: WorkbenchStore, initialWorkspaces: Workspace[], adapters: Map<HarnessId, HarnessAdapter>, registry?: WorkspaceRegistry) {
     this.store = store; this.adapters = adapters;
@@ -141,6 +143,17 @@ export class Workbench {
   /** Subscribe to live frames; returns the unsubscribe function. */
   onLive(listener: (frames: LiveEvent[]) => void): () => void { this.liveListeners.add(listener); return () => { this.liveListeners.delete(listener); }; }
   liveCursor(): LiveCursor { return { epoch: this.liveEpoch, sequence: this.liveSequence }; }
+  onObserved(listener: (id: string, items: NativeItem[]) => void): () => void { this.observedListeners.add(listener); return () => { this.observedListeners.delete(listener); }; }
+  /**
+   * Native activity Zhongshu did not start, such as an automation delivery (ADR 0021). Observe it like a sent
+   * message: the native state read here keeps observation while it runs, so running, unread and push follow.
+   */
+  async noticeActivity(id: string): Promise<void> {
+    if (this.closed || this.isDeleting(id)) return;
+    const conversation = this.store.getConversation(id);
+    if (!conversation?.binding || conversation.archived || !this.configured(conversation) || this.executionBlocked(conversation.cwd)) return;
+    await this.observe(id); await this.sync(id);
+  }
   get workspaces(): Workspace[] { return this.registry?.active() ?? this.initialWorkspaces; }
   workspaceView(): Omit<WorkbenchConfiguration, 'harnesses'> {
     return this.registry?.view() ?? { workspaces: this.workspaces.map(({ id, label }) => ({ id, label })) };
@@ -1730,6 +1743,7 @@ export class Workbench {
       }
       if (changed.length) {
         this.store.recordTurnFiles(id, changed);
+        for (const listener of this.observedListeners) { try { listener(id, changed); } catch { /* a matcher cannot break observation */ } }
         // In-flight growth is not a durable fact: it travels as appended text on the live stream and is never stored (ADR 0019).
         this.broadcastLive(id, runtime, changed);
       }

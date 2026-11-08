@@ -34,6 +34,8 @@ export const itemSchema = z.object({
   ...contentFields, tool: toolSchema.optional(), collaboration: collaborationSchema.optional(),
   /** A plan the agent proposed in Plan mode (Codex); shown as a plan block, not as an ordinary reply. */
   plan: z.literal(true).optional(),
+  /** A message a native automation delivered (ADR 0021), shown as it is and marked with its origin. */
+  automation: z.object({ messageId: identifierSchema.optional() }).strict().optional(),
 }).strict();
 export const subagentStatusSchema = z.enum(['running', 'idle', 'completed', 'interrupted', 'failed', 'unknown']);
 /** Counts come from the last verified native snapshot; unverified active agents are never counted as running. */
@@ -50,6 +52,8 @@ export const conversationSchema = z.object({
   plan: z.object({ active: z.boolean(), pending: z.boolean().optional() }).strict().optional(),
   /** A completed, failed, 待核实 or not user-caused interrupted result that no device has seen; shared through the server. */
   unread: z.boolean().optional(),
+  /** The native automation that created this conversation (ADR 0021); such conversations sit under their automation. */
+  automationId: boundedText(240).optional(),
 }).strict();
 const operationStatusSchema = z.enum(['queued', 'dispatching', 'accepted', 'unknown', 'rejected']);
 export const subagentStopSchema = z.object({ id: z.uuid(), status: operationStatusSchema, reason: boundedText(4096).nullable(), updatedAt: revisionSchema }).strict();
