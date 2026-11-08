@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { attentionSchema, conversationManagementSchema, conversationSearchSchema, createConversationSchema, enqueueOperationSchema, historyCursorSchema, historyPageSchema, identifierSchema, queueCommandSchema, storageSchema, workbenchConfigurationSchema,
   subagentHistorySchema, subagentIdSchema, subagentListSchema, subagentStopResponseSchema, answerRequestSchema, requestAnswerResponseSchema, requestIdSchema, conversationResponseSchema,
   workspaceAddSchema, workspaceBrowseSchema, workspaceDirectoryListSchema, workspaceIdSchema, workspaceManagementSchema } from '../shared/workbench.ts';
-import type { Conversation as ConversationView, LiveEvent, WorkbenchOperation, WorkbenchSnapshot } from '../shared/workbench.ts';
+import type { Conversation as ConversationView, ConversationState, LiveEvent, WorkbenchOperation, WorkbenchSnapshot } from '../shared/workbench.ts';
 import type { PrivateContext } from './app.ts';
 import type { Workbench } from './workbench.ts';
 import { conversationCursor, StoreError, type Conversation, type Operation, type WorkbenchChange } from './workbench-store.ts';
@@ -75,6 +75,14 @@ function snapshotView(value: ReturnType<Workbench['snapshot']>, unread: boolean,
     olderCursor: history.olderCursor, loaded: history.loaded && !trimmed,
     ...(trimmed ? { error: 'native_history_page_limit' } : history.error ? { error: history.error } : {}),
   }, operations, queue, ...(turnFiles.length ? { turnFiles } : {}), ...(value.conversation.usage ? { usage: value.conversation.usage } : {}), ...(requests ? { requests } : {}), ...(value.planReady ? { planReady: value.planReady } : {}), revision: value.revision, live: value.live };
+}
+/** The conversation's state without its history (ADR 0020): what a `state` change can have altered. */
+function stateView(value: ReturnType<Workbench['snapshot']>, unread: boolean, plan: ConversationView['plan']): ConversationState {
+  const conversation = conversationView(value.conversation, unread, plan);
+  const operations = newestWithin(value.operations.map(operationView), 1024 * 1024, true);
+  const requests = value.requests.length ? newestWithin(value.requests, 2 * 1024 * 1024, true) : undefined;
+  return { conversation, operations, queue: value.queue, ...(value.conversation.usage ? { usage: value.conversation.usage } : {}), ...(requests ? { requests } : {}),
+    ...(value.planReady ? { planReady: value.planReady } : {}), revision: value.revision };
 }
 function json(reply: FastifyReply, value: unknown): FastifyReply {
   const body = JSON.stringify(value);
@@ -155,13 +163,14 @@ export function createWorkbenchHttp(workbench: Workbench, input: Partial<z.input
         return;
       }
       for (const change of batch.events) {
-        const value: { type: 'change'; revision: number; conversationId: string; deleted?: boolean; summary?: true } = {
+        const value: { type: 'change'; revision: number; conversationId: string; deleted?: boolean; summary?: true; scope?: 'state' } = {
           type: 'change', revision: change.sequence, conversationId: change.conversationId,
         };
         if (workbench.store.deletions.get(change.conversationId)?.status === 'completed') value.deleted = true;
         // Live item deltas never alter list summaries; other changes are compared with what this page last saw.
         if (value.deleted || (!change.itemId && summaryChanged(connection, change.conversationId))) value.summary = true;
         // Live bodies never ride durable changes; they travel on the live stream (ADR 0019).
+        if (change.scope === 'state' && !value.deleted) value.scope = 'state';
         if (!event(connection, 'change', value, change.sequence)) return;
         connection.cursor = change.sequence;
         if (connection.blocked) return;
@@ -371,6 +380,11 @@ export function createWorkbenchHttp(workbench: Workbench, input: Partial<z.input
       privateApp.get('/conversations/:id', async (request, reply) => {
         parse(noQuery, request.query); const { id } = parse(uuidParams, request.params);
         return json(reply, snapshot(await workbench.open(id)));
+      });
+      privateApp.get('/conversations/:id/state', async (request, reply) => {
+        parse(noQuery, request.query); const { id } = parse(uuidParams, request.params);
+        const value = await workbench.open(id);
+        return json(reply, stateView(value, workbench.unread([value.conversation]).has(value.conversation.id), workbench.planOf(value.conversation)));
       });
       privateApp.get('/conversations/:id/skills', async (request, reply) => {
         parse(noQuery, request.query);

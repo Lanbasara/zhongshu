@@ -33,12 +33,13 @@ const columns = 'id,conversation_id,request_id,status,reason,summary,answer_json
  * the answer's identity, its delivery status and a short summary. The submitted answer is cleared as soon
  * as delivery settles, and an unknown delivery is never resent.
  */
-export function createRequestStore(db: DatabaseSync, notify: (event: { sequence: number; conversationId: string }) => void, now = Date.now) {
+export function createRequestStore(db: DatabaseSync, notify: (event: { sequence: number; conversationId: string; scope: 'state' }) => void, now = Date.now) {
   const emit = (id: string) => {
-    const result = db.prepare('INSERT INTO workbench_changes(conversation_id,created_at) VALUES(?,?)').run(id, now());
-    return { sequence: Number(result.lastInsertRowid), conversationId: id };
+    // Requests and sub-agents change what the conversation waits on, never its history (ADR 0020).
+    const result = db.prepare("INSERT INTO workbench_changes(conversation_id,scope,created_at) VALUES(?,'state',?)").run(id, now());
+    return { sequence: Number(result.lastInsertRowid), conversationId: id, scope: 'state' as const };
   };
-  const publish = (event: { sequence: number; conversationId: string } | undefined) => {
+  const publish = (event: { sequence: number; conversationId: string; scope: 'state' } | undefined) => {
     if (!event) return;
     try { notify(event); } catch { /* The durable change cursor replays committed changes. */ }
   };

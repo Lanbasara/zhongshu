@@ -54,12 +54,13 @@ export class SubagentStoreError extends Error {
  * Harnesses own bodies and execution. Stop requests keep stable identities for
  * reconciliation and are never resent by this store.
  */
-export function createSubagentStore(db: DatabaseSync, notify: (event: { sequence: number; conversationId: string }) => void, now = Date.now) {
+export function createSubagentStore(db: DatabaseSync, notify: (event: { sequence: number; conversationId: string; scope: 'state' }) => void, now = Date.now) {
   const emit = (id: string) => {
-    const result = db.prepare('INSERT INTO workbench_changes(conversation_id,created_at) VALUES(?,?)').run(id, now());
-    return { sequence: Number(result.lastInsertRowid), conversationId: id };
+    // Requests and sub-agents change what the conversation waits on, never its history (ADR 0020).
+    const result = db.prepare("INSERT INTO workbench_changes(conversation_id,scope,created_at) VALUES(?,'state',?)").run(id, now());
+    return { sequence: Number(result.lastInsertRowid), conversationId: id, scope: 'state' as const };
   };
-  const publish = (event: { sequence: number; conversationId: string } | undefined) => {
+  const publish = (event: { sequence: number; conversationId: string; scope: 'state' } | undefined) => {
     if (!event) return;
     try { notify(event); } catch { /* The durable change cursor replays committed changes. */ }
   };

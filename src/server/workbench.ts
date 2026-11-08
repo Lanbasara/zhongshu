@@ -1594,7 +1594,7 @@ export class Workbench {
     }
     while (next.size > requestLimit) { const oldest = [...next].find(([, value]) => value.status !== 'open')?.[0] ?? next.keys().next().value!; next.delete(oldest); changed = true; }
     if (next.size) this.requestViews.set(id, next); else this.requestViews.delete(id);
-    if (changed) this.store.touch(id);
+    if (changed) this.store.touch(id, undefined, 'state');
   }
   private requestList(id: string): PendingRequest[] {
     const entries = [...(this.requestViews.get(id)?.values() ?? [])];
@@ -1645,7 +1645,7 @@ export class Workbench {
       catch { receipt = { outcome: 'unknown', reason: 'native_receipt_unknown' }; }
       this.store.requests.settle(answerId, receipt);
       const entry = this.requestViews.get(queued.conversationId)?.get(queued.requestId);
-      if (receipt.outcome === 'accepted' && entry?.status === 'open') { entry.status = 'answered'; entry.resolvedAt = Date.now(); this.store.touch(queued.conversationId); }
+      if (receipt.outcome === 'accepted' && entry?.status === 'open') { entry.status = 'answered'; entry.resolvedAt = Date.now(); this.store.touch(queued.conversationId, undefined, 'state'); }
       if (!this.closed && !this.isDeleting(queued.conversationId)) await this.refreshRequests(queued.conversationId).catch(() => {});
     });
     this.answerTasks.set(answerId, task);

@@ -283,6 +283,9 @@ export const productMigrations: Migration[] = [{ version: 2, sql: `
 ` }, { version: 21, sql: `
   -- ADR 0019: a digest of the native latest page last announced, so reading unchanged history never announces a change.
   ALTER TABLE workbench_conversations ADD COLUMN native_mark TEXT CHECK (native_mark IS NULL OR length(native_mark) <= 200);
+` }, { version: 22, sql: `
+  -- ADR 0020: 'state' marks a change that leaves the conversation's history untouched; NULL may touch history.
+  ALTER TABLE workbench_changes ADD COLUMN scope TEXT CHECK (scope IS NULL OR scope = 'state');
 ` }];
 
 /** Runs inside restoreDatabase's private staging transaction, before the database is published. */
