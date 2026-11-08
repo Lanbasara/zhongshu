@@ -529,3 +529,20 @@ test('migration 17 counts results that existed before the seen marker as seen', 
   store.setConversationState(pending.id, { state: result('live-run', 'completed') });
   assert.deepEqual([...store.unseen([completed.id, unknown.id, pending.id])], [pending.id], 'results after the upgrade are tracked');
 });
+test('the native page mark announces only a different page, and survives reopening the database (ADR 0019)', t => {
+  const f = fixture(t); let db = f.open(); let store = createWorkbenchStore(db);
+  const input = conversation(); store.createConversation(input);
+  const announced: WorkbenchChange[] = [];
+  store = createWorkbenchStore(db, { onChange: change => announced.push(change) });
+  assert.equal(store.markNative(input.id, 'page:first'), true); assert.equal(announced.length, 1);
+  const version = store.version();
+  assert.equal(store.markNative(input.id, 'page:first'), false); assert.equal(store.version(), version, 'an equal mark writes nothing');
+  assert.equal(store.markNative(input.id, 'error:native_down'), true); assert.equal(store.markNative(input.id, 'error:native_down'), false);
+  assert.equal(store.markNative(input.id, 'page:first'), true); assert.equal(announced.length, 3);
+  assert.throws(() => store.markNative(input.id, 'not a mark'));
+  assert.throws(() => store.markNative(randomUUID(), 'page:first'), { code: 'conversation_not_found' });
+  f.close(db); db = f.open(); store = createWorkbenchStore(db);
+  const reopened = store.version();
+  assert.equal(store.markNative(input.id, 'page:first'), false, 'a restarted server does not re-announce an unchanged page');
+  assert.equal(store.version(), reopened);
+});

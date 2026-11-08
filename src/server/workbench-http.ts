@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { attentionSchema, conversationManagementSchema, conversationSearchSchema, createConversationSchema, enqueueOperationSchema, historyCursorSchema, historyPageSchema, identifierSchema, queueCommandSchema, storageSchema, workbenchConfigurationSchema,
   subagentHistorySchema, subagentIdSchema, subagentListSchema, subagentStopResponseSchema, answerRequestSchema, requestAnswerResponseSchema, requestIdSchema, conversationResponseSchema,
   workspaceAddSchema, workspaceBrowseSchema, workspaceDirectoryListSchema, workspaceIdSchema, workspaceManagementSchema } from '../shared/workbench.ts';
-import type { Conversation as ConversationView, WorkbenchOperation, WorkbenchSnapshot } from '../shared/workbench.ts';
+import type { Conversation as ConversationView, LiveEvent, WorkbenchOperation, WorkbenchSnapshot } from '../shared/workbench.ts';
 import type { PrivateContext } from './app.ts';
 import type { Workbench } from './workbench.ts';
 import { conversationCursor, StoreError, type Conversation, type Operation, type WorkbenchChange } from './workbench-store.ts';
@@ -74,7 +74,7 @@ function snapshotView(value: ReturnType<Workbench['snapshot']>, unread: boolean,
     items: trimmed ? [] : items, liveItems, liveItemsLimited: history.liveItemsLimited || liveItems.length < history.liveItems.length,
     olderCursor: history.olderCursor, loaded: history.loaded && !trimmed,
     ...(trimmed ? { error: 'native_history_page_limit' } : history.error ? { error: history.error } : {}),
-  }, operations, queue, ...(turnFiles.length ? { turnFiles } : {}), ...(value.conversation.usage ? { usage: value.conversation.usage } : {}), ...(requests ? { requests } : {}), ...(value.planReady ? { planReady: value.planReady } : {}), revision: value.revision };
+  }, operations, queue, ...(turnFiles.length ? { turnFiles } : {}), ...(value.conversation.usage ? { usage: value.conversation.usage } : {}), ...(requests ? { requests } : {}), ...(value.planReady ? { planReady: value.planReady } : {}), revision: value.revision, live: value.live };
 }
 function json(reply: FastifyReply, value: unknown): FastifyReply {
   const body = JSON.stringify(value);
@@ -155,21 +155,13 @@ export function createWorkbenchHttp(workbench: Workbench, input: Partial<z.input
         return;
       }
       for (const change of batch.events) {
-        const value: { type: 'change'; revision: number; conversationId: string; deleted?: boolean; summary?: true; item?: ReturnType<Workbench['liveItem']> } = {
+        const value: { type: 'change'; revision: number; conversationId: string; deleted?: boolean; summary?: true } = {
           type: 'change', revision: change.sequence, conversationId: change.conversationId,
         };
         if (workbench.store.deletions.get(change.conversationId)?.status === 'completed') value.deleted = true;
         // Live item deltas never alter list summaries; other changes are compared with what this page last saw.
         if (value.deleted || (!change.itemId && summaryChanged(connection, change.conversationId))) value.summary = true;
-        if (change.itemId && !value.deleted) {
-          // Live bodies live in memory only; a settled item falls back to the snapshot read.
-          const item = workbench.liveItem(change.conversationId, change.itemId);
-          // Large bodies use the same invalidation + snapshot path, never fragmented deltas.
-          if (item && Buffer.byteLength(item.text) <= MAX_FRAME_BYTES) {
-            value.item = item;
-            if (size(value) > MAX_FRAME_BYTES - 256) delete value.item;
-          }
-        }
+        // Live bodies never ride durable changes; they travel on the live stream (ADR 0019).
         if (!event(connection, 'change', value, change.sequence)) return;
         connection.cursor = change.sequence;
         if (connection.blocked) return;
@@ -179,10 +171,28 @@ export function createWorkbenchHttp(workbench: Workbench, input: Partial<z.input
   }
   const heartbeat = setInterval(() => {
     for (const connection of connections) {
-      if (authorized(connection) && !connection.blocked) { event(connection, 'heartbeat', {}); schedule(connection); }
+      if (authorized(connection) && !connection.blocked) { event(connection, 'heartbeat', { live: workbench.liveCursor().sequence }); schedule(connection); }
     }
   }, options.heartbeatMs).unref();
-  function close(): void { if (closed) return; closed = true; clearInterval(heartbeat); for (const connection of [...connections]) disconnect(connection); }
+  /**
+   * Live frames are written once to every open stream and never queued (ADR 0019). A blocked stream simply misses them;
+   * the next frame or heartbeat shows the gap and the page re-reads its snapshot.
+   */
+  function broadcast(frames: LiveEvent[]): void {
+    if (closed || !frames.length || !connections.size) return;
+    const encoded = frames.map(frame => {
+      const data = JSON.stringify(frame);
+      if (Buffer.byteLength(data) <= MAX_FRAME_BYTES - 256 || !('item' in frame)) return `event: live\ndata: ${data}\n\n`;
+      const omitted: LiveEvent = { type: 'live', sequence: frame.sequence, conversationId: frame.conversationId, itemId: frame.item.id, omitted: true };
+      return `event: live\ndata: ${JSON.stringify(omitted)}\n\n`;
+    });
+    for (const connection of [...connections]) {
+      if (connection.blocked || !authorized(connection)) continue;
+      for (const frame of encoded) if (!write(connection, frame)) break;
+    }
+  }
+  const unsubscribe = workbench.onLive(broadcast);
+  function close(): void { if (closed) return; closed = true; clearInterval(heartbeat); unsubscribe(); for (const connection of [...connections]) disconnect(connection); }
   function logout(sessionId: string): void { for (const connection of [...connections]) if (connection.sessionId === sessionId) disconnect(connection); }
   function changed(_change: WorkbenchChange): void { for (const connection of connections) schedule(connection); }
 
@@ -481,7 +491,7 @@ export function createWorkbenchHttp(workbench: Workbench, input: Partial<z.input
         reply.raw.on('drain', connection.drain);
         reply.raw.once('close', () => disconnect(connection, false));
         reply.raw.once('error', () => disconnect(connection));
-        event(connection, 'ready', { type: 'ready', revision: cursor }); schedule(connection);
+        event(connection, 'ready', { type: 'ready', revision: cursor, live: workbench.liveCursor() }); schedule(connection);
       });
     }, { prefix: '/workbench' });
   }

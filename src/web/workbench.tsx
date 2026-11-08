@@ -12,9 +12,10 @@ import { WorkspaceReader } from './workspace-reader.tsx';
 import { useCallback, useEffect, useMemo, useLayoutEffect, useRef, useState } from 'react';
 import {
   workbenchConfigurationSchema, conversationResponseSchema, operationResponseSchema,
-  snapshotSchema, historyPageSchema, changeEventSchema, resetEventSchema, queueViewSchema,
-  type WorkbenchConfiguration, type Conversation, type WorkbenchSnapshot, type WorkbenchItem, type QueueCommand, type TurnFileSummary,
+  snapshotSchema, historyPageSchema, changeEventSchema, resetEventSchema, readyEventSchema, heartbeatEventSchema, liveEventSchema, queueViewSchema,
+  type WorkbenchConfiguration, type Conversation, type WorkbenchSnapshot, type WorkbenchItem, type QueueCommand, type TurnFileSummary, type LiveCursor, type LiveEvent,
 } from '../shared/workbench.ts';
+import { applyLiveFrame } from './live-items.ts';
 import { request, RequestError, readDraft, sameInput, saveDraft, type Draft } from './workbench-client.ts';
 import { sessionSchema } from '../shared/http.ts';
 import './workbench.css';
@@ -144,6 +145,30 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
   const windowed = newer.length > 0;
   const selectedRef = useRef(selected); selectedRef.current = selected;
   const snapshotRef = useRef(snapshot); snapshotRef.current = snapshot;
+  /**
+   * The open conversation's in-flight items, updated synchronously frame by frame (ADR 0019), with the live position
+   * its snapshot reflected. React state follows it; consecutive frames must not wait for a render to apply.
+   */
+  const liveView = useRef<{ id: string; items: WorkbenchItem[]; cursor?: LiveCursor; limited: boolean } | undefined>(undefined);
+  /** This page's live stream position: the epoch and last sequence received. */
+  const liveStream = useRef<LiveCursor | undefined>(undefined);
+  /** Recent live frames of the open conversation, replayed on top of a snapshot that was cut before them. */
+  const liveLog = useRef<LiveEvent[]>([]);
+  const adoptSnapshot = (result: WorkbenchSnapshot) => {
+    const id = result.conversation.id; const limited = result.history.liveItemsLimited; const stream = liveStream.current;
+    let items = result.history.liveItems; let gap = false;
+    // Snapshot plus replay: frames that arrived while this snapshot was on its way are applied on top of it.
+    if (result.live && stream && result.live.epoch === stream.epoch) for (const frame of liveLog.current) {
+      if (frame.conversationId !== id || frame.sequence <= result.live.sequence) continue;
+      const next = applyLiveFrame(items, frame);
+      if (next !== 'gap') { items = next; continue; }
+      const itemId = 'item' in frame ? frame.item.id : frame.itemId;
+      if (!limited || items.some(item => item.id === itemId)) { gap = true; break; }
+    }
+    liveView.current = { id, items, cursor: result.live, limited };
+    setSnapshot(items === result.history.liveItems ? result : { ...result, history: { ...result.history, liveItems: items } });
+    if (gap) scheduleRefresh(id, false);
+  };
   const draftRef = useRef(draft); draftRef.current = draft;
   const generation = useRef(0);
   const requestSerial = useRef(0);
@@ -193,7 +218,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
       if (snapshotRef.current && result.revision < snapshotRef.current.revision) return;
       const first = !snapshotRef.current || snapshotRef.current.conversation.id !== id;
       const latestPage = preparePage(null, result.history.items, result.history.olderCursor, result.turnFiles);
-      setSnapshot(result);
+      adoptSnapshot(result);
       // A failed native read keeps whatever is already loaded (ADR 0014: no local copy to fall back on).
       const failed = !!result.history.error;
       if (latest || first) {
@@ -218,7 +243,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
     } catch (reason) {
       if (gen === generation.current) {
         if (reason instanceof RequestError && reason.status === 404) {
-          saveDraft(id, { text: '' }); setSnapshot(undefined); setPages([]); setNewer([]); setDraft({ text: '' }); draftRef.current = { text: '' };
+          saveDraft(id, { text: '' }); setSnapshot(undefined); liveView.current = undefined; setPages([]); setNewer([]); setDraft({ text: '' }); draftRef.current = { text: '' };
           setSelected(undefined); history.replaceState(null, '', location.pathname + location.search);
           setUnavailableNotice('对话已不可用。'); refreshList(value => value + 1);
         } else report(reason);
@@ -249,7 +274,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
   }, []);
   useEffect(() => {
     generation.current++; requestSerial.current++; viewController.current?.abort(); viewController.current = new AbortController();
-    setSnapshot(undefined); snapshotRef.current = undefined; setPages([]); setNewer([]); pagesRef.current = []; newerRef.current = []; setUnavailableFiles(new Set()); setError(''); setMoreOutput(false); atBottom.current = true;
+    setSnapshot(undefined); snapshotRef.current = undefined; liveView.current = undefined; liveLog.current = []; setPages([]); setNewer([]); pagesRef.current = []; newerRef.current = []; setUnavailableFiles(new Set()); setError(''); setMoreOutput(false); atBottom.current = true;
     const next = selected ? readDraft(selected) : { text: '' }; draftRef.current = next; setDraft(next);
     if (selected) { setUnavailableNotice(''); void loadRef.current(selected, true); }
     return () => viewController.current?.abort();
@@ -290,8 +315,47 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
       if (stopped) return;
       source?.close(); source = new EventSource(`/api/private/workbench/events?cursor=${cursor}`); lastMessage = Date.now();
       const own = source;
-      source.addEventListener('ready', () => { if (source !== own || stopped) return; delay = 500; lastMessage = Date.now(); setConnection('已连接'); scheduleRefresh(); configurationRefresh.current(); });
-      source.addEventListener('heartbeat', () => { if (source === own && !stopped) lastMessage = Date.now(); });
+      source.addEventListener('ready', event => {
+        if (source !== own || stopped) return;
+        try { liveStream.current = readyEventSchema.parse(JSON.parse((event as MessageEvent).data)).live; } catch { liveStream.current = undefined; }
+        delay = 500; lastMessage = Date.now(); setConnection('已连接'); scheduleRefresh(); configurationRefresh.current();
+      });
+      /** A live frame was missed: the open conversation re-reads its snapshot (ADR 0019). */
+      const liveGap = () => { if (selectedRef.current) scheduleRefresh(selectedRef.current, false); };
+      source.addEventListener('heartbeat', event => {
+        if (source !== own || stopped) return;
+        lastMessage = Date.now();
+        try {
+          const live = heartbeatEventSchema.parse(JSON.parse((event as MessageEvent).data)).live; const stream = liveStream.current;
+          if (stream && live > stream.sequence) { liveStream.current = { ...stream, sequence: live }; liveGap(); }
+        } catch { /* a heartbeat without a live position carries nothing to check */ }
+      });
+      source.addEventListener('live', event => {
+        if (source !== own || stopped) return;
+        lastMessage = Date.now();
+        let frame: LiveEvent;
+        try { frame = liveEventSchema.parse(JSON.parse((event as MessageEvent).data)); } catch { liveGap(); return; }
+        const stream = liveStream.current;
+        const missed = !stream || frame.sequence !== stream.sequence + 1;
+        if (stream && frame.sequence > stream.sequence) liveStream.current = { ...stream, sequence: frame.sequence };
+        if (frame.conversationId === selectedRef.current) { liveLog.current.push(frame); if (liveLog.current.length > 512) liveLog.current.shift(); }
+        const view = liveView.current;
+        const applicable = view && view.id === frame.conversationId && frame.conversationId === selectedRef.current
+          // Frames the snapshot already reflects are skipped.
+          && !(view.cursor && stream && view.cursor.epoch === stream.epoch && frame.sequence <= view.cursor.sequence);
+        if (applicable) {
+          const next = applyLiveFrame(view.items, frame);
+          if (next !== 'gap') {
+            view.items = next;
+            setSnapshot(current => current && current.conversation.id === frame.conversationId ? { ...current, history: { ...current.history, liveItems: next } } : current);
+          } else {
+            const itemId = 'item' in frame ? frame.item.id : frame.itemId;
+            // Output too long for the snapshot arrives from history once it completes; re-reading now would not help.
+            if (!view.limited || view.items.some(item => item.id === itemId)) { liveGap(); return; }
+          }
+        }
+        if (missed) liveGap();
+      });
       source.addEventListener('change', event => {
         if (source !== own || stopped) return;
         lastMessage = Date.now();
@@ -302,15 +366,11 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
             saveDraft(change.conversationId, { text: '' });
             if (change.conversationId === selectedRef.current) {
               history.replaceState(null, '', location.pathname + location.search);
-              setSelected(undefined); setSnapshot(undefined); setPages([]); setNewer([]); setDraft({ text: '' }); draftRef.current = { text: '' };
+              setSelected(undefined); setSnapshot(undefined); liveView.current = undefined; setPages([]); setNewer([]); setDraft({ text: '' }); draftRef.current = { text: '' };
               setUnavailableNotice('对话已删除。');
             }
             refreshList(value => value + 1);
             return;
-          }
-          if (change.item && change.conversationId === selectedRef.current) {
-            const item = change.item;
-            setSnapshot(current => current ? { ...current, history: { ...current.history, liveItems: [...current.history.liveItems.filter(old => old.id !== item.id), item].slice(-100) } } : current);
           }
           // History snapshots reconcile live and durable identities; this also catches missed terminal events.
           // Only list-visible changes refresh lists; content and usage refresh just the open conversation.
@@ -447,7 +507,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
         const result = await request(`/conversations/${id}`, snapshotSchema, { signal: viewController.current?.signal });
         if (!alive.current || gen !== generation.current || newerRef.current.at(-1) !== cursor) return;
         if (snapshotRef.current && result.revision < snapshotRef.current.revision) return;
-        setSnapshot(result);
+        adoptSnapshot(result);
         page = preparePage(null, result.history.items, result.history.olderCursor, result.turnFiles);
         // The latest page joins when it is adjacent (its older cursor reads the window's newest page) or overlaps it.
         // Output may have moved past the dropped latest page; then the latest page starts a new window.

@@ -14,7 +14,7 @@ import { createWorkbenchStore } from '../src/server/workbench-store.ts';
 import { Workbench } from '../src/server/workbench.ts';
 import { createWorkbenchHttp } from '../src/server/workbench-http.ts';
 import { WorkspaceRegistry } from '../src/server/workspace-registry.ts';
-import { attentionSchema, changeEventSchema, conversationListSchema, historyPageSchema, snapshotSchema, workbenchConfigurationSchema } from '../src/shared/workbench.ts';
+import { attentionSchema, changeEventSchema, conversationListSchema, heartbeatEventSchema, historyPageSchema, liveEventSchema, readyEventSchema, snapshotSchema, workbenchConfigurationSchema } from '../src/shared/workbench.ts';
 
 const origin = 'https://workbench.example';
 const configuration = { modelId: 'synthetic-model', permissionId: 'workspace-write' };
@@ -25,9 +25,10 @@ async function eventually(check: () => Promise<boolean> | boolean, timeout = 400
   assert.fail('bounded condition was not observed');
 }
 
-/** The next change frame that carries a live item; latest-page refreshes also emit item-less hints. */
-async function itemChange(stream: { named(name: string): Promise<{ name: string; id?: string; data: any } | null> }) {
-  for (;;) { const event = await stream.named('change'); if (!event || event.data.item) return event; }
+/** The next live frame (ADR 0019); live frames are never durable, so they carry no event id. */
+async function liveFrame(stream: { named(name: string): Promise<{ name: string; id?: string; data: any } | null> }) {
+  const event = await stream.named('live'); if (event) { liveEventSchema.parse(event.data); assert.equal(event.id, undefined); }
+  return event;
 }
 
 async function fixture(t: TestContext, limits: Parameters<typeof createWorkbenchHttp>[1] = {}, withRegistry = false) {
@@ -301,15 +302,28 @@ test('SSE preserves security headers, replays durable changes and resets expired
   assert.equal(first.response.headers.get('x-content-type-options'), 'nosniff');
   assert.equal(first.response.headers.get('strict-transport-security'), 'max-age=31536000');
   assert.match(first.response.headers.get('cache-control')!, /no-store/);
-  assert.equal((await first.named('ready'))?.data.revision, cut);
-  assert.ok(await first.named('heartbeat'));
+  const ready = (await first.named('ready'))!; readyEventSchema.parse(ready.data); assert.equal(ready.data.revision, cut);
+  heartbeatEventSchema.parse((await first.named('heartbeat'))!.data);
+  // Live growth travels as appended text on the live stream and adds nothing to the durable change log.
   await f.live(id, { id: 'live-one', kind: 'assistant', status: 'running', text: 'first body' });
-  const emitted = (await itemChange(first))!; changeEventSchema.parse(emitted.data);
-  assert.equal(emitted.data.item.text, 'first body'); assert.equal(emitted.id, String(emitted.data.revision)); first.close();
+  const whole = (await liveFrame(first))!; assert.equal(whole.data.sequence, ready.data.live.sequence + 1);
+  assert.deepEqual(whole.data.text, { value: 'first body' }); assert.equal(whole.data.item.id, 'live-one'); assert.equal(whole.data.item.text, undefined);
+  const before = f.store.version();
+  await f.live(id, { id: 'live-one', kind: 'assistant', status: 'running', text: 'first body, then more' });
+  const appended = (await liveFrame(first))!; assert.equal(appended.data.sequence, whole.data.sequence + 1);
+  assert.deepEqual(appended.data.text, { at: 'first body'.length, append: ', then more' });
+  assert.equal(f.store.version(), before, 'live growth writes no change rows');
+  // A durable change still carries a stable id and replays from the cursor.
+  f.store.setConversationState(id, { error: 'synthetic-durable-change' });
+  const emitted = (await first.named('change'))!; changeEventSchema.parse(emitted.data); assert.equal(emitted.id, String(emitted.data.revision)); first.close();
   await f.live(id, { id: 'live-one', kind: 'assistant', status: 'running', text: 'full current body after disconnect' });
-  const replay = await f.stream('?cursor=0', { 'last-event-id': emitted.id! }); await replay.named('ready');
-  const resumed = (await itemChange(replay))!; assert.ok(resumed.data.revision > emitted.data.revision);
-  assert.equal(resumed.data.item.id, 'live-one'); assert.equal(resumed.data.item.text, 'full current body after disconnect'); replay.close();
+  f.store.setConversationState(id, { error: 'synthetic-durable-change-2' });
+  const replay = await f.stream('?cursor=0', { 'last-event-id': emitted.id! }); const resumedReady = (await replay.named('ready'))!;
+  const resumed = (await replay.named('change'))!; assert.ok(resumed.data.revision > emitted.data.revision); replay.close();
+  // Live output missed while disconnected comes back with the snapshot, which names the live position it reflects.
+  const snapshot = snapshotSchema.parse((await f.request(`/conversations/${id}`)).body);
+  assert.equal(snapshot.history.liveItems.find(item => item.id === 'live-one')?.text, 'full current body after disconnect');
+  assert.deepEqual(snapshot.live, resumedReady.data.live);
   assert.equal((await f.request('/events?cursor=1e3')).status, 400);
   assert.equal((await f.request('/events?cursor=9007199254740992')).status, 400);
   for (let index = 0; index < 2002; index++) f.store.setConversationState(id, { error: `synthetic-history-${index}` });
@@ -325,7 +339,7 @@ test('logout closes only its session stream, and reset blocks the next event bef
   assert.equal((await f.request('/api/private/logout', { method: 'POST', body: {} })).status, 200);
   assert.equal(await end, true);
   await f.live(id, { id: 'after-logout', kind: 'notice', status: 'completed', text: 'Second session still authorized' });
-  assert.equal((await itemChange(second))!.data.item.text, 'Second session still authorized');
+  assert.deepEqual((await liveFrame(second))!.data.text, { value: 'Second session still authorized' });
   await f.auth.reset(randomBytes(32).toString('base64url'));
   const revoked = second.next().then(value => value === null, () => true);
   await f.live(id, { id: 'after-reset', kind: 'notice', status: 'completed', text: 'Must not reach revoked reader' });
@@ -355,8 +369,11 @@ test('idle streams recheck revoked credentials, while oversized events fall back
   const stream = await f.stream(); await stream.named('ready');
   const text = 'Synthetic long body '.repeat(8000);
   await f.live(id, { id: 'long-live', kind: 'assistant', status: 'running', text });
-  const change = (await stream.named('change'))!; assert.equal(change.data.item, undefined);
+  const omitted = (await liveFrame(stream))!; assert.equal(omitted.data.omitted, true); assert.equal(omitted.data.itemId, 'long-live'); assert.equal(omitted.data.text, undefined);
   assert.equal((await f.request(`/conversations/${id}`)).body.history.liveItems.find((item: NativeItem) => item.id === 'long-live').text, text);
+  // Once the page holds the body, later growth is small again.
+  await f.live(id, { id: 'long-live', kind: 'assistant', status: 'running', text: text + 'tail' });
+  assert.deepEqual((await liveFrame(stream))!.data.text, { at: text.length, append: 'tail' });
   await f.auth.reset(randomBytes(32).toString('base64url'));
   const revokedAt = Date.now();
   const ended = async () => { try { while (await stream.next()) { /* already-buffered heartbeat frames contain no private data */ } } catch { /* socket closed by credential check */ } };
@@ -397,9 +414,12 @@ test('a real non-reading TCP client is evicted under backpressure without an unb
   });
   assert.equal(paused.statusCode, 200); paused.on('error', () => {});
   const text = '\u0001'.repeat(7900);
-  await f.live(id, { id: 'backpressure', kind: 'assistant', status: 'running', text });
-  // Each durable change hint carries the current in-memory body.
-  for (let index = 0; index < 700; index++) f.store.touch(id, 'backpressure');
+  // Live frames are dropped, never queued, while a stream is blocked; output that keeps arriving fills the socket
+  // until the stream stops draining, and the reader that never reads is evicted (ADR 0019).
+  for (let batch = 0; batch < 60; batch++) {
+    for (let index = 0; index < 20; index++) await f.live(id, { id: `backpressure-${batch}-${index}`, kind: 'assistant', status: 'running', text });
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
   await new Promise(resolve => setTimeout(resolve, 400));
   const replacement = await f.stream(); assert.equal(replacement.response.status, 200, 'slow client connection slot must be released');
   await replacement.named('ready'); replacement.close(); paused.destroy();
