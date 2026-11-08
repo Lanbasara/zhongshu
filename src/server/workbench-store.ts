@@ -85,6 +85,11 @@ export interface WorkbenchStore {
   version(): number;
   /** Record a change hint (optionally naming a live item) without persisting any history body (ADR 0014). */
   touch(conversationId: string, itemId?: string): void;
+  /**
+   * Record what the native latest page looks like now; announces a change only when it differs from the last
+   * recorded mark, so reading unchanged history is never a change (ADR 0019). Returns whether it announced.
+   */
+  markNative(conversationId: string, mark: string): boolean;
   /** Keep the per-turn edited-path index; paths only, never message bodies. */
   recordTurnFiles(conversationId: string, items: NativeItem[]): void;
   storage: StorageAccounting;
@@ -107,6 +112,7 @@ const MAX_TEXT_BYTES = 1_048_576;
 const boundedText = (bytes: number) => z.string().max(bytes).refine(value => Buffer.byteLength(value, 'utf8') <= bytes);
 const identifier = boundedText(1024).min(1).refine(value => !value.includes('\0'));
 const uuid = z.uuid();
+const nativeMark = z.string().regex(/^[A-Za-z0-9:_-]{1,200}$/);
 const configurationSchema = z.object({ modelId: identifier, permissionId: identifier, reasoningEffort: identifier.optional(), agentPreset: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/).optional() }).strict();
 const nativeStateSchema = stateSchema;
 const itemSchema = z.object({
@@ -746,6 +752,22 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
     touch(conversationId, itemId) {
       parse(uuid, conversationId); if (itemId !== undefined) parse(identifier, itemId);
       mutate(changed => { requireConversation(conversationId); changed(conversationId, itemId); });
+    },
+    markNative(conversationId, mark) {
+      parse(uuid, conversationId); parse(nativeMark, mark);
+      const current = () => {
+        const row = db.prepare('SELECT native_mark FROM workbench_conversations WHERE id=?').get(conversationId);
+        if (!row) throw new StoreError('conversation_not_found', 404);
+        return row.native_mark === null ? null : String(row.native_mark);
+      };
+      // The common case, an unchanged page, is a plain read without taking the write lock.
+      if (current() === mark) return false;
+      return mutate(changed => {
+        if (current() === mark) return false;
+        db.prepare('UPDATE workbench_conversations SET native_mark=? WHERE id=?').run(mark, conversationId);
+        changed(conversationId);
+        return true;
+      });
     },
     recordTurnFiles(conversationId, value) {
       parse(uuid, conversationId);

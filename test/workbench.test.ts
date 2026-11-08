@@ -10,7 +10,7 @@ import { openDatabase } from '../src/server/database.ts';
 import { productMigrations } from '../src/server/migrations.ts';
 import { createWorkbenchStore, type OperationInput } from '../src/server/workbench-store.ts';
 import { Workbench } from '../src/server/workbench.ts';
-import type { QueueDelivery } from '../src/shared/workbench.ts';
+import type { LiveEvent, QueueDelivery } from '../src/shared/workbench.ts';
 
 function deferred<T>() { let resolve!: (value: T) => void; let reject!: (reason: unknown) => void; const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; }
 const terminal = (runId?: string): NativeState => ({ status: 'idle', pendingInputs: 0, configurationVerified: true, ...(runId ? { runId } : {}) });
@@ -928,4 +928,39 @@ test('stopping a run through the workbench is not unread; an interruption nobody
   f.peer.current = { ...terminal('native-run'), status: 'running' }; await f.service.reconcile(f.id);
   f.peer.current = finished('native-run', 'interrupted'); await f.service.reconcile(f.id);
   assert.equal(unread(), true);
+});
+test('re-reading an unobserved conversation announces native page changes, never an unchanged page again', async t => {
+  // The runtime of a conversation nobody observes is released shortly after each read (250 ms). Every open
+  // page re-reads on an announcement, so announcing an unchanged page again would loop over the network (ADR 0019).
+  const f = fixture(t); f.peer.records = [nativeItem('a'), nativeItem('b')];
+  const released = () => delay(400);
+  await f.service.open(f.id); await released();
+  const before = f.store.version(); const reads = f.peer.historyCalls.length;
+  for (let index = 0; index < 3; index++) { await f.service.open(f.id); await released(); }
+  assert.equal(f.peer.historyCalls.length, reads + 3, 'each open re-reads native history after release');
+  assert.equal(f.store.version(), before, 'an unchanged native page is not announced again');
+  f.peer.records.push(nativeItem('c'));
+  await f.service.open(f.id); await released();
+  const changed = f.store.version(); assert.ok(changed > before, 'a changed native page is announced');
+  f.peer.historyRead = async () => { throw new Error('native_down'); };
+  await f.service.open(f.id); await released();
+  const failing = f.store.version(); assert.ok(failing > changed, 'a new reading failure is announced');
+  await f.service.open(f.id); await released();
+  assert.equal(f.store.version(), failing, 'a repeated reading failure is not announced again');
+});
+test('live growth reaches listeners as appended text and writes no change rows (ADR 0019)', async t => {
+  const f = fixture(t); const frames: LiveEvent[] = [];
+  f.service.onLive(batch => frames.push(...batch));
+  await f.service.reading(f.id, 'live-reader');
+  const before = f.store.version(); const start = f.service.liveCursor().sequence;
+  f.peer.emit({ type: 'item', item: { id: 'reply', kind: 'assistant', status: 'running', text: 'Hello' } });
+  await until(() => frames.length === 1);
+  f.peer.emit({ type: 'item', item: { id: 'reply', kind: 'assistant', status: 'running', text: 'Hello, world' } });
+  await until(() => frames.length === 2);
+  f.peer.emit({ type: 'item', item: { id: 'reply', kind: 'assistant', status: 'running', text: 'Rewritten' } });
+  await until(() => frames.length === 3);
+  assert.deepEqual(frames.map(frame => 'item' in frame ? frame.text : null), [{ value: 'Hello' }, { at: 5, append: ', world' }, { value: 'Rewritten' }]);
+  assert.deepEqual(frames.map(frame => frame.sequence), [start + 1, start + 2, start + 3]);
+  assert.equal(f.store.version(), before, 'in-flight growth is not a durable change');
+  assert.equal(f.service.snapshot(f.id).live?.sequence, start + 3);
 });

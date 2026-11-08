@@ -7,10 +7,10 @@ import { nativeText } from '../shared/content.ts';
 import { referenceSchema } from '../shared/content.ts';
 import { isAbsolute, relative } from 'node:path';
 import { listWorkspaceDocuments, openWorkspaceDocument, saveWorkspaceDocument } from './workspace-documents.ts';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { StoreError, planView, type WorkbenchStore, type CreateConversation, type OperationInput, type Conversation, type Operation } from './workbench-store.ts';
 import type { WorkspaceRegistry } from './workspace-registry.ts';
-import type { ConversationUsage, PendingRequest, QueueCommand, QueueView, RequestAnswer, RequestAnswerView, SubagentList, WorkbenchConfiguration, WorkbenchItem, workspaceAddSchema, workspaceManagementSchema } from '../shared/workbench.ts';
+import type { BodyPatch, LiveCursor, LiveEvent, ConversationUsage, PendingRequest, QueueCommand, QueueView, RequestAnswer, RequestAnswerView, SubagentList, WorkbenchConfiguration, WorkbenchItem, workspaceAddSchema, workspaceManagementSchema } from '../shared/workbench.ts';
 import { attentionLimit, itemSchema, requestLimit, subagentIdSchema } from '../shared/workbench.ts';
 import { answerFits, answerSummary } from '../shared/requests.ts';
 import { answerView, RequestStoreError } from './request-store.ts';
@@ -56,6 +56,8 @@ type Runtime = {
   tail?: Tail;
   /** The native sub-agent tree may differ from the saved index. */
   subagentsDirty: boolean;
+  /** Bodies last sent per live item, so the next frame carries only what was appended (ADR 0019). */
+  sent: Map<string, { text: string; output?: string }>;
 };
 type SubagentLease = { readers: Map<string, number>; dispose?: () => void; opening?: Promise<void> };
 const cursorEnvelope = z.object({ c: z.uuid(), n: z.string().min(1).max(NATIVE_CURSOR_LENGTH) }).strict();
@@ -68,6 +70,12 @@ function viewItem(item: NativeItem): WorkbenchItem {
   return { id: item.id, kind: 'notice', text: UNDISPLAYABLE, status: 'unknown', ...(item.runId ? { runId: item.runId } : {}) };
 }
 const tailMark = (items: NativeItem[], cursor: string | null) => items.map(item => `${item.id}\u0000${item.status}\u0000${item.text.length}`).join('\u0001') + '\u0002' + (cursor ?? '');
+/** Durable, fixed-size mark of a native latest page (ADR 0019); equal pages give equal marks across reads and restarts. */
+const pageMark = (items: NativeItem[], cursor: string | null) => 'page:' + createHash('sha256').update(tailMark(items, cursor)).digest('base64url');
+/** A growing body as a patch against what was last sent: appended text when it only grew, the whole value otherwise. */
+function bodyPatch(previous: string | undefined, next: string): BodyPatch {
+  return previous !== undefined && next.length >= previous.length && next.startsWith(previous) ? { at: previous.length, append: next.slice(previous.length) } : { value: next };
+}
 const liveMark = (item: NativeItem) => `${item.status}\u0000${item.text.length}\u0000${item.text.slice(-32)}\u0000${item.tool?.exitCode ?? ''}\u0000${item.tool?.output?.length ?? ''}\u0000${item.fileEdits?.length ?? ''}`;
 /** Serialized size of the displayable part of a native page; transient image sources are excluded. */
 function pageBytes(page: HistoryPage): number {
@@ -120,12 +128,19 @@ export class Workbench {
   private readonly requestTimers = new Map<string, NodeJS.Timeout>();
   private readonly requestRefreshes = new Map<string, { task: Promise<void>; again: boolean }>();
   private readonly answerTasks = new Map<string, Promise<void>>();
+  /** In-memory live stream (ADR 0019): never stored, numbered per process so pages notice a missed frame. */
+  private readonly liveEpoch = randomBytes(12).toString('base64url');
+  private liveSequence = 0;
+  private readonly liveListeners = new Set<(frames: LiveEvent[]) => void>();
 
   constructor(store: WorkbenchStore, initialWorkspaces: Workspace[], adapters: Map<HarnessId, HarnessAdapter>, registry?: WorkspaceRegistry) {
     this.store = store; this.adapters = adapters;
     this.initialWorkspaces = initialWorkspaces; this.registry = registry;
     this.deletionGuard = id => this.store.deletions.get(id) !== null;
   }
+  /** Subscribe to live frames; returns the unsubscribe function. */
+  onLive(listener: (frames: LiveEvent[]) => void): () => void { this.liveListeners.add(listener); return () => { this.liveListeners.delete(listener); }; }
+  liveCursor(): LiveCursor { return { epoch: this.liveEpoch, sequence: this.liveSequence }; }
   get workspaces(): Workspace[] { return this.registry?.active() ?? this.initialWorkspaces; }
   workspaceView(): Omit<WorkbenchConfiguration, 'harnesses'> {
     return this.registry?.view() ?? { workspaces: this.workspaces.map(({ id, label }) => ({ id, label })) };
@@ -831,7 +846,7 @@ export class Workbench {
       olderCursor: this.wrapCursor(id, tail?.olderCursor ?? null), loaded: !!tail && !tail.error, ...(tail?.error ? { error: tail.error } : {}) };
     return { conversation, history, turnFiles: this.store.readTurnFiles(id, [...runIds]),
       operations: this.store.listOperations({ conversationId: id, order: 'desc', limit: 100 }), queue: this.queue(id), requests: this.requestList(id),
-      ...(this.planReady(conversation, [...items, ...liveItems]) ? { planReady: { runId: conversation.state.runId! } } : {}), revision: this.store.version() };
+      ...(this.planReady(conversation, [...items, ...liveItems]) ? { planReady: { runId: conversation.state.runId! } } : {}), revision: this.store.version(), live: this.liveCursor() };
   }
   planOf(conversation: Conversation) { return planView(conversation, this.adapters.get(conversation.harnessId)?.planMode); }
   /**
@@ -1010,17 +1025,18 @@ export class Workbench {
       else if (item.fileEdits && live.runId === item.runId && live.status === 'completed') runtime.live.set(key, { ...live, fileEdits: item.fileEdits });
     }
     runtime.tail = { items, olderCursor, at: Date.now() };
-    if (!previous || previous.error || tailMark(previous.items, previous.olderCursor) !== tailMark(items, olderCursor)) this.store.touch(id);
+    // Compared with the durable mark, not this runtime's previous page: a fresh runtime re-reading unchanged history announces nothing.
+    this.store.markNative(id, pageMark(items, olderCursor));
     this.enrichReceipts(id);
   }
-  private retireLive(runtime: Runtime, key: string): void { runtime.live.delete(key); runtime.flushed.delete(key); runtime.liveAt.delete(key); }
+  private retireLive(runtime: Runtime, key: string): void { runtime.live.delete(key); runtime.flushed.delete(key); runtime.liveAt.delete(key); runtime.sent.delete(key); }
   private failTail(id: string, runtime: Runtime, error: unknown): void {
     if (this.closed || this.runtimes.get(id) !== runtime || this.isDeleting(id)) return;
     // Reading failures keep already loaded content and never fence execution by themselves.
     const code = historyErrorCode(error);
     if (runtime.tail?.error === code) { runtime.tail.at = Date.now(); return; }
     runtime.tail = { items: runtime.tail?.items ?? [], olderCursor: runtime.tail?.olderCursor ?? null, at: Date.now(), error: code };
-    this.store.touch(id);
+    this.store.markNative(id, 'error:' + code);
   }
 
   private latestAcceptedMessage(id: string): Operation | undefined {
@@ -1697,7 +1713,7 @@ export class Workbench {
         if (!idle) throw new StoreError('active_conversation_limit', 429);
         this.disposeRuntime(idle[0]);
       }
-      runtime = { live: new Map(), flushed: new Map(), liveAt: new Map(), generation: 0, stateGeneration: 0, dirty: false, retryAttempt: 0, subagentsDirty: true }; this.runtimes.set(id, runtime);
+      runtime = { live: new Map(), flushed: new Map(), liveAt: new Map(), generation: 0, stateGeneration: 0, dirty: false, retryAttempt: 0, subagentsDirty: true, sent: new Map() }; this.runtimes.set(id, runtime);
     }
     return runtime;
   }
@@ -1714,12 +1730,23 @@ export class Workbench {
       }
       if (changed.length) {
         this.store.recordTurnFiles(id, changed);
-        // A few items travel inside their change frames; a larger batch asks pages to re-read the snapshot.
-        if (changed.length <= 4) for (const item of changed) this.store.touch(id, item.id);
-        else this.store.touch(id);
+        // In-flight growth is not a durable fact: it travels as appended text on the live stream and is never stored (ADR 0019).
+        this.broadcastLive(id, runtime, changed);
       }
       this.enrichReceipts(id);
     } catch { this.scheduleSync(id); }
+  }
+  private broadcastLive(id: string, runtime: Runtime, changed: NativeItem[]): void {
+    const frames: LiveEvent[] = [];
+    for (const native of changed) {
+      const { text, ...view } = viewItem(native);
+      const { output, ...tool } = view.tool ?? { name: '' };
+      const previous = runtime.sent.get(native.id);
+      runtime.sent.set(native.id, { text, ...(output === undefined ? {} : { output }) });
+      frames.push({ type: 'live', sequence: ++this.liveSequence, conversationId: id, item: { ...view, ...(view.tool ? { tool } : {}) },
+        text: bodyPatch(previous?.text, text), ...(output === undefined ? {} : { output: bodyPatch(previous?.output, output) }) });
+    }
+    for (const listener of this.liveListeners) { try { listener(frames); } catch { /* a page that misses frames re-reads the snapshot */ } }
   }
   private observe(id: string): Promise<void> {
     if (this.closed) return Promise.resolve();

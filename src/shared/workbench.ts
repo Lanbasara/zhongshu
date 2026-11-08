@@ -237,6 +237,11 @@ export type TurnFileSummary = z.infer<typeof turnFilesSchema>;
 /** Opaque, conversation-bound position in native history (ADR 0014). */
 export const historyCursorSchema = z.string().regex(/^[A-Za-z0-9_-]{1,8192}$/);
 export const historyPageItemLimit = 400;
+/**
+ * Position in the in-memory live stream (ADR 0019). `epoch` names one server process; `sequence` counts every live frame
+ * that process sent. A snapshot carries the position it already reflects, so older frames are skipped.
+ */
+export const liveCursorSchema = z.object({ epoch: z.string().regex(/^[A-Za-z0-9_-]{8,64}$/), sequence: revisionSchema }).strict();
 export const snapshotSchema = z.object({
   conversation: conversationSchema,
   /** The native latest page plus in-flight items; `error` keeps already loaded content readable when native reads fail. */
@@ -248,6 +253,8 @@ export const snapshotSchema = z.object({
   /** A Plan-mode turn ended with a proposed plan and nothing came after it: offer to carry it out (Codex). */
   planReady: z.object({ runId: identifierSchema }).strict().optional(),
   revision: revisionSchema,
+  /** The live-stream position this snapshot's `liveItems` already reflect (ADR 0019). */
+  live: liveCursorSchema.optional(),
 }).strict();
 /** One older native page. `olderCursor` is null at the first message of the conversation. */
 export const historyPageSchema = z.object({
@@ -258,9 +265,24 @@ export const storageSchema = z.object({
   images: z.object({ owned: revisionSchema, cache: revisionSchema }).strict(),
 }).strict();
 /** `summary` marks a change to what conversation lists show (status, unread, title, archive, sub-agent counts); content and usage changes omit it. */
-export const changeEventSchema = z.object({ type: z.literal('change'), revision: revisionSchema, conversationId: z.uuid(), deleted: z.boolean().optional(), summary: z.literal(true).optional(), item: itemSchema.optional() }).strict();
+export const changeEventSchema = z.object({ type: z.literal('change'), revision: revisionSchema, conversationId: z.uuid(), deleted: z.boolean().optional(), summary: z.literal(true).optional() }).strict();
 export const resetEventSchema = z.object({ type: z.literal('reset'), revision: revisionSchema }).strict();
-export const readyEventSchema = z.object({ type: z.literal('ready'), revision: revisionSchema }).strict();
+export const readyEventSchema = z.object({ type: z.literal('ready'), revision: revisionSchema, live: liveCursorSchema }).strict();
+/** Heartbeats carry the latest live sequence, so a page notices a frame it never received. */
+export const heartbeatEventSchema = z.object({ live: revisionSchema }).strict();
+/** A growing body: the whole value, or what was appended at offset `at` (UTF-16 code units) since the previous frame. */
+export const bodyPatchSchema = z.union([
+  z.object({ value: z.string().max(1_048_576) }).strict(),
+  z.object({ at: revisionSchema, append: z.string().max(1_048_576) }).strict(),
+]);
+/** A live item without its growing bodies; `text` and the tool output travel as patches beside it. */
+export const liveItemSchema = itemSchema.omit({ text: true }).extend({ tool: toolSchema.omit({ output: true }).optional() }).strict();
+/** One in-flight item update. It is never stored; a page that misses one re-reads the snapshot. */
+export const liveEventSchema = z.union([
+  z.object({ type: z.literal('live'), sequence: revisionSchema, conversationId: z.uuid(), item: liveItemSchema, text: bodyPatchSchema, output: bodyPatchSchema.optional() }).strict(),
+  /** The update was too large for one frame; the snapshot carries it. */
+  z.object({ type: z.literal('live'), sequence: revisionSchema, conversationId: z.uuid(), itemId: identifierSchema, omitted: z.literal(true) }).strict(),
+]);
 export type WorkbenchConfiguration = z.infer<typeof workbenchConfigurationSchema>;
 export type Conversation = z.infer<typeof conversationSchema>;
 export type AttentionView = z.infer<typeof attentionSchema>;
@@ -270,6 +292,9 @@ export type StorageView = z.infer<typeof storageSchema>;
 export type WorkbenchItem = z.infer<typeof itemSchema>;
 export type WorkbenchOperation = z.infer<typeof operationSchema>;
 export type ChangeEvent = z.infer<typeof changeEventSchema>;
+export type LiveCursor = z.infer<typeof liveCursorSchema>;
+export type BodyPatch = z.infer<typeof bodyPatchSchema>;
+export type LiveEvent = z.infer<typeof liveEventSchema>;
 export type Collaboration = z.infer<typeof collaborationSchema>;
 export type SubagentStatus = z.infer<typeof subagentStatusSchema>;
 export type SubagentView = z.infer<typeof subagentSchema>;
