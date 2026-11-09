@@ -65,8 +65,8 @@ export class Workbench {
       workspaces: new Workspaces({ ...base, ledger, observation }),
       lifecycle: new Lifecycle({ ...base, history, observation, subagents, readers }),
     };
-    // Bells ring in this order. After a verified state the queue pauses first, then sub-agents and requests follow;
-    // after a settled sync queued operations go out before the queue head.
+    // Bells ring in registration order. A saved state first lets the queue pause; once usage and live items are out
+    // too, sub-agents and requests follow. After a settled sync queued operations go out before the queue head.
     observation.connect(
       { recover: id => this.desks.execution.reconcile(id), prepare: conversation => this.desks.creation.prepare(conversation) },
       [this.desks.execution, this.desks.queue, this.desks.subagents, this.desks.requests, this.desks.readers],
@@ -77,7 +77,7 @@ export class Workbench {
   start(): Promise<void> {
     this.tasks.assertOpen();
     return this.tasks.task(async () => {
-      await this.desks.workspaces.start();
+      const phases = this.desks.workspaces.start(); if (phases) await phases;
       this.desks.lifecycle.restoreDeletions();
       this.store.recoverDispatching();
       this.store.subagents.recoverDispatching();

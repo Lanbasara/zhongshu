@@ -27,11 +27,15 @@ export class Workspaces {
     this.gate = deps.gate; this.ledger = deps.ledger; this.observation = deps.observation;
   }
 
-  /** Read each maintained Host's phase once at startup. */
-  async start(): Promise<void> {
-    for (const workspace of this.bindings.workspaces) {
-      if (workspace.maintenance) this.gate.setPhase(workspace.id, await workspace.maintenance('status'));
-    }
+  /** Read each maintained Host's phase once at startup. Without maintained Hosts there is nothing to wait for, so the
+   * rest of startup stays synchronous as before ADR 0024. */
+  start(): Promise<void> | undefined {
+    if (!this.bindings.workspaces.some(workspace => workspace.maintenance)) return undefined;
+    return (async () => {
+      for (const workspace of this.bindings.workspaces) {
+        if (workspace.maintenance) this.gate.setPhase(workspace.id, await workspace.maintenance('status'));
+      }
+    })();
   }
   view(): Omit<WorkbenchConfiguration, 'harnesses'> {
     return this.bindings.registry?.view() ?? { workspaces: this.bindings.workspaces.map(({ id, label }) => ({ id, label })) };

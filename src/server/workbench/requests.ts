@@ -30,7 +30,7 @@ export class Requests implements Participant {
 
   // Participant.
   hint(id: string, change: NativeChange): void { if (change.type === 'requests') this.schedule(id); }
-  verified(id: string, _state: NativeState, _items: unknown, conversation: Conversation): void {
+  synced(id: string, _state: NativeState, _items: unknown, conversation: Conversation): void {
     if (conversation.binding && this.bindings.adapters.get(conversation.harnessId)?.requests) this.schedule(id);
   }
   responsible(id: string): boolean { return this.store.requests.busy(id); }

@@ -432,6 +432,7 @@ export class Observation {
           for (const participant of this.participants) participant.verified?.(id, state.value, runtime.tail?.items ?? [], current);
           if (state.value.configurationVerified && history.status === 'fulfilled' && history.value.usage) this.store.setUsage(id, history.value.usage);
           if (runtime.flush) { clearTimeout(runtime.flush); this.flushLive(id, runtime); }
+          for (const participant of this.participants) participant.synced?.(id, state.value, runtime.tail?.items ?? [], current);
           if (state.value.status !== 'unknown' && !this.responsible(id)) runtime.retryAttempt = 0;
         } catch (error) {
           if (!this.tasks.closed && this.runtimes.get(id) === runtime) this.unknown(id, error instanceof StoreError ? error.code : 'native_state_unavailable');

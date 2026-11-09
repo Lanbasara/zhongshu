@@ -13,6 +13,8 @@ export interface Participant {
   noticed?(id: string): void;
   /** One sync pass saved the native state it read; `items` is the latest page now in memory. */
   verified?(id: string, state: NativeState, items: readonly NativeItem[], conversation: Conversation): void;
+  /** The same pass has also saved usage and announced live items; follow-up reads may start now. */
+  synced?(id: string, state: NativeState, items: readonly NativeItem[], conversation: Conversation): void;
   /** A sync finished with nothing left dirty. */
   settled?(id: string): void;
   /** Observation can no longer vouch for what it showed. */

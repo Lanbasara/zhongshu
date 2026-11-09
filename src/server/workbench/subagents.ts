@@ -35,7 +35,7 @@ export class Subagents implements Participant {
   // Participant: how the observation kernel's facts reach the sub-agent index.
   created(id: string): void { this.dirty.add(id); }
   hint(id: string, change: NativeChange): void { if (change.type === 'subagents') this.schedule(id, change.agentId, change.transcript); }
-  verified(id: string, state: NativeState, items: readonly NativeItem[]): void {
+  synced(id: string, state: NativeState, items: readonly NativeItem[]): void {
     if (state.configurationVerified && (this.dirty.has(id) || this.store.subagents.get(id)?.verified === false ||
       items.some(item => item.collaboration))) { this.dirty.delete(id); this.tasks.launch(this.refresh(id)); }
   }
