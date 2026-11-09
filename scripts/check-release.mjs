@@ -13,10 +13,12 @@ function walk(directory) {
 const digest = path => createHash('sha256').update(readFileSync(path)).digest('hex');
 if (process.argv.includes('--seal')) {
   const web = JSON.parse(readFileSync(resolve(dist, 'web-inventory.json'), 'utf8'));
-  const sourceFiles = ['server', 'harness', 'shared', 'sichen'].filter(name => existsSync(resolve(root, 'src', name))).flatMap(name => walk(resolve(root, 'src', name))).filter(path => path.endsWith('.ts') && !path.endsWith('.d.ts'));
+  const sourceFiles = ['server', 'harness', 'shared', 'sichen', 'simen'].filter(name => existsSync(resolve(root, 'src', name))).flatMap(name => walk(resolve(root, 'src', name))).filter(path => path.endsWith('.ts') && !path.endsWith('.d.ts'));
   // 司辰 (ADR 0022) adds its own package marker, version and runnable bin beside its compiled modules.
   const sichen = existsSync(resolve(root, 'src', 'sichen')) ? ['sichen/package.json', 'sichen/version.json', 'sichen/bin/sichen'] : [];
-  const allowed = new Set(['version.json', 'web-inventory.json', ...sichen, ...Object.keys(web), ...sourceFiles.map(path => relative(resolve(root, 'src'), path).replace(/\.ts$/, '.js'))]);
+  // 司门 (ADR 0023) likewise: its marker, version, the agents' `chrome-devtools` command and the host beside the browser.
+  const simen = existsSync(resolve(root, 'src', 'simen')) ? ['simen/package.json', 'simen/version.json', 'simen/bin/chrome-devtools', 'simen/bin/simen-host'] : [];
+  const allowed = new Set(['version.json', 'web-inventory.json', ...sichen, ...simen, ...Object.keys(web), ...sourceFiles.map(path => relative(resolve(root, 'src'), path).replace(/\.ts$/, '.js'))]);
   const inventory = {};
   for (const file of walk(dist)) {
     const name = relative(dist, file);
