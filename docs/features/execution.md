@@ -30,9 +30,9 @@
 
 | 场景 | 初始条件与动作 | 判据和独立观察 |
 | --- | --- | --- |
-| E01 | 建“执行 A”，输入含本轮独有标记的两行文本；先按 Enter，再发送。CLI complete 后输入新文本再发送 | Enter 不派发；首次发送 inspect 的 submitCalls=1、正文有两行用户输入、出现停止按钮。complete 后出现 `FIXTURE COMPLETED <runId>`、恢复发送，再发后 submitCalls=2；两轮同原生身份、配置不变。运行中快捷键的排队行为见 E06 |
-| E02 | 按 [空原生会话故障前提](conversations.md#空原生会话故障前提) 建“未知回执”；先运行 unknown-receipt，再发送唯一文本。保存产品操作 ID、inspect 调用数；在“核对同一发送”重试两次；再运行 prove，点“查询原生结果” | 未发布证据前，操作 unknown、保留 pending 草稿，同编号重试不增加 submitCalls。发布后 accepted，草稿中的 pending 被清除；inspect 始终只调用一次，原生 operationIds 只有原 ID。最后 complete 收尾 |
-| E03 | 在已接受且 running 的 fixture 对话点“停止当前轮” | inspect 的 stopCalls 加一、目标 runId 等于被停止轮，产品操作 type=stop；页面变“已中断”，显示后台工具可能仍运行/改动不撤销的提示。发下一条能再次运行；fixture 不证明真实工具退出 |
+| E01 | 在草稿输入含本轮独有标记的两行文本（草稿首发即为首次发送；之后的 `--title` 用 inspect 中折叠后的实际标题）；先按 Enter，再发送。CLI complete 后输入新文本再发送 | Enter 不派发；首次发送 inspect 的 submitCalls=1、正文有两行用户输入、出现停止按钮。complete 后出现 `FIXTURE COMPLETED <runId>`、恢复发送，再发后 submitCalls=2；两轮同原生身份、配置不变。运行中快捷键的排队行为见 E06 |
+| E02 | 按 [空原生会话故障前提](conversations.md#空原生会话故障前提) 建“未知回执”；先运行 unknown-receipt，再发送唯一文本。保存产品操作 ID、inspect 调用数；在“核对同一发送”重试两次；再运行 prove；页面若已自动核实（accepted、pending 清除、按钮消失），记为有效恢复，按钮仍在时再点“查询原生结果” | 未发布证据前，操作 unknown、保留 pending 草稿，同编号重试不增加 submitCalls。发布后 accepted，草稿中的 pending 被清除；inspect 始终只调用一次，原生 operationIds 只有原 ID。最后 complete 收尾 |
+| E03 | 在已接受且 running 的 fixture 对话点“停止当前轮” | inspect 的 stopCalls 加一、state.runId 仍是被停止轮且 status=interrupted；产品 type=stop 操作的 runId 等于被停止轮；页面变“已中断”，显示后台工具可能仍运行/改动不撤销的提示。发下一条能再次运行；fixture 不证明真实工具退出 |
 | E04 | 按下方五个独立分支，分别驱动存储失败、编码预算、HTTP 400、HTTP 413、原生 rejected | 每个分支都核对输入、pending、原操作编号、独立调用计数与编辑后再次发送；不能用其中一条代替其他分支 |
 | E05 | 按下面真实分支分别使用 Codex、DSH | 文件字节独立读回、原生身份/配置及正文共同符合预期；每个 Harness 单独结论 |
 
@@ -83,7 +83,7 @@ node test/support/feature-fixture.ts inspect --root "$zh_verify_root" --title '�
 
 1. 两端分别新建一个对话。fixture 发任意带标记的开场消息。真实 Host 按 E05 安排工作区 gate，在可信端核对工具已启动。逐条加入带唯一标记的 A、B、C，至少一条用 ⌘/Ctrl + Enter。刷新后队列应为 A、B、C。编辑 A，删除 C，再加入 D。检查未派发文字仍在队列，原生历史此时只有开场输入。
 2. 在当前轮仍活动时，点击 B 所在行的提前发送按钮，核对其余行仍按 A、D 排列。真实 Host 可在 gate 尚未释放时接收 B。先核对接收回执或 DSH `next-step` 中的请求编号，再 release gate。待 B 出现在原生历史，核对它只出现一次，且与开场消息属于同一轮。让本轮正常结束，再逐轮核对编辑后的 A 和 D 各自开启一轮，原 A 和 C 的标记未进入历史。fixture 使用 `complete`，真实 Host 对照原生历史及配置。另建一个队列，点停止，核对保留与暂停，再点“继续派发”核对新轮。
-3. 分别新建只有一个队列项的对话，浏览器拦截该对话的下一次 `POST /api/private/workbench/conversations/<id>/queue`，让按钮点击产生请求并暂存，核对它是该队列项的 `send`。在独立端结束原轮。为避免队首先被自动派发，先在第二个已登录页面点停止，使队列暂停，等待原生终态后才放行暂存的请求。Codex 应保留条目，原生历史没有该输入。DSH 应出现新轮和唯一输入，界面显示“提前发送的消息已送达后续轮”。保留点击时目标轮和实际历史轮的对应证据。正常结束与自动派发竞争由定向测试另测。
+3. 分别新建只有一个队列项的对话，用 browser-faults 的 `zhVerify.holdNextRequest('/api/private/workbench/conversations/<id>/queue')` 在请求发出前暂存，让按钮点击产生请求（`status().heldBefore` 为 `request`），核对它是该队列项的 `send`。在独立端结束原轮。为避免队首先被自动派发，先在第二个已登录页面点停止，使队列暂停，等待原生终态后才 `release()` 放行暂存的请求；从点击到放行须在应用请求超时内（数秒）完成，放行后确认该请求返回 200，否则应用已放弃这次请求，结果不能作为证据。Codex 应保留条目，原生历史没有该输入。DSH 应出现新轮和唯一输入，界面显示“提前发送的消息已送达后续轮”。保留点击时目标轮和实际历史轮的对应证据。正常结束与自动派发竞争由定向测试另测。
 4. fixture 中让原轮保持运行，排入一条消息后装载 `unknown-receipt`，点该条目的提前发送。核对队列显示“接收结果待核实”。刷新并点“查询原生结果”两次，原生 inspect 的提交计数不得增加。执行 `prove` 后核对用户条目恰好一次且属于正确轮。真实 Host 若只能丢弃浏览器 HTTP 响应，单独记录为浏览器重试证据，原生回执丢失仍需通过隔离的原生连接故障验证。
 
 ### E08–E10 提问与审批

@@ -275,7 +275,8 @@ export function NewConversation(props:Props) {
     props.onCreated(conversation);
   }
   function switchPower(harnessId:'codex'|'dsh'){
-    if(locked)return;const previous=current.current;const next=previous.powers[harnessId]??initialConfig(props.configuration.harnesses.find(h=>h.id===harnessId));
+    // Choosing the Power already in use changes nothing; reading its saved slot would discard the current choices.
+    if(locked||harnessId===current.current.harnessId)return;const previous=current.current;const next=previous.powers[harnessId]??initialConfig(props.configuration.harnesses.find(h=>h.id===harnessId));
     persist({...previous,harnessId,configuration:next,powers:{...previous.powers,[previous.harnessId]:previous.configuration}});
     if(previous.skills?.length)setError('已保留文字及技能标记；发送前会核验技能是否适用于当前 Power，不适用时请重新选择。');
   }

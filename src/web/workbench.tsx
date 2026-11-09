@@ -90,6 +90,8 @@ const stateReasons: Record<string, string> = {
   native_receipt_unknown: '原生接收结果暂时无法确认，本次操作不会自动重发。',
   native_run_changed: '当前运行已经变化，请先刷新状态。',
 };
+/** A rejection or unknown reason in words; a bare machine code without a sentence of its own gets the fallback. */
+const describe = (reason: string, fallback: string) => failures[reason] ?? (/^[a-z][a-z0-9_]*$/.test(reason) ? fallback : reason);
 const explain = (value: string) => stateReasons[value] ?? (/^[a-z0-9_]+$/.test(value) ? '暂时无法核对原生状态；已有内容保留，任务不会自动重发。' : value);
 /** A file opened from a turn's file list, or from elsewhere (a timeline entry) with no turn behind it. */
 type ReaderTarget = { conversationId: string; runId: string; workspaceId: string; path: string } | { conversationId?: undefined; runId?: undefined; workspaceId: string; path: string };
@@ -280,7 +282,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
       rememberConversation(result.conversation);
       setDraft(current => { const { pending: _pending, ...editable } = current; const next = sameInput(editable, pending) ? { text: '' } : editable; saveDraft(id, next); return next; });
       setError('');
-    } else if (operation?.status === 'rejected') setError(operation.reason ? failures[operation.reason] ?? operation.reason : '本次发送未被接受，输入已保留。');
+    } else if (operation?.status === 'rejected') setError(operation.reason ? describe(operation.reason, '本次发送未被接受，输入已保留。') : '本次发送未被接受，输入已保留。');
   };
   /** Re-read only the conversation's state; history and live items stay as they are (ADR 0020). */
   const loadState = async (id: string) => {
@@ -489,7 +491,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
         setDraft(current => { const { pending: _pending, ...editable } = current; const clean = sameInput(editable, operation) ? { text: '' } : editable; saveDraft(id, clean); return clean; });
       } else if (result && ['unknown', 'rejected'].includes(result.operation.status)) {
         const reason = result.operation.reason;
-        setError(reason ? failures[reason] ?? reason : '操作结果待核实。');
+        setError(reason ? describe(reason, '操作结果待核实，任务不会自动重发。') : '操作结果待核实。');
       }
       atBottom.current = true;
       // The sent message arrives on the live stream and with the next history change; only the operation state is read now.
