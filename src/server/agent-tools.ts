@@ -4,7 +4,7 @@
  * token. The token grants nothing but these tools; it is never the administrator credential.
  */
 import { createHash, timingSafeEqual } from 'node:crypto';
-import Fastify from 'fastify';
+import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import { z } from 'zod';
 
 export const NOTIFY_TOOL = 'notify_user';
@@ -31,6 +31,11 @@ const resultTool = {
   },
 };
 const PROTOCOLS = ['2026-07-28', '2025-11-25', '2025-06-18', '2025-03-26'];
+/** Shown to the agent by the Host as this server's instructions (ADR 0022): where scheduling and calendar entries go. */
+export const SICHEN_INSTRUCTIONS = 'Scheduled tasks and calendar entries: use the shell command `sichen` (run `sichen --help` first). '
+  + 'Write times as dates and clock times, e.g. `sichen schedule add "收盘复核" --at "2026-11-10 15:10" --to here --prompt "…"` or '
+  + '`--every 工作日 --time 14:45 --until 2027-01-31`. `--to here` returns results to this conversation. '
+  + 'It checks the rule and prints the next runs; do not write RRULE text or timeline JSON by hand.';
 const message = z.object({ jsonrpc: z.literal('2.0'), id: z.union([z.string().max(200), z.number()]).optional(), method: z.string().max(100), params: z.unknown().optional() }).passthrough();
 const callParams = z.object({ name: z.string().max(100), arguments: z.record(z.string(), z.unknown()).optional() }).passthrough();
 const notifyArgs = z.object({ summary: z.string(), file: z.string().optional() }).strict();
@@ -52,7 +57,10 @@ export function relativeFile(value: string | undefined): string | undefined {
 }
 
 export type NotifyOutcome = { id: string } | { refused: string };
-export function createAgentTools(options: { token: string; port: number; version: string; notify(summary: string, file: string | undefined): NotifyOutcome; record(summary: string): NotifyOutcome }) {
+type Guard = (request: FastifyRequest, reply: FastifyReply) => Promise<unknown>;
+export function createAgentTools(options: { token: string; port: number; version: string; notify(summary: string, file: string | undefined): NotifyOutcome; record(summary: string): NotifyOutcome;
+  /** 司辰's HTTP endpoints on the same loopback server and token (ADR 0022); also turns on the instructions. */
+  routes?(app: FastifyInstance, guard: Guard): Promise<void>; }) {
   const expected = createHash('sha256').update(options.token).digest();
   const app = Fastify({ logger: false, bodyLimit: 64 * 1024 });
   const authorized = (header: string | undefined) => {
@@ -70,7 +78,8 @@ export function createAgentTools(options: { token: string; port: number; version
     if (id === undefined) return undefined; // notifications such as notifications/initialized need no answer
     if (method === 'initialize') {
       const requested = z.object({ protocolVersion: z.string().max(40) }).passthrough().safeParse(params).data?.protocolVersion;
-      return result(id, { protocolVersion: requested && PROTOCOLS.includes(requested) ? requested : PROTOCOLS[2], capabilities: { tools: { listChanged: false } }, serverInfo: { name: 'zhongshu', version: options.version } });
+      return result(id, { protocolVersion: requested && PROTOCOLS.includes(requested) ? requested : PROTOCOLS[2], capabilities: { tools: { listChanged: false } }, serverInfo: { name: 'zhongshu', version: options.version },
+        ...(options.routes ? { instructions: SICHEN_INSTRUCTIONS } : {}) });
     }
     if (method === 'ping') return result(id, {});
     if (method === 'tools/list') return result(id, { tools: [notifyTool, resultTool] });
@@ -101,6 +110,12 @@ export function createAgentTools(options: { token: string; port: number; version
     return failure(id, -32601, 'Method not found');
   }
 
+  // Agents are not browsers; a page on this machine must not reach the tools, and only the token opens them.
+  const guard: Guard = async (request, reply) => {
+    if (request.headers.origin !== undefined) return reply.code(403).send();
+    if (!authorized(request.headers.authorization)) return reply.code(401).send();
+  };
+  if (options.routes) app.register(async scoped => { await options.routes!(scoped, guard); });
   app.post('/mcp', async (request, reply) => {
     // Agents are not browsers; a page on this machine must not reach the tool.
     if (request.headers.origin !== undefined) return reply.code(403).send();
@@ -120,6 +135,8 @@ export function createAgentTools(options: { token: string; port: number; version
 
   return {
     async listen() { await app.listen({ host: '127.0.0.1', port: options.port }); },
+    /** The bound port, for tests that listen on port 0. */
+    port() { const value = app.server.address(); return typeof value === 'object' && value ? value.port : options.port; },
     async close() { await app.close(); },
     /** For tests: the Fastify instance without listening. */
     inject: app.inject.bind(app),

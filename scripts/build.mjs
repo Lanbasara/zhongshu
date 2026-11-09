@@ -15,6 +15,12 @@ for (const args of [['scripts/design-tokens.mjs', '--check'], ['node_modules/typ
   if (result.error || result.status !== 0) throw new Error('Build failed');
 }
 await writeFile(new URL('version.json', dist), `${JSON.stringify({ name: pkg.name, version: pkg.version, revision })}\n`);
+// 司辰 (ADR 0022) ships as its own directory: dependency-free modules, a runnable bin and its version, mounted beside any Harness.
+const sichen = new URL('sichen/', dist);
+await writeFile(new URL('package.json', sichen), `${JSON.stringify({ name: 'sichen', private: true, type: 'module' })}\n`);
+await writeFile(new URL('version.json', sichen), `${JSON.stringify({ version: pkg.version, revision })}\n`);
+await mkdir(new URL('bin/', sichen), { recursive: true });
+await writeFile(new URL('bin/sichen', sichen), "#!/usr/bin/env node\nimport { main } from '../cli.js';\nawait main(process.argv.slice(2));\n", { mode: 0o755 });
 const boundary = spawnSync(process.execPath, ['scripts/check-release.mjs', '--seal'], { cwd: root, stdio: 'inherit' });
 if (boundary.error || boundary.status !== 0) throw new Error('Release boundary failed');
 console.log(`Built ${pkg.name} ${pkg.version} (${revision})`);

@@ -13,7 +13,7 @@ import type { WorkbenchConfiguration } from '../shared/workbench.ts';
 import { Button, IconButton } from './ui/controls.tsx';
 import { request } from './workbench-client.ts';
 import { CreateForm, Field, TimingFields, initialTiming, timingFrom } from './schedule-forms.tsx';
-import { addDays, dayLabel, localDate, localTime, mondayOf, parseDate, runConfigurationText, scheduleItems, summarize, timingText, whenText, WEEKDAYS, type ScheduleItem } from './schedule-model.ts';
+import { addDays, dayLabel, localDate, localTime, mondayOf, parseDate, ruleOf, runConfigurationText, scheduleItems, summarize, timingText, whenText, WEEKDAYS, type ScheduleItem } from './schedule-model.ts';
 import './schedule.css';
 
 export type ScheduleTab = 'calendar' | 'today' | 'future' | 'past' | 'tasks';
@@ -459,7 +459,9 @@ function TaskDetail({ task, configuration, csrf, report, close, notice, notify, 
   const conversation = task.latestRun?.conversationId ?? task.lastDelivery?.conversationId ?? task.target.conversationId;
   const latest = task.lastDelivery;
   const editable = task.status !== 'ended';
-  const editableTiming = task.timing.kind !== 'cron' && !(task.timing.kind === 'rrule' && !/COUNT=1/.test(task.timing.rrule));
+  // The page edits the rules it can show in its own fields; month and cron rules are changed with sichen or by the agent.
+  const rule = ruleOf(task);
+  const editableTiming = task.timing.kind === 'every' || (!!rule && ['once', 'daily', 'weekly'].includes(rule.rule.kind));
   const empty = !title.trim() || !prompt.trim();
   return <>
     <PanelHead title={task.title} close={close}/>
@@ -482,7 +484,7 @@ function TaskDetail({ task, configuration, csrf, report, close, notice, notify, 
         <Field label="任务内容">{editable ? <textarea aria-invalid={!prompt.trim() || undefined} value={prompt} maxLength={32000} onChange={event => setPrompt(event.target.value)}/> : <div className="sch-prompt">{task.prompt}</div>}</Field>
         {editable && editableTiming && changeTiming ? <TimingFields draft={timing} change={setTiming}/>
           : <Field label="运行时间"><div className="sch-static-row"><span>{timingText(task)}</span>{editable && editableTiming && <Button size="small" onClick={() => setChangeTiming(true)}>改时间</Button>}</div></Field>}
-        {editable && !editableTiming && <p className="sch-help">这条任务用的是高级规则，时间请在对话里让 Agent 改。</p>}
+        {editable && !editableTiming && <p className="sch-help">这条任务按月或按 cron 运行，时间请用 sichen schedule edit 改，或在对话里让 Agent 改。</p>}
       </div>
       <dl className="sch-kv">
         <dt>执行位置</dt><dd>{target}</dd>

@@ -12,25 +12,29 @@ import { skillCatalogSchema, type SkillOption } from '../shared/content.ts';
 import type { WorkbenchConfiguration } from '../shared/workbench.ts';
 import { Button } from './ui/controls.tsx';
 import { request, RequestError } from './workbench-client.ts';
-import { instructionWithSkill, localDate, localTime, timingText, WEEKDAYS } from './schedule-model.ts';
+import { instructionWithSkill, localDate, localTime, ruleOf, timingText, WEEKDAYS } from './schedule-model.ts';
 
 const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-type TimingDraft = { kind: 'at' | 'daily' | 'weekly' | 'every'; date: string; time: string; weekdays: number[]; minutes: number };
+/** `until`: the last day a daily or weekly rule runs, or '' for none (ADR 0022). */
+type TimingDraft = { kind: 'at' | 'daily' | 'weekly' | 'every'; date: string; time: string; weekdays: number[]; minutes: number; until: string };
 
+/** The page's choice as a rule for 司辰's time model; the server checks it and hands the Harness a matching timing. */
 export function timingFrom(draft: TimingDraft) {
-  if (draft.kind === 'at') { const [y, m, d] = draft.date.split('-').map(Number); const [hh, mm] = draft.time.split(':').map(Number); return { kind: 'at', at: new Date(y!, m! - 1, d!, hh!, mm!).toISOString() }; }
   if (draft.kind === 'every') return { kind: 'every', seconds: Math.max(1, draft.minutes) * 60 };
-  if (draft.kind === 'weekly') return { kind: 'weekly', time: draft.time, timeZone: zone, weekdays: draft.weekdays.length ? draft.weekdays : [1, 2, 3, 4, 5] };
-  return { kind: 'daily', time: draft.time, timeZone: zone };
+  const until = draft.kind !== 'at' && draft.until ? { until: draft.until } : {};
+  const rule = draft.kind === 'at' ? { kind: 'once', date: draft.date, time: draft.time }
+    : draft.kind === 'weekly' ? { kind: 'weekly', weekdays: draft.weekdays.length ? draft.weekdays : [1, 2, 3, 4, 5], time: draft.time } : { kind: 'daily', time: draft.time };
+  return { kind: 'when', when: { rule, timeZone: zone, ...until } };
 }
 export function initialTiming(task?: AutomationView): TimingDraft {
   const soon = new Date(Date.now() + 3600_000);
-  const base: TimingDraft = { kind: 'daily', date: localDate(soon), time: localTime(soon).slice(0, 3) + '00', weekdays: [1, 2, 3, 4, 5], minutes: 15 };
+  const base: TimingDraft = { kind: 'daily', date: localDate(soon), time: localTime(soon).slice(0, 3) + '00', weekdays: [1, 2, 3, 4, 5], minutes: 15, until: '' };
   if (!task) return base;
-  const timing = task.timing;
-  if (timing.kind === 'daily') return { ...base, time: timing.time };
-  if (timing.kind === 'weekly') return { ...base, kind: 'weekly', time: timing.time, weekdays: timing.weekdays };
-  if (timing.kind === 'every') return { ...base, kind: 'every', minutes: Math.round(timing.seconds / 60) };
+  if (task.timing.kind === 'every') return { ...base, kind: 'every', minutes: Math.round(task.timing.seconds / 60) };
+  const when = ruleOf(task);
+  const until = when?.until ?? '';
+  if (when?.rule.kind === 'daily') return { ...base, time: when.rule.time, until };
+  if (when?.rule.kind === 'weekly') return { ...base, kind: 'weekly', time: when.rule.time, weekdays: when.rule.weekdays, until };
   const at = new Date(task.scheduledAt); return { ...base, kind: 'at', date: localDate(at), time: localTime(at) };
 }
 
@@ -54,6 +58,10 @@ export function TimingFields({ draft, change }: { draft: TimingDraft; change(dra
       {draft.kind !== 'every' && <input type="time" aria-label="时间" value={draft.time} onChange={event => change({ ...draft, time: event.target.value })}/>}
       {draft.kind === 'every' && <label className="sch-suffix"><input type="number" aria-label="间隔分钟数" min={1} max={1440} value={draft.minutes} onChange={event => change({ ...draft, minutes: Number(event.target.value) })}/><span>分钟</span></label>}
     </div>
+    {(draft.kind === 'daily' || draft.kind === 'weekly') && <div className="sch-inline sch-until">
+      <label className="sch-suffix"><span>结束日期</span><input type="date" aria-label="结束日期" value={draft.until} onChange={event => change({ ...draft, until: event.target.value })}/></label>
+      {draft.until ? <button type="button" className="text-button" onClick={() => change({ ...draft, until: '' })}>不设结束</button> : <small className="sch-help">不填就一直运行；填了，运行到那天为止（含当天），到期由 DSH 自己结束。</small>}
+    </div>}
   </Field>;
 }
 
