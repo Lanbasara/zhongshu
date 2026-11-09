@@ -26,6 +26,13 @@ export const localTime = (value: Date) => `${String(value.getHours()).padStart(2
 export function parseDate(value: string): Date { const [y, m, d] = value.split('-').map(Number); return new Date(y!, m! - 1, d!); }
 export function addDays(value: string, days: number): string { const date = parseDate(value); date.setDate(date.getDate() + days); return localDate(date); }
 export function mondayOf(value: string): string { const date = parseDate(value); date.setDate(date.getDate() - ((date.getDay() + 6) % 7)); return localDate(date); }
+/** "11 月 15 日 10:00（6 天后）": an instant with how far it is from today in calendar days. */
+export function whenText(instant: number, now: number): string {
+  const date = new Date(instant);
+  const days = Math.round((parseDate(localDate(date)).getTime() - parseDate(localDate(new Date(now))).getTime()) / 86_400_000);
+  const relative = days === 0 ? '今天' : days === 1 ? '明天' : days === -1 ? '昨天' : days > 0 ? `${days} 天后` : `${-days} 天前`;
+  return `${date.getMonth() + 1} 月 ${date.getDate()} 日 ${localTime(date)}（${relative}）`;
+}
 export function dayLabel(value: string): string { const date = parseDate(value); return `${date.getMonth() + 1} 月 ${date.getDate()} 日 周${WEEKDAYS[(date.getDay() + 6) % 7]}`; }
 
 /** Wall-clock parts of an instant in a time zone. */
