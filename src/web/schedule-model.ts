@@ -60,6 +60,13 @@ export function scheduleItems(input: { automations: AutomationView[]; timeline: 
   const placed = input.notifications.filter(entry => entry.conversationId).sort((a, b) => a.createdAt - b.createdAt);
   const noticeAfter = (conversationId: string | undefined, since: number, until = Infinity) =>
     conversationId ? placed.filter(entry => entry.conversationId === conversationId && entry.createdAt >= since - 60_000 && entry.createdAt < until).at(-1)?.summary : undefined;
+  // A conversation can receive several tasks' runs; a notice belongs to the run delivered last before it.
+  const deliveries = new Map<string, number[]>();
+  for (const task of input.automations) {
+    const id = task.lastDelivery?.conversationId ?? task.target.conversationId;
+    if (task.lastDelivery && id) deliveries.set(id, [...(deliveries.get(id) ?? []), Date.parse(task.lastDelivery.deliveredAt)].sort((a, b) => a - b));
+  }
+  const nextDelivery = (conversationId: string | undefined, after: number) => (conversationId ? deliveries.get(conversationId)?.find(value => value > after) : undefined) ?? Infinity;
   let next: { key: string; at: number } | undefined;
   for (const task of input.automations) {
     const routine = task.timing.kind !== 'once' && task.timing.kind !== 'rrule';
@@ -68,7 +75,7 @@ export function scheduleItems(input: { automations: AutomationView[]; timeline: 
     if (delivered) {
       const when = at(Date.parse(delivered.deliveredAt));
       if (inRange(when.date)) items.push({ key: `${task.id}:delivered`, kind: 'agent', ...when, title: task.title, status: task.executing ? 'running' : 'done', routine,
-        late: delivered.late, notified: noticeAfter(delivered.conversationId ?? conversationId, Date.parse(delivered.deliveredAt)), automationId: task.id,
+        late: delivered.late, notified: noticeAfter(delivered.conversationId ?? conversationId, Date.parse(delivered.deliveredAt), nextDelivery(delivered.conversationId ?? conversationId, Date.parse(delivered.deliveredAt))), automationId: task.id,
         ...(delivered.result ? { result: delivered.result } : {}), ...(delivered.conversationId ?? conversationId ? { conversationId: delivered.conversationId ?? conversationId } : {}) });
     }
     if (task.status === 'ended') continue;

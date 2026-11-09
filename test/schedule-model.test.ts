@@ -99,6 +99,17 @@ test('timeline entries with a zone land on the viewer day; a passed action is ov
   assert.equal(summarize(items, '2026-11-09').actions, 1, 'an overdue action still counts as one to do');
 });
 
+test('two tasks running in one conversation each keep their own notice', () => {
+  const shared = '55555555-5555-4555-8555-555555555555';
+  const ran = (minutesAgo: number) => ({ scheduledAt: new Date(now - minutesAgo * 60_000).toISOString(), deliveredAt: new Date(now - minutesAgo * 60_000).toISOString(), late: false, conversationId: shared });
+  const first = task({ id: 'first', status: 'ended', target: { kind: 'conversation', conversationId: shared }, lastDelivery: ran(10) });
+  const second = task({ id: 'second', status: 'ended', target: { kind: 'conversation', conversationId: shared }, lastDelivery: ran(5) });
+  const notice = { id: '66666666-6666-4666-8666-666666666666', summary: '第二张卡的通知', file: null, createdAt: now - 3 * 60_000, state: 'placed' as const, conversationId: shared, itemId: 'i' };
+  const items = scheduleItems({ automations: [first, second], timeline: [], notifications: [notice], from: '2026-11-08', to: '2026-11-09', now });
+  assert.equal(items.find(item => item.automationId === 'first')?.notified, undefined, 'a later run\'s notice is not shown on the earlier card');
+  assert.equal(items.find(item => item.automationId === 'second')?.notified, '第二张卡的通知');
+});
+
 test('a future run opens a conversation only when the task always returns to one', () => {
   const fixed = '33333333-3333-4333-8333-333333333333'; const last = '44444444-4444-4444-8444-444444444444';
   const ran = { scheduledAt: new Date(now - 86_400_000).toISOString(), deliveredAt: new Date(now - 86_400_000).toISOString(), late: false, conversationId: last };

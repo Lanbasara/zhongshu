@@ -265,6 +265,16 @@ test('the automation service shows native tasks in product terms, adopts session
 
   await app.inject({ method: 'GET', url: '/automations' });
   assert.equal(noticed.length, 1, 'a delivery is handled once');
+  // Another task delivering into the same session later: each card keeps only its own run's conclusion.
+  const laterAt = new Date(Date.now() + 1000).toISOString();
+  tasks = [...tasks, { id: 'later', title: '午后检查', prompt: '查', timing: { kind: 'once', at: laterAt }, scheduledAt: laterAt, status: 'ended', target: { kind: 'session', sessionId: 's-run-1' },
+    involved: [], executing: false, lastDelivery: { scheduledAt: laterAt, deliveredAt: laterAt, messageId: 'm-later', sessionId: 's-run-1' } }];
+  await new Promise(resolve => setTimeout(resolve, 3100));
+  const afternoon = service.results.record('午后：维持'); assert.ok('id' in afternoon);
+  service.results.observed(adopted.id, [{ id: 'dsh:s-run-1:tool:c2', kind: 'tool', text: '', status: 'completed', tool: { name: 'mcp__zhongshu__record_result', output: `结论编号 ${afternoon.id}` } }]);
+  const shared = new Map((await app.inject({ method: 'GET', url: '/automations' })).json().automations.map((task: { id: string; lastDelivery?: { result?: string } }) => [task.id, task.lastDelivery?.result]));
+  assert.deepEqual([shared.get('routine'), shared.get('later')], ['简报：外部平稳，无需动作', '午后：维持']);
+  tasks = tasks.filter(task => task.id !== 'later');
   assert.equal(store.conversationForNative('dsh', 's-unknown'), null, 'a session the task did not create stays the Harness\'s own');
 
   // After its first delivery the Harness rewrites a "new once" target to a plain session; the reservation still adopts it.

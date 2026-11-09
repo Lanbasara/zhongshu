@@ -124,10 +124,23 @@ export function createAutomations(db: DatabaseSync, workbench: Workbench, adapte
   }
 
   function workspaceOf(cwd: string | undefined) { return cwd ? workbench.workspaceView().workspaces.find(entry => workbench.workspaces.find(w => w.id === entry.id)?.directory === cwd) : undefined; }
-  /** `until`: when the next delivery of the same task arrived; a conclusion after it belongs to that later run. */
-  function deliveryView(delivery: AutomationDelivery, until?: string): AutomationDeliveryView {
+  /**
+   * When the next delivery into the same session arrived, from this task or another one sharing the conversation;
+   * a conclusion written after it belongs to that later run.
+   */
+  function nextInSession(delivery: AutomationDelivery): string | undefined {
+    let next: string | undefined;
+    for (const task of cache.get('dsh')?.tasks ?? []) {
+      const other = task.lastDelivery;
+      if (other && other.sessionId === delivery.sessionId && other.deliveredAt > delivery.deliveredAt && (!next || other.deliveredAt < next)) next = other.deliveredAt;
+    }
+    return next;
+  }
+  /** `until`: when the next delivery arrived; without it, the next one known in the same session. */
+  function deliveryView(delivery: AutomationDelivery, until = nextInSession(delivery)): AutomationDeliveryView {
     const conversation = workbench.store.conversationForNative('dsh', delivery.sessionId);
-    const result = conversation ? results.within(conversation.id, Date.parse(delivery.deliveredAt) - 60_000, until ? Date.parse(until) - 60_000 : undefined) : undefined;
+    // A conclusion is written after its delivery and before the next one into the same session.
+    const result = conversation ? results.within(conversation.id, Date.parse(delivery.deliveredAt), until ? Date.parse(until) : undefined) : undefined;
     return { scheduledAt: delivery.scheduledAt, deliveredAt: delivery.deliveredAt, late: late(delivery), ...(conversation ? { conversationId: conversation.id } : {}),
       ...(delivery.prompt ? { prompt: delivery.prompt } : {}), ...(result ? { result } : {}) };
   }
@@ -215,8 +228,8 @@ export function createAutomations(db: DatabaseSync, workbench: Workbench, adapte
       if (!page) throw new AutomationError('automation_not_found', 404);
       // Each run ends where the next later delivery of the same task arrived; its conclusion is written before that.
       const times = page.records.map(record => record.deliveredAt).sort();
-      const next = (at: string) => times.find(other => other > at);
-      return { records: page.records.map(record => deliveryView(record, next(record.deliveredAt))), earlierUnavailable: page.earlierUnavailable, ...(page.before ? { before: page.before } : {}) };
+      const next = (record: AutomationDelivery) => [times.find(other => other > record.deliveredAt), nextInSession(record)].filter((value): value is string => !!value).sort()[0];
+      return { records: page.records.map(record => deliveryView(record, next(record))), earlierUnavailable: page.earlierUnavailable, ...(page.before ? { before: page.before } : {}) };
     });
     app.get('/automations/:id/runs', async request => {
       const { id } = parse(params, request.params);
