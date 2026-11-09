@@ -37,7 +37,7 @@
 | C07 | A 成功发送并 complete，B 再成功发送并 complete；回 A 再发一轮使 A 最新。用全新独立浏览器登录，点全局新对话；再点 B“＋”；在已有对话“管理对话”改标题并刷新 | 无缓存全局回退 A（按 accepted 消息而非对话创建时间），B 入口回退 B 配置；只读历史不改变最近成功发送排序。旧 DSH 配置的模型/effort 正确显示。重命名持久化且不改变配置/身份。无效/移除配置明确要求重选，不静默换权限；fixture 没有让模型或权限失效的控制命令，这一条只在真实 Harness 下架模型时可观察，fixture 中记 UNCOVERED |
 | C08 | fixture 中 Codex 选 ultra，再换 Fixture Alternate（仅 low/medium/high），核对应用其可靠默认 low，再明确选 high；切 DSH 选 off/high，再切回。用“恢复默认模型与深度”及模型列表“默认”；首发后 inspect。另在两个真实 Harness 重跑并独立读回原生配置 | 只出现当前模型实际支持档位；Power 间不带入不兼容值，切回保留各自选择；可靠默认缺失时不编造默认，要求明确选值。首发原生读取与页面选择一致；旧对话不因此重配。fixture Codex 默认是 fixture-model / medium，Alternate 默认 low；DSH 未给可靠默认，不得偷偷选择 off。真实 DSH 必须读回 Host default 和各模型 defaultEffort，验证默认/复位/切模型，而不能套用 fixture 的无默认前提。fixture 只证明选择/绑定语义，不能替代真实端验收 |
 | C09 | 在两端草稿加入合成图片、文件引用（输入 `@` 也会打开文件选择）与 `/` 选定技能；DSH 等待准备完成，刷新/切换后确认材料，首发。分别在上传期间断网、恢复后核对/重试；另在首发前由可信端删除所引用的文件 | 首发前仅浏览器暂存图片；失败有可见提示、可恢复，不静默只发文本；首发后原生实际看到图片/引用/技能（用 U04/U07/U12 独立证据），文本及材料各一次。引用文件被删时服务端明确拒绝首发：页面进入已创建的对话，提示原因，输入和其余材料可直接编辑，没有“核对同一发送”，operations 为空。这样建好但还没跑过一轮的 Codex 对话，稍后刷新、切走再回来，仍显示就绪，可以发送、归档（Codex 在首轮之前读回的思考深度为空，中书只接受这一项空缺，首轮由 `turn/start` 明确带上）。DSH 首发技能按 C05，不假造技能；缺真实能力记录 BLOCKED。fixture 的 Codex 没有技能（输入 `/` 显示“没有匹配的技能”），只有 DSH 提供 zhi-proof / zhi-secondary；fixture 原生会话只记录文字（含引用说明），不记录图片，所以“原生看到图片”只能在真实端用 U04 证明 |
-| C11 | 草稿选 DSH 后配置栏出现「Agent 预设」，默认「标准」；改选 PTC 后首发，再开一段保持默认首发。已有对话打开配置浮层 | 首发请求的 `agentPreset` 与所选一致，未选时为 `standard`；已有对话只显示预设，不能改。真实 DSH 另用 `session/follow` 读回原生预设一致，Host 不可用的预设显示为不可选且不被替换。fixture 的 DSH 提供标准与 PTC，只能证明选择、默认与请求内容，不能证明原生读回 |
+| C11 | 用没有浏览器偏好和发送历史的独立上下文：草稿选 DSH 后配置栏出现「Agent 预设」，默认「标准」，以默认首发一段；再开一段改选 PTC 后首发，然后打开第三个草稿。已有对话打开配置浮层 | 首发请求的 `agentPreset` 与所选一致，未选时为 `standard`；预设和模型、权限一样按 C07 回退，PTC 首发后的新草稿默认 PTC（「默认标准」只指没有偏好和历史时）；已有对话只显示预设，不能改。真实 DSH 另用 `session/follow` 读回原生预设一致，Host 不可用的预设显示为不可选且不被替换。fixture 的 DSH 提供标准与 PTC，只能证明选择、默认与请求内容，不能证明原生读回 |
 
 ```sh
 node test/support/feature-fixture.ts fail-create --root "$zh_verify_root"
@@ -49,7 +49,7 @@ node test/support/feature-fixture.ts repair --root "$zh_verify_root" --title '�
 ### C10 / DSH 原生准备与恢复
 
 1. 独立现场中在 Fixture A 草稿选择 DSH。观察页面发起带 CSRF 的 `POST /api/private/workbench/draft-preparation`，返回只含 preparationId 与技能，不含原生绑定。只读应用库 `workbench_draft_preparations` 的 workspace_id、preparation_id、native_id、claimed_by，核对 preparationId 与 native_id 不同、claimed_by 为空；产品对话列表无新增。原生 fixture 可用只读 `native.sqlite` sessions 或其 inspect 核对空输入。
-2. 输入带唯一标记的草稿，刷新、切 Power 后切回、切工作区后回来；记录每工作区准备身份，再重复五次。每工作区仍只有同一个未占用准备；文字和技能标记保留，不出现正式历史。停止并重启本次应用后沿同一身份恢复。真实 DSH 分支用 session/list 与 session/follow 对照空会话、cwd、无用户轮；只在自己拥有的独立 Host 上追加 Host 重启分支。
+2. 输入带唯一标记的草稿，刷新、切 Power 后切回、切工作区后回来（需要两个自己登记的工作区，不要切到别人的工作区，那会在那里建原生准备）；记录每工作区准备身份，再重复五次。每工作区仍只有同一个未占用准备；文字和技能标记保留，不出现正式历史。停止并重启本次应用后沿同一身份恢复。真实 DSH 分支用 session/list 与 session/follow 对照空会话、cwd、无用户轮；只在自己拥有的独立 Host 上追加 Host 重启分支。
 3. 使用共同故障工具 `zhVerify.dropNext('/api/private/workbench/draft-preparation')`，触发页面“重试准备首发技能”或重新进入尚未提交的草稿。丢回执后重试、刷新，仍沿原准备编号；服务器不可用时提示未完成且保稿。恢复前不发送，恢复后真实技能目录可选。首次已经加载完成时需重新进入才能触发查询，不以没有发生请求当作故障通过。
 4. 在两个独立浏览器上下文打开同工作区 DSH 草稿，核对共享未占用准备。A 从页面首发，原生输入及正式对话各一份；B 保留旧准备发送，应明确未发送并允许“重新准备首发技能”，不占用 A 的对话。重新准备后核验旧技能是否仍适用，再由用户重选/发送；新的正式对话身份独立。首发回执丢失按 C03 驱动，不能把明确拒绝与未知结果混为一类。
 5. 准备后的首发前可调整模型/深度/权限，实际原生绑定须与最终选择一致；选技能后切 Power 或工作区不携带错误身份提交。只读库检查已占用准备的归属与正式绑定一致。旧格式无 preparationId 的对话保持可接续，不改写历史配置。

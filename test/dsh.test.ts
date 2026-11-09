@@ -537,6 +537,41 @@ test('DSH rechecks current execution after target paging and refuses to queue be
   } finally { await context.close(); }
 });
 
+test('DSH keeps proving a long running turn when native events arrive while it pages back to the turn start', async () => {
+  const context = await setup();
+  try {
+    const binding = await context.create(); const native = context.fixture.sessions.get(binding.id)!;
+    await context.adapter.submit(binding, { id: randomUUID(), text: 'Synthetic long turn' });
+    // The turn start falls out of the latest five-record window, so state pages back to it.
+    for (let index = 0; index < 12; index++) context.fixture.append(native, 'synthetic/step', { index });
+    // A step boundary lands while the page is in flight: a few events, then more than one window.
+    context.fixture.onNextPage(() => { for (let index = 0; index < 3; index++) context.fixture.append(native, 'synthetic/step', { index: 100 + index }); });
+    const first = await context.adapter.state(binding);
+    assert.equal(first.status, 'running', first.reason); assert.equal(first.runId, `dsh:${binding.id}:turn:1`);
+    context.fixture.onNextPage(() => { for (let index = 0; index < 20; index++) context.fixture.append(native, 'synthetic/step', { index: 200 + index }); });
+    const second = await context.adapter.state(binding);
+    assert.equal(second.status, 'running', second.reason); assert.equal(second.runId, `dsh:${binding.id}:turn:1`);
+    context.fixture.append(native, 'turn/end', { turn: 1, reason: { kind: 'completed' } }); native.open = null;
+    assert.equal((await context.adapter.state(binding)).status, 'idle');
+  } finally { await context.close(); }
+});
+
+test('A watch opened in the middle of a long DSH turn reports it running, never a false unknown', async () => {
+  const context = await setup();
+  try {
+    const binding = await context.create(); const native = context.fixture.sessions.get(binding.id)!;
+    await context.adapter.submit(binding, { id: randomUUID(), text: 'Synthetic long turn' });
+    // More events than the watch's thirty-record window: its snapshot cannot see the turn start.
+    for (let index = 0; index < 40; index++) context.fixture.append(native, 'synthetic/step', { index });
+    const changes: NativeChange[] = [];
+    const unsubscribe = await context.adapter.watch(binding, change => changes.push(change));
+    await until(() => changes.some(change => change.type === 'state'));
+    const states = changes.flatMap(change => change.type === 'state' ? [change.state] : []);
+    assert.deepEqual(states.map(state => state.status), ['running']); assert.equal(states[0]!.runId, `dsh:${binding.id}:turn:1`);
+    unsubscribe();
+  } finally { await context.close(); }
+});
+
 test('DSH discards target proof if the Host history moves backwards during lookup', async () => {
   const context = await setup();
   try {
