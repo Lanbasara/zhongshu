@@ -69,30 +69,47 @@ test('a daily task expands once per day in its zone, and the earliest pending on
   assert.equal(items.find(item => item.automationId === 'once')?.movable, true);
 });
 
-test('a delivered run shows once, with the notice the agent sent after it', () => {
+test('a delivered run shows once, with the conclusion written back and the notice the agent sent after it', () => {
   const delivered = task({ id: 'ran', status: 'ended', scheduledAt: new Date(now - 7_200_000).toISOString(), target: { kind: 'conversation', conversationId: '11111111-1111-4111-8111-111111111111' },
-    lastDelivery: { scheduledAt: new Date(now - 7_200_000).toISOString(), deliveredAt: new Date(now - 7_190_000).toISOString(), late: true } });
+    lastDelivery: { scheduledAt: new Date(now - 7_200_000).toISOString(), deliveredAt: new Date(now - 7_190_000).toISOString(), late: true, result: '未触发，维持' } });
   const notice = { id: '22222222-2222-4222-8222-222222222222', summary: '结论一句话', file: null, createdAt: now - 7_100_000, state: 'placed' as const,
     conversationId: '11111111-1111-4111-8111-111111111111', itemId: 'item' };
   const day = localDate(new Date(now - 7_190_000));
   const items = scheduleItems({ automations: [delivered], timeline: [], notifications: [notice], from: day, to: day, now });
   assert.equal(items.length, 1);
-  assert.deepEqual([items[0]!.status, items[0]!.late, items[0]!.notified], ['done', true, '结论一句话']);
+  assert.deepEqual([items[0]!.status, items[0]!.late, items[0]!.notified, items[0]!.result], ['done', true, '结论一句话', '未触发，维持']);
+  assert.equal(items[0]!.conversationId, '11111111-1111-4111-8111-111111111111', 'the card opens the run conversation');
   const counts = summarize(items, day);
   assert.deepEqual([counts.notified, counts.late, counts.tasks], [1, 1, 0]);
 });
 
-test('timeline entries with a zone land on the viewer day; past or finished ones count as done', () => {
+test('timeline entries with a zone land on the viewer day; a passed action is overdue, not done, until its line says done', () => {
   const entry = (overrides: Partial<TimelineEntry>): TimelineEntry => ({ id: 'e', date: '2026-11-10', kind: 'event', title: '财报', workspaceId: 'w', workspaceLabel: 'W', ...overrides });
   const zoned = entry({ id: 'zoned', time: '21:30', tz: 'America/New_York' });
   const instant = Date.UTC(2026, 10, 11, 2, 30);
   const wide = { from: '2026-11-01', to: '2026-11-30', automations: [], notifications: [], now };
-  const items = scheduleItems({ ...wide, timeline: [zoned, entry({ id: 'cancelled', kind: 'action', status: 'cancelled' }), entry({ id: 'old', date: '2026-11-02', kind: 'research' })] });
+  const items = scheduleItems({ ...wide, timeline: [zoned, entry({ id: 'cancelled', kind: 'action', status: 'cancelled' }), entry({ id: 'old', date: '2026-11-02', kind: 'research' }),
+    entry({ id: 'missed', date: '2026-11-08', time: '10:00', tz: 'Asia/Shanghai', kind: 'action', title: '快赎' }), entry({ id: 'did', date: '2026-11-08', kind: 'action', status: 'done' })] });
   const placed = items.find(item => item.key === 'timeline:w:zoned')!;
   assert.deepEqual([placed.at, placed.date, placed.time, placed.status], [instant, localDate(new Date(instant)), localTime(new Date(instant)), 'todo']);
   assert.equal(items.find(item => item.key === 'timeline:w:cancelled')?.status, 'done');
   assert.equal(items.find(item => item.key === 'timeline:w:old')?.status, 'done');
-  assert.equal(summarize(items, '2026-11-09').actions, 0);
+  assert.equal(items.find(item => item.key === 'timeline:w:missed')?.status, 'overdue', 'nothing here knows whether the user did it');
+  assert.equal(items.find(item => item.key === 'timeline:w:did')?.status, 'done');
+  assert.equal(summarize(items, '2026-11-09').actions, 1, 'an overdue action still counts as one to do');
+});
+
+test('a future run opens a conversation only when the task always returns to one', () => {
+  const fixed = '33333333-3333-4333-8333-333333333333'; const last = '44444444-4444-4444-8444-444444444444';
+  const ran = { scheduledAt: new Date(now - 86_400_000).toISOString(), deliveredAt: new Date(now - 86_400_000).toISOString(), late: false, conversationId: last };
+  const perRun = task({ id: 'per-run', timing: { kind: 'daily', time: '09:00', timeZone: 'Asia/Shanghai' }, scheduledAt: new Date(now + 3_600_000).toISOString(), lastDelivery: ran });
+  const reused = task({ id: 'reused', timing: { kind: 'daily', time: '09:00', timeZone: 'Asia/Shanghai' }, scheduledAt: new Date(now + 3_600_000).toISOString(), lastDelivery: ran,
+    target: { kind: 'new_once', workspaceId: 'w', conversationId: fixed } });
+  const items = scheduleItems({ automations: [perRun, reused], timeline: [], notifications: [], from: '2026-11-07', to: '2026-11-12', now });
+  const future = (id: string) => items.filter(item => item.automationId === id && item.status !== 'done');
+  assert.ok(future('per-run').length > 0 && future('per-run').every(item => item.conversationId === undefined), 'a new conversation per run has none before it runs');
+  assert.ok(future('reused').every(item => item.conversationId === fixed));
+  assert.equal(items.find(item => item.automationId === 'per-run' && item.status === 'done')?.conversationId, last, 'the run that happened opens its own conversation');
 });
 
 test('a chosen skill is named first, in the words that make a DSH agent load it', () => {

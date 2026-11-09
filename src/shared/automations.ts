@@ -47,6 +47,8 @@ export const automationDeliverySchema = z.object({
   /** Delivered noticeably after its planned time, for example after a Host restart. */
   late: z.boolean(),
   conversationId: z.uuid().optional(), prompt: z.string().max(64_000).optional(),
+  /** The one-line conclusion the agent wrote back for this run (ADR 0021, 2026-11-09). */
+  result: z.string().max(400).optional(),
 }).strict();
 export const automationTargetSchema = z.object({
   kind: z.enum(['conversation', 'new', 'new_once', 'unknown']),

@@ -1,15 +1,16 @@
 /**
- * The tool Zhongshu offers agents (ADR 0021): `notify_user`, served as a minimal MCP Streamable HTTP endpoint.
- * It listens on loopback only, beside the native Hosts, and accepts one operator-provisioned bearer token.
- * The token grants nothing but this tool; it is never the administrator credential.
+ * The tools Zhongshu offers agents (ADR 0021): `notify_user` and `record_result`, served as a minimal MCP Streamable
+ * HTTP endpoint. It listens on loopback only, beside the native Hosts, and accepts one operator-provisioned bearer
+ * token. The token grants nothing but these tools; it is never the administrator credential.
  */
 import { createHash, timingSafeEqual } from 'node:crypto';
 import Fastify from 'fastify';
 import { z } from 'zod';
 
 export const NOTIFY_TOOL = 'notify_user';
+export const RESULT_TOOL = 'record_result';
 /** Kept short on purpose: every model request carries tool schemas. */
-const tool = {
+const notifyTool = {
   name: NOTIFY_TOOL,
   description: 'Send the user a one-line phone notification that opens this turn. Use only when they should look now: an alert they asked for, a met condition, a result needing their decision, or a brief they asked to receive. Your full result stays in your reply and files.',
   inputSchema: {
@@ -20,10 +21,20 @@ const tool = {
     },
   },
 };
+/** The conclusion goes back onto the task card that started the run (ADR 0021, 2026-11-09); it never notifies. */
+const resultTool = {
+  name: RESULT_TOOL,
+  description: 'When a scheduled task started this run, call once at the end with a one-line conclusion. It is shown on that task\'s calendar card; it does not notify the user.',
+  inputSchema: {
+    type: 'object', additionalProperties: false, required: ['summary'],
+    properties: { summary: { type: 'string', maxLength: 120, description: 'The conclusion, in the user\'s language.' } },
+  },
+};
 const PROTOCOLS = ['2026-07-28', '2025-11-25', '2025-06-18', '2025-03-26'];
 const message = z.object({ jsonrpc: z.literal('2.0'), id: z.union([z.string().max(200), z.number()]).optional(), method: z.string().max(100), params: z.unknown().optional() }).passthrough();
 const callParams = z.object({ name: z.string().max(100), arguments: z.record(z.string(), z.unknown()).optional() }).passthrough();
 const notifyArgs = z.object({ summary: z.string(), file: z.string().optional() }).strict();
+const resultArgs = z.object({ summary: z.string() }).strict();
 
 /** One line of at most 120 characters; control characters become spaces. */
 export function oneLine(value: string, limit = 120): string {
@@ -41,7 +52,7 @@ export function relativeFile(value: string | undefined): string | undefined {
 }
 
 export type NotifyOutcome = { id: string } | { refused: string };
-export function createAgentTools(options: { token: string; port: number; version: string; notify(summary: string, file: string | undefined): NotifyOutcome }) {
+export function createAgentTools(options: { token: string; port: number; version: string; notify(summary: string, file: string | undefined): NotifyOutcome; record(summary: string): NotifyOutcome }) {
   const expected = createHash('sha256').update(options.token).digest();
   const app = Fastify({ logger: false, bodyLimit: 64 * 1024 });
   const authorized = (header: string | undefined) => {
@@ -62,9 +73,19 @@ export function createAgentTools(options: { token: string; port: number; version
       return result(id, { protocolVersion: requested && PROTOCOLS.includes(requested) ? requested : PROTOCOLS[2], capabilities: { tools: { listChanged: false } }, serverInfo: { name: 'zhongshu', version: options.version } });
     }
     if (method === 'ping') return result(id, {});
-    if (method === 'tools/list') return result(id, { tools: [tool] });
+    if (method === 'tools/list') return result(id, { tools: [notifyTool, resultTool] });
     if (method === 'tools/call') {
       const call = callParams.safeParse(params);
+      if (call.success && call.data.name === RESULT_TOOL) {
+        const args = resultArgs.safeParse(call.data.arguments ?? {});
+        if (!args.success) return result(id, toolText('参数无效：需要 summary（一句话结论）。', true));
+        const summary = oneLine(args.data.summary);
+        if (!summary) return result(id, toolText('summary 不能为空。', true));
+        const outcome = options.record(summary);
+        if ('refused' in outcome) return result(id, toolText(outcome.refused, true));
+        // The number lets Zhongshu tie this tool record in the transcript to the run it concludes.
+        return result(id, toolText(`已写到任务卡上。结论编号 ${outcome.id}`));
+      }
       if (!call.success || call.data.name !== NOTIFY_TOOL) return failure(id, -32602, 'Unknown tool');
       const args = notifyArgs.safeParse(call.data.arguments ?? {});
       if (!args.success) return result(id, toolText('参数无效：需要 summary（一句话），可选 file（工作区相对路径）。', true));

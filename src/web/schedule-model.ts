@@ -8,10 +8,13 @@ import type { WorkbenchConfiguration } from '../shared/workbench.ts';
 import { conversationConfigurationLabel } from './conversation-configuration-label.ts';
 
 export type ItemKind = 'agent' | 'action' | 'event' | 'decision' | 'research';
-export type ItemStatus = 'done' | 'running' | 'next' | 'todo' | 'paused';
+/** `overdue`: an action of the user's whose time passed; nothing here knows whether it was done. */
+export type ItemStatus = 'done' | 'running' | 'next' | 'todo' | 'paused' | 'overdue';
 export type ScheduleItem = {
   key: string; kind: ItemKind; date: string; time?: string; at?: number; title: string; detail?: string;
   status: ItemStatus; routine?: boolean; late?: boolean; notified?: string;
+  /** The one-line conclusion the agent wrote back for this run (ADR 0021, 2026-11-09). */
+  result?: string;
   automationId?: string; conversationId?: string; entry?: TimelineEntry; movable?: boolean;
 };
 export const WEEKDAYS = ['一', '二', '三', '四', '五', '六', '日'];
@@ -65,7 +68,8 @@ export function scheduleItems(input: { automations: AutomationView[]; timeline: 
     if (delivered) {
       const when = at(Date.parse(delivered.deliveredAt));
       if (inRange(when.date)) items.push({ key: `${task.id}:delivered`, kind: 'agent', ...when, title: task.title, status: task.executing ? 'running' : 'done', routine,
-        late: delivered.late, notified: noticeAfter(delivered.conversationId ?? conversationId, Date.parse(delivered.deliveredAt)), automationId: task.id, ...(delivered.conversationId ?? conversationId ? { conversationId: delivered.conversationId ?? conversationId } : {}) });
+        late: delivered.late, notified: noticeAfter(delivered.conversationId ?? conversationId, Date.parse(delivered.deliveredAt)), automationId: task.id,
+        ...(delivered.result ? { result: delivered.result } : {}), ...(delivered.conversationId ?? conversationId ? { conversationId: delivered.conversationId ?? conversationId } : {}) });
     }
     if (task.status === 'ended') continue;
     const planned = Date.parse(task.scheduledAt);
@@ -84,8 +88,9 @@ export function scheduleItems(input: { automations: AutomationView[]; timeline: 
       const when = at(instant);
       if (!inRange(when.date)) continue;
       const key = `${task.id}:${instant}`;
+      // A future run opens a known conversation only when the task always returns to one; a new conversation per run has none yet.
       items.push({ key, kind: 'agent', ...when, title: task.title, status: task.status === 'paused' ? 'paused' : 'todo', routine, automationId: task.id,
-        ...(conversationId ? { conversationId } : {}), ...(occurrences.length === 1 && movable(task, input.now) ? { movable: true } : {}) });
+        ...(task.target.conversationId ? { conversationId: task.target.conversationId } : {}), ...(occurrences.length === 1 && movable(task, input.now) ? { movable: true } : {}) });
       if (task.status === 'active' && instant > input.now && (!next || instant < next.at)) next = { key, at: instant };
     }
   }
@@ -96,7 +101,9 @@ export function scheduleItems(input: { automations: AutomationView[]; timeline: 
     if (!inRange(date)) continue;
     const past = instant !== undefined ? instant < input.now : date < localDate(new Date(input.now));
     items.push({ key: `timeline:${entry.workspaceId}:${entry.id}`, kind: entry.kind, date, ...(time ? { time } : {}), ...(instant !== undefined ? { at: instant } : {}),
-      title: entry.title, ...(entry.detail ? { detail: entry.detail } : {}), status: entry.status === 'done' || entry.status === 'cancelled' || past ? 'done' : 'todo', entry });
+      title: entry.title, ...(entry.detail ? { detail: entry.detail } : {}),
+      // A user's action is done only when its line says so; a passed time alone proves nothing (2026-11-09).
+      status: entry.status === 'done' || entry.status === 'cancelled' ? 'done' : !past ? 'todo' : entry.kind === 'action' ? 'overdue' : 'done', entry });
   }
   return items.sort((a, b) => a.date.localeCompare(b.date) || (a.time ?? '').localeCompare(b.time ?? ''));
 }

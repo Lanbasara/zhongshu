@@ -14,6 +14,7 @@ import {
 } from '../shared/automations.ts';
 import type { Workbench } from './workbench.ts';
 import type { AgentNotifications } from './agent-notifications.ts';
+import { createAgentResults } from './agent-results.ts';
 import { readWorkspaceTimeline } from './workspace-documents.ts';
 
 const LATE_MS = 5 * 60_000;
@@ -30,6 +31,8 @@ const late = (delivery: { scheduledAt: string; deliveredAt: string }) => Date.pa
 
 export function createAutomations(db: DatabaseSync, workbench: Workbench, adapters: Map<HarnessId, HarnessAdapter>, notifications: AgentNotifications, log: (event: Record<string, unknown>) => void) {
   const sources = new Map<'dsh', HarnessAutomations>();
+  /** Conclusions agents write back to the card of the run they finished (ADR 0021, 2026-11-09). */
+  const results = createAgentResults(db);
   const dsh = adapters.get('dsh')?.automations;
   if (dsh) sources.set('dsh', dsh);
   const cache = new Map<'dsh', { at: number; tasks: NativeAutomation[] }>();
@@ -121,9 +124,12 @@ export function createAutomations(db: DatabaseSync, workbench: Workbench, adapte
   }
 
   function workspaceOf(cwd: string | undefined) { return cwd ? workbench.workspaceView().workspaces.find(entry => workbench.workspaces.find(w => w.id === entry.id)?.directory === cwd) : undefined; }
-  function deliveryView(delivery: AutomationDelivery): AutomationDeliveryView {
+  /** `until`: when the next delivery of the same task arrived; a conclusion after it belongs to that later run. */
+  function deliveryView(delivery: AutomationDelivery, until?: string): AutomationDeliveryView {
     const conversation = workbench.store.conversationForNative('dsh', delivery.sessionId);
-    return { scheduledAt: delivery.scheduledAt, deliveredAt: delivery.deliveredAt, late: late(delivery), ...(conversation ? { conversationId: conversation.id } : {}), ...(delivery.prompt ? { prompt: delivery.prompt } : {}) };
+    const result = conversation ? results.within(conversation.id, Date.parse(delivery.deliveredAt) - 60_000, until ? Date.parse(until) - 60_000 : undefined) : undefined;
+    return { scheduledAt: delivery.scheduledAt, deliveredAt: delivery.deliveredAt, late: late(delivery), ...(conversation ? { conversationId: conversation.id } : {}),
+      ...(delivery.prompt ? { prompt: delivery.prompt } : {}), ...(result ? { result } : {}) };
   }
   function view(task: NativeAutomation): AutomationView {
     let target: AutomationView['target'];
@@ -207,7 +213,10 @@ export function createAutomations(db: DatabaseSync, workbench: Workbench, adapte
       const query = parse(z.object({ before: z.string().min(1).max(240).optional() }).strict(), request.query);
       const page = await source('dsh').history(id, 50, query.before);
       if (!page) throw new AutomationError('automation_not_found', 404);
-      return { records: page.records.map(deliveryView), earlierUnavailable: page.earlierUnavailable, ...(page.before ? { before: page.before } : {}) };
+      // Each run ends where the next later delivery of the same task arrived; its conclusion is written before that.
+      const times = page.records.map(record => record.deliveredAt).sort();
+      const next = (at: string) => times.find(other => other > at);
+      return { records: page.records.map(record => deliveryView(record, next(record.deliveredAt))), earlierUnavailable: page.earlierUnavailable, ...(page.before ? { before: page.before } : {}) };
     });
     app.get('/automations/:id/runs', async request => {
       const { id } = parse(params, request.params);
@@ -262,10 +271,11 @@ export function createAutomations(db: DatabaseSync, workbench: Workbench, adapte
 
   return {
     routes,
+    results,
     available: () => sources.size > 0,
     async start(): Promise<void> {
       for (const value of sources.values()) unsubscribe.push(value.onChange(changed));
-      unsubscribe.push(workbench.onObserved((id, items) => notifications.observed(id, items)));
+      unsubscribe.push(workbench.onObserved((id, items) => { notifications.observed(id, items); results.observed(id, items); }));
       notifications.start();
       // Missed events are recovered by a slow re-list; deliveries still reach observation within a minute.
       poll = setInterval(() => { void refresh(); }, POLL_MS); poll.unref();
