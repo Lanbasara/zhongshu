@@ -144,6 +144,7 @@ export function officialCommandLine(settings: OfficialSettings): Official {
       return pages.map(page => ({ id: page.id, url: page.url }));
     },
     async close(pageId) { await ensureDaemon(settings.home); await invoke('close_page', { pageId }); },
+    async blank(pageId) { await ensureDaemon(settings.home); await invoke('navigate_page', { pageId, type: 'url', url: 'about:blank' }); },
     async stop() { if (existsSync(socket)) await run(['stop'], { cwd: settings.home, tmpdir: settings.home }); },
   };
 }

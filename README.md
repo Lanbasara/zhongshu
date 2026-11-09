@@ -73,6 +73,29 @@ Locally:
 SICHEN_URL=http://127.0.0.1:3100 SICHEN_TOKEN_FILE=/path/to/agent-tool-token node dist/sichen/bin/sichen doctor
 ```
 
+## simen
+
+司门 (`simen`) sits between agents and the official Chrome DevTools command line ([ADR 0023](docs/adr/0023-simen-browser-service.md), [feature map](docs/features/simen.md)). `npm run build` writes it to `dist/simen/`: dependency-free modules, `bin/chrome-devtools` (the command agents run) and `bin/simen-host` (the host beside the browser). Both need Node 24 and nothing else.
+
+The host runs where the browser is. It needs:
+- Chromium;
+- the pinned `chrome-devtools-mcp` package;
+- that package's command table exported as JSON, from `build/src/config/cli-options.js`.
+
+The host reads these environment variables:
+- `SIMEN_TOKEN_FILE` (required), a token file of 24–512 URL-safe characters;
+- `SIMEN_OFFICIAL_DIR` (required) and `SIMEN_COMMAND_TABLE` (required), the package directory and the exported table;
+- `SIMEN_PROFILE_DIR` (required), the browser's persistent profile;
+- `SIMEN_TMP_DIR` (required), per-conversation temporary directories; mount it at the same path where agents run, so they can read screenshots;
+- `SIMEN_STATE_DIR` (default `/run/simen`), for the official daemon's socket and config;
+- `SIMEN_PORT` (default `3200`) and `SIMEN_LISTEN` (default `127.0.0.1`);
+- `SIMEN_BROWSER_PORT` (default `9222`), `SIMEN_CHROMIUM` (default `/usr/bin/chromium`) and `SIMEN_CACHE_BYTES` (default 100 MiB);
+- `SIMEN_WINDOWS` (default 2), `SIMEN_IDLE_MS` and `SIMEN_WAIT_MS` (default 5 minutes each).
+
+The agents' workspace should be mounted in the browser's environment at the same path.
+
+The command reads `SIMEN_URL` (default `http://127.0.0.1:3200`) and `SIMEN_TOKEN_FILE` (default `/links/simen-token`), and uses `DSH_SESSION_ID` to know the conversation. Put `dist/simen/bin` first on the Host's `PATH` so `chrome-devtools` resolves to it, and set `agentTools.browser: true` in the Harness configuration so the app tells agents about it. Do not give the Harness a Chromium of its own.
+
 ## UI development
 
 ```sh

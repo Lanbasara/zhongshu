@@ -30,6 +30,8 @@ export type Official = {
   /** Open pages, starting the official daemon if needed. */
   pages(): Promise<{ id: number; url: string }[]>;
   close(pageId: number): Promise<void>;
+  /** Shows a blank page in this page. */
+  blank(pageId: number): Promise<void>;
   /** Stops the official daemon; it holds memory even after the browser is gone. */
   stop(): Promise<void>;
 };
@@ -81,9 +83,11 @@ export function createHost(options: HostOptions) {
     if (browser.running()) return;
     await browser.start();
     since = now();
-    // A profile that restores the last session may reopen old tabs; nobody owns them, so close all but the first.
+    // "Continue where you left off" keeps session cookies but also reopens the last tabs, which belonged to earlier
+    // conversations: close all but the first and blank that one, so no conversation sees another's last page.
     const pages = await official.pages();
     for (const page of pages.slice(1)) await official.close(page.id).catch(() => {});
+    if (pages[0] && pages[0].url !== 'about:blank') await official.blank(pages[0].id).catch(error => log({ simen: 'blank_failed', error: String(error) }));
     log({ simen: 'browser_started', version: browser.version() });
   }
 

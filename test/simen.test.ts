@@ -47,13 +47,14 @@ function fixture(t: TestContext, rules: ConstructorParameters<typeof Windows>[0]
     },
     async pages() { return pages.map(page => ({ ...page })); },
     async close(pageId) { pages = pages.filter(page => page.id !== pageId); events.push(`close:${pageId}`); },
+    async blank(pageId) { pages = pages.map(page => (page.id === pageId ? { ...page, url: 'about:blank' } : page)); events.push(`blank:${pageId}`); },
     async stop() { events.push('daemon:stop'); },
   };
   const windows = new Windows({ windows: 2, idleMs: 5 * MIN, waitMs: 5 * MIN, ...rules });
   const tmpRoot = join(root, 'tmp');
   const host = createHost({ token: TOKEN, version: '0.1.1', revision: 'a'.repeat(40), windows, browser, official, tmpRoot, now: () => clock, longPollMs: 0 });
   const run = (session: string | undefined, argv: string[], cwd = root) => host.run({ cwd, argv, ...(session ? { session } : {}) });
-  return { root, tmpRoot, host, run, runs, events, windows, advance: (ms: number) => { clock += ms; }, crash: () => { running = false; for (const listener of exits) listener(); }, pages: () => pages, running: () => running };
+  return { root, tmpRoot, host, run, runs, events, windows, advance: (ms: number) => { clock += ms; }, crash: () => { running = false; for (const listener of exits) listener(); }, pages: () => pages, running: () => running, restore: (urls: string[]) => { pages = urls.map(url => ({ id: next++, url })); } };
 }
 
 const text = (response: Awaited<ReturnType<ReturnType<typeof fixture>['run']>>) => (response.kind === 'result' ? `${response.code}|${response.stdout}${response.stderr}` : `wait:${response.ahead}`);
@@ -218,4 +219,12 @@ test('agents are told about chrome-devtools only where the instance gave them å
   assert.equal(await init(false), RESULT_INSTRUCTIONS);
   assert.equal(await init(true), `${RESULT_INSTRUCTIONS}\n\n${BROWSER_INSTRUCTIONS}`);
   assert.match(BROWSER_INSTRUCTIONS, /chrome-devtools new_page/);
+});
+
+test('tabs the profile restores from earlier conversations are closed or blanked when the browser starts', async t => {
+  const f = fixture(t);
+  f.restore(['https://earlier.example/a', 'https://earlier.example/b']);
+  await f.run('session-a', ['new_page', 'https://a.example']);
+  assert.deepEqual(f.pages().map(page => page.url), ['about:blank', 'https://a.example']);
+  assert.ok(f.events.includes('close:3') && f.events.includes('blank:2'));
 });
