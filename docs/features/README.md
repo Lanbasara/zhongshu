@@ -104,7 +104,7 @@ await page.evaluate(installBrowserFaults);
 await page.evaluate(() => window.zhVerify.dropNext('/api/private/workbench/conversations'));
 ```
 
-其他工具可读取该文件，去掉导出关键字后执行函数。`status()` 的 `held` 非空才表示已捕获响应；`release()` 释放它，`restore()` 恢复 fetch 和存储方法。drop 在服务端应答后丢弃一次响应；hold 故意让旧响应在应用取消后仍返回，以检验时序保护；`holdNextRequest(path, method)` 则在请求发出前暂存，放行后才真正发送，用来先在另一端改变原生状态。`rejectNextRequest(path, 400或413)` 只匹配同源指定对话的下一次发送POST，通过未知字段/超限字段触发真实服务端拒绝，见 [E04](execution.md)。这些工具均不改变响应正文，journal只留路径/方法/状态/操作ID，不记认证头或消息。每个故障单独安装/恢复，刷新也会清除注入。
+其他工具可读取该文件，去掉导出关键字后执行函数。`status()` 的 `held` 非空才表示已捕获响应；`release()` 释放它，`restore()` 恢复 fetch 和存储方法。drop 在服务端应答后丢弃一次响应；hold 故意让旧响应在应用取消后仍返回，以检验时序保护；`holdNextRequest(path, method)` 则在请求发出前暂存，放行后才真正发送，用来先在另一端改变原生状态；须在应用的请求超时（约 20 秒）内放行，否则应用已放弃这次请求，结果无效。`rejectNextRequest(path, 400或413)` 只匹配同源指定对话的下一次发送POST，通过未知字段/超限字段触发真实服务端拒绝，见 [E04](execution.md)。这些工具均不改变响应正文，journal只留路径/方法/状态/操作ID，不记认证头或消息。每个故障单独安装/恢复，刷新也会清除注入。
 
 ## Native：真实接入分支
 

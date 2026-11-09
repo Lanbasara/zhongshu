@@ -34,7 +34,7 @@ node test/support/feature-fixture.ts inspect --root "$zh_verify_root" --title '�
 | S04 结果待处理 | Codex 对话主 Agent 不在运行时 `complete-subagents`：头部入口带提示点，输入区提示「子 Agent 在主 Agent 上一轮结束后才完成……」；「填入」只写入输入框，inspect 的 `submitCalls` 不变。DSH 对话不出现此提示 |
 | S05 团队 | DSH 对话 `spawn-subagents` 后 `subagent-team`：面板出现「全部子 Agent / 团队」标签。团队页成员中主 Agent 标「本对话」不可点，其余可点开对应子 Agent 过程；共享任务显示标题、状态、负责人、写入范围并可展开；无任何写入入口 |
 | S06 无法核实 | 有运行中的子 Agent 时 `disconnect --title '本轮标题'`：头部显示「N 待核实」，侧栏显示「子 Agent 待核实」，卡片与名单相应行为「待核实」，面板顶部说明「以下是最后已知状态」，没有停止按钮；子 Agent 过程说明暂时读不到。`reconnect` 后恢复核实状态 |
-| S07 归属与安全 | 用当前对话的 hash 和另一对话的子 Agent 身份请求 `.../subagents/<id>/history` 与 `.../stop`：均返回 404 `subagent_not_found`，不改变任何原生状态（Codex 另由原生父链、DSH 由 subagent 地址再次核实归属）；畸形身份返回 400，例如 `a..b` 或编码的斜杠 `a%2Fb`（浏览器会先把单独的 `..` 路径段规范化掉，无法原样发出）。未登录请求 401；缺少 CSRF 的 POST 被拒绝 |
+| S07 归属与安全 | 用当前对话的 hash 和另一对话的子 Agent 身份请求 `.../subagents/<id>/history` 与 `.../stop`：均返回 404 `subagent_not_found`，不改变任何原生状态（Codex 另由原生父链、DSH 由 subagent 地址再次核实归属）；畸形身份返回 400，例如 `a..b` 或编码的斜杠 `a%2Fb`（浏览器会先把单独的 `..` 路径段规范化掉，无法原样发出）。未登录的 GET 返回 401；未登录或缺少 CSRF 的 POST（如 stop）返回 403 |
 | S08 归档与删除 | 先让主 Agent 不在运行（主 Agent 运行时按主 Agent 的理由拒绝）。子 Agent 运行或停止待核实时，管理窗口归档或删除被拒绝并说明「仍有子 Agent 在运行……」，对话保持原状；全部结束后归档成功，归档视图仍可打开面板阅读名单 |
 | S09 窄屏 | 390 宽视口：头部按钮只显示图标、运行状态点与数字（如 ●3），完整说明在可访问名称（如「子 Agent，3 个运行中，共 3 个」）里，面板为整页，无横向滚动；停止按钮为文字「停止」且满足触控尺寸；关闭回到对话 |
 

@@ -22,5 +22,6 @@ export function rememberConversation(conversation: Pick<Conversation,'workspaceI
 }
 export function clearConversationPreferences() { try { localStorage.removeItem(key); } catch { /* Optional preference storage can be disabled. */ } }
 export function initialConversationTitle(text: string): string {
-  return Array.from(text.replace(/\s+/gu,' ').trim()).slice(0,32).join('') || '新对话';
+  // Cut at 32 characters, then drop a trailing space the cut may leave.
+  return Array.from(text.replace(/\s+/gu,' ').trim()).slice(0,32).join('').trimEnd() || '新对话';
 }

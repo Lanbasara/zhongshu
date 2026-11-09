@@ -36,6 +36,8 @@ const second = { workspaceId:'second', harnessId:'dsh' as const, configuration:{
 test('initial title normalizes whitespace, limits Unicode code points without splitting emoji, and handles attachment-only input', () => {
   assert.equal(initialConversationTitle('  第一行\n\t第二行  '), '第一行 第二行');
   assert.equal(initialConversationTitle('文'.repeat(31) + '😀后续'), '文'.repeat(31) + '😀');
+  // A cut that lands on a space leaves no trailing space, so the rename field starts unchanged.
+  assert.equal(initialConversationTitle('a'.repeat(31) + ' bcd'), 'a'.repeat(31));
   assert.equal(Array.from(initialConversationTitle('😀'.repeat(40))).length, 32);
   assert.equal(initialConversationTitle(' \n\t'), '新对话');
 });
