@@ -37,6 +37,10 @@ const PROTOCOLS = ['2026-07-28', '2025-11-25', '2025-06-18', '2025-03-26'];
  */
 export const RESULT_INSTRUCTIONS = 'When a scheduled task started this run (the Host marks the message as scheduled), the last step of the run is '
   + '`record_result` with a one-line conclusion; it goes on that task\'s card. Call it once, after the work and any `notify_user`.';
+/** Where the browser is (ADR 0023): the official Chrome DevTools command line, with 司门 sharing one browser between conversations. */
+export const BROWSER_INSTRUCTIONS = 'Browser: use the shell command `chrome-devtools` (the official Chrome DevTools command line; run `chrome-devtools --help`). '
+  + 'This instance shares one browser: `chrome-devtools new_page <url>` gives this conversation its own window (one per conversation), '
+  + 'pass its page id to every page command, and `close_page <id>` when done. If both windows are busy the command waits its turn.';
 /** Where scheduling and calendar entries go (ADR 0022). */
 export const SICHEN_INSTRUCTIONS = 'Scheduled tasks and calendar entries: use the shell command `sichen` (run `sichen --help` first). '
   + 'Write times as dates and clock times, e.g. `sichen schedule add "收盘复核" --at "2026-11-10 15:10" --to here --prompt "…"` or '
@@ -66,7 +70,9 @@ export type NotifyOutcome = { id: string } | { refused: string };
 type Guard = (request: FastifyRequest, reply: FastifyReply) => Promise<unknown>;
 export function createAgentTools(options: { token: string; port: number; version: string; notify(summary: string, file: string | undefined): NotifyOutcome; record(summary: string): NotifyOutcome;
   /** 司辰's HTTP endpoints on the same loopback server and token (ADR 0022); also turns on the instructions. */
-  routes?(app: FastifyInstance, guard: Guard): Promise<void>; }) {
+  routes?(app: FastifyInstance, guard: Guard): Promise<void>;
+  /** The instance gave the Harness 司门's `chrome-devtools` (ADR 0023); adds the browser line to the instructions. */
+  browser?: boolean; }) {
   const expected = createHash('sha256').update(options.token).digest();
   const app = Fastify({ logger: false, bodyLimit: 64 * 1024 });
   const authorized = (header: string | undefined) => {
@@ -85,7 +91,7 @@ export function createAgentTools(options: { token: string; port: number; version
     if (method === 'initialize') {
       const requested = z.object({ protocolVersion: z.string().max(40) }).passthrough().safeParse(params).data?.protocolVersion;
       return result(id, { protocolVersion: requested && PROTOCOLS.includes(requested) ? requested : PROTOCOLS[2], capabilities: { tools: { listChanged: false } }, serverInfo: { name: 'zhongshu', version: options.version },
-        instructions: options.routes ? `${RESULT_INSTRUCTIONS}\n\n${SICHEN_INSTRUCTIONS}` : RESULT_INSTRUCTIONS });
+        instructions: [RESULT_INSTRUCTIONS, ...(options.routes ? [SICHEN_INSTRUCTIONS] : []), ...(options.browser ? [BROWSER_INSTRUCTIONS] : [])].join('\n\n') });
     }
     if (method === 'ping') return result(id, {});
     if (method === 'tools/list') return result(id, { tools: [notifyTool, resultTool] });

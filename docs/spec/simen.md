@@ -2,7 +2,7 @@
 status: active
 started: 2026-11-09
 exit: 在预发实例里同时验证以下几点：两段 DSH 对话按官方写法用 `chrome-devtools` 同时检查网页，第三段在排队；一段对话只能用自己的窗口；闲置 5 分钟后窗口被收回，临时截图被删除；没人用时浏览器和后台进程都退出，资源释放；登录状态在重启后还在。另外，安装和体检要在预发和正式环境都走通
-evidence: none yet
+evidence: 预发真实路径已通过（候选含 browser 镜像，见 PR）；正式环境安装与体检待发布
 ---
 
 # 司门：Agent 与 Chrome DevTools 之间的中间层

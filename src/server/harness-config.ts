@@ -17,13 +17,14 @@ const configuration = z.object({
   codex: z.object({ socketPath: absolutePath, pluginManagerSocketPath: absolutePath.optional() }).strict().optional(),
   dsh: z.object({ launchFile: absolutePath, maintenanceExecutable: absolutePath.optional(), pluginSources: dshPluginSources.optional() }).strict().optional(),
   // ADR 0021: the loopback tool endpoint agents call (`notify_user`); the token file is operator-owned and 0600.
-  agentTools: z.object({ port: z.number().int().min(1024).max(65535), tokenFile: absolutePath }).strict().optional(),
+  // ADR 0023: `browser` says the instance gave the Harness 司门's `chrome-devtools` command; agents are then told about it.
+  agentTools: z.object({ port: z.number().int().min(1024).max(65535), tokenFile: absolutePath, browser: z.boolean().optional() }).strict().optional(),
 }).strict();
 export type Workspace = { id: string; label: string; directory: string; managedWrites?: boolean; maintenance?: MaintenanceController };
 export type WorkspaceRoot = Pick<Workspace, 'id' | 'label' | 'directory'>;
 export const contains = (parent: string, child: string) => { const path = relative(parent, child); return path !== '..' && !path.startsWith('../') && !isAbsolute(path); };
 
-export type AgentToolsSettings = { port: number; token: string };
+export type AgentToolsSettings = { port: number; token: string; browser?: boolean };
 /** The token grants only the agent tool. Same file rules as other operator secrets: regular, private, owned by this account. */
 async function readToolToken(path: string): Promise<string> {
   const info = await lstat(path);
@@ -77,6 +78,6 @@ export async function loadHarnesses(file: string | undefined, dataDirectory: str
     adapters.set('dsh', createDshAdapter(config.dsh));
     if (config.dsh.pluginSources) plugins.dsh = dshPlugins(config.dsh.launchFile, config.dsh.pluginSources);
   }
-  const agentTools = config.agentTools ? { port: config.agentTools.port, token: await readToolToken(config.agentTools.tokenFile) } : undefined;
+  const agentTools = config.agentTools ? { port: config.agentTools.port, token: await readToolToken(config.agentTools.tokenFile), ...(config.agentTools.browser ? { browser: true } : {}) } : undefined;
   return { workspaces, workspaceRoots, adapters, plugins, ...(agentTools ? { agentTools } : {}) };
 }

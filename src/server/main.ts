@@ -57,7 +57,8 @@ async function main() {
     // The agent tool endpoint exists only where the operator configured it beside the native Hosts (ADR 0021).
     if (harnesses.agentTools) tools = createAgentTools({ token: harnesses.agentTools.token, port: harnesses.agentTools.port, version: metadata?.version ?? 'development', notify: (summary, file) => notifications.notify(summary, file),
       record: summary => automations!.results.record(summary),
-      routes: sichenRoutes({ operations: automations.operations, workbench, version: metadata?.version ?? 'development', ...(metadata?.revision ? { revision: metadata.revision } : {}) }) });
+      routes: sichenRoutes({ operations: automations.operations, workbench, version: metadata?.version ?? 'development', ...(metadata?.revision ? { revision: metadata.revision } : {}) }),
+      ...(harnesses.agentTools.browser ? { browser: true } : {}) });
     triggers = createPushTriggers({
       conversation: id => source.store.getConversation(id), unread: values => source.unread(values), isReading: id => source.isReading(id),
       active: () => source.attention().conversations.map(entry => entry.conversation),

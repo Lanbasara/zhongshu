@@ -20,6 +20,7 @@
 | 开启推送、完成/失败/等待提醒、点击直达、设备管理与安装 | [notifications](notifications.md)：N01–N07 | 能连上推送服务的真实浏览器；触发分支需真实 Harness |
 | 日程与原生自动任务、自动运行的结果、Agent 主动通知、工作区时间轴 | [automations](automations.md)：T01–T10 | 真实 DSH 0.2.2+；主动通知需操作者配置的通知工具 |
 | 用 `sichen` 命令说人话地管理定时任务（含结束日期、回到本对话）与日历条目 | [sichen](sichen.md)：S01–S08 | 真实 DSH 0.2.2+；操作者配置的 `agentTools`，`sichen` 与令牌放进 DSH 运行环境 |
+| Agent 照官方写法用 `chrome-devtools` 操作实例唯一的浏览器：一段对话一个窗口、排队、闲置收回、用时才开 | [simen](simen.md)：B01–B10 | 真实 DSH；操作者配置的浏览器服务（司门宿主 + Chromium + 固定版本 chrome-devtools-mcp）与 `agentTools.browser` |
 | 查看两端账号状态、失效提醒、Codex 设备码续登 | [harness-accounts](harness-accounts.md)：H01–H05 | 真实 Harness；登录类分支需隔离的 Codex |
 
 场景编号用于引用和记录证据，不表示优先级或已通过。每页的 `Implementation and regression` 给出当前代码与定向回归入口。
