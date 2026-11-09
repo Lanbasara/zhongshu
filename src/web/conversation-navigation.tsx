@@ -242,7 +242,8 @@ export function ManageDialog({ conversation, workspaceLabel, csrf, close, change
       const code = reason instanceof RequestError ? reason.code : '';
       setError(code === 'conversation_archive_busy' ? '这段对话正在运行、等待输入或尚待核实。请在结果明确后归档。'
         : code === 'subagents_running' ? '仍有子 Agent 在运行或停止结果待核实。归档会让原生服务停止它们；请等它们结束或先停止，再归档。'
-        : code === 'subagents_unverified' ? '暂时无法核对子 Agent 状态，请重新连接后再归档。' : '暂时无法确认更改。可以重试。');
+        : code === 'subagents_unverified' ? '暂时无法核对子 Agent 状态，请重新连接后再归档。'
+        : code === 'workspace_removed' ? '这段对话所在的工作区已移除。先在「设置 › 工作区」恢复工作区，再归档。' : '暂时无法确认更改。可以重试。');
     } finally { setBusy(false); }
   };
   const remove = async () => {

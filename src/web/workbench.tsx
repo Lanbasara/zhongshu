@@ -706,7 +706,12 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
     window.addEventListener('keydown', shortcut);
     return () => window.removeEventListener('keydown', shortcut);
   }, [setCollapsed]);
-  const openFiles = () => { if (!configuration?.workspaces.length) return; setSubagentPanel(undefined); setReader(true); setNavigation(false); };
+  const openFiles = () => {
+    if (!configuration?.workspaces.length) return;
+    // The reader opens beside a conversation or draft; from Settings, the archive or the schedule, go back to that page first.
+    if (view) { pageHistory.page(routeHash(creating ? (typeof creating === 'string' ? { kind: 'draft', workspaceId: creating } : { kind: 'draft' }) : selected ? { kind: 'conversation', id: selected } : { kind: 'home' }), 'push'); setView(undefined); }
+    setSubagentPanel(undefined); setReader(true); setNavigation(false);
+  };
   const showSettings = (tab?: SettingsTab) => { if (tab) setSettingsTab(tab); setView('settings'); setReader(false); setSubagentPanel(undefined); setNavigation(false); };
   const openSettings = (tab?: SettingsTab) => { pageHistory.page(routeHash({ kind: 'settings', tab: tab ?? settingsTab }), 'push'); showSettings(tab); };
   const changeSettingsTab = (tab: SettingsTab) => { setSettingsTab(tab); pageHistory.page(routeHash({ kind: 'settings', tab }), 'replace'); };

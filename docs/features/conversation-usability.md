@@ -67,7 +67,7 @@
 
 1. 按共同入口分别启动 Codex 和 DSH 真实测试实例。在合成工作区创建两个子目录，各放同名 `sample.tsx`。再准备 `read-only.md` 与 `manual.md`。Codex 在提示中明确要求用 `apply_patch`，DSH 明确要求用 `write` 或 `edit`。第一轮先编辑一个 `sample.tsx` 两次，再编辑另一目录的同名文件，并只读取 `read-only.md`。让 Agent 用 shell 另写 `shell-only.md`，同时由可信端修改 `manual.md`。独立核对磁盘结果及原生工具记录。
 2. 等轮终态。只应在轮末看到一张清单，两个同名文件各一项，路径能区分。只读、无可归因的 shell 写入及人工修改无条目。点两行分别打开，核对各自源码与真实磁盘内容一致。检查源码没有编辑入口，直接请求保存也被拒绝。第二轮改其中一份再恢复原文，该文件仍归第二轮。若使用[提前发送](execution.md#e06--e07-排队与提前发送)，按原生实际接收轮核对归属。
-3. 完整刷新并重启本次中书应用，回看第一轮及第二轮。用可信端改写一个文件并移除另一个，再从第一轮分别点击。阅读器应显示当前内容，或提示不可用并保留清单路径。窄屏重开可读文件，核对底部面板、关闭返回与焦点。跨工作区同名、越界路径和符号链接不能读到其他位置的内容。
+3. 完整刷新并重启本次中书应用，回看第一轮及第二轮。用可信端改写一个文件并移除另一个，再从第一轮分别点击。阅读器应显示当前内容，或提示不可用并保留清单路径。窄屏重开可读文件：阅读器是全屏的「工作区文件阅读器」（左上「返回对话」），核对关闭返回与焦点。跨工作区同名、越界路径和符号链接不能读到其他位置的内容。
 
 清单按读取到的原生编辑证据建立。旧历史尚未取得这些证据时继续显示原消息。单轮超过 500 项时，清单标明只显示部分记录。
 
@@ -81,7 +81,8 @@
 
 1. 在合成工作区准备 `notes/plan.md`、`reports/周报.html` 与 `.secret.md`。用真实 Harness 让 Agent 在回复里原样写出六个 Markdown 链接，目标分别为 `notes/plan.md`、`./reports/周报.html#摘要`、`../outside.md`、`.secret.md`、`/etc/hosts` 和一个 `https://` 外链。
 2. 回复完成后，前两个链接显示为可点的链接，不带 `[blocked]`；点开后阅读器显示对应文件的当前内容，路径与磁盘一致。越界、隐藏和绝对路径只显示文字或普通不可用链接，点开不会打开任何工作区文件；外链在新标签打开。
-3. 窄屏点开文件后用系统返回关闭阅读器，留在原对话。工作区移除后，文件链接只显示文字。计划区等无阅读器的 Markdown 中，文件链接显示为文字。
+3. 窄屏点开文件后用系统返回关闭阅读器，留在原对话。工作区移除后，文件链接只显示文字。输入区上方待确认的计划没有阅读器，其中的文件链接显示为文字；正文里的计划块与普通回复一样可点。
+4. 不是文件链接的几种写法显示也不同：隐藏文件被渲染库标为「隐藏 [blocked]」，越界与绝对路径成为没有 href 的链接文字；两者都不会打开任何文件。
 
 渲染时链接先被标记，再通过 URL 安全检查，最后在正文组件里还原为文件路径；单元测试覆盖标记与反例（`node --test test/markdown.test.ts`），但只有真实回复能证明 Agent 写法与阅读器的接线。
 
@@ -89,7 +90,7 @@
 
 1. 按 [Native 入口](README.md#native真实接入分支)启动隔离 Host 和应用。在工作区 A 放 `zhi-proof` 与 `zhi-secondary` 两个技能，各有 `SKILL.md`、名称和简述。Codex 用 `.agents/skills/`，DSH 用 `.dsh/skills/`。给 `zhi-proof` 的正文放独有合成标记，DSH front matter 设 `disable-model-invocation: true`。工作区 B 保持空白。分别建两段对话并核对就绪。
 2. 在 A 输入 `/` 再输入 `zhi`，用方向键切到 `zhi-proof`，按 Tab 并接着输入任务。完整刷新，确认强调的引用、余下文字与选择身份仍在。另测 Escape、无匹配时 Tab、输入路径或 URL、手打完整 `/zhi-proof` 后直接发送。原生收到的手打文本保留原样。390px 视口点按候选，继续输入。
-3. 发送选中的 `zhi-proof`，查原生同一轮用户输入和指令内容。Codex 查 `rawResponseItem/completed` 或隔离 rollout 的 `response_item`，核对 skill 正文标记。DSH 用 `session/follow` 或 `session/page` 查 `user/message`，要求 `source.kind=skill-invocation`、名称及正文标记同时匹配。模型复述不是调用证明。按 [E06/E07](execution.md#e06--e07-排队与提前发送)跑排队派发和回执核对，检查原操作只出现一次。Codex 的原生本轮追加不会加载技能正文，带显式技能的条目应显示「技能将在下一轮调用」并留在队列。直接请求本轮追加应拒绝，释放当前轮后核对下一轮的技能正文。普通文本仍可追加到本轮。DSH 的「尽快发送」可带技能。
+3. 发送选中的 `zhi-proof`，查原生同一轮用户输入和指令内容。Codex 以 `thread/read` 中该轮 userMessage.content 的 `type: skill` 项（name、path）为调用证据；正文标记是否进入模型输入要查 `rawResponseItem/completed` 或隔离 rollout 的 `response_item`，普通通知订阅收不到它们，rollout 在 Host 环境内，取不到时这一项记 BLOCKED。DSH 用 `session/follow` 或 `session/page` 查 `user/message`，要求 `source.kind=skill-invocation`、名称及正文标记同时匹配。模型复述不是调用证明。按 [E06/E07](execution.md#e06--e07-排队与提前发送)跑排队派发和回执核对，检查原操作只出现一次。Codex 的原生本轮追加不会加载技能正文，带显式技能的条目应显示「技能将在下一轮调用」并留在队列。直接请求本轮追加应拒绝，释放当前轮后核对下一轮的技能正文。普通文本仍可追加到本轮。DSH 的「尽快发送」可带技能。
 4. 切到 B 再查 `/zhi`，确认 A 的技能不出现。选中技能后在实验现场使它从原生目录消失并核对原生清单，再发送旧引用。应拒绝调用并保留草稿或排队条目。点「继续编辑」或队列行的「编辑」，核对保留内容可修改后重发。若该 Host 对旧会话冻结技能范围，使用能改变清单的原生禁用方式或下方 fixture。未登录端请求 `/api/private/workbench/conversations/<id>/skills` 应被拒绝，已登录结果只含显示信息与不透明 ID。
 
 ### U13 对话用量
@@ -97,7 +98,7 @@
 原生读回先核对绑定身份。在本次隔离应用中从浏览器地址取得产品对话 ID，以只读方式在本次 `zhongshu.sqlite` 按 ID 查询 `workbench_conversations` 的 `json_extract(binding_json, '$.id')`。只保留原生 ID 及本次合成用量证据。
 
 1. 在 U12 的两端真实对话各完成两次模型请求。对照浮层累计值、已用量与窗口容量。Codex 从隔离原生连接记录 `thread/tokenUsage/updated` 的 `total.totalTokens`、`last.totalTokens` 和 `modelContextWindow`。DSH 查 `session/projections`，累计值为 `tokenUsage` 四项之和，上下文优先用 `contextPressure.projectedTokens`，回退用 `pressureTokens`。只读本次原生绑定。记录数值和百分比，区分近似显示与精确累计值。
-2. 完整刷新、切到另一对话再切回，确认数据归属。用足够长的合成对话触发原生压缩，或从隔离 Host 请求压缩。DSH 可将约 26 KiB ASCII 合成材料分两条发送，每条少于 16,000 字符，再在该会话执行原生 `/compact`。核对原生事件和独立读数。占用变小时圆环与详情随之变化，累计值不因压缩降低。只有原生缺少容量或 fixture 分支可检验容量缺失。
+2. 完整刷新、切到另一对话再切回，确认数据归属。用足够长的合成对话触发原生压缩，或从隔离 Host 请求压缩（Codex 为 App Server 的 `thread/compact/start`）。DSH 可将约 26 KiB ASCII 合成材料分两条发送，每条少于 16,000 字符，再在该会话执行原生 `/compact`。核对原生事件和独立读数。占用变小时圆环与详情随之变化，累计值不因压缩降低。只有原生缺少容量或 fixture 分支可检验容量缺失。
 
 **Fixture 分支。** 按[共同入口](README.md)建 Fixture A 和 B。A 提供上述两项合成技能，B 为空。对本轮唯一标题运行 `node test/support/feature-fixture.ts <disable-skills|usage-full|usage-compact|usage-total-only> --root "$zh_verify_root" --title '<标题>'`。`disable-skills` 后发送旧引用，核对草稿或排队条目保留，`inspect` 的接收操作 ID 未增加。依次运行三个用量命令，观察 `18% → 8% → 暂无数据`，精确累计值一直为 `176,222,262`，最后一次只显示累计入口。刷新后核对本对话数值，B 无用量。fixture 覆盖工作台与浏览器行为，原生调用与统计口径各用真实 Host 验证。
 
