@@ -67,8 +67,25 @@ const passiveChildNotice = z.object({
   source: z.object({ kind: z.enum(['agent-message', 'subagent-settled']), form: z.enum(['relay', 'notice']), summary: z.string().max(4096).optional(), senderSessionId: subagentIdSchema }).strict(),
   content: z.array(z.object({ type: z.literal('text'), text: z.string().max(1024 * 1024) }).strict()).min(1).max(32),
 }).strict();
+// DSH 0.2.2 injects a change to a task involving this session into its next step, with the same producer kind as
+// a delivery but its own framing; it starts no turn and "needs no action" (dsh-schedule README, change notices).
+const passiveScheduleChange = z.object({
+  id: identifier, role: z.literal('user'), source: z.object({ kind: z.literal('schedule') }).strict(),
+  content: z.array(z.object({ type: z.literal('text'), text: z.string().max(1024 * 1024) }).strict()).min(1).max(32),
+}).strict().refine(entry => scheduleChange(entry.content) !== undefined);
 const passiveContext = (input: unknown) => passiveApprovalContext.safeParse(input).success || passivePlanNotice.safeParse(input).success
-  || passiveChildNotice.safeParse(input).success;
+  || passiveChildNotice.safeParse(input).success || passiveScheduleChange.safeParse(input).success;
+const changeWords: Record<string, string> = { created: '新建', updated: '修改', deleted: '删除' };
+/** The change and title a schedule change notice names; undefined for anything else, including a delivery. */
+export function scheduleChange(content: unknown): { change: string; title: string } | undefined {
+  const text = textContent(content);
+  if (!text.startsWith('[SCHEDULE CHANGE]\n')) return;
+  const lines = text.split('\n');
+  const change = lines.find(line => line.startsWith('change: '))?.slice('change: '.length).trim() ?? '';
+  let title = '';
+  try { const value: unknown = JSON.parse(lines.find(line => line.startsWith('schedule_title_json: '))?.slice('schedule_title_json: '.length) ?? '""'); if (typeof value === 'string') title = value.slice(0, 200); } catch { title = ''; }
+  return changeWords[change] ? { change: changeWords[change]!, title } : undefined;
+}
 export function object(value: unknown): Record<string, unknown> { return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
 export function modelId(model: Model): string { return Buffer.from(JSON.stringify(modelSchema.parse(model))).toString('base64url'); }
 export function decodeModel(id: string): Model {
@@ -219,6 +236,9 @@ export function itemFrom(session: string, event: Event, live = false, inferredTu
   if (event.type === 'user/message' && source.kind === 'subagent-settled' && subagentIdSchema.safeParse(source.senderSessionId).success)
     return { ...base, kind: 'notice', text: typeof source.summary === 'string' ? source.summary.slice(0, 2000) : '子 Agent 已结束', collaboration: { action: 'completed', agentIds: [String(source.senderSessionId)] } };
   if (event.type === 'user/message' && typeof object(data.source).rpcId === 'string') return { ...base, kind: 'user', text: textContent(data.content), operationId: String(object(data.source).rpcId) };
+  // A change to a task involving this session is a native notice, not a delivery: say which task changed and how.
+  const changed = event.type === 'user/message' && source.kind === 'schedule' ? scheduleChange(data.content ?? object(data.message).content) : undefined;
+  if (changed) return { ...base, kind: 'notice', text: `自动任务${changed.title ? `「${changed.title}」` : ''}已${changed.change}。这条原生通知不是投递。` };
   // An automation delivery (ADR 0021): a native user message the Host wrote, shown as it is and marked with its origin.
   if (event.type === 'user/message' && source.kind === 'schedule') {
     const messageId = typeof data.id === 'string' ? data.id : typeof object(data.message).id === 'string' ? String(object(data.message).id) : undefined;

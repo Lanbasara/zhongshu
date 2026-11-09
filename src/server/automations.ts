@@ -7,7 +7,7 @@ import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { HarnessError, type AutomationDelivery, type AutomationPatch, type AutomationTargetInput, type AutomationTimingInput, type HarnessAdapter, type HarnessAutomations, type HarnessId, type NativeAutomation } from '../harness/types.ts';
+import { HarnessError, type AutomationDelivery, type AutomationEdit, type AutomationPatch, type AutomationTargetInput, type AutomationTimingInput, type HarnessAdapter, type HarnessAutomations, type HarnessId, type NativeAutomation } from '../harness/types.ts';
 import { check, toNative, type When } from '../sichen/time.ts';
 import {
   automationCreateSchema, automationDeleteSchema, automationEditSchema, timelineLineSchema,
@@ -183,6 +183,13 @@ export function createAutomations(db: DatabaseSync, workbench: Workbench, adapte
     if (!entry || Date.now() - entry.at > FRESH_MS) await refresh();
     return cache.get('dsh')?.tasks ?? [];
   }
+  /** DSH 0.2.2 accepts an edit to an ended task and revives a one-shot one, so the rule is kept here, on a fresh native read. */
+  async function update(id: string, patch: AutomationPatch, expectedUpdatedAt?: string): Promise<AutomationEdit> {
+    const task = await source('dsh').view(id);
+    if (!task) return 'notFound';
+    if (task.status === 'ended') return 'ended';
+    return source('dsh').update(id, patch, expectedUpdatedAt);
+  }
   async function find(id: string): Promise<NativeAutomation> {
     const task = (await current()).find(entry => entry.id === id) ?? await source('dsh').view(id);
     if (!task) throw new AutomationError('automation_not_found', 404);
@@ -256,7 +263,7 @@ export function createAutomations(db: DatabaseSync, workbench: Workbench, adapte
       const input = parse(automationEditSchema, request.body);
       await find(id);
       const { timing, ...rest } = input.patch;
-      const result = await source('dsh').update(id, { ...rest, ...(timing ? { timing: nativeTiming(timing) } : {}) }, input.expectedUpdatedAt);
+      const result = await update(id, { ...rest, ...(timing ? { timing: nativeTiming(timing) } : {}) }, input.expectedUpdatedAt);
       await refresh();
       if (result === 'conflict') return { outcome: 'conflict' };
       if (result === 'notFound') return { outcome: 'not_found' };
@@ -305,7 +312,7 @@ export function createAutomations(db: DatabaseSync, workbench: Workbench, adapte
     },
     async edit(id: string, patch: AutomationPatch, expectedUpdatedAt?: string) {
       await find(id);
-      const result = await source('dsh').update(id, patch, expectedUpdatedAt);
+      const result = await update(id, patch, expectedUpdatedAt);
       await refresh();
       if (typeof result === 'string') return result;
       log({ event: 'automation_changed', via: 'sichen' });

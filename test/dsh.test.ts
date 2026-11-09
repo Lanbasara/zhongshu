@@ -594,6 +594,22 @@ test('After a stop, child messages left in next-step do not lock the conversatio
   } finally { await context.close(); }
 });
 
+test('A schedule change notice waiting in an idle session does not lock it; a schedule-looking unknown input still does', async () => {
+  const context = await setup();
+  try {
+    const binding = await context.create(); const native = context.fixture.sessions.get(binding.id)!;
+    const notice = (text: string) => ({ id: randomUUID(), role: 'user', source: { kind: 'schedule' }, content: [{ type: 'text', text }] });
+    // DSH 0.2.2 injects this into next-step when a task involving the idle session is created, edited or deleted elsewhere.
+    native.stepInbox.push(notice('[SCHEDULE CHANGE]\nA scheduled task involving this session was changed outside this session. This notice is not a delivery of the task and needs no action.\nchange: deleted\nschedule_id_json: "s"\nschedule_title_json: "t"'));
+    const idle = await context.adapter.state(binding);
+    assert.equal(idle.status, 'idle'); assert.equal(idle.pendingInputs, 0);
+    assert.equal((await context.adapter.submit(binding, { id: randomUUID(), text: 'Send after a schedule change' })).outcome, 'accepted');
+    context.fixture.append(native, 'turn/end', { turn: 1, reason: { kind: 'completed' } }); native.open = null;
+    native.stepInbox.push(notice('[SCHEDULE REMINDER]\nnot a change notice'));
+    assert.equal((await context.adapter.state(binding)).pendingInputs, 1);
+  } finally { await context.close(); }
+});
+
 test('DSH discards target proof if the Host history moves backwards during lookup', async () => {
   const context = await setup();
   try {

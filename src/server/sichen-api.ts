@@ -86,10 +86,15 @@ export function sichenRoutes(options: { operations: Operations; workbench: Workb
     try { text = await readWorkspaceTimeline(directory); } catch { throw new SichenFailure('workspace_file_unavailable', 409); }
     return parseTimeline(text ?? '', workspace);
   }
+  /** What the command line prints for a refused calendar line; the reasons are the parser's codes. */
+  const timelineProblems: Record<string, string> = {
+    not_json: '这一行不是合法的 JSON', invalid_fields: '种类、标题、日期或钟点的写法不对', invalid_date: '这个日期不存在',
+    link_outside_workspace: '链接要写工作区里的相对路径，不能是网址、绝对路径或带 ..',
+  };
   async function append(directory: string, line: Record<string, unknown>, workspace: { id: string; label: string }) {
     const text = JSON.stringify(line);
     const parsed = parseTimeline(text, workspace);
-    if (parsed.problems.length || parsed.entries.length !== 1) throw new SichenFailure('timeline_entry_invalid', 400, parsed.problems.map(problem => problem.reason));
+    if (parsed.problems.length || parsed.entries.length !== 1) throw new SichenFailure('timeline_entry_invalid', 400, parsed.problems.map(problem => timelineProblems[problem.reason] ?? problem.reason));
     try { await appendWorkspaceTimeline(directory, text); } catch { throw new SichenFailure('workspace_file_unavailable', 409); }
     return parsed.entries[0]!;
   }

@@ -121,7 +121,10 @@ function StatusMark({ item }: { item: ScheduleItem }) {
   if (item.notified) return <span className="sch-status sch-notified" title="已通知你"><Bell size={10}/></span>;
   if (item.status === 'next') return <span className="sch-status sch-next" title="下一个">●</span>;
   if (item.status === 'overdue') return <span className="sch-status sch-overdue" title="已过时间，还不知道做没做">!</span>;
-  if (item.status === 'done') return <span className="sch-status" title={item.kind === 'agent' ? '已运行' : '已过'}>✓</span>;
+  // A user's action line says done or cancelled; the two must not look alike (2026-11-10).
+  if (item.entry?.status === 'cancelled') return <span className="sch-status" role="img" title="已取消" aria-label="已取消">✕</span>;
+  if (item.status === 'done') { const label = item.kind === 'agent' ? '已运行' : item.entry?.status === 'done' ? '已完成' : '已过';
+    return <span className="sch-status" role="img" title={label} aria-label={label}>✓</span>; }
   return null;
 }
 function Row({ item, open, showDate }: { item: ScheduleItem; open(item: ScheduleItem): void; showDate?: boolean }) {
@@ -139,6 +142,7 @@ function Row({ item, open, showDate }: { item: ScheduleItem; open(item: Schedule
         {item.notified && <span className="sch-chip sch-chip-notified"><Bell size={10}/>已通知你</span>}
         {item.late && <span className="sch-chip sch-chip-late">迟到</span>}
         {item.kind === 'agent' && item.status === 'done' && <span className="sch-chip">已运行</span>}
+        {item.entry?.status && <span className="sch-chip">{item.entry.status === 'done' ? '已完成' : '已取消'}</span>}
         {item.kind === 'agent' && item.status === 'todo' && <span className="sch-chip">待运行</span>}
         {item.status === 'overdue' && <span className="sch-chip sch-chip-late">已过时间</span>}
         {item.status === 'running' && <span className="sch-chip sch-chip-next">运行中</span>}
