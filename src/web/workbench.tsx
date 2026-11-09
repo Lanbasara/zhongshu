@@ -21,7 +21,7 @@ import {
 } from '../shared/workbench.ts';
 import { applyLiveFrame } from './live-items.ts';
 import { adoptFull, applyState } from './snapshot-merge.ts';
-import { request, RequestError, readDraft, sameInput, saveDraft, type Draft } from './workbench-client.ts';
+import { request, RequestError, readDraft, sameInput, saveDraft, sendRefused, type Draft } from './workbench-client.ts';
 import { sessionSchema } from '../shared/http.ts';
 import './workbench.css';
 import { Transcript, FilePicker } from './conversation-content.tsx';
@@ -72,6 +72,9 @@ const failures: Record<string, string> = {
   native_history_page_limit: '这一页原生内容过大，暂时无法显示。',
   history_no_progress: '原生历史暂时无法继续读取；已加载的内容仍然保留。',
 };
+function failureText(reason: unknown): string {
+  return reason instanceof RequestError ? failures[reason.code] ?? '暂时无法确认结果。输入和已有内容仍保留，请重新连接。' : '连接暂时中断。输入和已有内容仍保留，请重试。';
+}
 const historyNotes: Record<string, string> = {
   native_history_unavailable: '原生暂时不可用：已加载的内容仍然保留，恢复后可以继续阅读。',
   native_history_page_limit: '最新一页原生内容过大，暂时无法显示。',
@@ -217,8 +220,10 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
   const report = useCallback((reason: unknown) => {
     if (!alive.current || (reason instanceof DOMException && reason.name === 'AbortError')) return;
     if (reason instanceof RequestError && reason.status === 401) { expired(); return; }
-    setError(reason instanceof RequestError ? failures[reason.code] ?? '暂时无法确认结果。输入和已有内容仍保留，请重新连接。' : '连接暂时中断。输入和已有内容仍保留，请重试。');
+    setError(failureText(reason));
   }, [expired]);
+  /** Why a draft's first message was refused; shown once its conversation opens, after the view resets its notice. */
+  const arrivalNotice = useRef<{ id: string; message: string } | undefined>(undefined);
   const refreshConfiguration = () => {
     const serial = ++configurationSerial.current;
     void request('/configuration', workbenchConfigurationSchema).then(value => {
@@ -324,6 +329,8 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
     setSnapshot(undefined); snapshotRef.current = undefined; liveView.current = undefined; liveLog.current = []; stateRevision.current = 0; pendingScope.current = undefined; setPages([]); setNewer([]); pagesRef.current = []; newerRef.current = []; setUnavailableFiles(new Set()); setError(''); setMoreOutput(false); atBottom.current = true;
     const next = selected ? readDraft(selected) : { text: '' }; draftRef.current = next; setDraft(next);
     if (selected) { setUnavailableNotice(''); void loadRef.current(selected, true); }
+    const notice = arrivalNotice.current; arrivalNotice.current = undefined;
+    if (notice && notice.id === selected) setError(notice.message);
     return () => viewController.current?.abort();
   }, [selected]);
   // Reading means the conversation is on screen: Settings and Archive cover it, so they release the lease (unread rule).
@@ -498,7 +505,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
       // A reader in older content still needs the full read that brings the window back to the latest page (ADR 0020).
       if (newerRef.current.length > 0) await load(id, true); else await loadState(id);
     } catch (reason) {
-      if (gen === generation.current && reason instanceof RequestError && ([400, 413].includes(reason.status) || ['conversation_archived','workspace_save_in_progress','workspace_execution_blocked','workspace_removed','workspace_remove_busy','workspace_directory_changed','workspace_directory_unavailable','workspace_identity_unavailable','operation_needs_reconciliation','file_reference_unavailable','file_reference_forbidden','quote_source_changed','image_reference_changed','image_unavailable','queue_full','queue_mode_unavailable'].includes(reason.code))) {
+      if (gen === generation.current && sendRefused(reason)) {
         setDraft(current => { const { pending: _pending, ...editable } = current; saveDraft(id, editable); return editable; });
       }
       report(reason);
@@ -842,7 +849,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
         : view === 'schedule' ? <ScheduleView csrf={csrf} report={report} configuration={configuration} revision={listRevision} tab={scheduleTab}
           onTab={changeScheduleTab} openConversation={choose} openFile={openWorkspaceFile}
           createFor={createFor} onCreateHandled={() => setCreateFor(undefined)}/>
-        : creating ? configuration ? <NewConversation key={String(creating)} configuration={configuration} initialWorkspace={typeof creating==='string'?creating:undefined} addedWorkspace={addedWorkspace} csrf={csrf} onWorkspace={switchDraftWorkspace} onAddWorkspace={()=>setWorkspaceAction({kind:'add'})} onCreated={c=>{setError('');refreshList(value=>value+1);adoptConversation(c.id);}} report={report}/> : <p className="view-status" role="status">正在读取工作区与配置…</p>
+        : creating ? configuration ? <NewConversation key={String(creating)} configuration={configuration} initialWorkspace={typeof creating==='string'?creating:undefined} addedWorkspace={addedWorkspace} csrf={csrf} onWorkspace={switchDraftWorkspace} onAddWorkspace={()=>setWorkspaceAction({kind:'add'})} onCreated={(c,refused)=>{setError('');refreshList(value=>value+1);if(refused)arrivalNotice.current={id:c.id,message:failureText(refused)};adoptConversation(c.id);}} report={report}/> : <p className="view-status" role="status">正在读取工作区与配置…</p>
         : !selected ? <section className="empty-workbench">
           <h2>选择一段对话，或开始新的工作</h2>
           <p>对话按工作区列在左侧。离开页面后 Agent 仍在工作，回来接着看就行。</p>

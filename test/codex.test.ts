@@ -331,6 +331,25 @@ test('Configuration drift blocks sending but still permits stopping the verified
   assert.equal(p.calls.filter(call => call.method === 'turn/interrupt').length, 1);
 });
 
+test('Before its first turn a resumed thread reports no effort; that gap alone is not drift', async t => {
+  let native: Record<string, unknown> = { ...nativeConfiguration(), reasoningEffort: null };
+  let turns: unknown[] = [];
+  const p = await peer(t, request => {
+    if (request.method === 'thread/resume') return native;
+    if (request.method === 'thread/turns/list') return { data: turns, nextCursor: null };
+    return undefined;
+  });
+  const binding = { ...saved, configuration: { ...saved.configuration, reasoningEffort: 'high' } };
+  assert.equal((await p.adapter.state(binding)).configurationVerified, true);
+  assert.equal((await p.adapter.submit(binding, { id: 'first-turn', text: 'Synthetic' })).outcome, 'accepted');
+  assert.equal(p.calls.find(call => call.method === 'turn/start')?.params.effort, 'high');
+  native = { ...native, model: 'changed-externally' };
+  assert.equal((await p.adapter.state(binding)).configurationVerified, false, 'other fields still have to match');
+  native = { ...native, model: nativeConfiguration().model };
+  turns = [{ id: 'run-1', status: 'completed' }];
+  assert.equal((await p.adapter.state(binding)).configurationVerified, false, 'a thread with turns must report its effort');
+});
+
 test('An idle completed readback retains the latest native run identity', async t => {
   const p = await peer(t, request => request.method === 'thread/turns/list' ? { data: [{ id: 'completed-run', status: 'completed' }], nextCursor: null } : undefined);
   assert.deepEqual(await p.adapter.state(saved), { status: 'idle', runId: 'completed-run', pendingInputs: 0, configurationVerified: true });

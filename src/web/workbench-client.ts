@@ -8,6 +8,13 @@ export class RequestError extends Error {
   readonly code: string; readonly status: number;
   constructor(code: string, status = 0) { super(code); this.code = code; this.status = status; }
 }
+const refusedCodes = new Set(['conversation_archived', 'workspace_save_in_progress', 'workspace_execution_blocked', 'workspace_removed', 'workspace_remove_busy',
+  'workspace_directory_changed', 'workspace_directory_unavailable', 'workspace_identity_unavailable', 'operation_needs_reconciliation', 'file_reference_unavailable',
+  'file_reference_forbidden', 'quote_source_changed', 'image_reference_changed', 'image_unavailable', 'queue_full', 'queue_mode_unavailable']);
+/** The server refused a send before recording it: nothing will run, so the input goes back to the person, editable. */
+export function sendRefused(reason: unknown): reason is RequestError {
+  return reason instanceof RequestError && ([400, 413].includes(reason.status) || refusedCodes.has(reason.code));
+}
 const root = '/api/private/workbench';
 /** A bounded, same-origin read. An uncertain write is retried only with its original ID. */
 export async function request<T>(path: string, schema: z.ZodType<T>, options: { signal?: AbortSignal; body?: unknown; csrf?: string; timeoutMs?: number } = {}): Promise<T> {

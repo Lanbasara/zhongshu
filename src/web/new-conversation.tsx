@@ -8,7 +8,7 @@ import { SkillEditor } from './patterns/composer-extras.tsx';
 import { DraftConfiguration } from './patterns/draft-configuration.tsx';
 import { Button } from './ui/controls.tsx';
 import { FilePicker } from './conversation-content.tsx';
-import { request, RequestError, saveDraft } from './workbench-client.ts';
+import { request, RequestError, saveDraft, sendRefused } from './workbench-client.ts';
 import { uploadDrafts, putUpload, removeUpload, type UploadDraft } from './upload-drafts.ts';
 import { readNewDraft, saveNewDraft, emptyNewDraft, removeNewDraft, type NewDraft } from './new-conversation-state.ts';
 import { readPreference, rememberConversation, initialConversationTitle } from './conversation-preferences.ts';
@@ -27,7 +27,7 @@ function trackImageWrite(id:string){
 }
 const defaultsSchema=z.object({conversation:conversationSchema.nullable()}).strict();
 const preparationSchema=skillCatalogSchema.extend({preparationId:z.uuid()}).strict();
-type Props={ configuration:WorkbenchConfiguration; initialWorkspace?:string; addedWorkspace?:string; csrf:string; onCreated(conversation:Conversation):void; onAddWorkspace():void; onWorkspace(workspace:string):void; report(error:unknown):void };
+type Props={ configuration:WorkbenchConfiguration; initialWorkspace?:string; addedWorkspace?:string; csrf:string; onCreated(conversation:Conversation,refused?:RequestError):void; onAddWorkspace():void; onWorkspace(workspace:string):void; report(error:unknown):void };
 function StagedImage({item,disabled,onRemove}:{item:UploadDraft;disabled:boolean;onRemove():void}) {
   const [url,setUrl]=useState('');useEffect(()=>{const url=URL.createObjectURL(item.file);setUrl(url);return()=>URL.revokeObjectURL(url);},[item.file]);
   return <div className="attachment-card"><img src={url} alt={item.file.name}/><span>{item.file.name}<small>发送时上传</small></span><button type="button" aria-label={`移除图片：${item.file.name}`} disabled={disabled} onClick={onRemove}><X size={14}/></button></div>;
@@ -129,7 +129,13 @@ export function NewConversation(props:Props) {
       .catch(reason=>{if(!abort.signal.aborted){setSkillsSupported(undefined);setError('暂时无法读取技能能力，请稍后重试。');props.report(reason);}});
     return()=>abort.abort();
   },[initialized,workspace?.id,catalog?.id,catalog?.available,preparationRetry]);
-  const edit=(text:string,skills:SkillReference[])=>{if(!locked)persist({...current.current,text,skills:skills.length?skills:undefined});};
+  const filesDisabled=locked||!workspace||(draft.references?.length??0)>=8;
+  const edit=(text:string,skills:SkillReference[])=>{
+    if(locked)return;const previous=current.current;
+    persist({...previous,text,skills:skills.length?skills:undefined});
+    // Typing @ opens the file picker, as in an existing conversation.
+    if(text.endsWith('@')&&!previous.text.endsWith('@')&&!filesDisabled)setPicking(true);
+  };
   async function addImages(files:File[]) {
     if(busyRef.current||stagingRef.current||current.current.submission||!imagesReady||!initialized)return;
     if(uploads.length+files.length>4){setError('每条消息最多添加 4 张图片。');return;}
@@ -215,7 +221,13 @@ export function NewConversation(props:Props) {
       if(!saveDraft(value.id,{...payload,pending:{...payload,id:submission.operationId}}))throw Error('无法保留发送编号，本次尚未发送。');
       value={...value,submission:{...value.submission!,dispatchStarted:true}};if(!persist(value,true))return;
       setStatus('正在发送首条消息…');
-      const response=await request(`/conversations/${value.id}/operations`,operationResponseSchema,{csrf:props.csrf,body:{id:submission.operationId,type:'message',payload},signal:abort.signal});
+      let response;
+      try{response=await request(`/conversations/${value.id}/operations`,operationResponseSchema,{csrf:props.csrf,body:{id:submission.operationId,type:'message',payload},signal:abort.signal});}
+      catch(reason){
+        // Refused before it was recorded: nothing runs, so the created conversation takes the input back editable, like any other send.
+        if(sendRefused(reason)){await handOver(snapshot.conversation,value,false,reason);return;}
+        throw reason;
+      }
       if(response.operation.status==='accepted')await complete(snapshot.conversation);
       else if(response.operation.status==='rejected')setStatus('首条消息未被接受，原内容已保留。');
       else await confirmFirstSend(value.id,submission.operationId,abort.signal);
@@ -243,17 +255,7 @@ export function NewConversation(props:Props) {
       const snapshot=await request(`/conversations/${value.id}`,snapshotSchema,{signal:abort.signal});
       if(!alive.current)return;
       if(snapshot.operations.some(item=>item.id===value.submission!.operationId&&item.status==='accepted')){await complete(snapshot.conversation);return;}
-      const payload={text:value.text,images:value.images,references:value.references,skills:value.skills};
-      const pending=value.submission!.dispatchStarted?{...payload,id:value.submission!.operationId}:undefined;
-      if(!saveDraft(value.id,{...payload,...(pending?{pending}:{})})){
-        setError('无法保留首条消息，内容仍在此草稿中。请检查浏览器存储后重试。');return;
-      }
-      await Promise.all(Object.keys(value.submission!.uploaded).map(id=>removeUpload(id)));
-      if(!alive.current)return;
-      // Existing composer now owns the saved input and remaining staged uploads.
-      // Remove only after that handoff is durable; no duplicate new draft remains.
-      removeNewDraft(value.workspaceId);
-      props.onCreated(snapshot.conversation);
+      await handOver(snapshot.conversation,value,value.submission!.dispatchStarted);
     }catch(reason){
       if(!alive.current||abort.signal.aborted)return;
       // Nothing was created yet (the first send never reached the server): say so instead of reporting a failure.
@@ -261,6 +263,20 @@ export function NewConversation(props:Props) {
       else props.report(reason);
     }
     finally{busyRef.current=false;if(alive.current)setBusy(false);}
+  }
+  /** The created conversation's composer takes over the first input; it stays pending only while its outcome is unknown. */
+  async function handOver(conversation:Conversation,value:NewDraft,unconfirmed:boolean,refused?:RequestError){
+    const payload={text:value.text,images:value.images,references:value.references,skills:value.skills};
+    const pending=unconfirmed?{...payload,id:value.submission!.operationId}:undefined;
+    if(!saveDraft(value.id,{...payload,...(pending?{pending}:{})})){
+      setError('无法保留首条消息，内容仍在此草稿中。请检查浏览器存储后重试。');return;
+    }
+    await Promise.all(Object.keys(value.submission!.uploaded).map(id=>removeUpload(id)));
+    if(!alive.current)return;
+    // Existing composer now owns the saved input and remaining staged uploads.
+    // Remove only after that handoff is durable; no duplicate new draft remains.
+    removeNewDraft(value.workspaceId);
+    props.onCreated(conversation,refused);
   }
   async function complete(conversation:Conversation){
     if(!alive.current)return;
@@ -284,7 +300,7 @@ export function NewConversation(props:Props) {
     <div className="new-draft-workspace"><Folder size={15}/><label className="sr-only" htmlFor="draft-workspace">工作区</label><select id="draft-workspace" value={draft.workspaceId} disabled={locked||staging||!initialized} onChange={e=>{if(stagingRef.current)return;if(!current.current.workspaceId){if(!persist({...current.current,workspaceId:e.target.value},true))return;removeNewDraft('');}else if(!persist(current.current,true))return;props.onWorkspace(e.target.value);}}><option value="">选择工作区</option>{props.configuration.workspaces.map(w=><option key={w.id} value={w.id}>{w.label}</option>)}</select></div>
     {!props.configuration.workspaces.length&&<div className="state-notice"><p>先添加工作区，再开始对话。</p>{props.configuration.workspaceRoots?.length?<Button onClick={()=>{awaitingWorkspace.current={previous:props.addedWorkspace};props.onAddWorkspace();}}>添加工作区</Button>:<p>管理员尚未配置允许添加的目录，请先完成工作区配置。</p>}</div>}
     <ComposerView value={draft.text} onChange={text=>edit(text,[])} renderEditor={editor=><SkillEditor editor={{...editor,placeholder:'你想从哪里开始？'}} spans={draft.skills} picker={workspace&&catalog?.available&&skillsSupported&&!locked?{load:loadSkills,format:skillLabelText,limit:skillLimit}:undefined} onEdit={edit}/>}
-      onSend={()=>void send()} onStop={()=>{}} onImages={files=>void addImages(files)} onFiles={()=>setPicking(true)} editDisabled={locked||!initialized} imagesDisabled={locked||staging||!initialized||!imagesReady} filesDisabled={locked||!workspace||(draft.references?.length??0)>=8}
+      onSend={()=>void send()} onStop={()=>{}} onImages={files=>void addImages(files)} onFiles={()=>setPicking(true)} editDisabled={locked||!initialized} imagesDisabled={locked||staging||!initialized||!imagesReady} filesDisabled={filesDisabled}
       sendDisabled={busy||staging||!initialized||!imagesReady||(!draft.submission&&(!valid||(!draft.text.trim()&&!uploads.length&&!draft.references?.length)))} sending={busy} running={false} model={model?.label??'选择模型'} permission={catalog?.permissions.find(p=>p.id===draft.configuration.permissionId)?.label??'选择权限'} configurationNote="首次发送后配置固定。"
       configurationControls={<DraftConfiguration catalogs={props.configuration.harnesses} harnessId={draft.harnessId} configuration={draft.configuration} disabled={locked||!initialized} onPowerChange={switchPower} onConfigurationChange={configuration=>persist({...current.current,configuration})}/>}
       hasMaterials={!!uploads.length||!!draft.references?.length} error={error} materials={<>{uploads.length>0&&<div className="attachment-tray">{uploads.map(item=><StagedImage key={item.id} item={item} disabled={locked||staging} onRemove={()=>void removeImage(item.id)}/>)}</div>}{draft.references?.map((r,index)=><div className="reference-card" key={index}><FileText size={14}/><span>{r.type==='file'?r.path:r.text}</span><button type="button" aria-label="移除引用" disabled={locked} onClick={()=>persist({...current.current,references:current.current.references?.filter((_,i)=>i!==index)})}><X size={14}/></button></div>)}</>}/>

@@ -240,6 +240,17 @@ class CodexAdapter implements HarnessAdapter {
     return confirmed ? { outcome: 'accepted' } : { outcome: 'unknown', reason: 'codex_answer_unconfirmed' };
   }
 
+  /**
+   * A resumed thread reports no effort until its first turn. Every turn names the conversation's
+   * effort explicitly (turn/start), so only that gap is accepted; every other field must still match.
+   */
+  private async effortUnsetBeforeFirstTurn(binding: Binding, loaded: z.infer<typeof configuredThread>): Promise<boolean> {
+    if (loaded.reasoningEffort != null || binding.configuration.reasoningEffort === undefined) return false;
+    if (!matches(binding, { ...loaded, reasoningEffort: binding.configuration.reasoningEffort })) return false;
+    const turns = parse(z.object({ data: z.array(turn).max(100), nextCursor: cursor.nullable() }), await this.rpc.request('thread/turns/list', { threadId: binding.id, limit: 1, sortDirection: 'desc', itemsView: 'notLoaded' }));
+    return turns.data.length === 0;
+  }
+
   private async load(binding: Binding): Promise<boolean> {
     const existing = this.loading.get(binding.id);
     if (existing) {
@@ -259,7 +270,7 @@ class CodexAdapter implements HarnessAdapter {
         response = await this.rpc.request('thread/resume', { threadId: binding.id, excludeTurns: true });
       }
       const loaded = parse(configuredThread, response);
-      const verified = matches(binding, loaded);
+      const verified = matches(binding, loaded) || await this.effortUnsetBeforeFirstTurn(binding, loaded);
       const watch = this.watches.get(binding.id);
       if (watch) watch.verified = verified;
       return verified;
