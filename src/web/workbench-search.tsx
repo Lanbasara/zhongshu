@@ -52,7 +52,8 @@ export function WorkbenchSearch({ open, onOpenChange, configuration, attention, 
     const controller = new AbortController();
     const timer = setTimeout(() => {
       void request('/conversation-search', conversationListSchema, { csrf, signal: controller.signal, body: { title: term } })
-        .then(result => { setFound({ term, conversations: result.conversations }); setFailed(false); })
+        // A response for an earlier term may still arrive after its request was abandoned; it must not replace the current one.
+        .then(result => { if (controller.signal.aborted) return; setFound({ term, conversations: result.conversations }); setFailed(false); })
         .catch(() => { if (!controller.signal.aborted) setFailed(true); });
     }, 140);
     return () => { clearTimeout(timer); controller.abort(); };

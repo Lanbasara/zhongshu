@@ -198,7 +198,8 @@ async function main() {
             if (value.state.status !== 'running') throw new Error('fixture_must_be_running');
             const runId = value.state.runId!;
             for (const item of value.items) if (item.kind === 'tool' && item.status === 'running' && item.runId === runId) item.status = 'failed';
-            value.state = { ...idle(), status: 'failed', runId };
+            // Like a real Host, a failed run reports its own terminal result.
+            value.state = { ...idle(), status: 'failed', runId, terminalRunId: runId, terminalStatus: 'failed' };
           }
           if (input.command === 'complete') {
             if (value.state.status !== 'running') throw new Error('fixture_must_be_running');

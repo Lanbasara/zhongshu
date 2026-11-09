@@ -47,6 +47,8 @@ function withPreset(value:NewDraft,catalog?:Props['configuration']['harnesses'][
   if(value.configuration.agentPreset||!catalog?.presets?.length)return value.configuration;
   return {...value.configuration,agentPreset:catalog.defaultPresetId??'standard'};
 }
+const preparationClaimedMessage='原生准备已被使用，本次尚未发送。请重新准备并核验技能。';
+const unconfirmedMessage='网络暂时不可用或回执丢失。原配置和内容已保留，请重试核对。';
 /** Local draft owns preparation; existing server operations still own execution/reconciliation. */
 export function NewConversation(props:Props) {
   const [draft,setDraft]=useState<NewDraft>(()=>readNewDraft(props.initialWorkspace??'')??emptyNewDraft(props.initialWorkspace??''));
@@ -103,6 +105,8 @@ export function NewConversation(props:Props) {
     if(latest.preparationId&&latest.preparationId!==result.preparationId)throw Error('草稿准备身份已变化，请重新核对。');
     if(!persist({...latest,preparationId:result.preparationId},true))throw Error('无法保留准备编号，本次尚未发送。');
     setPreparationState('ready');setPreparationClaimed(false);setSkillsSupported(true);
+    // A fresh preparation answers the earlier "already used" notice.
+    setError(previous=>previous===preparationClaimedMessage?'':previous);
     return result;
   }
   const loadSkills=useCallback(async(signal:AbortSignal)=>{
@@ -222,10 +226,11 @@ export function NewConversation(props:Props) {
         // An unknown response never enters this branch and keeps its frozen identity.
         persist({...current.current,submission:undefined});
         setPreparationState('failed');setPreparationClaimed(true);setSkillsSupported(false);setStatus('');
-        setError('原生准备已被使用，本次尚未发送。请重新准备并核验技能。');
-      }else if(reason instanceof RequestError&&reason.code==='storage_budget_reached'){setError('存储已达到预算上限，暂时不能新建对话或上传图片。内容已保留；可以在「设置 › 存储」中清理后重试。');}
+        setError(preparationClaimedMessage);
+      }else if(reason instanceof RequestError&&reason.code==='storage_budget_reached'){setStatus('');setError('存储已达到预算上限，暂时不能新建对话或上传图片。内容已保留；可以在「设置 › 存储」中清理后重试。');}
       else if(reason instanceof RequestError){props.report(reason);setError('暂时无法确认结果。原配置和内容已保留，请重试核对。');}
-      else if(!(reason instanceof DOMException&&reason.name==='AbortError'))setError(reason instanceof Error?reason.message:'暂时无法确认结果，请重试。');
+      // Our own explanations are shown as written; a network failure or a bare machine code gets a sentence instead.
+      else if(!(reason instanceof DOMException&&reason.name==='AbortError'))setError(reason instanceof Error&&!(reason instanceof TypeError)&&!/^[a-z_]+$/.test(reason.message)?reason.message:unconfirmedMessage);
     }
     finally{busyRef.current=false;if(alive.current)setBusy(false);}
   }
@@ -249,7 +254,12 @@ export function NewConversation(props:Props) {
       // Remove only after that handoff is durable; no duplicate new draft remains.
       removeNewDraft(value.workspaceId);
       props.onCreated(snapshot.conversation);
-    }catch(reason){if(alive.current&&!abort.signal.aborted)props.report(reason);}
+    }catch(reason){
+      if(!alive.current||abort.signal.aborted)return;
+      // Nothing was created yet (the first send never reached the server): say so instead of reporting a failure.
+      if(reason instanceof RequestError&&reason.status===404)setError('这段对话还没有创建，内容已保留。请点“重试核对首条消息”。');
+      else props.report(reason);
+    }
     finally{busyRef.current=false;if(alive.current)setBusy(false);}
   }
   async function complete(conversation:Conversation){

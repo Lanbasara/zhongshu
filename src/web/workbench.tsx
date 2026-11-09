@@ -667,6 +667,8 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
   const configurationLabel = conversationConfigurationLabel(conversation, configuration?.harnesses);
   const permission = configuration?.harnesses.find(h => h.id === conversation?.harnessId)?.permissions.find(p => p.id === conversation?.configuration.permissionId);
   const storage = useStorage();
+  // Deleting a conversation or sending images changes the list; read storage then too, so the budget badge follows promptly.
+  useEffect(() => { const timer = setTimeout(storage.refresh, 400); return () => clearTimeout(timer); }, [listRevision, storage.refresh]);
   const attention = useAttention(listRevision + attentionRevision, report);
   const accounts = useAccounts(report);
   const connectionView = { text: connection, state: connection === '已连接' ? 'online' as const : connection.startsWith('离线') ? 'offline' as const : 'connecting' as const };
@@ -814,8 +816,9 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
         badge={storageState(storage.value) && <span className="sidebar-badge" data-state={storageState(storage.value)} aria-label={storage.value?.full ? '存储已满' : '存储接近上限'}/>}/>
       {!narrow && <div className="sidebar-status"><ConnectionStatus {...connectionView}/></div>}
     </>}>
-    <ConversationNavigation workspaces={configuration?.workspaces} workspaceAction={setWorkspaceAction} selected={view ? undefined : selected}
-      revision={listRevision} csrf={csrf} choose={choose} create={createInWorkspace} manage={setManaging} report={report} attention={attention?.conversations}/>
+    {/* On phones the drawer is a modal; a dialog opened from it replaces it, or the drawer would take the dialog's first tap. */}
+    <ConversationNavigation workspaces={configuration?.workspaces} workspaceAction={action => { setNavigation(false); setWorkspaceAction(action); }} selected={view ? undefined : selected}
+      revision={listRevision} csrf={csrf} choose={choose} create={createInWorkspace} manage={conversation => { setNavigation(false); setManaging(conversation); }} report={report} attention={attention?.conversations}/>
   </SidebarShell>;
   const panel = view ? undefined : subagentPanel && conversation && !narrow ? subagentHost : reader && configuration ? <WorkspaceReader workspaces={configuration.workspaces} initialWorkspace={conversation?.workspaceId}
       target={readerTarget} onTargetUnavailable={target => {
@@ -832,7 +835,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
         : view === 'schedule' ? <ScheduleView csrf={csrf} report={report} configuration={configuration} revision={listRevision} tab={scheduleTab}
           onTab={changeScheduleTab} openConversation={choose} openFile={openWorkspaceFile}
           createFor={createFor} onCreateHandled={() => setCreateFor(undefined)}/>
-        : creating ? configuration ? <NewConversation key={String(creating)} configuration={configuration} initialWorkspace={typeof creating==='string'?creating:undefined} addedWorkspace={addedWorkspace} csrf={csrf} onWorkspace={switchDraftWorkspace} onAddWorkspace={()=>setWorkspaceAction({kind:'add'})} onCreated={c=>{refreshList(value=>value+1);adoptConversation(c.id);}} report={report}/> : <p className="view-status" role="status">正在读取工作区与配置…</p>
+        : creating ? configuration ? <NewConversation key={String(creating)} configuration={configuration} initialWorkspace={typeof creating==='string'?creating:undefined} addedWorkspace={addedWorkspace} csrf={csrf} onWorkspace={switchDraftWorkspace} onAddWorkspace={()=>setWorkspaceAction({kind:'add'})} onCreated={c=>{setError('');refreshList(value=>value+1);adoptConversation(c.id);}} report={report}/> : <p className="view-status" role="status">正在读取工作区与配置…</p>
         : !selected ? <section className="empty-workbench">
           <h2>选择一段对话，或开始新的工作</h2>
           <p>对话按工作区列在左侧。离开页面后 Agent 仍在工作，回来接着看就行。</p>
