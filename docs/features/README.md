@@ -62,7 +62,7 @@ node test/support/feature-fixture.ts serve --root "$zh_verify_root" --port 4391
 
 最后一条常驻前台。端口被占用时退出，不接管已有进程；换一个空闲端口并同步浏览器 origin。同一 root 同时只运行一套应用。此入口忽略个人 `ZHONGSHU_*` 配置，首次要求 root 为空且权限为 `0700`；新现场**尚未初始化管理员**，先跑 A01。修改源码或重新构建后重启应用；静态路由在启动时登记，不能边重建 dist 边把旧进程当作新版本验收。
 
-另开终端，将 READY 输出的绝对 root 赋给同名变量，再初始化：
+另开终端，等 serve 输出 `"event":"ready"` 的 JSON 行，把其中的绝对 root 赋给同名变量，再初始化：
 
 ```sh
 node test/support/feature-fixture.ts init --root "$zh_verify_root"
@@ -75,7 +75,7 @@ node test/support/feature-fixture.ts init --root "$zh_verify_root"
 ## Doctor：确认对象和可操作性
 
 1. 保存 `git rev-parse HEAD`、`git status --short`、diff，以及 Node/浏览器版本；工作树有改动时保存补丁和涉及文件的哈希。构建标签只能关联 HEAD，不能证明未提交内容。
-2. READY 应给出 `mode: fixture`、本次 PID、root、origin。检查本次 `/api/health` 与 `/api/version`，再打开该 origin；不能用健康接口代替页面验收。
+2. ready 行应给出 `mode: fixture`、本次 PID、root、origin。检查本次 `/api/health` 与 `/api/version`，再打开该 origin；不能用健康接口代替页面验收。
 3. 初始化并登录后，应能看到“新对话”。工作区“＋”直接进入草稿，hash 为 `#new:<工作区ID>`，不弹表单、不提前创建正式对话；DSH 会准备原生空会话，按 C10 核对；全局无历史且多工作区时先选区。输入框内选择 Codex/DSH、Fixture 模型、思考深度和 fixture 权限。Codex 可靠默认是 fixture-model / medium；DSH 须明确选择，无原生默认。保存选值；首次发送/核对成功后等 hash 变成本次对话 ID，再核对标题、状态、正文及 inspect。草稿或旧对话的输入框存在不能证明新对话已创建。
 4. 一般条件等待上限为 10 秒；登录与操作请求上限为 20 秒。fixture 等待的是明确 DOM/接口状态，超时保留最后状态并判失败。真实模型另记录本轮时间预算，超时不自动宣称产品失败。
 5. 进程中断前，核对应用自身 PID、实际端口监听者和本次数据目录。`spawn` 返回的 PID 可能只是 Node/Volta 启动器；不能只杀启动器就宣称应用中断。停止后需确认实际监听者退出、端口无监听且健康请求连接被拒绝，再执行停机期间的动作。重启后同样记录新监听者与版本。

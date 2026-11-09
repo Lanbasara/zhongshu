@@ -63,7 +63,9 @@ function AccountTab({ codexState, dshState }: { codexState: AccountState; dshSta
 function Catalog() {
   const [readout, say] = useReadout();
   const noop = () => {};
-  return <Page title="Harness 账号" lead={<>每端显示是否可用、账号、额度和最近核实时间。只有向厂商核实通过才算可用。{readout}</>}>
+  // The readout is its own paragraph, so it sits below the lead rather than inside the lead's <p>.
+  return <Page title="Harness 账号" lead="每端显示是否可用、账号、额度和最近核实时间。只有向厂商核实通过才算可用。">
+    {readout}
     <Section title="Codex 的各种状态" note="可用时显示本周额度；失效或未登录时可在页内用设备码登录。">
       <Stage stack>{(['valid', 'rejected', 'signed-out', 'unverified', 'disconnected', 'checking'] as const).map(state =>
         <HarnessAccountCard key={state} account={codex(state)} onCheck={() => say(`重新核实（${state}）`)} onLogin={() => say('登录')} onCancelLogin={noop} onCopy={noop}/>)}</Stage>

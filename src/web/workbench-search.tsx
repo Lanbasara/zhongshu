@@ -68,7 +68,8 @@ export function WorkbenchSearch({ open, onOpenChange, configuration, attention, 
       const { status, label: statusLabel } = conversationStatus(conversation);
       return { id: `c:${conversation.id}`, group: term ? '对话' : flagged.has(conversation.id) ? '需要关注' : '最近', title: conversation.title, detail: label(conversation.workspaceId), status, statusLabel, run: () => actions.open(conversation.id) };
     });
-    for (const workspace of configuration?.workspaces ?? []) if (term && match(workspace.label))
+    // A workspace is found by its display name or its directory name, so a rename does not hide it.
+    for (const workspace of configuration?.workspaces ?? []) if (term && (match(workspace.label) || (!!workspace.directoryName && match(workspace.directoryName))))
       result.push({ id: `w:${workspace.id}`, group: '工作区', title: workspace.label, detail: '在这里新建对话', icon: <FolderOpen size={15}/>, run: () => actions.draft(workspace.id) });
     const commands: (Omit<PaletteItem, 'group'> & { keywords?: string })[] = [
       { id: 'a:new', title: '新对话', icon: <SquarePen size={15}/>, run: () => actions.draft() },

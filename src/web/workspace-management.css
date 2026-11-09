@@ -4,7 +4,8 @@
   max-height: none; padding: 0; overflow: hidden;
 }
 .workspace-picker[open], .workspace-picker-form { display: grid; grid-template-rows: auto minmax(0, 1fr); }
-.workspace-picker-form { grid-template-rows: auto minmax(0, 1fr) auto; min-width: 0; }
+/* min-height:0 lets the form shrink to its row, so the folder list scrolls and the footer stays inside the sheet. */
+.workspace-picker-form { grid-template-rows: auto minmax(0, 1fr) auto; min-width: 0; min-height: 0; }
 .workspace-picker > header { padding: 8px 12px 8px 20px; border-bottom: 1px solid var(--zs-line); }
 .workspace-picker .icon-button, .workspace-picker-up { width: 44px; min-height: 44px; padding: 0; display: grid; place-items: center; flex: none; }
 .workspace-picker-toolbar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: var(--zs-canvas); border-bottom: 1px solid var(--zs-line); }
