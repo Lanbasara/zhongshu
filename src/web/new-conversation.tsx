@@ -38,10 +38,14 @@ function initialConfig(catalog:WorkbenchConfiguration['harnesses'][number]|undef
   const preset=catalog?.presets?.find(p=>p.id===catalog.defaultPresetId&&p.available);
   return {modelId:model?.id??'',permissionId:'',...(model?.defaultReasoningEffort?{reasoningEffort:model.defaultReasoningEffort}:{}),...(preset?{agentPreset:preset.id}:{})};
 }
-/** A DSH draft without a chosen preset (for example one saved before presets) uses Zhongshu's default; Codex never carries one. */
-function withPreset(value:NewDraft):NewDraft['configuration'] {
+/**
+ * A DSH draft without a chosen preset (for example one saved before presets) uses the catalog's default. A catalog that
+ * offers no presets takes none, as the draft's own check already expects (ADR 0017). Codex never carries one.
+ */
+function withPreset(value:NewDraft,catalog?:Props['configuration']['harnesses'][number]):NewDraft['configuration'] {
   if(value.harnessId!=='dsh'){const {agentPreset:_preset,...rest}=value.configuration;return rest;}
-  return value.configuration.agentPreset?value.configuration:{...value.configuration,agentPreset:'standard'};
+  if(value.configuration.agentPreset||!catalog?.presets?.length)return value.configuration;
+  return {...value.configuration,agentPreset:catalog.defaultPresetId??'standard'};
 }
 /** Local draft owns preparation; existing server operations still own execution/reconciliation. */
 export function NewConversation(props:Props) {
@@ -174,7 +178,7 @@ export function NewConversation(props:Props) {
         }
         // Verify selected skills against this exact workspace and Power before freezing.
         if(value.skills?.length){const skills=await loadSkills(abort.signal);if(value.skills.some(s=>!skills.some(item=>item.id===s.id)))throw Error('所选技能在当前 Power 或工作区已不可用，请重新选择。');}
-        value={...value,submission:{creation:{id:value.id,workspaceId:value.workspaceId,harnessId:value.harnessId,configuration:configurationSchema.parse(withPreset(value)),title:initialConversationTitle(value.text),...(value.harnessId==='dsh'&&value.preparationId?{preparationId:value.preparationId}:{})},operationId:crypto.randomUUID(),uploaded:{},dispatchStarted:false}};
+        value={...value,submission:{creation:{id:value.id,workspaceId:value.workspaceId,harnessId:value.harnessId,configuration:configurationSchema.parse(withPreset(value,props.configuration.harnesses.find(h=>h.id===value.harnessId))),title:initialConversationTitle(value.text),...(value.harnessId==='dsh'&&value.preparationId?{preparationId:value.preparationId}:{})},operationId:crypto.randomUUID(),uploaded:{},dispatchStarted:false}};
         if(!persist(value,true))return;
       }
       const submission=value.submission!;

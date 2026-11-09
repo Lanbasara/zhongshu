@@ -47,7 +47,7 @@ const cliSchema = z.object({
 });
 const recordSchema = z.object({
   id: z.uuid(), title: z.string().max(200), harnessId: z.enum(['codex', 'dsh']),
-  cwd: z.string().max(4096), configuration: z.object({ modelId: z.string(), permissionId: z.string(), reasoningEffort: z.string().optional() }),
+  cwd: z.string().max(4096), configuration: z.object({ modelId: z.string(), permissionId: z.string(), reasoningEffort: z.string().optional(), agentPreset: z.string().optional() }),
   state: stateSchema, items: z.array(itemSchema).max(200_000),
   submissions: z.array(z.object({ id: z.string(), text: z.string().max(16_000), runId: z.string() })).max(100),
   rejectedOperationIds: z.array(z.uuid()).max(100).default([]), rejectNext: z.boolean().default(false),
@@ -290,7 +290,9 @@ async function main() {
         return { id, available: true, ...(id === 'codex' ? { defaultModelId: 'fixture-model' } : {}), models: [
           { id: 'fixture-model', label: 'Fixture · 非真实模型', reasoningEfforts, ...(id === 'codex' ? { defaultReasoningEffort: 'medium' } : {}) },
           { id: 'fixture-alternate', label: 'Fixture Alternate · 非真实模型', reasoningEfforts: reasoningEfforts.slice(0, 3), ...(id === 'codex' ? { defaultReasoningEffort: 'low' } : {}) },
-        ], permissions: [{ id: 'fixture-write', label: 'Fixture write', description: 'Synthetic boundary; no actual agent execution.' }, { id: 'fixture-read', label: 'Fixture read', description: 'Synthetic configuration selection only.' }] }; },
+        ], permissions: [{ id: 'fixture-write', label: 'Fixture write', description: 'Synthetic boundary; no actual agent execution.' }, { id: 'fixture-read', label: 'Fixture read', description: 'Synthetic configuration selection only.' }],
+        // Like the real DSH adapter, the stand-in DSH offers both Agent presets with standard as Zhongshu's default (ADR 0017).
+        ...(id === 'dsh' ? { presets: [{ id: 'standard', label: '标准', description: 'Fixture · 逐个调用工具。', available: true }, { id: 'ptc', label: 'PTC', description: 'Fixture · 批量调用工具。', available: true }], defaultPresetId: 'standard' } : {}) }; },
       ...(id === 'dsh' ? { async prepareDraft(input: { id: string; cwd: string }) {
         const row = native.prepare('SELECT body FROM sessions WHERE id=?').get(input.id);
         if (!row) {
