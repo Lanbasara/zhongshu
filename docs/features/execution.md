@@ -74,7 +74,7 @@ node test/support/feature-fixture.ts inspect --root "$zh_verify_root" --title '�
 1. 按共同入口先核对整个 Host 的读取边界，分别保留 shell 与原生文件工具的禁止/允许读写结果，再准备两个独立合成工作区。各写 `notes.md`，含执行者本轮确定的三条事实；创建前确认 `result.md` 不存在。记录预期字节/事实，不让模型生成预期。
 2. 第一轮消息要求读取 notes、把事实写入 result，并只在首轮消息中给一个随机标记。终态后用工作区外的可信读取核对文件三条事实。不能采信“已写入”的自然语言。
 3. 第二轮只问“上一轮我给的标记是什么”，不再次提供标记、不让首轮写入文件。核对正文与首轮保存的预期一致，且原生身份/模型/权限未变。
-4. 为停止场景把 [workspace-gate.mjs](../../test/support/workspace-gate.mjs) 复制进本次合成目录，给 8–40 位小写字母数字标记。页面要求真实运行 `node workspace-gate.mjs <标记>`，等待 `gate-<标记>.started.json`，从可信端核对 PID/目录和进程存活，再点停止。
+4. 为停止场景把 [workspace-gate.mjs](../../test/support/workspace-gate.mjs) 复制进本次合成目录，给 8–40 位小写字母数字标记。页面要求真实运行 `node workspace-gate.mjs <标记>`，等待 `gate-<标记>.started.json`（Codex 沙箱里其中的 pid 属于沙箱命名空间：在容器内按 cmdline `node workspace-gate.mjs <标记>` 找进程，核对 `/proc/<pid>/status` 里 NSpid 的末项等于该 pid；一条命令里可用 `;` 串联多个不同标记的 gate，逐个 release，以免 90 秒时限不够），从可信端核对 PID/目录和进程存活，再点停止。
 5. 等原生本轮 terminal/interrupted、页面中断提示；同时独立检查工具是否仍存活，单独记录。退出工具可在本次目录创建 `gate-<标记>.release`，等待 finished 文件与 PID 退出；脚本最多 90 秒自终止，`outcome: timeout` 不算释放成功。不要把清理动作当作原生 stop 的效果。
 
 真实后台通知产生后继轮后，继续发送需要核实“上一条用户消息对应轮”的终态与当前空闲，不能只比较最新 runId。此反例的精确历史/竞争分支由定向回归提供；未实际触发真实后台通知时不宣称该原生分支通过。
@@ -104,7 +104,7 @@ node test/support/feature-fixture.ts inspect --root "$zh_verify_root" --title '�
 | 场景 | 驱动 | 判据和独立观察 |
 | --- | --- | --- |
 | E11 开关 | 两端各一段对话，点工具栏的 Plan；发一条消息后在运行中再点 | 开着时说明条出现、页面刷新后仍开着、另一个浏览器上下文看到相同状态；运行中开关为灰；服务端对运行中的切换返回 `plan_change_while_running` |
-| E12 Codex | 打开 Plan，发“先用 request_user_input 问我计划要几步，再给出计划，不要改文件” | 提问卡片的选项与原生一致（含“(Recommended)”）；回答后出现带“计划”标题的块和“计划已就绪”。点“按计划执行”：Plan 关闭，对话出现“按上面的计划开始执行。”，原生下一轮为默认模式。点“继续规划”只收起卡片 |
+| E12 Codex | 打开 Plan，发“先用 request_user_input 问我计划要几步，再给出计划，不要改文件” | 提问卡片的选项与原生 request_user_input 参数逐字一致（推荐项的后缀由模型给出，如“(Recommended)”或“（推荐）”）；提问与回答不在 thread/items/list 中，用隔离 rollout 核对：function_call(request_user_input) 的选项、function_call_output 的 answers（单选为 `{"answers":{"<id>":{"answers":["<label>"]}}}`），模式看 turn_context.collaboration_mode.mode，取不到 rollout 记 BLOCKED；回答后出现带“计划”标题的块和“计划已就绪”。点“按计划执行”：Plan 关闭，对话出现“按上面的计划开始执行。”，原生下一轮为默认模式。点“继续规划”只收起卡片 |
 | E13 DSH | 打开 Plan，发“规划后提交审核，批准前不要改文件” | 原生 Plan 为开启；审核卡片显示原生计划正文。“继续规划”附意见后 Agent 交回修改后的计划；“批准并执行”后原生 Plan 关闭、Agent 在同一轮继续，开关随之关闭 |
 
 ## Gotchas
