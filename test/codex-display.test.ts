@@ -29,7 +29,10 @@ test('web and unknown item lifecycles require positive completion evidence', () 
     assert.equal(mapItem({ ...input, status: 'failed' }, 'turn', '/workspace', false, true).status, 'failed');
     assert.equal(mapItem({ ...input, success: false }, 'turn', '/workspace', true).status, 'failed');
     assert.equal(mapItem({ ...input, status: 'futureStatus' }, 'turn', '/workspace').status, 'unknown');
-    if (type !== 'webSearch') assert.match(mapItem(input, 'turn', '/workspace').text, /详情尚未适配展示/);
+    if (type === 'contextCompaction') {
+      assert.equal(mapItem(input, 'turn', '/workspace').text, '上下文压缩（结果未确认）');
+      assert.equal(mapItem(input, 'turn', '/workspace', false, true).text, '上下文已压缩');
+    } else if (type !== 'webSearch') assert.match(mapItem(input, 'turn', '/workspace').text, /详情尚未适配展示/);
   }
 });
 

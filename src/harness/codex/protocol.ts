@@ -114,7 +114,9 @@ export function mapItem(input: z.infer<typeof nativeItem>, runId: string, cwd: s
     // A plan proposed in Plan mode (`<turnId>-plan`); the completed text is authoritative.
     case 'plan': return { ...base, kind: 'assistant', plan: true, text: input.text ?? '', status: running ? 'running' : 'completed' };
     // The native context was compacted (on request or automatically); later turns see the summary, not the full history.
-    case 'contextCompaction': return { ...base, kind: 'notice', text: running ? '正在压缩上下文' : '上下文已压缩', status: running ? 'running' : 'completed' };
+    // Like every other item, it reads as completed only with positive completion evidence.
+    case 'contextCompaction': return { ...base, kind: 'notice', status: observedStatus,
+      text: { running: '正在压缩上下文', completed: '上下文已压缩', failed: '上下文压缩失败' }[observedStatus as string] ?? '上下文压缩（结果未确认）' };
     default: return { ...base, kind: 'notice', text: `此原生条目的详情尚未适配展示：${input.type}。这不表示原生能力不可用。`, status: observedStatus };
   }
 }
