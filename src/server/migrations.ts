@@ -318,6 +318,16 @@ export const productMigrations: Migration[] = [{ version: 2, sql: `
     session_id TEXT NOT NULL CHECK (length(session_id) <= 240),
     seen_at INTEGER NOT NULL
   ) STRICT;
+` }, { version: 25, sql: `
+  -- ADR 0021 (2026-11-09): the one-line conclusion an agent writes back to the task card whose delivery started the run.
+  CREATE TABLE agent_results (
+    id TEXT PRIMARY KEY,
+    summary TEXT NOT NULL CHECK (length(summary) <= 400),
+    created_at INTEGER NOT NULL,
+    conversation_id TEXT,
+    item_id TEXT CHECK (item_id IS NULL OR length(item_id) <= 600)
+  ) STRICT;
+  CREATE INDEX agent_results_conversation ON agent_results(conversation_id, created_at);
 ` }];
 
 /** Runs inside restoreDatabase's private staging transaction, before the database is published. */

@@ -71,7 +71,8 @@ export function ScheduleView({ csrf, report, configuration, revision, tab, onTab
     from: addDays(today, -400), to: addDays(today, 400), now }), [data.automations, data.timeline.entries, data.notifications, today, now]);
   const visible = useMemo(() => items.filter(item => filters[item.kind === 'agent' ? (item.routine ? 'routine' : 'agent') : item.kind === 'decision' || item.kind === 'research' ? 'record' : item.kind]), [items, filters]);
   const open = (item: ScheduleItem) => {
-    if (item.automationId && item.status === 'done' && item.conversationId) return openConversation(item.conversationId);
+    // An agent card opens its conversation whenever there is one (ADR 0021, 2026-11-09); a new conversation per run has none before it runs.
+    if (item.automationId && item.conversationId) return openConversation(item.conversationId);
     if (item.automationId) return setPanel({ kind: 'task', id: item.automationId });
     setPanel({ kind: 'entry', item });
   };
@@ -116,7 +117,8 @@ function StatusMark({ item }: { item: ScheduleItem }) {
   if (item.status === 'running') return <span className="sch-status sch-running" title="运行中"/>;
   if (item.notified) return <span className="sch-status sch-notified" title="已通知你"><Bell size={10}/></span>;
   if (item.status === 'next') return <span className="sch-status sch-next" title="下一个">●</span>;
-  if (item.status === 'done') return <span className="sch-status" title="已完成">✓</span>;
+  if (item.status === 'overdue') return <span className="sch-status sch-overdue" title="已过时间，还不知道做没做">!</span>;
+  if (item.status === 'done') return <span className="sch-status" title={item.kind === 'agent' ? '已运行' : '已过'}>✓</span>;
   return null;
 }
 function Row({ item, open, showDate }: { item: ScheduleItem; open(item: ScheduleItem): void; showDate?: boolean }) {
@@ -125,6 +127,7 @@ function Row({ item, open, showDate }: { item: ScheduleItem; open(item: Schedule
     <KindMark item={item}/>
     <span className="sch-main">
       <span className="sch-title">{item.title}{item.status === 'paused' ? '（已暂停）' : ''}</span>
+      {item.result && <span className="sch-summary sch-result">{item.result}</span>}
       {item.notified && <span className="sch-summary">“{item.notified}”</span>}
       {item.detail && <span className="sch-summary">{item.detail}</span>}
       <span className="sch-chips">
@@ -132,6 +135,9 @@ function Row({ item, open, showDate }: { item: ScheduleItem; open(item: Schedule
         {item.routine && <span className="sch-chip">例行</span>}
         {item.notified && <span className="sch-chip sch-chip-notified"><Bell size={10}/>已通知你</span>}
         {item.late && <span className="sch-chip sch-chip-late">迟到</span>}
+        {item.kind === 'agent' && item.status === 'done' && <span className="sch-chip">已运行</span>}
+        {item.kind === 'agent' && item.status === 'todo' && <span className="sch-chip">待运行</span>}
+        {item.status === 'overdue' && <span className="sch-chip sch-chip-late">已过时间</span>}
         {item.status === 'running' && <span className="sch-chip sch-chip-next">运行中</span>}
         {item.status === 'next' && <span className="sch-chip sch-chip-next">下一个</span>}
       </span>
@@ -336,7 +342,7 @@ function FutureTab({ items, today, week, setWeek, open }: { items: ScheduleItem[
   </section>;
 }
 function PastTab({ items, today, open, problems, labels }: { items: ScheduleItem[]; today: string; open(item: ScheduleItem): void; problems: TimelineView['problems']; labels?: { id: string; label: string }[] }) {
-  const past = items.filter(item => item.date <= today && (item.kind === 'decision' || item.kind === 'research' || item.status === 'done')).reverse();
+  const past = items.filter(item => item.date <= today && (item.kind === 'decision' || item.kind === 'research' || item.status === 'done' || item.status === 'overdue')).reverse();
   const days = [...new Set(past.map(item => item.date))].slice(0, 60);
   return <section className="sch-column">
     <p className="schedule-note">按日期列出做过的研究、下过的决定和已经跑过的任务。研究和决定来自工作区的时间轴文件；中书只按文件里的类型和链接显示。</p>
@@ -456,6 +462,7 @@ function TaskDetail({ task, configuration, csrf, report, close, notice, notify, 
           <button key={record.deliveredAt} type="button" disabled={!record.conversationId} onClick={() => record.conversationId && openConversation(record.conversationId)}>
             <span>{dayLabel(localDate(new Date(record.deliveredAt)))} {localTime(new Date(record.deliveredAt))}</span>
             {record.late && <span className="sch-chip sch-chip-late">迟到 {Math.round((Date.parse(record.deliveredAt) - Date.parse(record.scheduledAt)) / 60_000)} 分钟</span>}
+            {record.result && <small>{record.result}</small>}
             {noticeFor(record) && <small><Bell size={10}/> “{noticeFor(record)}”</small>}
           </button>)}</div>}
       </>

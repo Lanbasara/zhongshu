@@ -8,6 +8,7 @@ import { automationOf, targetInput, timingInput } from '../src/harness/dsh/autom
 import { itemFrom } from '../src/harness/dsh/native.ts';
 import { createAgentTools, oneLine, relativeFile } from '../src/server/agent-tools.ts';
 import { createAgentNotifications } from '../src/server/agent-notifications.ts';
+import { createAgentResults } from '../src/server/agent-results.ts';
 import { parseTimeline } from '../src/server/automations.ts';
 import { openDatabase } from '../src/server/database.ts';
 import { productMigrations } from '../src/server/migrations.ts';
@@ -53,8 +54,9 @@ test('a schedule delivery in native history is shown as the user-side message it
 });
 
 test('the agent tool endpoint speaks minimal MCP, accepts only its token, refuses browsers and validates input', async t => {
-  const calls: [string, string | undefined][] = [];
-  const tools = createAgentTools({ token: TOKEN, port: 0, version: '0.2.0', notify: (summary, file) => { calls.push([summary, file]); return { id: '11111111-2222-4333-8444-555555555555' }; } });
+  const calls: [string, string | undefined][] = []; const recorded: string[] = [];
+  const tools = createAgentTools({ token: TOKEN, port: 0, version: '0.2.0', notify: (summary, file) => { calls.push([summary, file]); return { id: '11111111-2222-4333-8444-555555555555' }; },
+    record: summary => { recorded.push(summary); return { id: '22222222-3333-4444-8555-666666666666' }; } });
   t.after(() => tools.close());
   const post = (body: unknown, headers: Record<string, string> = { authorization: `Bearer ${TOKEN}` }) => tools.inject({ method: 'POST', url: '/mcp', headers: { 'content-type': 'application/json', ...headers }, payload: JSON.stringify(body) });
   assert.equal((await post(rpc('tools/list'), {})).statusCode, 401);
@@ -64,8 +66,14 @@ test('the agent tool endpoint speaks minimal MCP, accepts only its token, refuse
   assert.equal(init.result.protocolVersion, '2025-06-18'); assert.deepEqual(init.result.capabilities, { tools: { listChanged: false } });
   assert.equal((await post({ jsonrpc: '2.0', method: 'notifications/initialized' })).statusCode, 202);
   const list = (await post(rpc('tools/list'))).json();
-  assert.deepEqual(list.result.tools.map((entry: { name: string }) => entry.name), ['notify_user']);
-  assert.ok(JSON.stringify(list.result.tools).length < 1200, 'tool schema stays small; every model request carries it');
+  assert.deepEqual(list.result.tools.map((entry: { name: string }) => entry.name), ['notify_user', 'record_result']);
+  assert.ok(JSON.stringify(list.result.tools).length < 1800, 'tool schemas stay small; every model request carries them');
+  // The conclusion goes onto the task card; it is a separate tool from notifying the user (ADR 0021, 2026-11-09).
+  const written = (await post(rpc('tools/call', { name: 'record_result', arguments: { summary: '黄金周检：\n4,122 未进低区，未触发' } }))).json();
+  assert.match(written.result.content[0].text, /结论编号 22222222-3333-4444-8555-666666666666/);
+  assert.deepEqual(recorded, ['黄金周检： 4,122 未进低区，未触发']);
+  assert.equal((await post(rpc('tools/call', { name: 'record_result', arguments: { summary: 'x', file: 'a.md' } }))).json().result.isError, true);
+  assert.equal((await post(rpc('tools/call', { name: 'record_result', arguments: { summary: ' ' } }))).json().result.isError, true);
   const sent = (await post(rpc('tools/call', { name: 'notify_user', arguments: { summary: '上证跌破\n3,600，T1 触发', file: './2026-11-09/case-001/work/tracking.md' } }))).json();
   assert.match(sent.result.content[0].text, /通知编号 11111111-2222-4333-8444-555555555555/);
   assert.deepEqual(calls, [['上证跌破 3,600，T1 触发', '2026-11-09/case-001/work/tracking.md']]);
@@ -78,6 +86,26 @@ test('the agent tool endpoint speaks minimal MCP, accepts only its token, refuse
   assert.equal(calls.length, 1);
   assert.equal(oneLine('a'.repeat(200)).length, 120);
   assert.throws(() => relativeFile('/etc/passwd')); assert.throws(() => relativeFile('a//b')); assert.equal(relativeFile(undefined), undefined);
+});
+
+test('a written-back conclusion is tied to its conversation by the tool record and belongs to the run delivered before it', t => {
+  const db = database(t); let clock = 1_000_000;
+  const results = createAgentResults(db, { now: () => clock });
+  const first = results.record('周检：未进低区'); assert.ok('id' in first);
+  assert.equal(results.within('c-1', 0), undefined, 'not placed until its tool record is seen');
+  results.observed('c-1', [{ id: 'dsh:s:tool:call-1', kind: 'tool', text: '', status: 'completed', tool: { name: 'mcp__zhongshu__record_result', output: `已写到任务卡上。结论编号 ${first.id}` } }]);
+  results.observed('c-2', [{ id: 'dsh:s2:tool:call-1', kind: 'tool', text: '', status: 'completed', tool: { name: 'mcp__zhongshu__record_result', output: `结论编号 ${first.id}` } }]);
+  assert.equal(results.within('c-1', 0), '周检：未进低区'); assert.equal(results.within('c-2', 0), undefined, 'placed once, where it was first seen');
+  clock += 7 * 86_400_000;
+  const second = results.record('周检：进入低区，触发'); assert.ok('id' in second);
+  results.observed('c-1', [{ id: 'dsh:s:tool:call-9', kind: 'tool', text: '', status: 'completed', tool: { name: 'mcp__zhongshu__record_result', output: `结论编号 ${second.id}` } }]);
+  // A reused conversation: each delivery's window ends where the next one began.
+  assert.equal(results.within('c-1', 0, 1_000_000 + 86_400_000), '周检：未进低区');
+  assert.equal(results.within('c-1', 1_000_000 + 86_400_000), '周检：进入低区，触发');
+  assert.equal(results.within('c-1', 0, 1_000_000), undefined);
+  // A notify record is not a conclusion.
+  results.observed('c-3', [{ id: 'x', kind: 'tool', text: '', status: 'completed', tool: { name: 'mcp__zhongshu__notify_user', output: `通知编号 ${second.id}` } }]);
+  assert.equal(results.within('c-3', 0), undefined);
 });
 
 test('a notification is pushed with a direct link once its tool record is observed, and otherwise opens the schedule', async t => {
@@ -229,9 +257,24 @@ test('the automation service shows native tasks in product terms, adopts session
   assert.deepEqual((byId.get('follow') as { target: unknown }).target, { kind: 'conversation', conversationId: existing.id, conversationTitle: existing.title, configuration },
     'runs into a conversation use its configuration');
   assert.deepEqual((byId.get('elsewhere') as { target: unknown }).target, { kind: 'unknown' });
+  // The agent writes its conclusion back; it shows on the card of the run it concludes (ADR 0021, 2026-11-09).
+  const conclusion = service.results.record('简报：外部平稳，无需动作'); assert.ok('id' in conclusion);
+  service.results.observed(adopted.id, [{ id: 'dsh:s-run-1:tool:c1', kind: 'tool', text: '', status: 'completed', tool: { name: 'mcp__zhongshu__record_result', output: `结论编号 ${conclusion.id}` } }]);
+  const concluded = (await app.inject({ method: 'GET', url: '/automations' })).json().automations.find((task: { id: string }) => task.id === 'routine');
+  assert.equal(concluded.lastDelivery.result, '简报：外部平稳，无需动作');
 
   await app.inject({ method: 'GET', url: '/automations' });
   assert.equal(noticed.length, 1, 'a delivery is handled once');
+  // Another task delivering into the same session later: each card keeps only its own run's conclusion.
+  const laterAt = new Date(Date.now() + 1000).toISOString();
+  tasks = [...tasks, { id: 'later', title: '午后检查', prompt: '查', timing: { kind: 'once', at: laterAt }, scheduledAt: laterAt, status: 'ended', target: { kind: 'session', sessionId: 's-run-1' },
+    involved: [], executing: false, lastDelivery: { scheduledAt: laterAt, deliveredAt: laterAt, messageId: 'm-later', sessionId: 's-run-1' } }];
+  await new Promise(resolve => setTimeout(resolve, 3100));
+  const afternoon = service.results.record('午后：维持'); assert.ok('id' in afternoon);
+  service.results.observed(adopted.id, [{ id: 'dsh:s-run-1:tool:c2', kind: 'tool', text: '', status: 'completed', tool: { name: 'mcp__zhongshu__record_result', output: `结论编号 ${afternoon.id}` } }]);
+  const shared = new Map((await app.inject({ method: 'GET', url: '/automations' })).json().automations.map((task: { id: string; lastDelivery?: { result?: string } }) => [task.id, task.lastDelivery?.result]));
+  assert.deepEqual([shared.get('routine'), shared.get('later')], ['简报：外部平稳，无需动作', '午后：维持']);
+  tasks = tasks.filter(task => task.id !== 'later');
   assert.equal(store.conversationForNative('dsh', 's-unknown'), null, 'a session the task did not create stays the Harness\'s own');
 
   // After its first delivery the Harness rewrites a "new once" target to a plain session; the reservation still adopts it.

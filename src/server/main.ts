@@ -54,7 +54,8 @@ async function main() {
     const notifications = createAgentNotifications(db, { push: event => { void push.notify(event); }, title: id => source.store.getConversation(id)?.title });
     automations = createAutomations(db, workbench, harnesses.adapters, notifications, event => app?.log.info(event));
     // The agent tool endpoint exists only where the operator configured it beside the native Hosts (ADR 0021).
-    if (harnesses.agentTools) tools = createAgentTools({ token: harnesses.agentTools.token, port: harnesses.agentTools.port, version: metadata?.version ?? 'development', notify: (summary, file) => notifications.notify(summary, file) });
+    if (harnesses.agentTools) tools = createAgentTools({ token: harnesses.agentTools.token, port: harnesses.agentTools.port, version: metadata?.version ?? 'development', notify: (summary, file) => notifications.notify(summary, file),
+      record: summary => automations!.results.record(summary) });
     triggers = createPushTriggers({
       conversation: id => source.store.getConversation(id), unread: values => source.unread(values), isReading: id => source.isReading(id),
       active: () => source.attention().conversations.map(entry => entry.conversation),
