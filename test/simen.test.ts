@@ -152,6 +152,18 @@ test('the daemon and the browser are 司门\'s: start, stop, status and --sessio
   assert.match(text(await f.run(undefined, ['--help'])), /^0\|ran --help/, 'help goes to the official command line');
 });
 
+test('help for a tool needs no window, starts nothing and leaves no directory for a conversation without a window', async t => {
+  const f = fixture(t);
+  assert.match(text(await f.run('session-a', ['take_screenshot', '--help'])), /^0\|ran take_screenshot --help/, 'answered while no browser runs');
+  assert.match(text(await f.run('session-a', ['click', '-h'])), /^0\|ran click -h/);
+  assert.equal(f.running(), false, 'help does not start the browser');
+  await f.run('session-b', ['new_page', 'https://b.example']);
+  assert.match(text(await f.run('session-a', ['take_snapshot', '--help'])), /^0\|ran take_snapshot --help/);
+  assert.match(text(await f.run('session-a', ['--help'])), /^0\|ran --help/);
+  assert.equal(existsSync(join(f.tmpRoot, 'session-a')), false, 'only a window owns a conversation directory (ADR 0023)');
+  assert.equal(f.runs.at(-1)!.tmpdir, join(f.tmpRoot, '_shared'));
+});
+
 test('when the browser dies, every window goes with it and the next command says so', async t => {
   const f = fixture(t);
   await f.run('session-a', ['new_page', 'https://a.example']);
