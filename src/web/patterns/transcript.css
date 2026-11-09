@@ -25,6 +25,12 @@
 .message-text input[type=checkbox] { width:auto; accent-color:var(--zs-accent); margin-right:.5em; }
 .message-text a { color:var(--zs-accent-text); text-decoration:underline; text-decoration-color:var(--zs-accent-line); text-underline-offset:3px; transition:text-decoration-color var(--zs-duration-response); }
 .message-text a:hover { text-decoration-color:currentColor; }
+/* A workspace file the agent linked: opens in the reader, looks like a link. */
+.message-text .message-file-link { display:inline; padding:0; border:0; background:none; font:inherit; cursor:pointer; color:var(--zs-accent-text);
+  text-decoration:underline; text-decoration-color:var(--zs-accent-line); text-underline-offset:3px; transition:text-decoration-color var(--zs-duration-response); }
+.message-text .message-file-link:hover { text-decoration-color:currentColor; }
+.message-text .message-file-link:focus-visible { outline:2px solid var(--zs-focus); outline-offset:2px; border-radius:2px; }
+.message-text .message-file-name { font-family:var(--zs-font-code); font-size:.94em; }
 .message-text :not(pre)>code { font-family:var(--zs-font-code); background:var(--zs-surface-subtle); color:var(--zs-text); padding:.12em .36em; border-radius:4px; font-size:.86em; }
 .message-text pre { max-width:100%; overflow-x:auto; white-space:pre; font:var(--zs-type-code)/1.7 var(--zs-font-code); }
 .message-text blockquote { margin:.9em 0; padding:.1em 0 .1em 1em; border-left:2px solid var(--zs-border-strong); color:var(--zs-text-muted); }

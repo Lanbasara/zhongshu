@@ -80,6 +80,8 @@ DSH 对话的 Agent 预设（标准或 PTC）是固定配置的一部分（[ADR 
 
 标题、控制与正文统一使用界面字体（长文正文 15px），等宽只用于代码与命令。组件只用语义颜色（surface/text/accent/status 等），以后加入暗色只需重定义语义层。状态各有一种形状与颜色：运行中为蓝色转圈，完成未读为绿点，执行失败为红点，等待处理为琥珀点，待核实与已中断分别为橙色、灰色空心圈，就绪不显示。输入与正文共用阅读宽度；窄屏为抽屉导航，标题栏提供搜索，浮层改为底部面板或全屏。响应、状态、表面切换分别使用 120/180/260ms 与同一缓动，系统减少动效时去除位移、持续旋转与流光。
 
+页面地址与浏览器历史只由 [navigation.ts](../src/web/navigation.ts) 写入：用户移到新页面时新增一条记录，同页更正（换标签、草稿换工作区、草稿首发成为对话、对话不可用回首页）替换当前记录；后退、前进和改变地址都按地址显示页面。窄屏上非原生浮层（导航抽屉、搜索、阅读器、子 Agent 面板、日程任务卡片）打开时各压入一条只属于浮层的记录，返回手势先关闭浮层；换页前先退掉这些记录，异步退回期间的写入排队，避免竞争。原生 `<dialog>` 交给浏览器关闭。
+
 界面原型与组件示例的维护约定见 [ADR 0008](adr/0008-storybook-ui-prototypes.md)。启动命令见 [README](../README.md#ui-development)。
 
 发布边界在 [design-boundaries](../scripts/design-boundaries.ts) 与 [check-release](../scripts/check-release.mjs)：源码 AST 拒绝产品到开发目录的依赖、展示层到功能的依赖与直接网络调用；Vite 检查实际模块图、输出名称和静态资源清单；最终 dist 记录文件及 SHA-256，容器校验清单且不得安装 Storybook。源码检查是防误用护栏，不是恶意源码沙箱。公共静态资源变化由 [product-assets](../scripts/product-assets.json) 显式登记，检查会识别改名混入的原型。构建与 Docker 的输入只含产品和必要构建工具，不含 stories/Storybook 输出；验证反例见 [interface](features/interface.md)。

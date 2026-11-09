@@ -12,6 +12,8 @@ import {
 import type { WorkbenchConfiguration } from '../shared/workbench.ts';
 import { Button, IconButton } from './ui/controls.tsx';
 import { request } from './workbench-client.ts';
+import { useBackDismiss } from './navigation.ts';
+import { useNarrow } from './patterns/workbench-frame.tsx';
 import { CreateForm, Field, TimingFields, initialTiming, timingFrom } from './schedule-forms.tsx';
 import { addDays, dayLabel, localDate, localTime, mondayOf, parseDate, ruleOf, runConfigurationText, scheduleItems, summarize, timingText, whenText, WEEKDAYS, type ScheduleItem } from './schedule-model.ts';
 import './schedule.css';
@@ -55,6 +57,8 @@ export function ScheduleView({ csrf, report, configuration, revision, tab, onTab
 }) {
   const data = useScheduleData(csrf, revision, report);
   const [panel, setPanel] = useState<Panel>();
+  // On a phone the task card covers the page; the back gesture closes it first.
+  useBackDismiss(!!panel, () => setPanel(undefined), useNarrow());
   // Refusals from the Harness (a newer edit elsewhere, a finished or running task) are explained here, not as connection errors.
   const [notice, setNotice] = useState<string>();
   useEffect(() => { if (!notice) return; const timer = setTimeout(() => setNotice(undefined), 8000); return () => clearTimeout(timer); }, [notice]);
