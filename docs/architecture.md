@@ -25,7 +25,7 @@ React 浏览器 ──同源 HTTP / SSE──→ Fastify 应用
 | 页面与服务 | [React 页面](../src/web/main.tsx) / [HTTP 应用](../src/server/app.ts) | 同源接口，私有路由统一认证、来源与 CSRF 检查 |
 | 身份 | [auth.ts](../src/server/auth.ts) / [管理员命令](../src/server/admin.ts) / [ADR 0006](adr/0006-auth-session-data.md) | 单管理员、服务端会话、私有数据目录边界 |
 | 持久数据 | [database.ts](../src/server/database.ts) / [产品迁移](../src/server/migrations.ts) / [存储预算](../src/server/storage.ts) / [ADR 0003](adr/0003-local-persistence.md) | WAL/FULL、显式迁移、在线备份与新目录恢复；数据不在镜像内；不保存历史正文，实例预算约束库大小 |
-| 对话与操作 | [Workbench](../src/server/workbench.ts) / [存储](../src/server/workbench-store.ts) | 派发前落库、未知回执核对和原生生命周期统一管理；历史正文按需从原生读取（[ADR 0014](adr/0014-native-history-source.md)） |
+| 对话与操作 | [Workbench 前台](../src/server/workbench.ts) / [岗位与内核](../src/server/workbench/) / [存储](../src/server/workbench-store.ts) | 派发前落库、未知回执核对和原生生命周期统一管理；历史正文按需从原生读取（[ADR 0014](adr/0014-native-history-source.md)）；内部按能力分岗位、只向下依赖（[ADR 0024](adr/0024-workbench-modules.md)），见下方 [Workbench 内部结构](#workbench-内部结构) |
 | 原生能力 | [共同语义](../src/harness/types.ts) / [Codex](../src/harness/codex/index.ts) / [DSH](../src/harness/dsh/index.ts) / [ADR 0001](adr/0001-native-harness-boundary.md) | 原生字段与版本差异留在各 adapter；不自行实现 Agent loop |
 | 消息与资源 | [内容契约](../src/shared/content.ts) / [资源存储与路径](../src/server/resources.ts) / [正文](../src/web/conversation-content.tsx) / [输入](../src/web/composer.tsx) | 原生解释图片和工具，应用保存授权资源与消息元数据；前端不执行原始 HTML |
 | 浏览器恢复 | [公开契约](../src/shared/workbench.ts) / [HTTP 与更新流](../src/server/workbench-http.ts) / [工作台](../src/web/workbench.tsx) / [历史窗口](../src/web/history-window.ts) / [ADR 0004](adr/0004-recoverable-communication.md) | 稳定操作编号、持久事件水位、有界慢端恢复和旧响应防覆盖；按原生页组成有界窗口，两端可读回 |
@@ -39,6 +39,20 @@ React 浏览器 ──同源 HTTP / SSE──→ Fastify 应用
 Codex adapter 在已建立连接丢失时报告内部 `unavailable` 事件，由 Workbench 立即持久化“待核实”并撤销配置/终态证明，保留绑定、历史、操作及最后已知运行信息。离线连接尝试失败不重复发失联事件；旧连接事件和旧代次读取不能覆盖后来的状态。重新连接后按原绑定核实配置和原生状态，不自动重发未知操作。公开 HTTP/SSE 仍使用既有状态契约。
 
 Web manifest 提供独立窗口入口，推送与安装见下方[通知与安装](#通知与安装)。界面以 Streamdown 渲染 Markdown/GFM/代码，用按轮折叠的工具组展示原生命令、输出和状态。运行中输入的路径见[执行功能地图](features/execution.md)。原始 HTML 不执行，链接协议受限。Agent 的提问与审批见下方[提问与审批](#提问与审批)。
+
+## Workbench 内部结构
+
+对外只有 [Workbench 前台](../src/server/workbench.ts)：HTTP 路由、自动任务、推送与测试都只调用它，公开方法不随内部调整而变。前台组装下列模块，转交调用，拼出对话快照，并负责启动、关闭和每 5 秒一次的恢复巡检。分层、同层连线白名单和单文件 500 行预算的理由见 [ADR 0024](adr/0024-workbench-modules.md)，由 [design-boundaries](../scripts/design-boundaries.ts) 在 `npm test` 与构建时检查。
+
+| 层 | 模块与它独占的内存状态 |
+| --- | --- |
+| 4 岗位 | [creation](../src/server/workbench/creation.ts)：模型目录缓存。[execution](../src/server/workbench/execution.ts)：派发中的操作。[queue](../src/server/workbench/queue.ts)：无，队列在存储中。[readers](../src/server/workbench/readers.ts)：对话阅读租约。[transcript](../src/server/workbench/transcript.ts)：无。[subagents](../src/server/workbench/subagents.ts)：子 Agent 观察租约、树的刷新、停止任务和提示合并。[requests](../src/server/workbench/requests.ts)：请求视图与回答任务。[workspaces](../src/server/workbench/workspaces.ts)：无，事实记在 gate。[lifecycle](../src/server/workbench/lifecycle.ts)：删除任务 |
+| 3 心脏 | [observation](../src/server/workbench/observation.ts)：每段对话的运行时（实时条目、最新页、同步、失联重试与释放），以及恢复巡检的游标。[participant](../src/server/workbench/participant.ts)：心脏与岗位之间的铃声与投票契约，无状态 |
+| 2 名单与账本 | [gate](../src/server/workbench/gate.ts)：工作区移除、保存与维护阶段，删除围栏，派发中、创建中与草稿准备中的占用；文件头写明每项由谁写入。[ledger](../src/server/workbench/ledger.ts)：无，读取持久操作。[history](../src/server/workbench/history.ts)：近期展示过的原生条目（32 MiB 上限）。[live](../src/server/workbench/live.ts)：实时帧的进程纪元、序号与订阅者 |
+| 1 绑定 | [bindings](../src/server/workbench/bindings.ts)：无，判断对话的工作区与 Harness 是否仍然成立 |
+| 0 工具 | [tasks](../src/server/workbench/tasks.ts)：后台任务与关闭标记。[pages](../src/server/workbench/pages.ts)：无，原生分页、游标与展示条目的规则 |
+
+心脏每次同步后按登记顺序摇铃：已核实的状态先让队列判断暂停，再让子 Agent 与提问跟进；同步结束且无待办时，先派发排队的操作，再递送队列头。是否释放一段对话的运行时，由心脏自己的事实（实时条目、创建中、派发中、原生状态）加上各岗位的投票决定。
 
 ## 新建草稿与配置归属
 
@@ -113,7 +127,7 @@ Codex 经专用 Unix socket 管理进程调用固定 CLI 和同一实例的 App 
 | 层 | 当前职责 |
 | --- | --- |
 | 接入 | [共同语义](../src/harness/types.ts) 增加子 Agent 列表、过程读取、观察与停止。[Codex](../src/harness/codex/index.ts) 用 `thread/list` 的后代查询（含已归档分区）发现子 thread，沿 `parentThreadId` 核实归属，把带子 thread 身份的通知转成所属对话的提示，用 `turn/interrupt` 停止；子 thread 不被中书解除订阅。[DSH](../src/harness/dsh/index.ts) 从父会话快照读取 `subagentCatalog` 与 `agentTeam`，按 subagent 地址被动跟随子会话取状态和过程，用 `subagents/interruptByParent` 停止。两端把原生协作记录映射为带 `collaboration` 的条目 |
-| 服务 | [Workbench](../src/server/workbench.ts) 合并提示后读取原生子 Agent 树；子 Agent 运行、待核实或停止未决时计入执行责任，归档和删除前要求子树已结束。观察丢失时撤销核实。停止是带稳定编号的操作，未知回执只按核实读取结算，不重发 |
+| 服务 | [子 Agent 岗](../src/server/workbench/subagents.ts) 合并提示后读取原生子 Agent 树；子 Agent 运行、待核实或停止未决时计入执行责任，归档和删除前要求子树已结束。观察丢失时撤销核实。停止是带稳定编号的操作，未知回执只按核实读取结算，不重发 |
 | 数据 | [子 Agent 存储](../src/server/subagent-store.ts) 在对话行保存子 Agent 索引（身份、父子、显示信息、最后核实状态、每个子 Agent 的修订号）和停止操作表；子 Agent 过程只向原生现读，不入库 |
 | 接口 | 私有路由提供列表、过程分页、阅读租约、停止及停止结果核对；对话视图带子 Agent 摘要，变更流以摘要修订号提示页面重读 |
 | 界面 | [展示组件](../src/web/patterns/subagents.tsx) 只接收数据；[功能层](../src/web/subagents.tsx) 管理请求、租约与停止，[工作台](../src/web/workbench.tsx) 放置头部入口、阅读区面板（窄屏整页）、正文协作卡片和提示，[侧栏](../src/web/conversation-navigation.tsx) 显示后台运行标记 |
@@ -125,7 +139,7 @@ Codex 经专用 Unix socket 管理进程调用固定 CLI 和同一实例的 App 
 | 层 | 当前职责 |
 | --- | --- |
 | 接入 | [共同语义](../src/harness/types.ts) 增加 `requests` / `answer` 与 `requests` 变更提示。[Codex](../src/harness/codex/index.ts) 经 [RPC](../src/harness/codex/rpc.ts) 接住 App Server 发来的命令、文件、权限审批与 MCP 信息请求（[映射](../src/harness/codex/requests.ts)），在收到它的连接上回答，以 `serverRequest/resolved` 为送达确认；断线时清空，重新接入对话及运行中的子 Agent 时由原生重发。[DSH](../src/harness/dsh/index.ts) 以应答身份连接，[连接](../src/harness/dsh/connection.ts) 另开事件流接收转发的提问与审批（[映射](../src/harness/dsh/requests.ts)），按事件编号回答，绝不回复“交给下一个”。无法呈现的请求明确拒绝并在对话中说明 |
-| 服务 | [Workbench](../src/server/workbench.ts) 在内存中保持每段对话的请求视图（打开、已回答、已失效，已结束的保留约 10 分钟），观察丢失时不判失效。回答是带稳定编号的操作：校验与请求相符后入库、派发、按回执结算；回执未知只靠重新读取原生判断，原生仍在等待则作废该回答以便重答 |
+| 服务 | [提问岗](../src/server/workbench/requests.ts) 在内存中保持每段对话的请求视图（打开、已回答、已失效，已结束的保留约 10 分钟），观察丢失时不判失效。回答是带稳定编号的操作：校验与请求相符后入库、派发、按回执结算；回执未知只靠重新读取原生判断，原生仍在等待则作废该回答以便重答 |
 | 数据 | [回答存储](../src/server/request-store.ts)（迁移 18）保存回答编号、所属对话与请求、状态与摘要；提交的内容在结算后清除。请求本身不入库 |
 | 接口 | 快照带 `requests`；私有 `POST /conversations/:id/requests/:request/answer` 与 `/request-answers/:answer/reconcile`，沿用认证、来源与 CSRF 检查，日志不含内容 |
 | 界面 | [展示组件](../src/web/patterns/requests.tsx) 只接收数据（文案与服务端摘要由测试保持一致）；[功能层](../src/web/requests.tsx) 提交与核对，放在输入框上方 |
@@ -188,7 +202,7 @@ Store 的最近接收消息提交时序支持侧栏分页，游标独立保存�
 | 层 | 当前职责 |
 | --- | --- |
 | 接入 | `history(binding, cursor, limit)` 返回原生页与不透明游标。[Codex](../src/harness/codex/index.ts) 直接调用 `thread/items/list`（分页线程有索引，读取不 `resume`），按条目大小增减每次条数；旧格式线程报 `codex_history_unsupported`。[DSH](../src/harness/dsh/index.ts) 最新页来自快照，旧页只用不激活 Agent 的 `session/page`，游标携带边界轮次，用页内 `turn/start` 推算条目所属轮次 |
-| 服务 | [Workbench](../src/server/workbench.ts) 在运行时内存中保持最新页与实时条目：相邻两次读取有重叠时拼接（上限 200 条），早于读取且已结束的实时副本退场；状态与最新页一同读取，历史读取失败只标记可读性，不改变执行核实。旧页由服务端签发、绑定对话身份的游标读取；只含隐藏事件的页向前跳过，超出序列化预算的页以更少条目重读。引用与工作区图片核验先查内存中的近期条目，再从最新页向前有界查找 |
+| 服务 | [观察内核](../src/server/workbench/observation.ts) 在运行时内存中保持最新页与实时条目，[分页规则](../src/server/workbench/pages.ts) 约束原生页与游标，[transcript](../src/server/workbench/transcript.ts) 读取更早的页：相邻两次读取有重叠时拼接（上限 200 条），早于读取且已结束的实时副本退场；状态与最新页一同读取，历史读取失败只标记可读性，不改变执行核实。旧页由服务端签发、绑定对话身份的游标读取；只含隐藏事件的页向前跳过，超出序列化预算的页以更少条目重读。引用与工作区图片核验先查内存中的近期条目，再从最新页向前有界查找 |
 | 数据 | Store 只记录持久变更提示、每段对话的原生最新页标记（迁移 21，[ADR 0019](adr/0019-live-deltas-and-pure-reads.md)）与本轮文件路径；实时增长不落盘；原正文投影表已由迁移 16 删除。[存储预算](../src/server/storage.ts)按数据库在用页面计量，达到预算拒绝上传与新建对话，原生图片副本可淘汰 |
 | 接口 | 快照返回最新页、实时条目、`olderCursor` 与可选 `error`；`GET /conversations/:id/state` 只返回状态部分，不含历史；`GET /conversations/:id/history?cursor=` 返回一页；`GET /storage`、`POST /storage/clear-cache` 提供用量与缓存清理 |
 | 界面 | [历史窗口](../src/web/history-window.ts)按页组成窗口（≤500 条/8 MiB），每页记住读回它的游标；向上超出时最新端的页带游标离开，向下逐页读回，最后拼回最新页。[工作台](../src/web/workbench.tsx)滚动到两端时自动读取，并以首个可见条目固定阅读位置；[存储入口](../src/web/storage-status.tsx)显示用量与清理 |

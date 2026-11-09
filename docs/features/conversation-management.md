@@ -54,7 +54,7 @@ M10：未读由服务端记住（[architecture](../architecture.md)），两个�
 ## Implementation and regression
 
 - [侧栏与管理表单](../../src/web/conversation-navigation.tsx)负责宽度、分组与对话行，[搜索与跳转](../../src/web/workbench-search.tsx)负责标题搜索与未读读取，[归档页](../../src/web/archive-view.tsx)与[设置页](../../src/web/settings-view.tsx)负责各自入口，[工作台](../../src/web/workbench.tsx)负责打开对话、草稿、提示与标签页标题。
-- [私有路由](../../src/server/workbench-http.ts)约束输入并沿用登录与 CSRF，[Workbench](../../src/server/workbench.ts)核对原生状态，[存储](../../src/server/workbench-store.ts)保存标题和归档标记，并在提交入队时检查归档状态。
+- [私有路由](../../src/server/workbench-http.ts)约束输入并沿用登录与 CSRF，[生命周期岗](../../src/server/workbench/lifecycle.ts)核对原生状态，[存储](../../src/server/workbench-store.ts)保存标题和归档标记，并在提交入队时检查归档状态。
 - `node --test test/workbench-http.test.ts test/workbench-store.test.ts` 覆盖查询分页、迁移、认证与归档竞态。独立运行证据按[共同要求](README.md#独立执行验收)记录。
 - 存储预算：[storage.ts](../../src/server/storage.ts) 计量与淘汰，[资源](../../src/server/resources.ts)区分上传与可再生副本，[设置页存储面板](../../src/web/storage-status.tsx)；`node --test test/storage.test.ts`。
 

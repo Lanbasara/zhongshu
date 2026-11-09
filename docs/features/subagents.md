@@ -66,6 +66,6 @@ node test/support/feature-fixture.ts inspect --root "$zh_verify_root" --title '�
 ## Implementation and regression
 
 - 接入：[共同语义](../../src/harness/types.ts)、[Codex](../../src/harness/codex/index.ts) 与[协议映射](../../src/harness/codex/protocol.ts)、[DSH](../../src/harness/dsh/index.ts) 与[事件映射](../../src/harness/dsh/native.ts)。
-- 服务与数据：[Workbench](../../src/server/workbench.ts)、[子 Agent 存储](../../src/server/subagent-store.ts)、[私有路由](../../src/server/workbench-http.ts)。
+- 服务与数据：[子 Agent 岗](../../src/server/workbench/subagents.ts)、[子 Agent 存储](../../src/server/subagent-store.ts)、[私有路由](../../src/server/workbench-http.ts)。
 - 界面：[展示组件](../../src/web/patterns/subagents.tsx)、[功能层](../../src/web/subagents.tsx)、[工作台](../../src/web/workbench.tsx)、[侧栏](../../src/web/conversation-navigation.tsx)；Storybook「模式/子 Agent」保留各状态示例。
 - 回归：`node --test test/subagents.test.ts test/subagent-protocols.test.ts` 覆盖索引与归属、待核实降级、停止身份与未知回执、归档准入、提示合并、阅读租约、恢复与协议映射。它们不代替上面的浏览器与真实 Host 路径。

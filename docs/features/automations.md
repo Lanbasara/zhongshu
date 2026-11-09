@@ -64,6 +64,6 @@
 ## Implementation and regression
 
 - 原生接入：[共同语义](../../src/harness/types.ts)、[DSH 自动任务](../../src/harness/dsh/automations.ts)、[投递消息识别](../../src/harness/dsh/native.ts)、[变更事件](../../src/harness/dsh/connection.ts)。
-- 服务：[自动任务服务与私有接口](../../src/server/automations.ts)、[通知工具](../../src/server/agent-tools.ts)、[主动通知](../../src/server/agent-notifications.ts)、[时间轴读取](../../src/server/workspace-documents.ts)；运行观察与未读在 [Workbench](../../src/server/workbench.ts) 与[存储](../../src/server/workbench-store.ts)，推送规则在 [push-triggers.ts](../../src/server/push-triggers.ts)。
+- 服务：[自动任务服务与私有接口](../../src/server/automations.ts)、[通知工具](../../src/server/agent-tools.ts)、[主动通知](../../src/server/agent-notifications.ts)、[时间轴读取](../../src/server/workspace-documents.ts)；运行观察与未读在 [观察内核](../../src/server/workbench/observation.ts)、[阅读者](../../src/server/workbench/readers.ts) 与[存储](../../src/server/workbench-store.ts)，推送规则在 [push-triggers.ts](../../src/server/push-triggers.ts)。
 - 界面：[日程页](../../src/web/schedule-view.tsx) 与[日程模型](../../src/web/schedule-model.ts)、[对话里的自动任务](../../src/web/conversation-automations.tsx)、[投递消息解析](../../src/web/automation-delivery.ts)、[侧栏](../../src/web/conversation-navigation.tsx)。
 - 回归：`node --test test/automations.test.ts test/schedule-model.test.ts`。覆盖原生字段映射、投递消息识别、通知工具的协议与鉴权、通知落位与推送、会话接入与预留、时间轴解析、完成不推送、日历展开与时区。它们不代替上面的真实 Host 与浏览器路径。
