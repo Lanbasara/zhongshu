@@ -26,6 +26,11 @@ import { parseStorageBudget } from '../../src/server/storage.ts';
 import { Workbench } from '../../src/server/workbench.ts';
 import { createWorkbenchHttp } from '../../src/server/workbench-http.ts';
 import { WorkspaceRegistry } from '../../src/server/workspace-registry.ts';
+import { createPluginManagement } from '../../src/server/plugins.ts';
+import { createPush } from '../../src/server/push.ts';
+import { createHarnessAccounts } from '../../src/server/harness-accounts.ts';
+import { createAgentNotifications } from '../../src/server/agent-notifications.ts';
+import { createAutomations } from '../../src/server/automations.ts';
 import { itemSchema, stateSchema, subagentStatusSchema, teamSchema, usageSchema } from '../../src/shared/workbench.ts';
 
 process.umask(0o077);
@@ -391,22 +396,42 @@ async function main() {
   const registry = new WorkspaceRegistry(db, workspaces, [{ id: 'fixture-root', label: 'Fixture directories', directory }]);
   let transport: ReturnType<typeof createWorkbenchHttp> | undefined;
   const store = createWorkbenchStore(db, { onChange: event => transport?.changed(event), storageBudget: parseStorageBudget(input.storageBudget) });
-  const workbench = new Workbench(store, workspaces, new Map<HarnessId, HarnessAdapter>([['codex', adapter('codex')], ['dsh', adapter('dsh')]]), registry);
+  const adapters = new Map<HarnessId, HarnessAdapter>([['codex', adapter('codex')], ['dsh', adapter('dsh')]]);
+  const workbench = new Workbench(store, workspaces, adapters, registry);
   transport = createWorkbenchHttp(workbench);
   const origin = 'http://127.0.0.1:' + input.port;
+  // The same private routes as the product (main.ts), so every page loads. The stand-in Harnesses have no accounts,
+  // automations or plugin backends, and push never leaves this machine.
+  const offline = (() => Promise.reject(new Error('fixture_push_offline'))) as typeof fetch;
+  const push = createPush(db, { origin, fetch: offline, log: () => {}, badge: () => workbench.attention().unread });
+  const plugins = createPluginManagement(db, {});
+  const accounts = createHarnessAccounts([...adapters.values()], { notify: () => {}, log: () => {} });
+  const notifications = createAgentNotifications(db, { push: () => {}, title: id => store.getConversation(id)?.title });
+  const automations = createAutomations(db, workbench, adapters, notifications, () => {});
   let app: Awaited<ReturnType<typeof buildApp>> | undefined;
   let stopping = false;
   const stop = async () => {
     if (stopping) return; stopping = true;
     const timeout = setTimeout(() => process.exit(1), 10_000).unref();
-    try { transport!.close(); await workbench.close(); await app?.close(); db.close(); native.close(); unlinkSync(lock); clearTimeout(timeout); console.log(JSON.stringify({ event: 'stopped', pid: process.pid })); }
+    try {
+      automations.close(); accounts.close(); push.close(); transport!.close(); await plugins.close(); await workbench.close(); await app?.close();
+      db.close(); native.close(); unlinkSync(lock); clearTimeout(timeout); console.log(JSON.stringify({ event: 'stopped', pid: process.pid }));
+    }
     catch { process.exitCode = 1; }
   };
   process.once('SIGINT', () => { void stop(); }); process.once('SIGTERM', () => { void stop(); });
   try {
     const metadata = z.object({ name: z.literal('zhongshu'), version: z.string(), revision: z.string() }).parse(JSON.parse(readFileSync(join(repository, 'dist/version.json'), 'utf8')));
-    app = await buildApp({ db, origin, assetsDirectory: join(repository, 'dist/public'), metadata, privateRoutes: transport.routes, onLogout: transport.logout });
-    await workbench.start(); await app.listen({ host: '127.0.0.1', port: input.port });
+    app = await buildApp({ db, origin, assetsDirectory: join(repository, 'dist/public'), metadata, onLogout: transport.logout,
+      privateRoutes: async (scope, context) => {
+        await transport!.routes(scope, context);
+        await scope.register(plugins.routes, { prefix: '/workbench' });
+        await scope.register(push.routes, { prefix: '/push' });
+        await scope.register(accounts.routes, { prefix: '/accounts' });
+        await scope.register(automations.routes, { prefix: '/workbench' });
+      } });
+    await workbench.start(); accounts.start(); await automations.start();
+    await app.listen({ host: '127.0.0.1', port: input.port });
     console.log(JSON.stringify({ event: 'ready', mode: 'fixture', pid: process.pid, root, origin, revision: metadata.revision }));
   } catch (error) { await stop(); throw error; }
 }
