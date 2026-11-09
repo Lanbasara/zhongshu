@@ -72,6 +72,11 @@ const failures: Record<string, string> = {
   native_history_page_limit: '这一页原生内容过大，暂时无法显示。',
   history_no_progress: '原生历史暂时无法继续读取；已加载的内容仍然保留。',
 };
+/** Names what the manage dialog offers; only Codex conversations can be deleted (the dialog says so for DSH). */
+function manageLabel(conversation: Conversation): string {
+  const deletable = conversation.harnessId === 'codex';
+  return conversation.archived ? (deletable ? '重命名、恢复或删除' : '重命名或恢复') : (deletable ? '重命名、归档或删除' : '重命名或归档');
+}
 function failureText(reason: unknown): string {
   return reason instanceof RequestError ? failures[reason.code] ?? '暂时无法确认结果。输入和已有内容仍保留，请重新连接。' : '连接暂时中断。输入和已有内容仍保留，请重试。';
 }
@@ -811,7 +816,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
     {!view && !narrow && <IconButton label="打开工作区文件" tooltip="工作区文件" aria-expanded={reader} disabled={!configuration?.workspaces.length} onClick={openFiles}><FolderOpen size={16}/></IconButton>}
     {conversationView && conversation && <Menu label="对话操作" trigger={<MoreHorizontal size={17}/>} align="end">
       {narrow && <MenuItem disabled={!configuration?.workspaces.length} onSelect={openFiles}><FolderOpen size={15}/>打开工作区文件</MenuItem>}
-      <MenuItem onSelect={() => setManaging(conversation)}><Pencil size={15}/>{conversation.archived ? '重命名、恢复或删除' : '重命名、归档或删除'}</MenuItem>
+      <MenuItem onSelect={() => setManaging(conversation)}><Pencil size={15}/>{manageLabel(conversation)}</MenuItem>
       <MenuItem onSelect={() => { scheduleRefresh(); refreshConfiguration(); }}><RefreshCw size={15}/>重新连接并刷新状态</MenuItem>
     </Menu>}
   </div>;

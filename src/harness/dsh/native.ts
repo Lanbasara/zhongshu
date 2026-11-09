@@ -59,7 +59,16 @@ const passivePlanNotice = z.object({
   source: z.object({ kind: z.literal('plan-mode'), form: z.literal('notice'), summary: z.string().max(4096).optional() }).strict(),
   content: z.array(z.object({ type: z.literal('text'), text: z.string().max(1024 * 1024) }).strict()).min(1).max(32),
 }).strict();
-const passiveContext = (input: unknown) => passiveApprovalContext.safeParse(input).success || passivePlanNotice.safeParse(input).success;
+// A child's relayed message or settle notice spliced into next-step while the parent was busy. DSH hands it to
+// the parent's next step; after a user stop nothing wakes the parent, so it waits for the next prompt too.
+// It is the children's output, not queued user work, so it must not lock the conversation.
+const passiveChildNotice = z.object({
+  id: identifier, role: z.literal('user'),
+  source: z.object({ kind: z.enum(['agent-message', 'subagent-settled']), form: z.enum(['relay', 'notice']), summary: z.string().max(4096).optional(), senderSessionId: subagentIdSchema }).strict(),
+  content: z.array(z.object({ type: z.literal('text'), text: z.string().max(1024 * 1024) }).strict()).min(1).max(32),
+}).strict();
+const passiveContext = (input: unknown) => passiveApprovalContext.safeParse(input).success || passivePlanNotice.safeParse(input).success
+  || passiveChildNotice.safeParse(input).success;
 export function object(value: unknown): Record<string, unknown> { return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
 export function modelId(model: Model): string { return Buffer.from(JSON.stringify(modelSchema.parse(model))).toString('base64url'); }
 export function decodeModel(id: string): Model {

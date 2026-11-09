@@ -29,12 +29,12 @@ node test/support/feature-fixture.ts inspect --root "$zh_verify_root" --title '�
 | 场景 | 动作和判据 |
 | --- | --- |
 | S01 看见 | fixture：Codex 对话首发后（运行中）`spawn-subagents --count 3`。头部显示「子 Agent · 3 运行中」，正文卡片「派出 3 个子 Agent」三行可区分（名称、任务、状态）。点第二行，面板打开该子 Agent：先显示「主 Agent 交代的任务」，再是只读过程，无输入框；焦点进入面板，Esc 或关闭后回到触发处。刷新后入口、卡片与名单一致。真实：见下方原生分支 |
-| S02 单独停止 | 在面板停止一个运行中的子 Agent：显示「正在停止…」后为「已停止」，其余仍运行，主 Agent 状态不变；inspect 的 `subagentStopCalls` 加 1。回执未知：先 `unknown-subagent-stop`，再停止另一个：行显示「停止待核实」，过程页说明尚未确认并提供「查询原生结果」；查询后 inspect 调用次数不变，面板说明未重发；再次停止生效，调用次数再加 1 |
-| S03 停止主 Agent | 子 Agent 运行中点主输入框的停止：输入区上方提示「主 Agent 已停止，仍有 N 个子 Agent 在运行」（DSH 另说明可能自动继续），数量与名单一致，「查看子 Agent」打开面板。侧栏该对话显示「N 个子 Agent 运行中」代替主状态；子 Agent 全部结束后标记消失（DSH 子 Agent 完成会唤醒主 Agent，侧栏先换回主 Agent 的运行状态，标记消失在 fixture 或 Codex 上观察） |
+| S02 单独停止 | 在面板停止一个运行中的子 Agent：显示「正在停止…」后为「已停止」，其余仍运行，主 Agent 状态不变（fixture 与 Codex；真实 DSH 停止后会唤醒主 Agent，它可能给被停的子 Agent 派新任务，名单随之回到运行中，这时以被停那一轮原生 `aborted`、gate 没有 finished 文件为准）；「正在停止…」可能一闪而过；inspect 的 `subagentStopCalls` 加 1。回执未知：先 `unknown-subagent-stop`，再停止另一个：行显示「停止待核实」，过程页说明尚未确认并提供「查询原生结果」；查询后 inspect 调用次数不变，面板说明未重发；再次停止生效，调用次数再加 1 |
+| S03 停止主 Agent | 子 Agent 运行中点主输入框的停止：输入区上方提示「主 Agent 已停止，仍有 N 个子 Agent 在运行」（DSH 另说明可能自动继续），数量与名单一致，「查看子 Agent」打开面板。侧栏该对话显示「N 个子 Agent 运行中」代替主状态；子 Agent 全部结束后标记消失（DSH 子 Agent 完成会唤醒主 Agent，侧栏先换回主 Agent 的运行状态，标记消失在 fixture 或 Codex 上观察）。真实 DSH 另测：子 Agent 在主 Agent 自己的长工具运行时完成，它们的消息进入主 Agent 的 next-step 收件箱，这时停止主 Agent；原生不再自动开轮，消息留在收件箱。对话显示已中断、可以输入发送和归档；下一条消息发出后原生 next-step 清空，主 Agent 的回答能复述子 Agent 的结果 |
 | S04 结果待处理 | Codex 对话主 Agent 不在运行时 `complete-subagents`：头部入口带提示点，输入区提示「子 Agent 在主 Agent 上一轮结束后才完成……」；「填入」只写入输入框，inspect 的 `submitCalls` 不变。DSH 对话不出现此提示 |
-| S05 团队 | DSH 对话 `spawn-subagents` 后 `subagent-team`：面板出现「全部子 Agent / 团队」标签。团队页成员中主 Agent 标「本对话」不可点，其余可点开对应子 Agent 过程；共享任务显示标题、状态、负责人、写入范围并可展开；无任何写入入口 |
+| S05 团队 | DSH 对话 `spawn-subagents` 后 `subagent-team`：面板出现「全部子 Agent / 团队」标签。团队页成员中主 Agent 标「本对话」不可点，其余可点开对应子 Agent 过程；共享任务显示标题、状态、负责人、写入范围并可展开；无任何写入入口。真实 DSH 只有开启团队 profile 才有团队：看原生 `request/header` 的 tools 里有没有团队与任务工具；只有 subagent、send_message 等时记前提缺失 |
 | S06 无法核实 | 有运行中的子 Agent 时 `disconnect --title '本轮标题'`：头部显示「N 待核实」，侧栏显示「子 Agent 待核实」，卡片与名单相应行为「待核实」，面板顶部说明「以下是最后已知状态」，没有停止按钮；子 Agent 过程说明暂时读不到。`reconnect` 后恢复核实状态 |
-| S07 归属与安全 | 用当前对话的 hash 和另一对话的子 Agent 身份请求 `.../subagents/<id>/history` 与 `.../stop`：均返回 404 `subagent_not_found`，不改变任何原生状态（Codex 另由原生父链、DSH 由 subagent 地址再次核实归属）；畸形身份返回 400，例如 `a..b` 或编码的斜杠 `a%2Fb`（浏览器会先把单独的 `..` 路径段规范化掉，无法原样发出）。未登录的 GET 返回 401；未登录或缺少 CSRF 的 POST（如 stop）返回 403 |
+| S07 归属与安全 | 用当前对话的 hash 和另一对话的子 Agent 身份请求 `.../subagents/<id>/history` 与 `.../stop`：均返回 404 `subagent_not_found`，不改变任何原生状态（Codex 另由原生父链、DSH 由 subagent 地址再次核实归属）；畸形身份返回 400，例如 `a..b` 或编码的斜杠 `a%2Fb`（浏览器会先把单独的 `..` 路径段规范化掉，无法原样发出）。未登录的 GET 和同源 POST 返回 401 `unauthenticated`；已登录但缺少 CSRF 的 POST（如 stop）返回 403 `invalid_csrf`；缺 Origin 或跨站的 POST 先被来源检查拒绝，返回 403 `invalid_origin`，所以从页面外发出的请求看不到 401 |
 | S08 归档与删除 | 先让主 Agent 不在运行（主 Agent 运行时按主 Agent 的理由拒绝）。子 Agent 运行或停止待核实时，管理窗口归档或删除被拒绝并说明「仍有子 Agent 在运行……」，对话保持原状；全部结束后归档成功，归档视图仍可打开面板阅读名单 |
 | S09 窄屏 | 390 宽视口：头部按钮只显示图标、运行状态点与数字（如 ●3），完整说明在可访问名称（如「子 Agent，3 个运行中，共 3 个」）里，面板为整页，无横向滚动；停止按钮为文字「停止」且满足触控尺寸；关闭回到对话 |
 

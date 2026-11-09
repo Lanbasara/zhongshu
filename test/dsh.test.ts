@@ -572,6 +572,28 @@ test('A watch opened in the middle of a long DSH turn reports it running, never 
   } finally { await context.close(); }
 });
 
+test('After a stop, child messages left in next-step do not lock the conversation; unknown next-step input still does', async () => {
+  const context = await setup();
+  try {
+    const binding = await context.create(); const native = context.fixture.sessions.get(binding.id)!;
+    await context.adapter.submit(binding, { id: randomUUID(), text: 'Synthetic parent turn' });
+    const child = randomUUID();
+    // Native rc.4: a child's relay and settle notice land in next-step while the parent's own tool runs.
+    native.stepInbox.push(
+      { id: randomUUID(), role: 'user', source: { kind: 'agent-message', form: 'relay', senderSessionId: child }, content: [{ type: 'text', text: 'Agent sent a message' }, { type: 'text', text: 'synthetic result' }] },
+      { id: randomUUID(), role: 'user', source: { kind: 'subagent-settled', form: 'notice', summary: 'Background subagent finished', senderSessionId: child }, content: [{ type: 'text', text: 'Background subagent finished' }] });
+    // A user stop ends the turn; nothing wakes the parent, so the notices wait for the next prompt.
+    context.fixture.append(native, 'turn/end', { turn: 1, reason: { kind: 'aborted', reason: { kind: 'user' } } }); native.open = null;
+    const stopped = await context.adapter.state(binding);
+    assert.equal(stopped.status, 'interrupted'); assert.equal(stopped.pendingInputs, 0);
+    assert.equal((await context.adapter.submit(binding, { id: randomUUID(), text: 'Next prompt after the stop' })).outcome, 'accepted');
+    context.fixture.append(native, 'turn/end', { turn: 2, reason: { kind: 'completed' } }); native.open = null;
+    native.stepInbox.push({ id: randomUUID(), role: 'user', source: { kind: 'user', rpcId: randomUUID() }, content: [{ type: 'text', text: 'Unknown queued work' }] });
+    assert.equal((await context.adapter.state(binding)).pendingInputs, 1);
+    assert.equal((await context.adapter.submit(binding, { id: randomUUID(), text: 'Must not run behind unknown input' })).outcome, 'rejected');
+  } finally { await context.close(); }
+});
+
 test('DSH discards target proof if the Host history moves backwards during lookup', async () => {
   const context = await setup();
   try {
