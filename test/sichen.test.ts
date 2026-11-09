@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
 import type { AutomationView } from '../src/shared/automations.ts';
 import type { AutomationPatch, AutomationTargetInput, AutomationTimingInput } from '../src/harness/types.ts';
-import { createAgentTools, SICHEN_INSTRUCTIONS } from '../src/server/agent-tools.ts';
+import { createAgentTools, RESULT_INSTRUCTIONS, SICHEN_INSTRUCTIONS } from '../src/server/agent-tools.ts';
 import { sichenRoutes } from '../src/server/sichen-api.ts';
 
 const TOKEN = 'synthetic-tool-token-0123456789abcdef';
@@ -57,7 +57,7 @@ test('the agent server tells agents about sichen and guards its endpoints with t
   const f = fixture(t);
   const init = (await f.tools.inject({ method: 'POST', url: '/mcp', headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },
     payload: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18' } }) })).json();
-  assert.equal(init.result.instructions, SICHEN_INSTRUCTIONS);
+  assert.equal(init.result.instructions, `${RESULT_INSTRUCTIONS}\n\n${SICHEN_INSTRUCTIONS}`);
   assert.match(SICHEN_INSTRUCTIONS, /sichen --help/);
   assert.equal((await f.request('GET', '/sichen/v1/version', undefined, { authorization: 'Bearer wrong-token-0123456789abcdefgh' })).statusCode, 401);
   assert.equal((await f.request('GET', '/sichen/v1/version', undefined, { origin: 'https://example.com' })).statusCode, 403);

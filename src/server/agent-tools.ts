@@ -24,14 +24,20 @@ const notifyTool = {
 /** The conclusion goes back onto the task card that started the run (ADR 0021, 2026-11-09); it never notifies. */
 const resultTool = {
   name: RESULT_TOOL,
-  description: 'When a scheduled task started this run, call once at the end with a one-line conclusion. It is shown on that task\'s calendar card; it does not notify the user.',
+  description: 'Required when a scheduled task started this run: call once as the last step, with a one-line conclusion. It is shown on that task\'s card; it does not notify the user.',
   inputSchema: {
     type: 'object', additionalProperties: false, required: ['summary'],
     properties: { summary: { type: 'string', maxLength: 120, description: 'The conclusion, in the user\'s language.' } },
   },
 };
 const PROTOCOLS = ['2026-07-28', '2025-11-25', '2025-06-18', '2025-03-26'];
-/** Shown to the agent by the Host as this server's instructions (ADR 0022): where scheduling and calendar entries go. */
+/**
+ * Shown to the agent by the Host as this server's instructions. A tool description alone was not enough: on 2026-11-09
+ * three scheduled runs on a long review finished without `record_result`, so the rule is stated here as well.
+ */
+export const RESULT_INSTRUCTIONS = 'When a scheduled task started this run (the Host marks the message as scheduled), the last step of the run is '
+  + '`record_result` with a one-line conclusion; it goes on that task\'s card. Call it once, after the work and any `notify_user`.';
+/** Where scheduling and calendar entries go (ADR 0022). */
 export const SICHEN_INSTRUCTIONS = 'Scheduled tasks and calendar entries: use the shell command `sichen` (run `sichen --help` first). '
   + 'Write times as dates and clock times, e.g. `sichen schedule add "收盘复核" --at "2026-11-10 15:10" --to here --prompt "…"` or '
   + '`--every 工作日 --time 14:45 --until 2027-01-31`. `--to here` returns results to this conversation. '
@@ -79,7 +85,7 @@ export function createAgentTools(options: { token: string; port: number; version
     if (method === 'initialize') {
       const requested = z.object({ protocolVersion: z.string().max(40) }).passthrough().safeParse(params).data?.protocolVersion;
       return result(id, { protocolVersion: requested && PROTOCOLS.includes(requested) ? requested : PROTOCOLS[2], capabilities: { tools: { listChanged: false } }, serverInfo: { name: 'zhongshu', version: options.version },
-        ...(options.routes ? { instructions: SICHEN_INSTRUCTIONS } : {}) });
+        instructions: options.routes ? `${RESULT_INSTRUCTIONS}\n\n${SICHEN_INSTRUCTIONS}` : RESULT_INSTRUCTIONS });
     }
     if (method === 'ping') return result(id, {});
     if (method === 'tools/list') return result(id, { tools: [notifyTool, resultTool] });

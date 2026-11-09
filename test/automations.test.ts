@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
 import { automationOf, targetInput, timingInput } from '../src/harness/dsh/automations.ts';
 import { itemFrom } from '../src/harness/dsh/native.ts';
-import { createAgentTools, oneLine, relativeFile } from '../src/server/agent-tools.ts';
+import { createAgentTools, oneLine, relativeFile, RESULT_INSTRUCTIONS } from '../src/server/agent-tools.ts';
 import { createAgentNotifications } from '../src/server/agent-notifications.ts';
 import { createAgentResults } from '../src/server/agent-results.ts';
 import { parseTimeline } from '../src/server/automations.ts';
@@ -64,6 +64,8 @@ test('the agent tool endpoint speaks minimal MCP, accepts only its token, refuse
   assert.equal((await post(rpc('tools/list'), { authorization: `Bearer ${TOKEN}`, origin: 'https://example.com' })).statusCode, 403);
   const init = (await post(rpc('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'dsh', version: '0' } }))).json();
   assert.equal(init.result.protocolVersion, '2025-06-18'); assert.deepEqual(init.result.capabilities, { tools: { listChanged: false } });
+  // Without 司辰 the instructions still carry the rule that a scheduled run ends with record_result.
+  assert.equal(init.result.instructions, RESULT_INSTRUCTIONS); assert.match(RESULT_INSTRUCTIONS, /record_result/);
   assert.equal((await post({ jsonrpc: '2.0', method: 'notifications/initialized' })).statusCode, 202);
   const list = (await post(rpc('tools/list'))).json();
   assert.deepEqual(list.result.tools.map((entry: { name: string }) => entry.name), ['notify_user', 'record_result']);
