@@ -13,6 +13,16 @@ export const automationTimingSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('cron'), expression: z.string().min(1).max(200), timeZone: zone }).strict(),
   z.object({ kind: z.literal('rrule'), rrule: z.string().min(1).max(2000) }).strict(),
 ]);
+const dateText = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
+/** 司辰's rule in people's terms (ADR 0022); the server checks it and turns it into native timing. */
+export const whenRuleSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('once'), date: dateText, time: clock }).strict(),
+  z.object({ kind: z.literal('daily'), time: clock }).strict(),
+  z.object({ kind: z.literal('weekly'), weekdays: z.array(z.number().int().min(1).max(7)).min(1).max(7), time: clock }).strict(),
+  z.object({ kind: z.literal('monthly'), day: z.number().int().min(1).max(31), months: z.array(z.number().int().min(1).max(12)).min(1).max(12).optional(), time: clock }).strict(),
+  z.object({ kind: z.literal('cron'), expression: z.string().min(9).max(200) }).strict(),
+]);
+export const whenSchema = z.object({ rule: whenRuleSchema, timeZone: zone, from: dateText.optional(), until: dateText.optional() }).strict();
 /** What the page may ask for; `at` is an absolute instant the page computed from the user's local date and time. */
 export const automationTimingInputSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('at'), at: instant }).strict(),
@@ -20,6 +30,8 @@ export const automationTimingInputSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('daily'), time: clock, timeZone: zone }).strict(),
   z.object({ kind: z.literal('weekly'), time: clock, timeZone: zone, weekdays: z.array(z.number().int().min(1).max(7)).min(1).max(7) }).strict(),
   z.object({ kind: z.literal('cron'), expression: z.string().min(9).max(200), timeZone: zone }).strict(),
+  /** A rule in people's terms, including starts and ends (ADR 0022). */
+  z.object({ kind: z.literal('when'), when: whenSchema }).strict(),
 ]);
 /** A target in product terms: a conversation, or a new conversation in a registered workspace. */
 const presetId = z.string().regex(/^[a-z][a-z0-9-]{0,63}$/);

@@ -247,3 +247,5 @@
 .sch-task > svg { flex:none; color:var(--zs-text-muted); }
 .sch-task > span:nth-child(2) { display:flex; flex-direction:column; gap:3px; min-width:0; flex:1; }
 .sch-task .sch-result { color:var(--zs-text-body); }
+.sch-until { margin-top:8px; align-items:center; flex-wrap:wrap; gap:8px; }
+.sch-until .sch-help { flex-basis:100%; margin:0; }

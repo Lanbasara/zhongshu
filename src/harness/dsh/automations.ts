@@ -68,6 +68,7 @@ export function timingInput(value: AutomationTimingInput): Record<string, unknow
     case 'daily': return { kind: 'daily', daily: { time: seconds(value.time), time_zone: value.timeZone } };
     case 'weekly': return { kind: 'weekly', weekly: { time: seconds(value.time), time_zone: value.timeZone, weekdays: value.weekdays } };
     case 'cron': return { kind: 'cron', cron: { expression: value.expression, time_zone: value.timeZone } };
+    case 'rrule': return { kind: 'rrule', rrule: value.rrule };
   }
 }
 export function targetInput(value: AutomationTargetInput): Record<string, unknown> {

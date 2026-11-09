@@ -18,6 +18,7 @@ import { createPushTriggers } from './push-triggers.ts';
 import { createHarnessAccounts } from './harness-accounts.ts';
 import { createAgentNotifications } from './agent-notifications.ts';
 import { createAgentTools } from './agent-tools.ts';
+import { sichenRoutes } from './sichen-api.ts';
 import { createAutomations } from './automations.ts';
 
 const metadataSchema = z.object({ name: z.literal('zhongshu'), version: z.string().max(64), revision: z.string().regex(/^(development|[a-f0-9]{40})$/) });
@@ -55,7 +56,8 @@ async function main() {
     automations = createAutomations(db, workbench, harnesses.adapters, notifications, event => app?.log.info(event));
     // The agent tool endpoint exists only where the operator configured it beside the native Hosts (ADR 0021).
     if (harnesses.agentTools) tools = createAgentTools({ token: harnesses.agentTools.token, port: harnesses.agentTools.port, version: metadata?.version ?? 'development', notify: (summary, file) => notifications.notify(summary, file),
-      record: summary => automations!.results.record(summary) });
+      record: summary => automations!.results.record(summary),
+      routes: sichenRoutes({ operations: automations.operations, workbench, version: metadata?.version ?? 'development', ...(metadata?.revision ? { revision: metadata.revision } : {}) }) });
     triggers = createPushTriggers({
       conversation: id => source.store.getConversation(id), unread: values => source.unread(values), isReading: id => source.isReading(id),
       active: () => source.attention().conversations.map(entry => entry.conversation),

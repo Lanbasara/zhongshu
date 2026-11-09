@@ -1,5 +1,5 @@
 ---
-status: draft
+status: active
 started: 2026-11-09
 exit: 预发实例里，Agent 不靠任何工作区规矩，用 `sichen` 建出带结束日期、投递到本对话的任务，读回与 DSH 原生一致，到期自动结束；日历条目由 `sichen timeline` 写入并出现在日历上；网页可设结束日期；版本不一致与非法输入都被明确拒绝；安装、更新与体检在预发和正式环境走通
 evidence: none yet

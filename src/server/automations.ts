@@ -7,7 +7,8 @@ import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { HarnessError, type AutomationDelivery, type HarnessAdapter, type HarnessAutomations, type HarnessId, type NativeAutomation } from '../harness/types.ts';
+import { HarnessError, type AutomationDelivery, type AutomationPatch, type AutomationTargetInput, type AutomationTimingInput, type HarnessAdapter, type HarnessAutomations, type HarnessId, type NativeAutomation } from '../harness/types.ts';
+import { check, toNative, type When } from '../sichen/time.ts';
 import {
   automationCreateSchema, automationDeleteSchema, automationEditSchema, timelineLineSchema,
   type AutomationDeliveryView, type AutomationView, type TimelineEntry, type TimelineView,
@@ -23,9 +24,18 @@ const POLL_MS = 60_000;
 const ADOPT_RETRY_MS = 3_000;
 const ADOPT_WINDOW_MS = 10 * 60_000;
 const FRESH_MS = 3_000;
-class AutomationError extends Error {
+export class AutomationError extends Error {
   readonly statusCode: number;
-  constructor(code: string, statusCode = 400) { super(code); this.statusCode = statusCode; }
+  /** For `invalid_time`: what is wrong with the rule, in plain words (ADR 0022). */
+  readonly problems?: string[];
+  constructor(code: string, statusCode = 400, problems?: string[]) { super(code); this.statusCode = statusCode; if (problems) this.problems = problems; }
+}
+/** Page and 司辰 timing to native timing: a people's rule is checked here, then handed over in a shape the Harness runs. */
+export function nativeTiming(timing: AutomationTimingInput | { kind: 'when'; when: When }, now = Date.now()): AutomationTimingInput {
+  if (timing.kind !== 'when') return timing;
+  const problems = check(timing.when, now);
+  if (problems.length) throw new AutomationError('invalid_time', 400, problems);
+  return toNative(timing.when, now);
 }
 const late = (delivery: { scheduledAt: string; deliveredAt: string }) => Date.parse(delivery.deliveredAt) - Date.parse(delivery.scheduledAt) > LATE_MS;
 
@@ -207,7 +217,7 @@ export function createAutomations(db: DatabaseSync, workbench: Workbench, adapte
 
   async function routes(app: FastifyInstance): Promise<void> {
     app.setErrorHandler((error, _request, reply) => {
-      if (error instanceof AutomationError) return reply.code(error.statusCode).send({ error: error.message });
+      if (error instanceof AutomationError) return reply.code(error.statusCode).send({ error: error.message, ...(error.problems ? { problems: error.problems } : {}) });
       if (error instanceof HarnessError) return reply.code(502).send({ error: 'harness_unavailable' });
       const code = typeof error === 'object' && error !== null && 'statusCode' in error ? error.statusCode : undefined;
       const status = typeof code === 'number' && code >= 400 && code < 500 ? code : 500;
@@ -237,7 +247,7 @@ export function createAutomations(db: DatabaseSync, workbench: Workbench, adapte
     });
     app.post('/automations', { bodyLimit: 64 * 1024 }, async request => {
       const input = parse(automationCreateSchema, request.body);
-      const task = await source(input.harnessId).create({ title: input.title, prompt: input.prompt, timing: input.timing, target: targetInput(input.target) });
+      const task = await source(input.harnessId).create({ title: input.title, prompt: input.prompt, timing: nativeTiming(input.timing), target: targetInput(input.target) });
       log({ event: 'automation_created' }); await refresh();
       return { outcome: 'ok', automation: view(task) };
     });
@@ -245,7 +255,8 @@ export function createAutomations(db: DatabaseSync, workbench: Workbench, adapte
       const { id } = parse(params, request.params);
       const input = parse(automationEditSchema, request.body);
       await find(id);
-      const result = await source('dsh').update(id, input.patch, input.expectedUpdatedAt);
+      const { timing, ...rest } = input.patch;
+      const result = await source('dsh').update(id, { ...rest, ...(timing ? { timing: nativeTiming(timing) } : {}) }, input.expectedUpdatedAt);
       await refresh();
       if (result === 'conflict') return { outcome: 'conflict' };
       if (result === 'notFound') return { outcome: 'not_found' };
@@ -282,9 +293,37 @@ export function createAutomations(db: DatabaseSync, workbench: Workbench, adapte
     app.get('/timeline', async () => timeline());
   }
 
+  /** The same operations, for 司辰's command line (ADR 0022); it reaches them through the agent endpoint, not the page. */
+  const operations = {
+    async list() { return (await current()).map(view); },
+    async get(id: string) { return view(await find(id)); },
+    async native(id: string) { return find(id); },
+    async create(input: { title: string; prompt: string; timing: AutomationTimingInput; target: AutomationTargetInput }) {
+      const task = await source('dsh').create(input);
+      log({ event: 'automation_created', via: 'sichen' }); await refresh();
+      return view(task);
+    },
+    async edit(id: string, patch: AutomationPatch, expectedUpdatedAt?: string) {
+      await find(id);
+      const result = await source('dsh').update(id, patch, expectedUpdatedAt);
+      await refresh();
+      if (typeof result === 'string') return result;
+      log({ event: 'automation_changed', via: 'sichen' });
+      return view(result);
+    },
+    async remove(id: string, expectedUpdatedAt?: string) {
+      const result = await source('dsh').remove(id, expectedUpdatedAt); await refresh();
+      if (result === 'deleted') log({ event: 'automation_deleted', via: 'sichen' });
+      return result;
+    },
+    async run(id: string) { const result = await source('dsh').run(id); await refresh(); return typeof result === 'string' ? result : view(result); },
+    available: () => sources.has('dsh'),
+  };
+
   return {
     routes,
     results,
+    operations,
     available: () => sources.size > 0,
     async start(): Promise<void> {
       for (const value of sources.values()) unsubscribe.push(value.onChange(changed));

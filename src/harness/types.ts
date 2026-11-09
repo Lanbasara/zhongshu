@@ -78,7 +78,9 @@ export type AutomationTimingInput =
   | { kind: 'every'; seconds: number }
   | { kind: 'daily'; time: string; timeZone: string }
   | { kind: 'weekly'; time: string; timeZone: string; weekdays: number[] }
-  | { kind: 'cron'; expression: string; timeZone: string };
+  | { kind: 'cron'; expression: string; timeZone: string }
+  /** RFC 5545: one DTSTART line and one RRULE line; how 司辰 hands over starts, ends and month rules (ADR 0022). */
+  | { kind: 'rrule'; rrule: string };
 export type AutomationTargetInput = { kind: 'session'; sessionId: string } | { kind: 'new_once' | 'new'; cwd?: string; preset?: string };
 export type AutomationPatch = { title?: string; prompt?: string; timing?: AutomationTimingInput; target?: AutomationTargetInput; active?: boolean };
 export type AutomationEdit = NativeAutomation | 'conflict' | 'notFound' | 'ended';

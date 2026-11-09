@@ -6,6 +6,9 @@
 import type { AgentNotificationView, AutomationView, TimelineEntry } from '../shared/automations.ts';
 import type { WorkbenchConfiguration } from '../shared/workbench.ts';
 import { conversationConfigurationLabel } from './conversation-configuration-label.ts';
+import { describe, fromNative, upcoming, validZone, zoned, zonedInstant, type When } from '../sichen/time.ts';
+
+export { zonedInstant };
 
 export type ItemKind = 'agent' | 'action' | 'event' | 'decision' | 'research';
 /** `overdue`: an action of the user's whose time passed; nothing here knows whether it was done. */
@@ -36,23 +39,6 @@ export function whenText(instant: number, now: number): string {
 export function dayLabel(value: string): string { const date = parseDate(value); return `${date.getMonth() + 1} 月 ${date.getDate()} 日 周${WEEKDAYS[(date.getDay() + 6) % 7]}`; }
 
 /** Wall-clock parts of an instant in a time zone. */
-function zoned(instant: number, timeZone: string) {
-  const parts = Object.fromEntries(new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23', weekday: 'short' })
-    .formatToParts(new Date(instant)).map(part => [part.type, part.value]));
-  return { date: `${parts.year}-${parts.month}-${parts.day}`, time: `${parts.hour}:${parts.minute}`, weekday: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].indexOf(String(parts.weekday)) + 1 };
-}
-/** The instant a wall-clock date and time names in a zone; two passes settle offsets, gaps resolve forward. */
-export function zonedInstant(date: string, time: string, timeZone: string): number {
-  const [y, m, d] = date.split('-').map(Number); const [hh, mm] = time.split(':').map(Number);
-  const wanted = Date.UTC(y!, m! - 1, d!, hh!, mm!);
-  const drift = (instant: number) => { const seen = zoned(instant, timeZone); const [sy, sm, sd] = seen.date.split('-').map(Number); const [sh, smm] = seen.time.split(':').map(Number); return wanted - Date.UTC(sy!, sm! - 1, sd!, sh!, smm!); };
-  const first = wanted + drift(wanted);
-  const second = first + drift(first);
-  // In a skipped hour neither guess shows the wanted time; the later one lies just after the gap.
-  return drift(second) === 0 ? second : Math.max(first, second);
-}
-function validZone(timeZone: string): boolean { try { new Intl.DateTimeFormat('en', { timeZone }); return true; } catch { return false; } }
-
 /** One-shot tasks that have not run may be moved in time; recurring ones are edited in the form. */
 export function movable(task: AutomationView, now: number): boolean {
   const oneShot = task.timing.kind === 'once' || (task.timing.kind === 'rrule' && /(^|;)COUNT=1(;|$)/m.test(task.timing.rrule));
@@ -88,14 +74,12 @@ export function scheduleItems(input: { automations: AutomationView[]; timeline: 
     if (task.status === 'ended') continue;
     const planned = Date.parse(task.scheduledAt);
     const occurrences: number[] = [];
-    if (task.status === 'active' && (task.timing.kind === 'daily' || task.timing.kind === 'weekly') && validZone(task.timing.timeZone)) {
-      const timing = task.timing;
-      for (let day = addDays(input.from, -1); day <= addDays(input.to, 1); day = addDays(day, 1)) {
-        const instant = zonedInstant(day, timing.time, timing.timeZone);
-        if (instant < planned - 60_000) continue;
-        if (timing.kind === 'weekly' && !timing.weekdays.includes(zoned(instant, timing.timeZone).weekday)) continue;
-        occurrences.push(instant);
-      }
+    // Recurring rules the time model reads (daily, weekly, monthly, with starts and ends) are laid out up to their end;
+    // other rules show only the occurrence the Harness reports.
+    const rule = task.status === 'active' ? fromNative(task.timing, Intl.DateTimeFormat().resolvedOptions().timeZone) : undefined;
+    if (rule && rule.rule.kind !== 'once' && rule.rule.kind !== 'cron' && validZone(rule.timeZone)) {
+      const end = zonedInstant(addDays(input.to, 2), '00:00', rule.timeZone);
+      for (const instant of upcoming(rule, planned - 60_000, 800)) { if (instant > end) break; occurrences.push(instant); }
     } else occurrences.push(planned);
     for (const instant of occurrences) {
       if (delivered && Math.abs(Date.parse(delivered.scheduledAt) - instant) < 60_000) continue; // already shown as delivered
@@ -139,17 +123,22 @@ export function summarize(items: ScheduleItem[], today: string) {
   };
 }
 
-export function timingText(task: AutomationView): string {
+/** The rule in words, through 司辰's time model (ADR 0022): "每个工作日 14:45 · 到 2027-01-31". */
+export function timingText(task: AutomationView, now = Date.now()): string {
   const timing = task.timing;
-  const zone = (value: string) => value === Intl.DateTimeFormat().resolvedOptions().timeZone ? '' : ` · ${value}`;
-  switch (timing.kind) {
-    case 'once': { const date = new Date(timing.at); return `一次 · ${date.getMonth() + 1}-${date.getDate()} ${localTime(date)}`; }
-    case 'every': return timing.seconds % 3600 === 0 ? `每 ${timing.seconds / 3600} 小时` : `每 ${Math.round(timing.seconds / 60)} 分钟`;
-    case 'daily': return `每天 ${timing.time}${zone(timing.timeZone)}`;
-    case 'weekly': return `每周${timing.weekdays.map(day => WEEKDAYS[day - 1]).join('、')} ${timing.time}${zone(timing.timeZone)}`;
-    case 'cron': return `按规则 ${timing.expression}${zone(timing.timeZone)}`;
-    case 'rrule': return /COUNT=1\b/.test(timing.rrule) ? `一次 · ${localTime(new Date(task.scheduledAt))}` : '按 RRULE 规则';
-  }
+  if (timing.kind === 'every') return timing.seconds % 3600 === 0 ? `每 ${timing.seconds / 3600} 小时` : `每 ${Math.round(timing.seconds / 60)} 分钟`;
+  const viewer = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const when = ruleOf(task, now);
+  if (!when) return timing.kind === 'cron' ? `按规则 ${timing.expression}` : '按原生规则';
+  if (when.rule.kind === 'once') { const date = new Date(task.scheduledAt); return `一次 · ${date.getMonth() + 1}-${date.getDate()} ${localTime(date)}`; }
+  return describe(when, viewer);
+}
+/** The task's rule when the time model reads it; a start that has already come is dropped from what is shown. */
+export function ruleOf(task: AutomationView, now = Date.now()): When | undefined {
+  if (task.timing.kind === 'every') return undefined;
+  const read = fromNative(task.timing, Intl.DateTimeFormat().resolvedOptions().timeZone);
+  if (!read?.from || read.from > zoned(now, read.timeZone).date) return read;
+  const { from: _from, ...rest } = read; return rest;
 }
 
 /** The instruction a task delivers: an optional skill named first, so the agent loads it before anything else. */

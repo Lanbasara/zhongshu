@@ -55,6 +55,24 @@ The administrator password comes from `ZHONGSHU_ADMIN_PASSWORD` (at least 8 char
 
 Conversation history is read from the native Harness on demand; the application database keeps only its own records (bindings, operations, uploads, image copies). `ZHONGSHU_STORAGE_BUDGET` bounds that database (bytes or units such as `16GiB`; default `16GiB`). From 80% the interface warns; at the limit, image uploads and new conversations are refused until regenerable image copies are cleared or Codex conversations are deleted, while reading and sending text continue. When nothing is left to clean, raise the budget in the instance configuration.
 
+## sichen
+
+`sichen` is the time module's command line ([ADR 0022](docs/adr/0022-sichen-time-module.md), [feature map](docs/features/sichen.md)). `npm run build` writes it to `dist/sichen/`: dependency-free modules, `bin/sichen` and `version.json`. It needs Node 24 and nothing else.
+
+It reaches the app's `agentTools` endpoint, so `agentTools` must be configured (see [Harness connections](#harness-connections)). It reads two environment variables:
+- `SICHEN_URL`, default `http://127.0.0.1:3100`;
+- `SICHEN_TOKEN_FILE`, default `/links/sichen-token`, pointing at a copy of the same token.
+
+DSH sets `DSH_SESSION_ID` for shell commands; that is how `--to 本对话` finds the conversation.
+
+To make it available to agents, put `dist/sichen/bin` on the Host's `PATH` and give it the token file read-only. The app tells agents about it through the MCP server's instructions. Disabling the Host's native schedule tools is optional instance configuration.
+
+Locally:
+
+```sh
+SICHEN_URL=http://127.0.0.1:3100 SICHEN_TOKEN_FILE=/path/to/agent-tool-token node dist/sichen/bin/sichen doctor
+```
+
 ## UI development
 
 ```sh

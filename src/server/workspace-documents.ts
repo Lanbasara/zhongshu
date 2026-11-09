@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { constants, type BigIntStats } from 'node:fs';
-import { lstat, open, opendir, realpath, rename, unlink } from 'node:fs/promises';
+import { lstat, mkdir, open, opendir, realpath, rename, unlink } from 'node:fs/promises';
 import { basename, extname, join } from 'node:path';
 import { workspaceDocumentPath } from '../shared/content.ts';
 import { ResourceError } from './resources.ts';
@@ -108,6 +108,31 @@ export async function readWorkspaceTimeline(root: string, identity?: string): Pr
     if (code === 'ENOENT' || (error instanceof ResourceError && error.message === 'file_reference_unavailable')) return null;
     throw error;
   }
+}
+
+/**
+ * Append one already validated line to the workspace timeline (司辰, ADR 0022). The hidden directory is created inside
+ * the workspace when missing; links and other escapes are refused like any workspace path.
+ */
+export async function appendWorkspaceTimeline(root: string, line: string, identity?: string): Promise<void> {
+  if (line.includes('\n') || Buffer.byteLength(line) > 4096) throw new ResourceError('timeline_line_invalid', 400);
+  await withWorkspaceDirectory(root, [], async directory => {
+    try { await mkdir(join(directory, '.zhongshu'), { mode: 0o755 }); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+  }, identity);
+  await withWorkspaceDirectory(root, ['.zhongshu'], async directory => {
+    const file = join(directory, 'timeline.jsonl');
+    const existing = await lstat(file).catch(() => undefined);
+    if (existing && !existing.isFile()) throw new ResourceError('file_reference_forbidden', 403);
+    if (existing && existing.size > 2 * 1024 * 1024) throw new ResourceError('file_too_large', 413);
+    const handle = await open(file, constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | constants.O_NOFOLLOW, 0o644);
+    try {
+      // A file that does not end with a newline gets one first, so the new line never joins the last one.
+      const size = (await handle.stat()).size;
+      let prefix = '';
+      if (size > 0) { const reader = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW); try { const last = Buffer.alloc(1); await reader.read(last, 0, 1, size - 1); if (last[0] !== 10) prefix = '\n'; } finally { await reader.close(); } }
+      await handle.write(prefix + line + '\n');
+    } finally { await handle.close(); }
+  }, identity);
 }
 
 export function saveWorkspaceDocument(root: string, path: string, version: string, text: string, assertWritable: () => void, identity?: string) {

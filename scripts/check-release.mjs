@@ -13,8 +13,10 @@ function walk(directory) {
 const digest = path => createHash('sha256').update(readFileSync(path)).digest('hex');
 if (process.argv.includes('--seal')) {
   const web = JSON.parse(readFileSync(resolve(dist, 'web-inventory.json'), 'utf8'));
-  const sourceFiles = ['server', 'harness', 'shared'].flatMap(name => walk(resolve(root, 'src', name))).filter(path => path.endsWith('.ts') && !path.endsWith('.d.ts'));
-  const allowed = new Set(['version.json', 'web-inventory.json', ...Object.keys(web), ...sourceFiles.map(path => relative(resolve(root, 'src'), path).replace(/\.ts$/, '.js'))]);
+  const sourceFiles = ['server', 'harness', 'shared', 'sichen'].filter(name => existsSync(resolve(root, 'src', name))).flatMap(name => walk(resolve(root, 'src', name))).filter(path => path.endsWith('.ts') && !path.endsWith('.d.ts'));
+  // 司辰 (ADR 0022) adds its own package marker, version and runnable bin beside its compiled modules.
+  const sichen = existsSync(resolve(root, 'src', 'sichen')) ? ['sichen/package.json', 'sichen/version.json', 'sichen/bin/sichen'] : [];
+  const allowed = new Set(['version.json', 'web-inventory.json', ...sichen, ...Object.keys(web), ...sourceFiles.map(path => relative(resolve(root, 'src'), path).replace(/\.ts$/, '.js'))]);
   const inventory = {};
   for (const file of walk(dist)) {
     const name = relative(dist, file);
