@@ -28,6 +28,8 @@
 .subagent-bar-title strong { font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .subagent-bar-count { color:var(--zs-text-muted); font-size:var(--zs-type-caption); white-space:nowrap; }
 .workspace-reader button.subagent-detail-stop { border:1px solid var(--zs-border); padding:0 var(--zs-space-3); }
+/* On phones the stop button meets the same 44px touch height as back and close beside it. */
+@media (max-width:759px) { .workspace-reader button.subagent-detail-stop { min-height:44px; } }
 
 .subagent-stale {
   display:flex;
