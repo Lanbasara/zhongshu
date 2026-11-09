@@ -28,8 +28,9 @@ export const automationTargetInputSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('conversation'), conversationId: z.uuid() }).strict(),
   /** The Harness creates each session with the workspace and preset; model, effort and permission are its defaults. */
   z.object({ kind: z.literal('new'), workspaceId: z.string().min(1).max(64), preset: presetId.optional() }).strict(),
-  /** With a configuration, Zhongshu creates that one conversation now and points the task at it. */
-  z.object({ kind: z.literal('new_once'), workspaceId: z.string().min(1).max(64), preset: presetId.optional(), configuration: configurationSchema.optional() }).strict(),
+  /** The Harness opens one session at the first run and reuses it; like `new`, it takes only the workspace and preset.
+   * Zhongshu never opens a conversation before a run (ADR 0021, 2026-11-09). */
+  z.object({ kind: z.literal('new_once'), workspaceId: z.string().min(1).max(64), preset: presetId.optional() }).strict(),
 ]);
 const title = z.string().trim().min(1).max(120);
 const prompt = z.string().trim().min(1).max(32_000);

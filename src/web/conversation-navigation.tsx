@@ -1,13 +1,12 @@
 import { SubagentBackgroundMark } from './patterns/subagents.tsx';
 import { Clock } from 'lucide-react';
-import type { AutomationView } from '../shared/automations.ts';
 import { z } from 'zod';
 import { memo, useEffect, useRef, useState, type CSSProperties } from 'react';
 import { conversationListSchema, conversationResponseSchema, conversationTitleSchema, type Conversation, type WorkbenchConfiguration } from '../shared/workbench.ts';
 import { RequestError, request } from './workbench-client.ts';
 import type { WorkspaceAction } from './workspace-management.tsx';
 import { ConversationRow, WorkspaceActions, WorkspaceGroup } from './patterns/sidebar.tsx';
-import { conversationStatus, harnessLabel, runStatus } from './conversation-status.ts';
+import { conversationStatus, harnessLabel } from './conversation-status.ts';
 import type { StatusKind } from './ui/controls.tsx';
 
 const widthKey = 'zhongshu:sidebar-width';
@@ -46,11 +45,6 @@ export function useSidebarWidth() {
 }
 
 type NavigationProps = {
-  /** Automations that open a new conversation per run (ADR 0021); each takes one row under its workspace. */
-  automations?: AutomationView[];
-  openRuns?(automationId: string): void;
-  /** The automation the open conversation belongs to, so its row reads as selected. */
-  selectedAutomation?: string;
   workspaces?: WorkbenchConfiguration['workspaces'];
   workspaceAction(action: WorkspaceAction): void;
   selected?: string;
@@ -70,6 +64,15 @@ type RowProps = {
   choose(id: string): void;
   manage(conversation: Conversation): void;
 };
+
+/** A conversation an automation run opened (ADR 0021) is an ordinary row, marked with the time the run opened it. */
+function rowDetail(conversation: Conversation, workspaceLabel?: (id: string) => string) {
+  const where = workspaceLabel ? `${workspaceLabel(conversation.workspaceId)} · ${harnessLabel(conversation.harnessId)}` : undefined;
+  if (!conversation.automationId) return where;
+  const opened = new Date(conversation.createdAt);
+  const when = `${opened.getMonth() + 1}-${opened.getDate()} ${String(opened.getHours()).padStart(2, '0')}:${String(opened.getMinutes()).padStart(2, '0')}`;
+  return [where, `自动任务 · ${when}`].filter(Boolean).join(' · ');
+}
 
 export function ConversationResults({ query, revision, csrf, report, rows, hideEmpty, workspaceLabel, label, visible = true, empty = '暂无对话' }: {
   query: Query; revision: number; csrf: string; report(reason: unknown): void; rows: RowProps;
@@ -155,8 +158,9 @@ export function ConversationResults({ query, revision, csrf, report, rows, hideE
       const background = conversation.subagents && !['running', 'waiting'].includes(conversation.state.status) && (conversation.subagents.running || conversation.subagents.unverified);
       return <ConversationRow key={conversation.id} title={conversation.title} status={status} statusLabel={statusLabel}
         unread={conversation.unread} selected={conversation.id === rows.selected}
-        detail={workspaceLabel ? `${workspaceLabel(conversation.workspaceId)} · ${harnessLabel(conversation.harnessId)}` : undefined}
-        meta={background ? <SubagentBackgroundMark running={conversation.subagents!.running} unverified={conversation.subagents!.unverified}/> : undefined}
+        detail={rowDetail(conversation, workspaceLabel)}
+        meta={background ? <SubagentBackgroundMark running={conversation.subagents!.running} unverified={conversation.subagents!.unverified}/>
+          : conversation.automationId ? <Clock size={12} aria-label="自动任务"/> : undefined}
         onOpen={() => rows.choose(conversation.id)} onManage={() => rows.manage(conversation)}/>;
     })}
     {visible && next && <div className="conversation-pagination">
@@ -199,11 +203,6 @@ export const ConversationNavigation = memo(function ConversationNavigation(props
         summary={closed ? summarise(props.attention, workspace.id) : undefined}
         actions={<WorkspaceActions label={workspace.label} onCreate={() => props.create(workspace.id)} onManage={() => props.workspaceAction({ kind: 'manage', workspace })}/>}>
         <ConversationResults {...resultProps} visible={!closed} query={{ workspaceId: workspace.id }}/>
-        {!closed && props.automations?.filter(task => (task.target.kind === 'new' || task.target.kind === 'new_once') && task.target.workspaceId === workspace.id && (task.runs > 0 || task.status !== 'ended'))
-          .map(task => { const run = task.executing ? runStatus('running', false) : task.latestRun ? runStatus(task.latestRun.status, task.latestRun.unread) : runStatus('idle', false);
-            return <ConversationRow key={task.id} title={task.title} status={run.status} statusLabel={task.executing || task.latestRun ? `最近一次运行：${run.label}` : ''} unread={task.latestRun?.unread}
-              selected={task.id === props.selectedAutomation} detail={task.runs ? `自动任务 · ${task.runs} 次运行` : '自动任务 · 还没跑过'} meta={<Clock size={12} aria-label="自动任务"/>}
-              onOpen={() => props.openRuns?.(task.id)}/>; })}
       </WorkspaceGroup>;
     })}
     {props.workspaces && <section className="workspace-group workspace-unregistered">

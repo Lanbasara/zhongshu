@@ -107,7 +107,7 @@ test('a notification is pushed with a direct link once its tool record is observ
   assert.ok('refused' in notifications.notify('one too many', undefined), 'a looping agent cannot flood the phone');
 });
 
-test('the store adopts a session an automation created once, finds it by native identity, and keeps it out of the sidebar list', t => {
+test('the store adopts a session an automation created once, finds it by native identity, and lists it like any conversation', t => {
   const db = database(t); const store = createWorkbenchStore(db);
   const configuration = { modelId: 'fixture-model', permissionId: 'danger-full-access' };
   const input = { id: randomUUID(), harnessId: 'dsh' as const, workspaceId: 'fixture', cwd: '/workspace/stock', title: '每日盘前简报', configuration,
@@ -118,8 +118,11 @@ test('the store adopts a session an automation created once, finds it by native 
   assert.equal(store.conversationForNative('dsh', 's-run-1')?.id, adopted.id);
   assert.equal(store.conversationForNative('dsh', 's-unknown'), null);
   const ordinary = store.createConversation({ id: randomUUID(), harnessId: 'dsh', workspaceId: 'fixture', cwd: '/workspace/stock', configuration }).conversation;
-  assert.deepEqual(store.listConversations().map(entry => entry.id), [ordinary.id]);
+  // Run conversations are ordinary sidebar rows (ADR 0021, 2026-11-09); a native run moves one to the top.
+  assert.deepEqual(store.listConversations().map(entry => entry.id), [ordinary.id, adopted.id]);
   assert.deepEqual(store.listConversations({ automationId: 'schedule-1' }).map(entry => entry.id), [adopted.id]);
+  store.setConversationState(adopted.id, { state: { status: 'running', runId: 'dsh:s-run-1:1', pendingInputs: 0, configurationVerified: true } });
+  assert.deepEqual(store.listConversations().map(entry => entry.id), [adopted.id, ordinary.id]);
 });
 
 test('the workspace timeline file is read whole from its fixed hidden path; bad lines are reported and the last line per id wins', async t => {
@@ -267,18 +270,13 @@ test('the automation service shows native tasks in product terms, adopts session
   assert.equal(store.getConversation(tracked.id)?.automationId, 'once', 'conversations of tasks still listed stay with them');
   assert.deepEqual((await app.inject({ method: 'POST', url: '/automations/once/run' })).json(), { outcome: 'pending' });
 
-  // "First new, then reuse" with a chosen configuration: the conversation exists, configured, before the first run.
+  // Zhongshu never opens a conversation before a run (ADR 0021, 2026-11-09): neither target takes a configuration.
   const chosen = { modelId: 'deep-model', reasoningEffort: 'high', permissionId: 'danger-full-access', agentPreset: 'ptc' };
-  const made = (await app.inject({ method: 'POST', url: '/automations', payload: { harnessId: 'dsh', title: '每日研判', prompt: '使用技能 jianwei-brief（/jianwei-brief）。',
-    timing: { kind: 'daily', time: '09:30', timeZone: 'Asia/Shanghai' }, target: { kind: 'new_once', workspaceId: 'stock', configuration: chosen } } })).json();
-  assert.equal(made.outcome, 'ok');
-  assert.deepEqual(sessions, [{ cwd: directory, configuration: chosen, title: '每日研判' }]);
-  assert.deepEqual((created.at(-1) as { target: unknown }).target, { kind: 'session', sessionId: 's-made' }, 'the task points at the conversation Zhongshu made');
-  const own = store.conversationForNative('dsh', 's-made');
-  assert.equal(own?.automationId, 'made'); assert.deepEqual(own?.configuration, chosen);
-  assert.deepEqual(made.automation.target, { kind: 'new_once', conversationId: own!.id, workspaceId: 'stock', workspaceLabel: 'Stock', configuration: chosen });
-  const plain = await app.inject({ method: 'POST', url: '/automations', payload: { harnessId: 'dsh', title: 'x', prompt: 'x', timing: { kind: 'every', seconds: 3600 },
-    target: { kind: 'new', workspaceId: 'stock', configuration: chosen } } });
-  assert.equal(plain.statusCode, 400, 'a new session per run cannot carry a configuration the Harness would not apply');
+  for (const kind of ['new_once', 'new']) {
+    const refused = await app.inject({ method: 'POST', url: '/automations', payload: { harnessId: 'dsh', title: '每日研判', prompt: 'x',
+      timing: { kind: 'daily', time: '09:30', timeZone: 'Asia/Shanghai' }, target: { kind, workspaceId: 'stock', configuration: chosen } } });
+    assert.equal(refused.statusCode, 400, `${kind} cannot carry a configuration the Harness would not apply`);
+  }
+  assert.deepEqual(sessions, [], 'no session was opened ahead of a run');
   assert.deepEqual((await app.inject({ method: 'POST', url: '/automations/missing/run' })).json(), { outcome: 'not_found' });
 });

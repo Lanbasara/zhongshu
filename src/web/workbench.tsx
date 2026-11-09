@@ -706,14 +706,9 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
   const status = conversation ? conversationStatus(conversation) : undefined;
   const statusText = workspaceRemoved ? '工作区已移除' : conversation ? stateLabel(conversation) : '';
   const searchButton = <IconButton className="header-search" label="搜索与跳转" onClick={() => setSearching(true)}><Search size={18}/></IconButton>;
-  // One read serves the sidebar rows and the conversation strip; the sidebar opens an automation's latest run.
+  // One read serves the run bar and the conversation strip. Run conversations are ordinary sidebar rows (ADR 0021, 2026-11-09).
   const automationData = useAutomations(listRevision, true);
   const automationTitles = useMemo(() => new Map(automationData.automations.map(task => [task.id, task.title])), [automationData.automations]);
-  const openRuns = useCallback((automationId: string) => {
-    request(`/automations/${encodeURIComponent(automationId)}/runs`, z.object({ conversations: z.array(z.object({ id: z.uuid() }).passthrough()).max(200) }))
-      .then(value => { const latest = value.conversations[0]; if (latest) choose(latest.id); else openScheduleRef.current('tasks'); })
-      .catch(() => openScheduleRef.current('tasks'));
-  }, [choose]);
   // An agent notification opens its turn (ADR 0021): scroll to the tool record, or the reply after it, and mark it briefly.
   useEffect(() => {
     if (!pendingNotice || !selected || !snapshot || snapshot.conversation.id !== selected) return;
@@ -773,7 +768,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
         badge={storageState(storage.value) && <span className="sidebar-badge" data-state={storageState(storage.value)} aria-label={storage.value?.full ? '存储已满' : '存储接近上限'}/>}/>
       {!narrow && <div className="sidebar-status"><ConnectionStatus {...connectionView}/></div>}
     </>}>
-    <ConversationNavigation automations={automationData.automations} openRuns={openRuns} selectedAutomation={view ? undefined : conversation?.automationId} workspaces={configuration?.workspaces} workspaceAction={setWorkspaceAction} selected={view ? undefined : selected}
+    <ConversationNavigation workspaces={configuration?.workspaces} workspaceAction={setWorkspaceAction} selected={view ? undefined : selected}
       revision={listRevision} csrf={csrf} choose={choose} create={createInWorkspace} manage={setManaging} report={report} attention={attention?.conversations}/>
   </SidebarShell>;
   const panel = view ? undefined : subagentPanel && conversation && !narrow ? subagentHost : reader && configuration ? <WorkspaceReader workspaces={configuration.workspaces} initialWorkspace={conversation?.workspaceId}

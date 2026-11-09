@@ -233,3 +233,13 @@ test('pending Codex results hold observation and recovery without blocking archi
   assert.equal((await f.service.setArchived(f.id, true)).archived, true, 'pending results never block archive');
   assert.equal(f.store.recoverableConversations('').includes(f.id), false, 'an archived tree no longer holds the parent');
 });
+
+test('a session no run ever started in can be archived with set-up inputs still queued; one that ran cannot', async t => {
+  // ADR 0021, 2026-11-09: conversations opened ahead of a first run could not be deleted (DSH) nor archived (queued set-up).
+  const f = fixture(t);
+  f.peer.state = async () => ({ ...idle(), pendingInputs: 2 });
+  assert.equal((await f.service.setArchived(f.id, true)).archived, true);
+  const g = fixture(t);
+  g.peer.state = async () => ({ ...idle(), runId: 'run-1', pendingInputs: 2 });
+  await assert.rejects(g.service.setArchived(g.id, true), { code: 'conversation_archive_busy' });
+});

@@ -7,7 +7,7 @@ import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { HarnessError, type AutomationDelivery, type Binding, type Configuration, type HarnessAdapter, type HarnessAutomations, type HarnessId, type NativeAutomation } from '../harness/types.ts';
+import { HarnessError, type AutomationDelivery, type HarnessAdapter, type HarnessAutomations, type HarnessId, type NativeAutomation } from '../harness/types.ts';
 import {
   automationCreateSchema, automationDeleteSchema, automationEditSchema, timelineLineSchema,
   type AutomationDeliveryView, type AutomationView, type TimelineEntry, type TimelineView,
@@ -171,29 +171,6 @@ export function createAutomations(db: DatabaseSync, workbench: Workbench, adapte
     return { kind: input.kind, cwd: workspace.directory, ...(input.preset ? { preset: input.preset } : {}) };
   }
 
-  /**
-   * "First new, then reuse" with a chosen configuration. The Harness can only give a session it creates a workspace and
-   * a preset, so Zhongshu creates that conversation now, configured and verified like any other, and points the task at
-   * it. It is the task's conversation from the start. If the task cannot be created, the empty session stays unused.
-   */
-  async function createWithConversation(input: z.infer<typeof automationCreateSchema>, workspaceId: string, configuration: Configuration): Promise<NativeAutomation> {
-    const adapter = adapters.get('dsh');
-    const workspace = workbench.workspaces.find(entry => entry.id === workspaceId);
-    if (!adapter || !sources.has('dsh')) throw new AutomationError('automations_unavailable', 409);
-    if (!workspace) throw new AutomationError('workspace_not_found', 404);
-    let binding: Binding;
-    try { binding = await adapter.create({ cwd: workspace.directory, configuration, title: input.title }, () => {}); }
-    catch (error) {
-      if (error instanceof HarnessError && /^DSH_(REASONING_EFFORT|CONFIGURATION|PRESET)_UNAVAILABLE$/.test(error.code)) throw new AutomationError('automation_configuration_unavailable', 409);
-      throw error;
-    }
-    const task = await source('dsh').create({ title: input.title, prompt: input.prompt, timing: input.timing, target: { kind: 'session', sessionId: binding.id } });
-    reserve(task.id, binding.id);
-    workbench.store.adoptConversation({ id: randomUUID(), harnessId: 'dsh', workspaceId: workspace.id, cwd: workspace.directory, title: task.title.slice(0, 200) || '自动任务',
-      configuration, binding, automationId: task.id });
-    return task;
-  }
-
   /** The timeline of every active workspace; invalid lines are skipped and reported, never guessed. */
   async function timeline(): Promise<TimelineView> {
     const entries: TimelineEntry[] = []; const problems: TimelineView['problems'] = [];
@@ -238,8 +215,7 @@ export function createAutomations(db: DatabaseSync, workbench: Workbench, adapte
     });
     app.post('/automations', { bodyLimit: 64 * 1024 }, async request => {
       const input = parse(automationCreateSchema, request.body);
-      const task = input.target.kind === 'new_once' && input.target.configuration ? await createWithConversation(input, input.target.workspaceId, input.target.configuration)
-        : await source(input.harnessId).create({ title: input.title, prompt: input.prompt, timing: input.timing, target: targetInput(input.target) });
+      const task = await source(input.harnessId).create({ title: input.title, prompt: input.prompt, timing: input.timing, target: targetInput(input.target) });
       log({ event: 'automation_created' }); await refresh();
       return { outcome: 'ok', automation: view(task) };
     });
