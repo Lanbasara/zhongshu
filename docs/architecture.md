@@ -154,7 +154,7 @@ Codex 经专用 Unix socket 管理进程调用固定 CLI 和同一实例的 App 
 | 叫用户 | [agent-tools.ts](../src/server/agent-tools.ts) 在 `127.0.0.1` 的独立端口提供最小 MCP（`initialize`、`tools/list`、`tools/call`），只有 `notify_user` 一个工具，Bearer 令牌比对、拒绝带 `Origin` 的请求。[agent-notifications.ts](../src/server/agent-notifications.ts) 保存通知（有频率上限），从 Workbench 观察到的工具记录（运行中的实时条目，以及变化了的最新历史页）认出所在对话与条目后推送；20 秒内认不出，就推送到日程 |
 | 数据 | 迁移 23：对话行的 `automation_id`；`agent_notifications`（摘要、可选文件、落位）；`automation_deliveries`（每个任务处理过的最近一次投递，重启不重复不遗漏）。迁移 24：`automation_reservations`（预留会话）。任务本身不入库 |
 | 接口 | 私有 `GET /automations`、`/automations/:id/history`、`/automations/:id/runs`、`/notifications`、`/notifications/:id`、`/timeline`；`POST /automations`、`/automations/:id/edit`、`/delete`、`/run`。沿用认证、来源与 CSRF 检查 |
-| 界面 | 侧栏「日程」进入 [schedule-view.tsx](../src/web/schedule-view.tsx)，日期展开与汇总在纯模型 [schedule-model.ts](../src/web/schedule-model.ts)。对话顶部的任务条与运行条在 [conversation-automations.tsx](../src/web/conversation-automations.tsx)，投递消息解析在 [automation-delivery.ts](../src/web/automation-delivery.ts)，侧栏每个任务一行在 [conversation-navigation.tsx](../src/web/conversation-navigation.tsx)。推送点开 `#<对话>:notice:<通知>` 时滚到那一轮并高亮 |
+| 界面 | 侧栏「日程」进入 [schedule-view.tsx](../src/web/schedule-view.tsx)，日期展开与汇总在纯模型 [schedule-model.ts](../src/web/schedule-model.ts)。对话顶部的任务条与运行条在 [conversation-automations.tsx](../src/web/conversation-automations.tsx)，投递消息解析在 [automation-delivery.ts](../src/web/automation-delivery.ts)；任务运行开出的对话在[侧栏](../src/web/conversation-navigation.tsx)里是普通对话行，带时钟标记，任务本身不占行。推送点开 `#<对话>:notice:<通知>` 时滚到那一轮并高亮 |
 
 ## Harness 账号
 

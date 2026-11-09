@@ -1,22 +1,21 @@
 /**
  * Forms of the schedule panel (ADR 0021): create and edit a native automation. What a task can be configured with
- * follows what the Harness applies: a new session per run takes only the workspace and preset; a conversation reused
- * by every run is created by Zhongshu with the full configuration; a conversation target keeps its own.
+ * follows what the Harness applies: a conversation the Host opens for a run (every run, or the first run and then reused)
+ * takes only the workspace and preset, with the Host's default model, effort and permission; a conversation target keeps
+ * its own. Zhongshu never opens a conversation before a run (ADR 0021, 2026-11-09).
  */
 import { useEffect, useState, type ReactNode } from 'react';
 import { Check, ChevronDown, Sparkles } from 'lucide-react';
 import { z } from 'zod';
 import { automationResultSchema, type AutomationView } from '../shared/automations.ts';
 import { skillCatalogSchema, type SkillOption } from '../shared/content.ts';
-import { configurationSchema, type WorkbenchConfiguration } from '../shared/workbench.ts';
-import { DraftConfiguration, type DraftConfigurationValue } from './patterns/draft-configuration.tsx';
+import type { WorkbenchConfiguration } from '../shared/workbench.ts';
 import { Button } from './ui/controls.tsx';
 import { request, RequestError } from './workbench-client.ts';
 import { instructionWithSkill, localDate, localTime, timingText, WEEKDAYS } from './schedule-model.ts';
 
 const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
 type TimingDraft = { kind: 'at' | 'daily' | 'weekly' | 'every'; date: string; time: string; weekdays: number[]; minutes: number };
-type Catalog = WorkbenchConfiguration['harnesses'][number];
 
 function timingFrom(draft: TimingDraft) {
   if (draft.kind === 'at') { const [y, m, d] = draft.date.split('-').map(Number); const [hh, mm] = draft.time.split(':').map(Number); return { kind: 'at', at: new Date(y!, m! - 1, d!, hh!, mm!).toISOString() }; }
@@ -94,13 +93,6 @@ const targets = {
   new: ['每次新开一段对话', '每次运行都是一段新对话，适合例行检查。'],
   new_once: ['首次新开，之后回到那段', '所有运行都在同一段对话里，适合持续跟踪。'],
 } as const;
-const defaultsSchema = z.object({ conversation: z.object({ harnessId: z.enum(['codex', 'dsh']), configuration: configurationSchema }).passthrough().nullable() });
-
-function nativeDefaults(catalog?: Catalog): DraftConfigurationValue {
-  const model = catalog?.models.find(item => item.id === catalog.defaultModelId);
-  const preset = catalog?.presets?.find(item => item.id === catalog.defaultPresetId && item.available);
-  return { modelId: model?.id ?? '', permissionId: '', ...(model?.defaultReasoningEffort ? { reasoningEffort: model.defaultReasoningEffort } : {}), ...(preset ? { agentPreset: preset.id } : {}) };
-}
 
 export function CreateForm({ configuration, csrf, report, close, reload, conversationId }: {
   configuration?: WorkbenchConfiguration; csrf: string; report(reason: unknown): void; close(): void; reload(): Promise<void>; conversationId?: string;
@@ -114,21 +106,11 @@ export function CreateForm({ configuration, csrf, report, close, reload, convers
   const [picked, setPicked] = useState('');
   const workspace = configuration?.workspaces.some(entry => entry.id === picked) ? picked : configuration?.workspaces[0]?.id ?? '';
   const [preset, setPreset] = useState(dsh?.defaultPresetId ?? presets.find(item => item.available)?.id ?? '');
-  const [agent, setAgent] = useState<DraftConfigurationValue>(() => nativeDefaults(dsh));
   const [skill, setSkill] = useState<SkillOption>();
   const [busy, setBusy] = useState(false); const [tried, setTried] = useState(false); const [problem, setProblem] = useState<string>();
-  // A reused conversation starts from what the user last ran in this workspace, like a new conversation does.
-  useEffect(() => {
-    if (target !== 'new_once' || !workspace) return; let alive = true;
-    request(`/conversation-defaults?workspaceId=${encodeURIComponent(workspace)}`, defaultsSchema).then(value => {
-      if (alive && value.conversation?.harnessId === 'dsh') setAgent({ ...nativeDefaults(dsh), ...value.conversation.configuration });
-    }).catch(() => {});
-    return () => { alive = false; };
-  }, [target, workspace, dsh]);
   useEffect(() => { setSkill(undefined); }, [target, workspace]);
 
-  const missing = [!title.trim() && '名称', !prompt.trim() && !skill && '指令或技能', target !== 'conversation' && !workspace && '工作区',
-    target === 'new_once' && (!agent.modelId || !agent.permissionId) && '模型与权限'].filter(Boolean) as string[];
+  const missing = [!title.trim() && '名称', !prompt.trim() && !skill && '指令或技能', target !== 'conversation' && !workspace && '工作区'].filter(Boolean) as string[];
   const submit = async () => {
     setTried(true); setProblem(undefined);
     if (missing.length) return;
@@ -136,13 +118,11 @@ export function CreateForm({ configuration, csrf, report, close, reload, convers
     try {
       const body = { harnessId: 'dsh', title: title.trim(), prompt: instructionWithSkill(prompt, skill), timing: timingFrom(timing),
         target: target === 'conversation' && conversationId ? { kind: 'conversation', conversationId }
-          : target === 'new_once' ? { kind: 'new_once', workspaceId: workspace, configuration: agent }
-          : { kind: 'new', workspaceId: workspace, ...(preset ? { preset } : {}) } };
+          : { kind: target, workspaceId: workspace, ...(preset ? { preset } : {}) } };
       await request('/automations', automationResultSchema, { csrf, body, timeoutMs: 60_000 });
       await reload(); close();
     } catch (error) {
-      if (error instanceof RequestError && error.code === 'automation_configuration_unavailable') setProblem('所选的模型、思考深度或预设现在不可用，请换一个再试。');
-      else if (error instanceof RequestError && error.code === 'workspace_not_found') setProblem('这个工作区已经不在了，请换一个。');
+      if (error instanceof RequestError && error.code === 'workspace_not_found') setProblem('这个工作区已经不在了，请换一个。');
       else report(error);
     } finally { setBusy(false); }
   };
@@ -163,13 +143,11 @@ export function CreateForm({ configuration, csrf, report, close, reload, convers
           <button key={id} type="button" role="radio" aria-checked={target === id} className="sch-choice" onClick={() => setTarget(id)}>
             <span><b>{targets[id][0]}</b><small>{targets[id][1]}</small></span>{target === id && <Check size={15} aria-hidden="true"/>}</button>)}
       </div>
-      <Field label="Agent 配置" hint={target === 'new' ? '每次运行的对话由宿主新建，只能选预设；模型、思考深度和权限用宿主默认。要指定模型，选“首次新开，之后回到那段”。'
-        : target === 'new_once' ? '中书现在就按这个配置建好那段对话，之后每次运行都投递到那里。' : undefined}>
-        {target === 'conversation' && <p className="sch-static">沿用这段对话的配置。</p>}
-        {target === 'new' && (presets.length ? <Segments label="Agent 预设" value={preset} change={setPreset} options={presets.map(item => [item.id, item.label, !item.available] as const)}/>
-          : <p className="sch-static">宿主默认</p>)}
-        {target === 'new_once' && dsh && <div className="sch-config"><DraftConfiguration catalogs={[dsh]} harnessId="dsh" configuration={agent} disabled={busy}
-          onPowerChange={() => {}} onConfigurationChange={setAgent}/></div>}
+      <Field label="Agent 配置" hint={target === 'conversation' ? undefined
+        : '运行到点时由宿主新开对话，只能选预设；模型、思考深度和权限用宿主默认。要用别的配置，先自己开一段配好的对话，再让任务投递到那里。'}>
+        {target === 'conversation' ? <p className="sch-static">沿用这段对话的配置。</p>
+          : presets.length ? <Segments label="Agent 预设" value={preset} change={setPreset} options={presets.map(item => [item.id, item.label, !item.available] as const)}/>
+          : <p className="sch-static">宿主默认</p>}
       </Field>
       {problem && <p className="sch-notice" role="status">{problem}</p>}
     </div>

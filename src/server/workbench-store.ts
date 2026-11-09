@@ -481,7 +481,7 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
               WHERE workspace_id = ? AND archived = ? AND (last_activity_at,id) < (?,?)
                 AND workspace_id NOT IN (SELECT value FROM json_each(?))
                 AND instr(lower(title), lower(?)) > 0
-                AND ((? IS NULL AND automation_id IS NULL) OR automation_id = ?)
+                AND (? IS NULL OR automation_id = ?)
               ORDER BY last_activity_at DESC,id DESC LIMIT ?
             `).all(input.workspaceId, Number(input.archived), ...cursor, exclusions, title, automation, automation, input.limit)
           : input.archived !== undefined && input.workspaceId === undefined
@@ -490,7 +490,7 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
                 WHERE archived = ? AND (last_activity_at,id) < (?,?)
                   AND workspace_id NOT IN (SELECT value FROM json_each(?))
                   AND instr(lower(title), lower(?)) > 0
-                  AND ((? IS NULL AND automation_id IS NULL) OR automation_id = ?)
+                  AND (? IS NULL OR automation_id = ?)
                 ORDER BY last_activity_at DESC,id DESC LIMIT ?
               `).all(Number(input.archived), ...cursor, exclusions, title, automation, automation, input.limit)
             : db.prepare(`
@@ -498,7 +498,7 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
                 WHERE (last_activity_at,id) < (?,?) AND (? IS NULL OR workspace_id = ?)
                   AND workspace_id NOT IN (SELECT value FROM json_each(?))
                   AND instr(lower(title), lower(?)) > 0
-                  AND ((? IS NULL AND automation_id IS NULL) OR automation_id = ?)
+                  AND (? IS NULL OR automation_id = ?)
                 ORDER BY last_activity_at DESC,id DESC LIMIT ?
               `).all(...cursor, input.workspaceId ?? null, input.workspaceId ?? null, exclusions, title, automation, automation, input.limit);
         return rows.map(conversationFromRow);
@@ -562,6 +562,11 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
         const error = change.error === undefined ? conversation.error : change.error;
         if (readiness === conversation.readiness && JSON.stringify(state) === JSON.stringify(conversation.state) && error === conversation.error) return conversation;
         db.prepare('UPDATE workbench_conversations SET readiness=?,state_json=?,error=? WHERE id=?').run(readiness, JSON.stringify(state), error, id);
+        // A native run Zhongshu did not start, such as an automation delivery, is new activity: the conversation moves up
+        // the list like one the user just wrote in (ADR 0021, 2026-11-09). Runs Zhongshu starts were counted on acceptance.
+        if (state.runId && state.runId !== conversation.state.runId) {
+          db.prepare('UPDATE workbench_conversations SET last_activity_at=MAX(last_activity_at,?) WHERE id=?').run(now(), id);
+        }
         changed(id, undefined, 'state');
         return requireConversation(id);
       });

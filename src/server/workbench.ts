@@ -90,6 +90,13 @@ function historyErrorCode(error: unknown): string {
 }
 
 /** One application writer. Native execution outlives browser observers and application connections. */
+/** A native session no run has ever started in, such as one opened ahead of a first message; set-up commands may
+ * still wait in its inbox. Archiving it hides nothing that ran (ADR 0021, 2026-11-09). */
+function neverRan(conversation: Conversation) {
+  const state = conversation.state;
+  return state.status === 'idle' && !state.runId && !state.terminalRunId && !state.latest;
+}
+
 export class Workbench {
   readonly store: WorkbenchStore;
   private readonly initialWorkspaces: Workspace[];
@@ -1179,7 +1186,7 @@ export class Workbench {
     }
     this.assertNotDeleting(id);
     return this.store.setArchived(id, archived, conversation =>
-      conversation.binding ? this.messageAllowed(conversation) :
+      conversation.binding ? this.messageAllowed(conversation) || neverRan(conversation) :
         conversation.readiness === 'blocked' && conversation.state.pendingInputs === 0 &&
         !['running', 'waiting'].includes(conversation.state.status));
   }
