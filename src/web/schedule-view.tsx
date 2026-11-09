@@ -3,7 +3,7 @@
  * changed through the private API; the workspace timeline is read-only. Nothing about a task is kept in the browser.
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
-import { Bell, ChevronLeft, ChevronRight, Clock, Pause, Pencil, Play, Plus, Trash2, X } from 'lucide-react';
+import { Bell, ChevronLeft, ChevronRight, Clock, Pause, Play, Plus, Trash2, X } from 'lucide-react';
 import { z } from 'zod';
 import {
   agentNotificationListSchema, automationHistorySchema, automationListSchema, automationResultSchema, timelineSchema,
@@ -12,8 +12,8 @@ import {
 import type { WorkbenchConfiguration } from '../shared/workbench.ts';
 import { Button, IconButton } from './ui/controls.tsx';
 import { request } from './workbench-client.ts';
-import { CreateForm, EditForm } from './schedule-forms.tsx';
-import { addDays, dayLabel, localDate, localTime, mondayOf, parseDate, runConfigurationText, scheduleItems, summarize, timingText, WEEKDAYS, type ScheduleItem } from './schedule-model.ts';
+import { CreateForm, Field, TimingFields, initialTiming, timingFrom } from './schedule-forms.tsx';
+import { addDays, dayLabel, localDate, localTime, mondayOf, parseDate, runConfigurationText, scheduleItems, summarize, timingText, whenText, WEEKDAYS, type ScheduleItem } from './schedule-model.ts';
 import './schedule.css';
 
 export type ScheduleTab = 'calendar' | 'today' | 'future' | 'past' | 'tasks';
@@ -71,8 +71,7 @@ export function ScheduleView({ csrf, report, configuration, revision, tab, onTab
     from: addDays(today, -400), to: addDays(today, 400), now }), [data.automations, data.timeline.entries, data.notifications, today, now]);
   const visible = useMemo(() => items.filter(item => filters[item.kind === 'agent' ? (item.routine ? 'routine' : 'agent') : item.kind === 'decision' || item.kind === 'research' ? 'record' : item.kind]), [items, filters]);
   const open = (item: ScheduleItem) => {
-    // An agent card opens its conversation whenever there is one (ADR 0021, 2026-11-09); a new conversation per run has none before it runs.
-    if (item.automationId && item.conversationId) return openConversation(item.conversationId);
+    // A card opens the card first, like the native app; its conversation is one step away on it (ADR 0021, 2026-11-09).
     if (item.automationId) return setPanel({ kind: 'task', id: item.automationId });
     setPanel({ kind: 'entry', item });
   };
@@ -93,7 +92,7 @@ export function ScheduleView({ csrf, report, configuration, revision, tab, onTab
     : tab === 'today' ? <DayList items={visible.filter(item => item.date === today)} now={now} today={today} open={open} heading={`${dayLabel(today)} · 现在 ${localTime(new Date(now))}`}/>
     : tab === 'future' ? <FutureTab items={visible} today={today} week={week} setWeek={setWeek} open={open}/>
     : tab === 'past' ? <PastTab items={visible} today={today} open={open} problems={data.timeline.problems} labels={configuration?.workspaces}/>
-    : <TasksTab automations={data.automations} open={id => setPanel({ kind: 'task', id })} openConversation={openConversation}/>;
+    : <TasksTab automations={data.automations} open={id => setPanel({ kind: 'task', id })} now={now}/>;
   return <div className="schedule">
     <div className="schedule-tabs" role="tablist" aria-label="日程视图">
       {scheduleTabs.map(entry => <button key={entry.id} type="button" role="tab" aria-selected={tab === entry.id} className="schedule-tab" onClick={() => onTab(entry.id)}>{entry.label}</button>)}
@@ -105,7 +104,7 @@ export function ScheduleView({ csrf, report, configuration, revision, tab, onTab
       {!data.available && data.loaded && <p className="schedule-note">这个实例没有可用的原生自动任务（需要 DSH 0.2.2 及以上）。时间轴文件仍会显示。</p>}
       {content}
     </div>
-    {panel && <SchedulePanel panel={panel} automations={data.automations} configuration={configuration} csrf={csrf} report={report} close={() => setPanel(undefined)}
+    {panel && <SchedulePanel panel={panel} automations={data.automations} configuration={configuration} csrf={csrf} report={report} close={() => setPanel(undefined)} now={now}
       notice={notice} notify={setNotice} reload={data.reload} edit={edit} openConversation={id => { setPanel(undefined); openConversation(id); }} openFile={(workspaceId, path) => { setPanel(undefined); openFile(workspaceId, path); }} notifications={data.notifications}/>}
   </div>;
 }
@@ -351,40 +350,44 @@ function PastTab({ items, today, open, problems, labels }: { items: ScheduleItem
     {days.map(day => <div key={day}><h3 className="sch-dayhead">{dayLabel(day)}</h3>{past.filter(item => item.date === day).map(item => <Row key={item.key} item={item} open={open}/>)}</div>)}
   </section>;
 }
-function TasksTab({ automations, open, openConversation }: { automations: AutomationView[]; open(id: string): void; openConversation(id: string): void }) {
-  const groups = new Map<string, { title: string; sub: string; conversationId?: string; tasks: AutomationView[] }>();
-  for (const task of automations) {
-    const where = task.target.workspaceLabel ? ` · ${task.target.workspaceLabel}` : '';
-    const key = task.target.kind === 'conversation' ? `c:${task.target.conversationId}` : task.target.kind === 'unknown' ? 'unknown' : `${task.target.kind}:${task.target.workspaceId ?? ''}`;
-    const group = groups.get(key) ?? (task.target.kind === 'conversation' ? { title: `投递到对话：${task.target.conversationTitle ?? ''}`, sub: '回到这段对话', conversationId: task.target.conversationId, tasks: [] }
-      : task.target.kind === 'unknown' ? { title: '投递到中书之外的会话', sub: '原生会话不在中书里', tasks: [] }
-      : task.target.kind === 'new_once' ? { title: `首次新开，之后回到那段${where}`, sub: '第一次运行时新开一段对话，以后都投递到那里', tasks: [] }
-      : { title: `每次新开一段对话${where}`, sub: '历次运行收在任务下面，不占侧栏', tasks: [] });
-    group.tasks.push(task); groups.set(key, group);
-  }
+const taskFilters = [['active', '已开启'], ['paused', '已暂停'], ['ended', '已结束'], ['all', '全部']] as const;
+/** All tasks as one list, like the native app: filtered by state, searchable, each row opening its card. */
+function TasksTab({ automations, open, now }: { automations: AutomationView[]; open(id: string): void; now: number }) {
+  const [filter, setFilter] = useState<(typeof taskFilters)[number][0]>('active');
+  const [query, setQuery] = useState('');
+  const needle = query.trim().toLowerCase();
+  const shown = automations.filter(task => (filter === 'all' || task.status === filter) && (!needle || `${task.title}\n${task.prompt}`.toLowerCase().includes(needle)))
+    .sort((a, b) => a.status === 'ended' && b.status === 'ended' ? (b.lastDelivery?.deliveredAt ?? '').localeCompare(a.lastDelivery?.deliveredAt ?? '') : a.scheduledAt.localeCompare(b.scheduledAt));
   if (!automations.length) return <p className="quiet sch-column">还没有自动任务。可以在对话里让 Agent 按计划建，或点「新建自动任务」。</p>;
   return <section className="sch-column sch-wide">
-    <p className="schedule-note">按“结果投递到哪”分组。中书不区分跟踪、例行或跟进，这些形态从投递目标和次数里自然出现。</p>
-    {[...groups.values()].map(group => <section key={group.title} className="sch-group">
-      <header><span><b>{group.title}</b><small>{group.sub} · {group.tasks.length} 个</small></span>{group.conversationId && <Button size="small" variant="quiet" onClick={() => openConversation(group.conversationId!)}>打开对话</Button>}</header>
-      {group.tasks.map(task => <button key={task.id} type="button" className={`sch-task${task.status === 'ended' ? ' sch-past' : ''}`} onClick={() => open(task.id)}>
-        <span><span className="sch-title">{task.title}</span><small>{timingText(task)}{task.runs ? ` · 运行 ${task.runs} 次` : ''}</small></span>
-        <span className="sch-chips">
-          {task.lastDelivery?.late && <span className="sch-chip sch-chip-late">迟到</span>}
-          {task.executing && <span className="sch-chip sch-chip-next">运行中</span>}
-          {task.status === 'paused' ? <span className="sch-chip"><Pause size={10}/>已暂停</span> : task.status === 'ended' ? <span className="sch-chip">已跑完</span>
-            : <span className="sch-chip sch-chip-agent">下次 {new Date(task.scheduledAt).getMonth() + 1}-{new Date(task.scheduledAt).getDate()} {localTime(new Date(task.scheduledAt))}</span>}
+    <div className="sch-task-tools">
+      <div className="sch-seg" role="group" aria-label="按状态筛选">{taskFilters.map(([id, label]) =>
+        <button key={id} type="button" aria-pressed={filter === id} onClick={() => setFilter(id)}>{label}</button>)}</div>
+      <input className="sch-search" type="search" placeholder="搜索自动任务" aria-label="搜索自动任务" value={query} onChange={event => setQuery(event.target.value)}/>
+    </div>
+    {shown.length === 0 ? <p className="quiet">没有符合条件的任务。</p> : <div className="sch-task-list">{shown.map(task =>
+      <button key={task.id} type="button" className={`sch-task${task.status === 'ended' ? ' sch-past' : ''}`} onClick={() => open(task.id)}>
+        <Clock size={15} aria-hidden="true"/>
+        <span>
+          <span className="sch-title">{task.title}</span>
+          <small>{timingText(task)}{task.status === 'active' ? ` · 下次计划时间：${whenText(Date.parse(task.scheduledAt), now)}`
+            : task.lastDelivery ? ` · 最近一次：${whenText(Date.parse(task.lastDelivery.deliveredAt), now)}` : ''}{task.target.workspaceLabel ? ` · ${task.target.workspaceLabel}` : ''}</small>
+          {task.lastDelivery?.result && <small className="sch-result">{task.lastDelivery.result}</small>}
         </span>
-      </button>)}
-    </section>)}
+        <span className="sch-chips">
+          {task.executing && <span className="sch-chip sch-chip-next">运行中</span>}
+          {task.lastDelivery?.late && <span className="sch-chip sch-chip-late">迟到</span>}
+          {task.status === 'paused' && <span className="sch-chip"><Pause size={10}/>已暂停</span>}
+        </span>
+      </button>)}</div>}
   </section>;
 }
 
-function SchedulePanel({ panel, automations, configuration, csrf, report, close, notice, notify, reload, edit, openConversation, openFile, notifications }: {
+function SchedulePanel({ panel, automations, configuration, csrf, report, close, notice, notify, reload, edit, openConversation, openFile, notifications, now }: {
   panel: Panel; automations: AutomationView[]; configuration?: WorkbenchConfiguration; csrf: string; report(reason: unknown): void; close(): void;
   notice?: string; notify(message: string): void;
   reload(): Promise<void>; edit(task: AutomationView, body: { patch: Record<string, unknown> }): Promise<boolean>; openConversation(id: string): void;
-  openFile(workspaceId: string, path: string): void; notifications: AgentNotificationView[];
+  openFile(workspaceId: string, path: string): void; notifications: AgentNotificationView[]; now: number;
 }) {
   const ref = useRef<HTMLElement>(null);
   // Focus moves into the panel itself: not the close button, and no field that would pop up a phone keyboard.
@@ -395,7 +398,7 @@ function SchedulePanel({ panel, automations, configuration, csrf, report, close,
   return <>
     <div className="sch-scrim" onClick={close}/>
     <aside className="sch-panel" ref={ref} tabIndex={-1} role="dialog" aria-modal="true" aria-label={panel.kind === 'create' ? '新建自动任务' : '详情'}>
-      {panel.kind === 'task' ? <TaskDetail task={automations.find(task => task.id === panel.id)} configuration={configuration} csrf={csrf} report={report} close={close} notice={notice} notify={notify} reload={reload} edit={edit} openConversation={openConversation} notifications={notifications}/>
+      {panel.kind === 'task' ? <TaskDetail task={automations.find(task => task.id === panel.id)} configuration={configuration} csrf={csrf} report={report} close={close} notice={notice} notify={notify} reload={reload} edit={edit} openConversation={openConversation} notifications={notifications} now={now}/>
         : panel.kind === 'create' ? <><PanelHead title="新建自动任务" close={close}/><CreateForm configuration={configuration} csrf={csrf} report={report} close={close} reload={reload} conversationId={panel.conversationId}/></>
         : <EntryDetail item={panel.item} close={close} openFile={openFile}/>}
     </aside>
@@ -410,14 +413,23 @@ const refusals: Record<string, string> & { conflict: string; not_found: string }
 function PanelHead({ title, close }: { title: string; close(): void }) {
   return <header className="sch-panel-head"><Clock size={15}/><h2>{title}</h2><IconButton label="关闭" onClick={close}><X size={16}/></IconButton></header>;
 }
-function TaskDetail({ task, configuration, csrf, report, close, notice, notify, reload, edit, openConversation, notifications }: {
+/**
+ * The task card (ADR 0021, 2026-11-09): what it is, whether it ran and when it runs next, the conclusion written back,
+ * and one step to its conversation. Name, instruction and timing are edited in place, like the native app.
+ */
+function TaskDetail({ task, configuration, csrf, report, close, notice, notify, reload, edit, openConversation, notifications, now }: {
   task?: AutomationView; configuration?: WorkbenchConfiguration; csrf: string; report(reason: unknown): void; close(): void; notice?: string; notify(message: string): void; reload(): Promise<void>;
-  edit(task: AutomationView, body: { patch: Record<string, unknown> }): Promise<boolean>; openConversation(id: string): void; notifications: AgentNotificationView[];
+  edit(task: AutomationView, body: { patch: Record<string, unknown> }): Promise<boolean>; openConversation(id: string): void; notifications: AgentNotificationView[]; now: number;
 }) {
   const [history, setHistory] = useState<AutomationDeliveryView[]>();
-  const [editing, setEditing] = useState(false);
+  const [title, setTitle] = useState(task?.title ?? ''); const [prompt, setPrompt] = useState(task?.prompt ?? '');
+  const [timing, setTiming] = useState(() => initialTiming(task)); const [changeTiming, setChangeTiming] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [busy, setBusy] = useState(false);
+  const discard = useCallback(() => { setTitle(task?.title ?? ''); setPrompt(task?.prompt ?? ''); setTiming(initialTiming(task)); setChangeTiming(false); }, [task]);
+  // A change made elsewhere shows up as long as nothing here is being edited.
+  const dirty = !!task && (title !== task.title || prompt !== task.prompt || changeTiming);
+  useEffect(() => { if (!dirty) discard(); }, [task?.updatedAt]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (!task) return; let alive = true;
     request(`/automations/${encodeURIComponent(task.id)}/history`, automationHistorySchema).then(page => { if (alive) setHistory(page.records); }).catch(error => { if (alive) { setHistory([]); report(error); } });
@@ -435,44 +447,71 @@ function TaskDetail({ task, configuration, csrf, report, close, notice, notify, 
     await reload();
     if (result.outcome === 'conflict') { notify(refusals.conflict); setConfirmDelete(false); } else close();
   });
+  const save = () => act(async () => {
+    const patch = { ...(title !== task.title ? { title } : {}), ...(prompt !== task.prompt ? { prompt } : {}), ...(changeTiming ? { timing: timingFrom(timing) } : {}) };
+    if (await edit(task, { patch })) setChangeTiming(false);
+  });
   const target = task.target.kind === 'conversation' ? `回到对话：${task.target.conversationTitle ?? ''}` : task.target.kind === 'new' ? `每次新开一段对话${task.target.workspaceLabel ? `（${task.target.workspaceLabel}）` : ''}`
     : task.target.kind === 'new_once' ? `首次新开，之后都回到那段${task.target.workspaceLabel ? `（${task.target.workspaceLabel}）` : ''}` : '中书之外的原生会话';
-  const noticeFor = (record: AutomationDeliveryView) => record.conversationId ? notifications.filter(entry => entry.conversationId === record.conversationId && entry.createdAt >= Date.parse(record.deliveredAt) - 60_000).at(-1)?.summary : undefined;
-  if (editing) return <>
-    <PanelHead title="修改任务" close={close}/>
-    {notice && <p className="sch-notice sch-notice-panel" role="status">{notice}</p>}
-    <EditForm task={task} save={async patch => { if (await edit(task, { patch })) setEditing(false); }} cancel={() => setEditing(false)}/>
-  </>;
+  const noticeFor = (record: AutomationDeliveryView, until?: string) => record.conversationId ? notifications.filter(entry => entry.conversationId === record.conversationId
+    && entry.createdAt >= Date.parse(record.deliveredAt) - 60_000 && (!until || entry.createdAt < Date.parse(until))).at(-1)?.summary : undefined;
+  const status = task.executing ? '运行中' : task.status === 'paused' ? '已暂停' : task.status === 'ended' ? '已跑完' : task.lastDelivery ? '已运行' : '待运行';
+  const conversation = task.latestRun?.conversationId ?? task.lastDelivery?.conversationId ?? task.target.conversationId;
+  const latest = task.lastDelivery;
+  const editable = task.status !== 'ended';
+  const editableTiming = task.timing.kind !== 'cron' && !(task.timing.kind === 'rrule' && !/COUNT=1/.test(task.timing.rrule));
+  const empty = !title.trim() || !prompt.trim();
   return <>
     <PanelHead title={task.title} close={close}/>
-    <div className="sch-panel-body">
+    <div className="sch-panel-body sch-card">
       {notice && <p className="sch-notice" role="status">{notice}</p>}
-      <>
-        <dl className="sch-kv">
-          <dt>状态</dt><dd>{task.status === 'paused' ? '已暂停' : task.status === 'ended' ? '已跑完' : task.executing ? '运行中' : '进行中'}</dd>
-          <dt>时间</dt><dd>{timingText(task)}</dd>
-          {task.status === 'active' && <><dt>下一次</dt><dd>{dayLabel(localDate(new Date(task.scheduledAt)))} {localTime(new Date(task.scheduledAt))}</dd></>}
-          <dt>结果去哪</dt><dd>{target}</dd>
-          <dt>运行配置</dt><dd>{runConfigurationText(task, configuration)}</dd>
-        </dl>
-        <h3 className="sch-sub">交给 Agent 的指令</h3>
-        <div className="sch-prompt">{task.prompt}</div>
-        <h3 className="sch-sub">运行记录</h3>
-        {!history ? <p className="quiet">正在读取…</p> : history.length === 0 ? <p className="quiet">还没跑过。</p> : <div className="sch-history">{history.map(record =>
-          <button key={record.deliveredAt} type="button" disabled={!record.conversationId} onClick={() => record.conversationId && openConversation(record.conversationId)}>
-            <span>{dayLabel(localDate(new Date(record.deliveredAt)))} {localTime(new Date(record.deliveredAt))}</span>
-            {record.late && <span className="sch-chip sch-chip-late">迟到 {Math.round((Date.parse(record.deliveredAt) - Date.parse(record.scheduledAt)) / 60_000)} 分钟</span>}
-            {record.result && <small>{record.result}</small>}
-            {noticeFor(record) && <small><Bell size={10}/> “{noticeFor(record)}”</small>}
-          </button>)}</div>}
-      </>
+      <p className="sch-card-when">
+        <span className={`sch-chip${task.executing ? ' sch-chip-next' : ''}`}>{status}</span>
+        {task.status === 'active' && <span>下次运行 {whenText(Date.parse(task.scheduledAt), now)}</span>}
+      </p>
+      <section className="sch-latest">
+        {latest ? <>
+          <small>最近一次 · {whenText(Date.parse(latest.deliveredAt), now)}{latest.late ? ' · 迟到' : ''}</small>
+          <p>{latest.result ?? '这次没有写回结论，打开对话看过程。'}</p>
+          {noticeFor(latest) && <small><Bell size={10}/> 已通知你：“{noticeFor(latest)}”</small>}
+        </> : <p className="quiet">还没跑过。{task.target.kind === 'new' || (task.target.kind === 'new_once' && !conversation) ? '到点后会新开一段对话。' : ''}</p>}
+        {conversation && <Button size="small" variant="primary" onClick={() => openConversation(conversation)}>打开对话<ChevronRight size={14}/></Button>}
+      </section>
+      <div className="sch-form">
+        <Field label="名称">{editable ? <input aria-invalid={!title.trim() || undefined} value={title} maxLength={120} onChange={event => setTitle(event.target.value)}/> : <p className="sch-static">{task.title}</p>}</Field>
+        <Field label="任务内容">{editable ? <textarea aria-invalid={!prompt.trim() || undefined} value={prompt} maxLength={32000} onChange={event => setPrompt(event.target.value)}/> : <div className="sch-prompt">{task.prompt}</div>}</Field>
+        {editable && editableTiming && changeTiming ? <TimingFields draft={timing} change={setTiming}/>
+          : <Field label="运行时间"><div className="sch-static-row"><span>{timingText(task)}</span>{editable && editableTiming && <Button size="small" onClick={() => setChangeTiming(true)}>改时间</Button>}</div></Field>}
+        {editable && !editableTiming && <p className="sch-help">这条任务用的是高级规则，时间请在对话里让 Agent 改。</p>}
+      </div>
+      <dl className="sch-kv">
+        <dt>执行位置</dt><dd>{target}</dd>
+        <dt>运行配置</dt><dd>{runConfigurationText(task, configuration)}</dd>
+      </dl>
+      <h3 className="sch-sub">运行记录</h3>
+      {!history ? <p className="quiet">正在读取…</p> : history.length === 0 ? <p className="quiet">还没跑过。</p> : <div className="sch-history">{history.map((record, index) => {
+        const later = history.map(entry => entry.deliveredAt).filter(at => at > record.deliveredAt).sort()[0];
+        const said = noticeFor(record, later);
+        return <button key={record.deliveredAt + index} type="button" disabled={!record.conversationId} onClick={() => record.conversationId && openConversation(record.conversationId)}>
+          <span>{dayLabel(localDate(new Date(record.deliveredAt)))} {localTime(new Date(record.deliveredAt))}</span>
+          {record.late && <span className="sch-chip sch-chip-late">迟到 {Math.round((Date.parse(record.deliveredAt) - Date.parse(record.scheduledAt)) / 60_000)} 分钟</span>}
+          {record.conversationId && <ChevronRight size={13} aria-hidden="true"/>}
+          {record.result && <small>{record.result}</small>}
+          {said && <small><Bell size={10}/> “{said}”</small>}
+        </button>; })}</div>}
     </div>
     <footer className="sch-panel-actions">
-      {task.status !== 'ended' && <Button size="small" disabled={busy} onClick={() => act(async () => { await edit(task, { patch: { active: task.status === 'paused' } }); })}>{task.status === 'paused' ? <><Play size={13}/>恢复</> : <><Pause size={13}/>暂停</>}</Button>}
-      <Button size="small" disabled={busy || task.executing} onClick={() => void run()}><Play size={13}/>立即运行</Button>
-      {task.status !== 'ended' && <Button size="small" disabled={busy} onClick={() => setEditing(true)}><Pencil size={13}/>修改</Button>}
-      {confirmDelete ? <Button size="small" variant="danger" disabled={busy} onClick={() => void remove()}>确认删除</Button>
-        : <Button size="small" variant="quiet" disabled={busy} onClick={() => setConfirmDelete(true)}><Trash2 size={13}/>删除</Button>}
+      {dirty ? <>
+        {empty && <span className="sch-missing" role="status">名称和内容不能为空</span>}
+        <span className="sch-spacer"/>
+        <Button variant="quiet" disabled={busy} onClick={discard}>放弃</Button>
+        <Button variant="primary" disabled={busy || empty} onClick={() => void save()}>{busy ? '正在保存…' : '保存修改'}</Button>
+      </> : <>
+        {task.status !== 'ended' && <Button size="small" disabled={busy} onClick={() => act(async () => { await edit(task, { patch: { active: task.status === 'paused' } }); })}>{task.status === 'paused' ? <><Play size={13}/>恢复</> : <><Pause size={13}/>暂停</>}</Button>}
+        <Button size="small" disabled={busy || task.executing} onClick={() => void run()}><Play size={13}/>立即运行</Button>
+        {confirmDelete ? <Button size="small" variant="danger" disabled={busy} onClick={() => void remove()}>确认删除</Button>
+          : <Button size="small" variant="quiet" disabled={busy} onClick={() => setConfirmDelete(true)}><Trash2 size={13}/>删除</Button>}
+      </>}
     </footer>
   </>;
 }

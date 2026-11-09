@@ -17,13 +17,13 @@ import { instructionWithSkill, localDate, localTime, timingText, WEEKDAYS } from
 const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
 type TimingDraft = { kind: 'at' | 'daily' | 'weekly' | 'every'; date: string; time: string; weekdays: number[]; minutes: number };
 
-function timingFrom(draft: TimingDraft) {
+export function timingFrom(draft: TimingDraft) {
   if (draft.kind === 'at') { const [y, m, d] = draft.date.split('-').map(Number); const [hh, mm] = draft.time.split(':').map(Number); return { kind: 'at', at: new Date(y!, m! - 1, d!, hh!, mm!).toISOString() }; }
   if (draft.kind === 'every') return { kind: 'every', seconds: Math.max(1, draft.minutes) * 60 };
   if (draft.kind === 'weekly') return { kind: 'weekly', time: draft.time, timeZone: zone, weekdays: draft.weekdays.length ? draft.weekdays : [1, 2, 3, 4, 5] };
   return { kind: 'daily', time: draft.time, timeZone: zone };
 }
-function initialTiming(task?: AutomationView): TimingDraft {
+export function initialTiming(task?: AutomationView): TimingDraft {
   const soon = new Date(Date.now() + 3600_000);
   const base: TimingDraft = { kind: 'daily', date: localDate(soon), time: localTime(soon).slice(0, 3) + '00', weekdays: [1, 2, 3, 4, 5], minutes: 15 };
   if (!task) return base;
@@ -34,7 +34,7 @@ function initialTiming(task?: AutomationView): TimingDraft {
   const at = new Date(task.scheduledAt); return { ...base, kind: 'at', date: localDate(at), time: localTime(at) };
 }
 
-function Field({ label, hint, children, optional }: { label: string; hint?: ReactNode; children: ReactNode; optional?: boolean }) {
+export function Field({ label, hint, children, optional }: { label: string; hint?: ReactNode; children: ReactNode; optional?: boolean }) {
   return <div className="sch-field"><span className="sch-label">{label}{optional && <small>可选</small>}</span>{children}{hint && <small className="sch-help">{hint}</small>}</div>;
 }
 function Segments<T extends string>({ label, value, options, change }: { label: string; value: T; options: readonly (readonly [T, string, boolean?])[]; change(value: T): void }) {
@@ -43,7 +43,7 @@ function Segments<T extends string>({ label, value, options, change }: { label: 
   </div>;
 }
 
-function TimingFields({ draft, change }: { draft: TimingDraft; change(draft: TimingDraft): void }) {
+export function TimingFields({ draft, change }: { draft: TimingDraft; change(draft: TimingDraft): void }) {
   return <Field label="什么时候" hint={draft.kind === 'every' ? '从现在起，每隔这么久运行一次。' : `按 ${zone} 时间。`}>
     <Segments label="什么时候" value={draft.kind} change={kind => change({ ...draft, kind })} options={[['at', '一次'], ['daily', '每天'], ['weekly', '每周'], ['every', '固定间隔']]}/>
     {draft.kind === 'weekly' && <div className="sch-days" role="group" aria-label="星期">{WEEKDAYS.map((day, index) =>
@@ -155,32 +155,6 @@ export function CreateForm({ configuration, csrf, report, close, reload, convers
       {tried && missing.length > 0 && <span className="sch-missing" role="status">还差：{missing.join('、')}</span>}
       <Button variant="quiet" onClick={close}>取消</Button>
       <Button type="submit" variant="primary" disabled={busy}>{busy ? '正在创建…' : '创建'}</Button>
-    </footer>
-  </form>;
-}
-
-export function EditForm({ task, save, cancel }: { task: AutomationView; save(patch: Record<string, unknown>): Promise<void>; cancel(): void }) {
-  const [title, setTitle] = useState(task.title); const [prompt, setPrompt] = useState(task.prompt);
-  const editableTiming = task.timing.kind !== 'cron' && !(task.timing.kind === 'rrule' && !/COUNT=1/.test(task.timing.rrule));
-  const [timing, setTiming] = useState(initialTiming(task)); const [changeTiming, setChangeTiming] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const empty = !title.trim() || !prompt.trim();
-  return <form className="sch-form-shell" noValidate onSubmit={event => {
-    event.preventDefault(); if (empty) return; setBusy(true);
-    void save({ ...(title !== task.title ? { title } : {}), ...(prompt !== task.prompt ? { prompt } : {}), ...(changeTiming ? { timing: timingFrom(timing) } : {}) }).finally(() => setBusy(false));
-  }}>
-    <div className="sch-panel-body sch-form">
-      <Field label="名称"><input aria-invalid={!title.trim() || undefined} value={title} maxLength={120} onChange={event => setTitle(event.target.value)}/></Field>
-      <Field label="交给 Agent 的指令"><textarea aria-invalid={!prompt.trim() || undefined} value={prompt} maxLength={32000} onChange={event => setPrompt(event.target.value)}/></Field>
-      {editableTiming ? (changeTiming ? <TimingFields draft={timing} change={setTiming}/>
-        : <Field label="时间"><div className="sch-static-row"><span>{timingText(task)}</span><Button size="small" onClick={() => setChangeTiming(true)}>改时间</Button></div></Field>)
-        : <p className="schedule-note">这条任务用的是高级规则（{timingText(task)}），时间请在对话里让 Agent 改。</p>}
-      <p className="sch-help">结果去哪和 Agent 配置在建好后不能改；要换，就新建一个任务。</p>
-    </div>
-    <footer className="sch-panel-actions sch-panel-actions-end">
-      {empty && <span className="sch-missing" role="status">名称和指令不能为空</span>}
-      <Button variant="quiet" onClick={cancel}>取消</Button>
-      <Button type="submit" variant="primary" disabled={busy || empty}>{busy ? '正在保存…' : '保存'}</Button>
     </footer>
   </form>;
 }

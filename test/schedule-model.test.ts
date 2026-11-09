@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { deliveredReminders } from '../src/web/automation-delivery.ts';
-import { instructionWithSkill, localDate, localTime, movable, runConfigurationText, scheduleItems, summarize, zonedInstant } from '../src/web/schedule-model.ts';
+import { instructionWithSkill, localDate, localTime, movable, runConfigurationText, scheduleItems, summarize, whenText, zonedInstant } from '../src/web/schedule-model.ts';
 import type { AutomationView, TimelineEntry } from '../src/shared/automations.ts';
 
 const framing = 'This is a scheduled message from the user';
@@ -137,4 +137,13 @@ test('the run configuration says what the Harness will apply', () => {
   assert.equal(runConfigurationText(task({ target: { kind: 'new', workspaceId: 'w', preset: 'ptc' } }), configuration as never), 'PTC · 模型、思考深度和权限用宿主默认');
   assert.equal(runConfigurationText(task({ target: { kind: 'new', workspaceId: 'w' } }), configuration as never), '默认预设 · 模型、思考深度和权限用宿主默认');
   assert.equal(runConfigurationText(task({ target: { kind: 'unknown' } }), configuration as never), '中书之外的会话');
+});
+
+test('a card says when, with how many calendar days away, like the native app', () => {
+  const base = new Date(2026, 10, 9, 12, 30).getTime();
+  assert.equal(whenText(new Date(2026, 10, 15, 10, 0).getTime(), base), '11 月 15 日 10:00（6 天后）');
+  assert.equal(whenText(new Date(2026, 10, 9, 14, 45).getTime(), base), '11 月 9 日 14:45（今天）');
+  assert.equal(whenText(new Date(2026, 10, 10, 8, 0).getTime(), base), '11 月 10 日 08:00（明天）');
+  assert.equal(whenText(new Date(2026, 10, 8, 23, 59).getTime(), base), '11 月 8 日 23:59（昨天）');
+  assert.equal(whenText(new Date(2026, 10, 2, 9, 0).getTime(), base), '11 月 2 日 09:00（7 天前）');
 });
