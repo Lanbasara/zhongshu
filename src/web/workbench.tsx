@@ -4,7 +4,9 @@ import { Button, IconButton, Kbd, Menu, MenuItem, StatusDot, modifierKey, type S
 import { WorkbenchFrame, useNarrow } from './patterns/workbench-frame.tsx';
 import { ConnectionStatus, SidebarAction, SidebarShell } from './patterns/sidebar.tsx';
 import { Toasts, type ToastView } from './patterns/toasts.tsx';
-import { conversationStatus, harnessLabel, stateLabel } from './conversation-status.ts';
+import { conversationStatus, harnessLabel, nativeRunState, stateLabel } from './conversation-status.ts';
+import { conversationAttention } from './conversation-attention.ts';
+import { ConversationAttention } from './patterns/conversation-attention.tsx';
 import { SettingsView, settingsTabs, type SettingsTab } from './settings-view.tsx';
 import { ArchiveView } from './archive-view.tsx';
 import { ScheduleView, scheduleTabs, type ScheduleTab } from './schedule-view.tsx';
@@ -85,22 +87,8 @@ const historyNotes: Record<string, string> = {
   native_history_page_limit: '最新一页原生内容过大，暂时无法显示。',
   conversation_not_ready: '原生会话尚未就绪，暂时没有可读取的历史。',
 };
-const stateReasons: Record<string, string> = {
-  workspace_removed: failures.workspace_removed!,
-  workspace_directory_changed: failures.workspace_directory_changed!,
-  workspace_directory_unavailable: failures.workspace_directory_unavailable!,
-  workspace_identity_unavailable: failures.workspace_identity_unavailable!,
-  workspace_restore_pending: '正在核对原生会话，核对后可以继续对话。',
-  conversation_configuration_changed: '这段对话的工作区或原生服务配置已变化，需要管理员核对后才能继续。',
-  conversation_preparation_incomplete: '原生对话尚未准备完成；已有绑定已保留。',
-  native_creation_result_unknown: '应用在创建过程中中断，创建结果仍待核实。',
-  native_configuration_unverified: '还无法核实这段对话的模型与权限配置。',
-  native_receipt_unknown: '原生接收结果暂时无法确认，本次操作不会自动重发。',
-  native_run_changed: '当前运行已经变化，请先刷新状态。',
-};
 /** A rejection or unknown reason in words; a bare machine code without a sentence of its own gets the fallback. */
 const describe = (reason: string, fallback: string) => failures[reason] ?? (/^[a-z][a-z0-9_]*$/.test(reason) ? fallback : reason);
-const explain = (value: string) => stateReasons[value] ?? (/^[a-z0-9_]+$/.test(value) ? '暂时无法核对原生状态；已有内容保留，任务不会自动重发。' : value);
 /** A file opened from a turn's file list, or from elsewhere (a timeline entry) with no turn behind it. */
 type ReaderTarget = { conversationId: string; runId: string; workspaceId: string; path: string } | { conversationId?: undefined; runId?: undefined; workspaceId: string; path: string };
 
@@ -161,6 +149,10 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
   const [loadingNewer, setLoadingNewer] = useState(false);
   const [connection, setConnection] = useState('正在连接');
   const [moreOutput, setMoreOutput] = useState(false);
+  /** The conversation whose accepted message still has no native run after the delay; only then is waiting a hint. */
+  const [stuckConversation, setStuckConversation] = useState<string>();
+  /** The conversation whose unknown state outlasted the grace period; a fresh unknown is a normal first read. */
+  const [lingeredUnknown, setLingeredUnknown] = useState<string>();
   const pagesRef = useRef(pages); pagesRef.current = pages;
   const newerRef = useRef(newer); newerRef.current = newer;
   const loadingOlderRef = useRef(false);
@@ -597,12 +589,37 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
   const olderRef = useRef(older); olderRef.current = older;
   const newerLoadRef = useRef(loadNewer); newerLoadRef.current = loadNewer;
   const conversation = snapshot?.conversation;
-  const openRequests = !!snapshot?.requests?.some(item => item.status === 'open');
   const planning = usePlan({ conversation: snapshot?.conversation, csrf, report, onNotice: setError, onChanged: () => { if (selected) scheduleRefresh(selected); } });
   const unresolved = snapshot?.operations.some(op => ['queued', 'dispatching', 'unknown'].includes(op.status));
   const latestMessage = snapshot?.operations.find(op => op.type === 'message' && op.status === 'accepted');
   const rejectedDraft = draft.pending && snapshot?.operations.find(op => op.id === draft.pending!.id)?.status === 'rejected';
   const previousMessageSettled = !latestMessage || (latestMessage.runId !== null && (latestMessage.runId === conversation?.state.runId || latestMessage.runId === conversation?.state.terminalRunId));
+  // Waiting for the native run behind a just-accepted message is normal; only a lengthy wait becomes a hint,
+  // so every send does not flash one. The same wait still holds back the next send through `ready`.
+  useEffect(() => {
+    setStuckConversation(undefined);
+    if (previousMessageSettled || !selected) return;
+    const id = selected;
+    const timer = setTimeout(() => setStuckConversation(id), 8000);
+    return () => clearTimeout(timer);
+  }, [previousMessageSettled, selected]);
+  const stuckMessage = stuckConversation !== undefined && stuckConversation === selected;
+  // A conversation that was just created or opened reads as unknown until its first observation; only a lasting
+  // unknown is worth a hint, so a new conversation or a switch does not flash one.
+  const unknownStatus = conversation?.state.status === 'unknown';
+  useEffect(() => {
+    setLingeredUnknown(undefined);
+    if (!unknownStatus || !conversation) return;
+    const id = conversation.id;
+    const timer = setTimeout(() => setLingeredUnknown(id), 2_000);
+    return () => clearTimeout(timer);
+  }, [unknownStatus, conversation?.id]);
+  // Clear as soon as the state stops being unknown, without waiting for the effect to rerun.
+  const unknownLingered = !!conversation && conversation.state.status === 'unknown' && lingeredUnknown === conversation.id;
+  // The delayed flag can outlive the wait by one render; a settled message never becomes a hint.
+  const attentionNotice = conversation ? conversationAttention({ conversation, operations: snapshot?.operations ?? [], stuckMessage: stuckMessage && !previousMessageSettled, unknownLingered }) : null;
+  /** Keep the prop stable while nothing about the run changes (typing must not re-render the transcript). */
+  const transcriptRunState = useCallback((runId: string) => (conversation ? nativeRunState(conversation.state, runId) : undefined), [conversation?.state]);
   const removedWorkspace = configuration?.removedWorkspaces?.find(workspace => workspace.id === conversation?.workspaceId);
   const workspaceRemoved = !!removedWorkspace || conversation?.error === 'workspace_removed';
   const running = !!conversation?.state.runId && ['running', 'waiting'].includes(conversation.state.status);
@@ -864,6 +881,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
         </section> : <>
         {conversation && conversation.automationId && <AutomationRunBar conversation={conversation} automations={automationData.automations} revision={listRevision} choose={choose} openTasks={() => openSchedule('tasks')}/>}
         {conversation && !conversation.automationId && <AutomationStrip conversation={conversation} automations={automationData.automations} notifications={automationData.notifications} openTasks={() => openSchedule('tasks')}/>}
+        <ConversationAttention attention={attentionNotice} onReconcile={() => void reconcile()}/>
         <div className="message-scroll" ref={scroll} onScroll={() => {
           const node = scroll.current!; const remaining = node.scrollHeight - node.scrollTop - node.clientHeight;
           atBottom.current = remaining < 80 && !newerRef.current.length; if (atBottom.current) setMoreOutput(false);
@@ -881,6 +899,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
             <AutomationTitles.Provider value={automationTitles}>
               <Transcript items={visible} conversation={selected} onQuote={quote} turnFiles={turnFiles} renderCollaboration={collaboration}
                 activeRun={running ? conversation?.state.runId : undefined} activeFile={readerTarget?.runId !== undefined && readerTarget.conversationId === selected ? { runId: readerTarget.runId, path: readerTarget.path } : undefined}
+                runState={transcriptRunState}
                 workspaceUnavailable={workspaceRemoved} unavailableFiles={unavailableFiles} onOpenFile={openTurnFile} {...(workspaceRemoved ? {} : { onOpenLink: openLinkedFile })}/>
             </AutomationTitles.Provider>
             {windowed && <button className="load-history" disabled={loadingNewer} onClick={() => void loadNewer()}>{loadingNewer ? '正在读取…' : '查看更新的内容'}</button>}
@@ -888,7 +907,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
         </div>
         <div className="composer-region">
           {moreOutput && <button className="new-output" aria-label="有新内容，回到底部" onClick={() => { atBottom.current = true; if (scroll.current) scroll.current.scrollTop = scroll.current.scrollHeight; setMoreOutput(false); }}>↓ 有新内容</button>}
-          {(conversation?.error || (conversation?.state.reason && !(conversation.state.status === 'waiting' && openRequests))) && <p className="state-notice">{explain(conversation.error ?? conversation.state.reason!)}</p>}
+          {workspaceRemoved && <p className="state-notice">{failures.workspace_removed}</p>}
           {conversation?.state.status === 'interrupted' && <p className="state-notice">本轮已中断。此前启动的后台工具可能仍在运行，已经产生的改动不会撤销。</p>}
           {conversation?.state.status === 'interrupted' && !!conversation.subagents?.running && <p className="state-notice" role="status">
             主 Agent 已停止，仍有 {conversation.subagents.running} 个子 Agent 在运行。{conversation.harnessId === 'dsh' && '它们完成后，DSH 可能让主 Agent 自动继续工作。'}
@@ -899,7 +918,6 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
             {usable && !draft.pending && <button type="button" className="text-button" onClick={() => updateDraft({ ...draft, text: draft.text.trim() ? `${draft.text}\n子 Agent 都结束了，请汇总它们的结果。` : '子 Agent 都结束了，请汇总它们的结果。' })}>填入“请汇总结果”</button>}</p>}
           {snapshot?.history.liveItemsLimited && <p className="state-notice">部分实时输出较长，将在完成后从历史中读取完整内容。</p>}
           {!!conversation?.state.pendingInputs && <p className="state-notice">原生服务仍保留 {conversation.state.pendingInputs} 项待处理输入。停止当前轮不会清空它们。</p>}
-          {!workspaceRemoved && (unresolved || conversation?.state.status === 'unknown' || !previousMessageSettled) && <div className="state-notice">{!previousMessageSettled ? '正在核对上一条消息对应轮次的执行结果。' : '正在核对执行结果。'}<button className="text-button" onClick={() => void reconcile()}>查询原生结果</button></div>}
           {removedWorkspace && <button className="text-button" onClick={() => setWorkspaceAction({ kind: 'restore', workspace: removedWorkspace })}>恢复工作区</button>}
           {conversation?.archived && <div className="state-notice">这段对话已归档。<button className="text-button" onClick={() => setManaging(conversation)}>恢复对话</button></div>}
           {lastEarly?.delivery && lastEarly.delivery.mode !== 'next' && <div className="state-notice" role="status">

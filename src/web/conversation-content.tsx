@@ -8,7 +8,7 @@ import type { MessageReference, ImageAttachment } from '../shared/content.ts';
 import { referenceSchema } from '../shared/content.ts';
 import { markedWorkspacePath, workspaceImages, workspaceLinks } from './markdown.ts';
 import { TurnFiles } from './patterns/turn-files.tsx';
-import { ProcessBlock } from './patterns/process.tsx';
+import { ProcessBlock, type ProcessRunState } from './patterns/process.tsx';
 import { AutomationTitles, deliveredReminders } from './automation-delivery.ts';
 import './patterns/plan.css';
 
@@ -108,18 +108,22 @@ export function Message({ item, conversation, onQuote, onOpenLink }: {
   </article>;
 }
 
-/** Tool records of one native turn, shown as the process block. Records with nothing to show take no space. */
-export function ToolGroup({ items }: { items: WorkbenchItem[] }) {
+/**
+ * Tool records of one native turn, shown as the process block. Records with nothing to show take no space.
+ * `runState` is the native turn's own terminal/active state when the workbench can verify it; without it the
+ * block reports the steps as facts and never concludes that the whole turn failed.
+ */
+export function ToolGroup({ items, runState, lastOfRun }: { items: WorkbenchItem[]; runState?: ProcessRunState; lastOfRun?: boolean }) {
   const steps = items.filter(item => item.tool?.name || item.tool?.input || item.tool?.output || item.text.trim() || item.status !== 'completed')
     .map(item => ({ id: item.id, name: item.tool?.name || '工具执行', status: item.status,
       ...(item.tool?.input ? { input: item.tool.input } : {}), ...(item.tool?.output || item.text ? { output: item.tool?.output || item.text } : {}),
       ...(item.tool?.exitCode !== undefined ? { exitCode: item.tool.exitCode } : {}) }));
   if (!steps.length) return null;
-  return <ProcessBlock steps={steps} running={items.some(item => item.status === 'running')} anchor={items[0]?.id}/>;
+  return <ProcessBlock steps={steps} {...(runState ? { runState } : {})} lastOfRun={lastOfRun} anchor={items[0]?.id}/>;
 }
 
 /** Group tools without reordering text or merging actions from separate native turns. */
-export const Transcript = memo(function Transcript({ items, conversation, onQuote, turnFiles, activeRun, activeFile, unavailableFiles, workspaceUnavailable, onOpenFile, onOpenLink, renderCollaboration }: {
+export const Transcript = memo(function Transcript({ items, conversation, onQuote, turnFiles, activeRun, activeFile, unavailableFiles, workspaceUnavailable, onOpenFile, onOpenLink, renderCollaboration, runState }: {
   items: WorkbenchItem[]; conversation: string; onQuote(reference: MessageReference): void;
   turnFiles?: ReadonlyMap<string, TurnFileSummary>; activeRun?: string; activeFile?: { runId: string; path: string };
   unavailableFiles?: ReadonlySet<string>; workspaceUnavailable?: boolean;
@@ -128,6 +132,8 @@ export const Transcript = memo(function Transcript({ items, conversation, onQuot
   onOpenLink?(path: string, trigger: HTMLButtonElement): void;
   /** Native collaboration records render as compact cards; adjacent records of one action and turn share a card. */
   renderCollaboration?(items: WorkbenchItem[]): ReactNode;
+  /** The verified state of a native turn, keyed by runId. Omitted for sub-agent history: there only steps are facts. */
+  runState?(runId: string): ProcessRunState | undefined;
 }) {
   const groups: { key: string; tools?: WorkbenchItem[]; message?: WorkbenchItem; collaboration?: WorkbenchItem[] }[] = [];
   const lastItem = new Map<string, string>();
@@ -143,12 +149,19 @@ export const Transcript = memo(function Transcript({ items, conversation, onQuot
       else groups.push({ key: item.id, tools: [item] });
     } else groups.push({ key: item.id, message: item });
   }
+  // Only the last tool group of a native turn carries the turn's terminal conclusion, so a run says it once.
+  const lastToolGroup = new Map<string, string>();
+  for (const group of groups) {
+    const run = group.tools?.at(-1)?.runId;
+    if (run !== undefined) lastToolGroup.set(run, group.key);
+  }
   return groups.map(group => {
     const last = group.tools?.at(-1) ?? group.collaboration?.at(-1) ?? group.message!;
     const run = last.runId;
     const summary = run && run !== activeRun && lastItem.get(run) === last.id ? turnFiles?.get(run) : undefined;
+    const native = group.tools && run !== undefined ? runState?.(run) : undefined;
     return <Fragment key={group.key}>
-      {group.collaboration ? renderCollaboration!(group.collaboration) : group.tools ? <ToolGroup items={group.tools}/> : <Message item={group.message!} conversation={conversation} onQuote={onQuote} {...(onOpenLink ? { onOpenLink } : {})}/>}
+      {group.collaboration ? renderCollaboration!(group.collaboration) : group.tools ? <ToolGroup items={group.tools} {...(native ? { runState: native } : {})} lastOfRun={run !== undefined && lastToolGroup.get(run) === group.key}/> : <Message item={group.message!} conversation={conversation} onQuote={onQuote} {...(onOpenLink ? { onOpenLink } : {})}/>}
       {summary && onOpenFile && <TurnFiles key={summary.runId} activePath={activeFile?.runId === summary.runId ? activeFile.path : undefined}
         limited={summary.limited} onOpen={(path, trigger) => onOpenFile(summary.runId, path, trigger)}
         files={summary.paths.map(path => ({ path, unavailable: workspaceUnavailable || unavailableFiles?.has(JSON.stringify([summary.runId, path])) }))}/>}
