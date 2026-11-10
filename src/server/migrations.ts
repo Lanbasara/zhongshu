@@ -328,6 +328,9 @@ export const productMigrations: Migration[] = [{ version: 2, sql: `
     item_id TEXT CHECK (item_id IS NULL OR length(item_id) <= 600)
   ) STRICT;
   CREATE INDEX agent_results_conversation ON agent_results(conversation_id, created_at);
+` }, { version: 26, sql: `
+  -- ADR 0025: one task's conversations are read by its own index, not by scanning every conversation in activity order.
+  CREATE INDEX workbench_conversations_automation ON workbench_conversations(automation_id, last_activity_at, id);
 ` }];
 
 /** Runs inside restoreDatabase's private staging transaction, before the database is published. */

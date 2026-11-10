@@ -42,12 +42,14 @@ export type ListOperations = { conversationId?: string; status?: OperationStatus
 export type ConversationList = {
   beforeId?: string; limit?: number; workspaceId?: string; archived?: boolean;
   title?: string; excludeWorkspaces?: string[];
-  /** Only the conversations this automation created (ADR 0021); without it, those conversations are left out. */
+  /** Only the conversations this automation created (ADR 0021); without it, no automation filter is applied. */
   automationId?: string;
 };
 // The cursor owns its ordering boundary, so deleting or moving the anchor does not invalidate it.
 // It contains no title: the query fingerprint binds a cursor to its authorized query scope.
 const conversationPageCursor = z.object({ time: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER), id: z.uuid(), scope: z.string().regex(/^[a-f0-9]{64}$/) }).strict();
+/** Unarchived conversations an instance may hold; archiving a conversation frees its slot (ADR 0025). */
+const CONVERSATION_CAPACITY = 10_000;
 function conversationScope(query: ConversationList): string {
   return createHash('sha256').update(JSON.stringify([query.workspaceId ?? null, query.archived ?? null,
     query.title ?? '', [...(query.excludeWorkspaces ?? [])].sort(), ...(query.automationId ? [query.automationId] : [])])).digest('hex');
@@ -73,6 +75,12 @@ export interface WorkbenchStore {
   conversationForNative(harnessId: HarnessId, nativeId: string): Conversation | null;
   /** Automations that own at least one adopted conversation. */
   automationOwners(): string[];
+  /** One automation's run count and newest conversation, without loading its whole history (ADR 0025). */
+  automationRuns(automationId: string): { count: number; latest: Conversation | null };
+  /** Unarchived conversations against the instance capacity; archiving a conversation frees a slot (ADR 0025). */
+  conversationCapacity(): { used: number; limit: number };
+  /** Automation-run conversations idle since `cutoff`, oldest first, eligible for automatic archiving (ADR 0025). */
+  idleAutomationConversationIds(cutoff: number, limit?: number): string[];
   /** The automation is gone: its conversations become ordinary ones, so the results stay in the sidebar. */
   releaseAutomation(automationId: string): void;
   getConversation(id: string): Conversation | null;
@@ -377,8 +385,8 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
           return { conversation: conversationFromRow(existing), created: false };
         }
         assertWorkspaceActive(input.workspaceId);
-        const count = Number(db.prepare('SELECT COUNT(*) AS count FROM workbench_conversations').get()!.count);
-        if (count >= 10_000) throw new StoreError('conversation_capacity_reached', 409);
+        const count = Number(db.prepare('SELECT COUNT(*) AS count FROM workbench_conversations WHERE archived=0').get()!.count);
+        if (count >= CONVERSATION_CAPACITY) throw new StoreError('conversation_capacity_reached', 409);
         let nativePreparationId: string | undefined;
         if (input.preparationId) {
           const row = db.prepare('SELECT * FROM workbench_draft_preparations WHERE workspace_id=?').get(input.workspaceId);
@@ -401,6 +409,27 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
     automationOwners() {
       return (db.prepare('SELECT DISTINCT automation_id FROM workbench_conversations WHERE automation_id IS NOT NULL LIMIT 10000').all() as { automation_id: string }[]).map(row => row.automation_id);
     },
+    automationRuns(automationId) {
+      parse(z.string().min(1).max(240), automationId);
+      return storage(() => {
+        const count = Number(db.prepare('SELECT COUNT(*) AS count FROM workbench_conversations WHERE automation_id=?').get(automationId)!.count);
+        const row = db.prepare('SELECT * FROM workbench_conversations WHERE automation_id=? ORDER BY last_activity_at DESC,id DESC LIMIT 1').get(automationId);
+        return { count, latest: row ? conversationFromRow(row) : null };
+      });
+    },
+    conversationCapacity() {
+      return storage(() => ({ used: Number(db.prepare('SELECT COUNT(*) AS count FROM workbench_conversations WHERE archived=0').get()!.count), limit: CONVERSATION_CAPACITY }));
+    },
+    idleAutomationConversationIds(cutoff, limit = 100) {
+      parse(z.number().int().nonnegative(), cutoff); parse(z.number().int().min(1).max(1000), limit);
+      return storage(() => (db.prepare(`SELECT c.id FROM workbench_conversations c
+        WHERE c.automation_id IS NOT NULL AND c.archived=0 AND c.last_activity_at < ?
+          AND json_extract(c.state_json,'$.status') IN ('idle','interrupted','failed')
+          AND COALESCE(json_extract(c.state_json,'$.pendingInputs'),0) = 0
+          AND NOT EXISTS (SELECT 1 FROM workbench_operations o WHERE o.conversation_id=c.id AND o.status IN ('queued','dispatching'))
+          AND NOT EXISTS (SELECT 1 FROM workbench_queue_entries q WHERE q.conversation_id=c.id AND q.content_json IS NOT NULL)
+        ORDER BY c.last_activity_at, c.id LIMIT ?`).all(cutoff, limit) as { id: string }[]).map(row => String(row.id)));
+    },
     releaseAutomation(automationId) {
       parse(z.string().min(1).max(240), automationId);
       mutate(changed => {
@@ -415,8 +444,8 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
         const known = db.prepare("SELECT id FROM workbench_conversations WHERE harness_id=? AND json_extract(binding_json,'$.id')=?").get(input.harnessId, input.binding.id);
         if (known) return requireConversation(String(known.id));
         assertWorkspaceActive(input.workspaceId);
-        const count = Number(db.prepare('SELECT COUNT(*) AS count FROM workbench_conversations').get()!.count);
-        if (count >= 10_000) throw new StoreError('conversation_capacity_reached', 409);
+        const count = Number(db.prepare('SELECT COUNT(*) AS count FROM workbench_conversations WHERE archived=0').get()!.count);
+        if (count >= CONVERSATION_CAPACITY) throw new StoreError('conversation_capacity_reached', 409);
         const creationDigest = digest([input.harnessId, input.workspaceId, input.cwd, 'automation', input.automationId, input.binding.id]);
         const initial: NativeState = { status: 'unknown', pendingInputs: 0, configurationVerified: false };
         db.prepare(`INSERT INTO workbench_conversations(id,harness_id,workspace_id,cwd,title,configuration_json,creation_digest,binding_json,
@@ -474,33 +503,35 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
         }
         const title = input.title ?? '';
         const exclusions = JSON.stringify(input.excludeWorkspaces ?? []);
-        const automation = input.automationId ?? null;
+        // A dedicated clause lets SQLite use the automation index; `(? IS NULL OR automation_id = ?)` does not (ADR 0025).
+        const automationClause = input.automationId ? 'AND automation_id = ?' : '';
+        const automationArgs = input.automationId ? [input.automationId] : [];
         const rows = input.workspaceId !== undefined && input.archived !== undefined
           ? db.prepare(`
               SELECT * FROM workbench_conversations
               WHERE workspace_id = ? AND archived = ? AND (last_activity_at,id) < (?,?)
                 AND workspace_id NOT IN (SELECT value FROM json_each(?))
                 AND instr(lower(title), lower(?)) > 0
-                AND (? IS NULL OR automation_id = ?)
+                ${automationClause}
               ORDER BY last_activity_at DESC,id DESC LIMIT ?
-            `).all(input.workspaceId, Number(input.archived), ...cursor, exclusions, title, automation, automation, input.limit)
+            `).all(input.workspaceId, Number(input.archived), ...cursor, exclusions, title, ...automationArgs, input.limit)
           : input.archived !== undefined && input.workspaceId === undefined
             ? db.prepare(`
                 SELECT * FROM workbench_conversations
                 WHERE archived = ? AND (last_activity_at,id) < (?,?)
                   AND workspace_id NOT IN (SELECT value FROM json_each(?))
                   AND instr(lower(title), lower(?)) > 0
-                  AND (? IS NULL OR automation_id = ?)
+                  ${automationClause}
                 ORDER BY last_activity_at DESC,id DESC LIMIT ?
-              `).all(Number(input.archived), ...cursor, exclusions, title, automation, automation, input.limit)
+              `).all(Number(input.archived), ...cursor, exclusions, title, ...automationArgs, input.limit)
             : db.prepare(`
                 SELECT * FROM workbench_conversations
                 WHERE (last_activity_at,id) < (?,?) AND (? IS NULL OR workspace_id = ?)
                   AND workspace_id NOT IN (SELECT value FROM json_each(?))
                   AND instr(lower(title), lower(?)) > 0
-                  AND (? IS NULL OR automation_id = ?)
+                  ${automationClause}
                 ORDER BY last_activity_at DESC,id DESC LIMIT ?
-              `).all(...cursor, input.workspaceId ?? null, input.workspaceId ?? null, exclusions, title, automation, automation, input.limit);
+              `).all(...cursor, input.workspaceId ?? null, input.workspaceId ?? null, exclusions, title, ...automationArgs, input.limit);
         return rows.map(conversationFromRow);
       });
     },

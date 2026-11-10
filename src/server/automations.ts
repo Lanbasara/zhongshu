@@ -16,7 +16,8 @@ import {
 import type { Workbench } from './workbench.ts';
 import type { AgentNotifications } from './agent-notifications.ts';
 import { createAgentResults } from './agent-results.ts';
-import { readWorkspaceTimeline } from './workspace-documents.ts';
+import { StoreError } from './workbench-store.ts';
+import { readWorkspaceTimelineFile, workspaceTimelineStat, TIMELINE_NEAR_LIMIT_BYTES } from './workspace-documents.ts';
 
 const LATE_MS = 5 * 60_000;
 const POLL_MS = 60_000;
@@ -89,6 +90,10 @@ export function createAutomations(db: DatabaseSync, workbench: Workbench, adapte
     return conversation.id;
   }
   async function deliveries(source: HarnessAutomations, tasks: NativeAutomation[]): Promise<void> {
+    // One capacity read per refresh; while full, a run that needs a new conversation is left for a later refresh
+    // instead of retrying an adoption that cannot succeed (ADR 0025).
+    const capacity = workbench.store.conversationCapacity();
+    const full = capacity.used >= capacity.limit;
     for (const task of tasks) {
       if (closed) return;
       try {
@@ -99,11 +104,15 @@ export function createAutomations(db: DatabaseSync, workbench: Workbench, adapte
         const started = task.executing && !executing.has(task.id);
         if (task.executing) executing.add(task.id); else executing.delete(task.id);
         if (!fresh && !started) continue;
-        const adopted = target ? (delivery && target === delivery.sessionId ? await adopt(source, task, target) : workbench.store.conversationForNative('dsh', target)?.id) : undefined;
+        const known = target ? workbench.store.conversationForNative('dsh', target)?.id : undefined;
+        if (full && delivery && target === delivery.sessionId && !known) continue;
+        const adopted = target ? (delivery && target === delivery.sessionId ? await adopt(source, task, target) : known) : undefined;
         if (adopted === 'later' && delivery && Date.now() - Date.parse(delivery.deliveredAt) < ADOPT_WINDOW_MS) { retrySoon(); continue; }
         if (adopted && adopted !== 'later') await workbench.noticeActivity(adopted).catch(() => {});
         if (fresh && delivery) remember(task.id, delivery);
-      } catch { log({ event: 'automation_delivery_unhandled' }); }
+      } catch (error) {
+        log({ event: error instanceof StoreError && error.code === 'conversation_capacity_reached' ? 'automation_capacity_reached' : 'automation_delivery_unhandled' });
+      }
     }
   }
   async function refresh(): Promise<void> {
@@ -166,11 +175,11 @@ export function createAutomations(db: DatabaseSync, workbench: Workbench, adapte
       const workspace = workspaceOf(task.target.cwd);
       target = { kind: task.target.kind, ...(workspace ? { workspaceId: workspace.id, workspaceLabel: workspace.label } : {}), ...(task.target.preset ? { preset: task.target.preset } : {}) };
     }
-    const runs = workbench.store.listConversations({ automationId: task.id, limit: 1000 });
-    const latest = runs[0];
+    const runs = workbench.store.automationRuns(task.id);
+    const latest = runs.latest;
     return { id: task.id, harnessId: 'dsh', title: task.title, prompt: task.prompt, timing: task.timing, scheduledAt: task.scheduledAt, status: task.status, target,
       executing: task.executing, ...(task.createdAt ? { createdAt: task.createdAt } : {}), ...(task.updatedAt ? { updatedAt: task.updatedAt } : {}),
-      ...(task.lastDelivery ? { lastDelivery: deliveryView(task.lastDelivery) } : {}), runs: runs.length,
+      ...(task.lastDelivery ? { lastDelivery: deliveryView(task.lastDelivery) } : {}), runs: runs.count,
       ...(latest ? { latestRun: { conversationId: latest.id, status: latest.state.status, unread: workbench.unread([latest]).has(latest.id) } } : {}) };
   }
   function source(harness: string): HarnessAutomations {
@@ -207,19 +216,39 @@ export function createAutomations(db: DatabaseSync, workbench: Workbench, adapte
     return { kind: input.kind, cwd: workspace.directory, ...(input.preset ? { preset: input.preset } : {}) };
   }
 
+  /** Parsed timeline per workspace, keyed by the file's identity, so an unchanged file is not read again (ADR 0025). */
+  const timelineCache = new Map<string, { identity: string; label: string; entries: TimelineEntry[]; problems: TimelineView['problems'] }>();
   /** The timeline of every active workspace; invalid lines are skipped and reported, never guessed. */
-  async function timeline(): Promise<TimelineView> {
+  async function timeline(query: { from?: string; to?: string } = {}): Promise<TimelineView> {
     const entries: TimelineEntry[] = []; const problems: TimelineView['problems'] = [];
     const labels = new Map(workbench.workspaceView().workspaces.map(entry => [entry.id, entry.label]));
+    let nearLimit = false;
     for (const workspace of workbench.workspaces) {
-      let text: string | null;
-      try { text = await readWorkspaceTimeline(workspace.directory); }
+      let stat: { identity: string; size: number } | null;
+      try { stat = await workspaceTimelineStat(workspace.directory); }
       catch { problems.push({ workspaceId: workspace.id, line: 1, reason: 'file_unreadable' }); continue; }
-      if (!text) continue;
-      const parsed = parseTimeline(text, { id: workspace.id, label: labels.get(workspace.id) ?? workspace.id });
-      entries.push(...parsed.entries); problems.push(...parsed.problems.slice(0, Math.max(0, 200 - problems.length)));
+      if (!stat) { timelineCache.delete(workspace.id); continue; }
+      if (stat.size >= TIMELINE_NEAR_LIMIT_BYTES) nearLimit = true;
+      const label = labels.get(workspace.id) ?? workspace.id;
+      let cached = timelineCache.get(workspace.id);
+      if (!cached || cached.identity !== stat.identity) {
+        let file: { text: string; identity: string; size: number } | null;
+        try { file = await readWorkspaceTimelineFile(workspace.directory); }
+        catch { problems.push({ workspaceId: workspace.id, line: 1, reason: 'file_unreadable' }); continue; }
+        if (!file) { timelineCache.delete(workspace.id); continue; }
+        const parsed = parseTimeline(file.text, { id: workspace.id, label });
+        cached = { identity: file.identity, label, entries: parsed.entries, problems: parsed.problems };
+        timelineCache.set(workspace.id, cached);
+      } else if (cached.label !== label) {
+        // A workspace can be renamed without touching its file; keep the parsed lines, refresh the label.
+        cached.entries = cached.entries.map(entry => ({ ...entry, workspaceLabel: label })); cached.label = label;
+      }
+      entries.push(...cached.entries); problems.push(...cached.problems.slice(0, Math.max(0, 200 - problems.length)));
     }
-    return { entries: entries.sort(byWhen), problems };
+    const ranged = query.from || query.to ? entries.filter(entry => (!query.from || entry.date >= query.from) && (!query.to || entry.date <= query.to)) : entries;
+    const sorted = ranged.sort(byWhen);
+    const truncated = sorted.length > 20_000;
+    return { entries: truncated ? sorted.slice(0, 20_000) : sorted, problems, truncated, nearLimit };
   }
 
   async function routes(app: FastifyInstance): Promise<void> {
@@ -234,9 +263,10 @@ export function createAutomations(db: DatabaseSync, workbench: Workbench, adapte
     const parse = <T>(schema: z.ZodType<T>, value: unknown): T => { const parsed = schema.safeParse(value); if (!parsed.success) throw new AutomationError('invalid_request'); return parsed.data; };
     const params = z.object({ id: z.string().min(1).max(240) }).strict();
     app.get('/automations', async () => {
-      if (!sources.size) return { available: false, automations: [] };
+      if (!sources.size) return { available: false, automations: [], capacity: workbench.store.conversationCapacity() };
       await current();
-      return { available: true, automations: (cache.get('dsh')?.tasks ?? []).map(view) };
+      // Read after the refresh: an adoption in this same request already consumed a slot (ADR 0025).
+      return { available: true, automations: (cache.get('dsh')?.tasks ?? []).map(view), capacity: workbench.store.conversationCapacity() };
     });
     app.get('/automations/:id/history', async request => {
       const { id } = parse(params, request.params);
@@ -297,7 +327,10 @@ export function createAutomations(db: DatabaseSync, workbench: Workbench, adapte
       if (!value) throw new AutomationError('notification_not_found', 404);
       return value;
     });
-    app.get('/timeline', async () => timeline());
+    app.get('/timeline', async request => {
+      const query = parse(z.object({ from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(), to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional() }).strict(), request.query);
+      return timeline(query);
+    });
   }
 
   /** The same operations, for 司辰's command line (ADR 0022); it reaches them through the agent endpoint, not the page. */
@@ -358,7 +391,8 @@ export function parseTimeline(text: string, workspace: { id: string; label: stri
   const entries = new Map<string, TimelineEntry>(); const problems: TimelineView['problems'] = [];
   const report = (line: number, reason: string) => { if (problems.length < 200) problems.push({ workspaceId: workspace.id, line, reason }); };
   const lines = text.split('\n');
-  for (let index = 0; index < lines.length && index < 20_000; index++) {
+  // Read size is bounded by the file cap, not by an arbitrary line count: the newest line must never be dropped (ADR 0025).
+  for (let index = 0; index < lines.length; index++) {
     const line = lines[index]!.trim(); if (!line) continue;
     let raw: unknown;
     try { raw = JSON.parse(line); } catch { report(index + 1, 'not_json'); continue; }

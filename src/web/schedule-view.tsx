@@ -23,6 +23,8 @@ export const scheduleTabs: { id: ScheduleTab; label: string }[] = [
   { id: 'calendar', label: '日历' }, { id: 'today', label: '今天' }, { id: 'future', label: '未来' }, { id: 'past', label: '回看' }, { id: 'tasks', label: '全部任务' },
 ];
 type Filters = Record<'agent' | 'routine' | 'action' | 'event' | 'record', boolean>;
+const keepItem = (filters: Filters) => (item: ScheduleItem) =>
+  filters[item.kind === 'agent' ? (item.routine ? 'routine' : 'agent') : item.kind === 'decision' || item.kind === 'research' ? 'record' : item.kind];
 type Panel = { kind: 'task'; id: string } | { kind: 'create'; conversationId?: string } | { kind: 'entry'; item: ScheduleItem };
 const kindLabel: Record<ScheduleItem['kind'], string> = { agent: 'Agent 任务', action: '你要做的', event: '外部大事', decision: '决定', research: '研究' };
 const HOUR = 48; const START = 7; const END = 24;
@@ -30,13 +32,17 @@ const HOUR = 48; const START = 7; const END = 24;
 function useScheduleData(csrf: string, revision: number, report: (reason: unknown) => void) {
   const [automations, setAutomations] = useState<AutomationView[]>([]);
   const [available, setAvailable] = useState(true);
-  const [timeline, setTimeline] = useState<TimelineView>({ entries: [], problems: [] });
+  const [timeline, setTimeline] = useState<TimelineView>({ entries: [], problems: [], truncated: false, nearLimit: false });
   const [notifications, setNotifications] = useState<AgentNotificationView[]>([]);
+  const [capacity, setCapacity] = useState<{ used: number; limit: number }>();
   const [loaded, setLoaded] = useState(false);
   const reload = useCallback(async () => {
     try {
-      const [list, line, notes] = await Promise.all([request('/automations', automationListSchema), request('/timeline', timelineSchema), request('/notifications', agentNotificationListSchema)]);
-      setAutomations(list.automations); setAvailable(list.available); setTimeline(line); setNotifications(notes.notifications);
+      const day = localDate(new Date());
+      // Only the range the page can show; a large timeline file never becomes a large response (ADR 0025).
+      const [list, line, notes] = await Promise.all([request('/automations', automationListSchema),
+        request(`/timeline?from=${addDays(day, -402)}&to=${addDays(day, 402)}`, timelineSchema), request('/notifications', agentNotificationListSchema)]);
+      setAutomations(list.automations); setAvailable(list.available); setTimeline(line); setNotifications(notes.notifications); setCapacity(list.capacity);
     } catch (error) { report(error); } finally { setLoaded(true); }
   }, [report]);
   useEffect(() => { void reload(); }, [reload, revision]);
@@ -46,7 +52,16 @@ function useScheduleData(csrf: string, revision: number, report: (reason: unknow
     return () => clearInterval(timer);
   }, [reload]);
   void csrf;
-  return { automations, available, timeline, notifications, loaded, reload };
+  return { automations, available, timeline, notifications, capacity, loaded, reload };
+}
+
+/** The dates one tab can actually show; occurrences outside them are never computed (ADR 0025). */
+function viewRange(tab: ScheduleTab, mode: 'month' | 'week', today: string, selected: string, month: string): { from: string; to: string } {
+  if (tab === 'calendar' && mode === 'week') { const from = mondayOf(selected); return { from, to: addDays(from, 6) }; }
+  if (tab === 'calendar') { const from = mondayOf(`${month}-01`); return { from, to: addDays(from, 41) }; }
+  if (tab === 'future') { const from = mondayOf(addDays(today, 1)); return { from, to: addDays(from, 55) }; }
+  if (tab === 'past') return { from: addDays(today, -400), to: today };
+  return { from: today, to: today };
 }
 
 export function ScheduleView({ csrf, report, configuration, revision, tab, onTab, openConversation, openFile, createFor, onCreateHandled }: {
@@ -71,9 +86,14 @@ export function ScheduleView({ csrf, report, configuration, revision, tab, onTab
   const [month, setMonth] = useState(() => today.slice(0, 7));
   const [filters, setFilters] = useState<Filters>({ agent: true, routine: true, action: true, event: true, record: true });
   const [week, setWeek] = useState(0);
+  const range = viewRange(tab, mode, today, selected, month);
   const items = useMemo(() => scheduleItems({ automations: data.automations, timeline: data.timeline.entries, notifications: data.notifications,
-    from: addDays(today, -400), to: addDays(today, 400), now }), [data.automations, data.timeline.entries, data.notifications, today, now]);
-  const visible = useMemo(() => items.filter(item => filters[item.kind === 'agent' ? (item.routine ? 'routine' : 'agent') : item.kind === 'decision' || item.kind === 'research' ? 'record' : item.kind]), [items, filters]);
+    from: range.from, to: range.to, now }), [data.automations, data.timeline.entries, data.notifications, range.from, range.to, now]);
+  // The side panel follows the selected day, which may lie outside the month being viewed.
+  const dayItems = useMemo(() => tab === 'calendar' ? scheduleItems({ automations: data.automations, timeline: data.timeline.entries, notifications: data.notifications,
+    from: selected, to: selected, now }) : [], [tab, data.automations, data.timeline.entries, data.notifications, selected, now]);
+  const visible = useMemo(() => items.filter(keepItem(filters)), [items, filters]);
+  const visibleDay = useMemo(() => dayItems.filter(keepItem(filters)), [dayItems, filters]);
   const open = (item: ScheduleItem) => {
     // A card opens the card first, like the native app; its conversation is one step away on it (ADR 0021, 2026-11-09).
     if (item.automationId) return setPanel({ kind: 'task', id: item.automationId });
@@ -90,8 +110,16 @@ export function ScheduleView({ csrf, report, configuration, revision, tab, onTab
     await data.reload();
     return accepted;
   };
+  const capacity = data.capacity;
+  const notices = [
+    ...(data.automations.length > 1000 ? [`自动任务很多（${data.automations.length} 个），日程页可能变慢。`] : []),
+    ...(data.timeline.nearLimit ? ['时间轴文件接近 10 MiB 上限，下一次追加前会自动压缩。'] : []),
+    ...(data.timeline.truncated ? ['时间轴条目过多，只显示了当前窗口内的一部分。'] : []),
+    ...(capacity && capacity.used >= capacity.limit ? [`未归档对话已满（${capacity.used}/${capacity.limit}）。自动任务的新运行不会出现在中书；归档旧对话可释放名额。`]
+      : capacity && capacity.used >= capacity.limit - 100 ? [`未归档对话接近上限（${capacity.used}/${capacity.limit}）。归档旧对话可释放名额。`] : []),
+  ];
   const content = !data.loaded ? <p className="quiet">正在读取日程…</p>
-    : tab === 'calendar' ? <CalendarTab items={visible} all={items} today={today} now={now} mode={mode} setMode={setMode} selected={selected} setSelected={setSelected}
+    : tab === 'calendar' ? <CalendarTab items={visible} all={items} dayItems={visibleDay} today={today} now={now} mode={mode} setMode={setMode} selected={selected} setSelected={setSelected}
       month={month} setMonth={setMonth} filters={filters} setFilters={setFilters} open={open} automations={data.automations} edit={edit}/>
     : tab === 'today' ? <DayList items={visible.filter(item => item.date === today)} now={now} today={today} open={open} heading={`${dayLabel(today)} · 现在 ${localTime(new Date(now))}`}/>
     : tab === 'future' ? <FutureTab items={visible} today={today} week={week} setWeek={setWeek} open={open}/>
@@ -106,6 +134,7 @@ export function ScheduleView({ csrf, report, configuration, revision, tab, onTab
     <div className="schedule-body">
       {notice && !panel && <p className="sch-notice" role="status">{notice}</p>}
       {!data.available && data.loaded && <p className="schedule-note">这个实例没有可用的原生自动任务（需要 DSH 0.2.2 及以上）。时间轴文件仍会显示。</p>}
+      {notices.map(text => <p key={text} className="schedule-note sch-warn-note">{text}</p>)}
       {content}
     </div>
     {panel && <SchedulePanel panel={panel} automations={data.automations} configuration={configuration} csrf={csrf} report={report} close={() => setPanel(undefined)} now={now}
@@ -169,11 +198,11 @@ function DayList({ items, now, today, open, heading }: { items: ScheduleItem[]; 
 }
 
 function CalendarTab(props: {
-  items: ScheduleItem[]; all: ScheduleItem[]; today: string; now: number; mode: 'month' | 'week'; setMode(mode: 'month' | 'week'): void;
+  items: ScheduleItem[]; all: ScheduleItem[]; dayItems: ScheduleItem[]; today: string; now: number; mode: 'month' | 'week'; setMode(mode: 'month' | 'week'): void;
   selected: string; setSelected(date: string): void; month: string; setMonth(month: string): void; filters: Filters; setFilters(filters: Filters): void;
   open(item: ScheduleItem): void; automations: AutomationView[]; edit(task: AutomationView, body: { patch: Record<string, unknown> }): Promise<boolean>;
 }) {
-  const { items, today, mode, selected, month } = props;
+  const { items, dayItems, today, mode, selected, month } = props;
   const monthStart = `${month}-01`;
   const from = mode === 'month' ? monthStart : mondayOf(selected);
   const to = mode === 'month' ? localDate(new Date(parseDate(monthStart).getFullYear(), parseDate(monthStart).getMonth() + 1, 0)) : addDays(from, 6);
@@ -204,10 +233,10 @@ function CalendarTab(props: {
       <span className={stats.paused ? 'sch-warn' : ''}><b>{stats.paused}</b>个已暂停</span><span className={stats.busy ? 'sch-warn' : ''}><b>{stats.busy}</b>个密集日</span>
     </div>
     {mode === 'month'
-      ? <div className="sch-layout"><MonthGrid items={items} month={month} today={today} selected={selected} busy={stats.busyDays} select={props.setSelected}/><DaySide items={items} date={selected} today={today} open={props.open}/></div>
+      ? <div className="sch-layout"><MonthGrid items={items} month={month} today={today} selected={selected} busy={stats.busyDays} select={props.setSelected}/><DaySide items={dayItems} date={selected} today={today} open={props.open}/></div>
       : <><WeekGrid items={items} from={from} today={today} now={props.now} open={props.open} automations={props.automations} edit={props.edit} select={props.setSelected}/>
         <p className="schedule-note">电脑上可以拖动还没跑的一次性任务改期（15 分钟一格）；循环任务点开后在表单里改。</p>
-        <DaySide items={items} date={selected} today={today} open={props.open}/></>}
+        <DaySide items={dayItems} date={selected} today={today} open={props.open}/></>}
   </section>;
 }
 function MonthGrid({ items, month, today, selected, busy, select }: { items: ScheduleItem[]; month: string; today: string; selected: string; busy: Set<string>; select(date: string): void }) {

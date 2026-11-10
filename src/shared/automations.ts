@@ -80,7 +80,11 @@ export const automationSchema = z.object({
   runs: z.number().int().nonnegative(),
   latestRun: z.object({ conversationId: z.uuid(), status: z.enum(['idle', 'running', 'waiting', 'interrupted', 'failed', 'unknown']), unread: z.boolean() }).strict().optional(),
 }).strict();
-export const automationListSchema = z.object({ available: z.boolean(), automations: z.array(automationSchema).max(5000) }).strict();
+export const automationListSchema = z.object({
+  available: z.boolean(), automations: z.array(automationSchema).max(5000),
+  /** Unarchived conversations against the instance limit, so the page can warn before a run cannot be adopted (ADR 0025). */
+  capacity: z.object({ used: z.number().int().nonnegative(), limit: z.number().int().positive() }).strict(),
+}).strict();
 export const automationHistorySchema = z.object({ records: z.array(automationDeliverySchema).max(100), before: z.string().max(240).optional(), earlierUnavailable: z.boolean() }).strict();
 export const automationResultSchema = z.object({ automation: automationSchema.optional(), outcome: z.enum(['ok', 'conflict', 'not_found', 'ended', 'pending', 'deleted']) }).strict();
 
@@ -108,6 +112,10 @@ export const timelineSchema = z.object({
   entries: z.array(timelineEntrySchema).max(20_000),
   /** Lines skipped because they were not valid, per workspace; shown so the agent can be asked to fix them. */
   problems: z.array(z.object({ workspaceId: z.string().max(64), line: z.number().int().positive(), reason: z.string().max(80) }).strict()).max(200),
+  /** The window held more entries than one response carries; the page says so instead of failing the whole read. */
+  truncated: z.boolean(),
+  /** At least one workspace file is close to its 10 MiB limit and will be compacted before the next append. */
+  nearLimit: z.boolean(),
 }).strict();
 
 export type AutomationView = z.infer<typeof automationSchema>;

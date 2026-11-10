@@ -39,6 +39,8 @@ export class Workbench {
   private readonly observation: Observation;
   private readonly desks: Desks;
   private sweepTimer?: NodeJS.Timeout;
+  /** ADR 0025: retention runs hourly, not on every five-second pass. */
+  private archiveSweepAt = 0;
   private closing?: Promise<void>;
 
   constructor(store: WorkbenchStore, initialWorkspaces: Workspace[], adapters: Map<HarnessId, HarnessAdapter>, registry?: WorkspaceRegistry) {
@@ -74,6 +76,8 @@ export class Workbench {
   }
 
   // Start, sweep, close.
+  /** ADR 0025: archive idle automation-run conversations past the retention period; the hourly sweep runs this. */
+  archiveIdleAutomations(now = Date.now()): number { return this.desks.lifecycle.archiveIdleAutomations(now); }
   start(): Promise<void> {
     this.tasks.assertOpen();
     return this.tasks.task(async () => {
@@ -93,6 +97,10 @@ export class Workbench {
       this.desks.readers.sweep();
       this.desks.subagents.sweep();
       this.desks.lifecycle.restoreDeletions();
+      if (Date.now() - this.archiveSweepAt >= 60 * 60_000) {
+        this.archiveSweepAt = Date.now();
+        try { this.archiveIdleAutomations(this.archiveSweepAt); } catch { /* the next hourly pass looks again */ }
+      }
       try { this.observation.restorePending(); } catch { /* Durable recovery resumes on the next bounded pass. */ }
     }, 5000).unref();
   }

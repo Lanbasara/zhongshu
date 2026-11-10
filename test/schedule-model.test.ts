@@ -69,6 +69,13 @@ test('a daily task expands once per day in its zone, and the earliest pending on
   assert.equal(items.find(item => item.automationId === 'once')?.movable, true);
 });
 
+test('a window bounds the expansion: an old plan still yields every day in the requested range', () => {
+  const stale = task({ id: 'stale-daily', timing: { kind: 'daily', time: '09:00', timeZone: 'Asia/Shanghai' }, scheduledAt: new Date(Date.UTC(2024, 0, 1, 1)).toISOString() });
+  const items = scheduleItems({ automations: [stale], timeline: [], notifications: [], from: '2026-11-08', to: '2026-11-11', now });
+  assert.deepEqual([...new Set(items.map(item => item.date))], ['2026-11-08', '2026-11-09', '2026-11-10', '2026-11-11']);
+  assert.ok(items.every(item => new Date(item.at!).getUTCHours() === 1), '09:00 in Shanghai whatever zone runs the test');
+});
+
 test('a delivered run shows once, with the conclusion written back and the notice the agent sent after it', () => {
   const delivered = task({ id: 'ran', status: 'ended', scheduledAt: new Date(now - 7_200_000).toISOString(), target: { kind: 'conversation', conversationId: '11111111-1111-4111-8111-111111111111' },
     lastDelivery: { scheduledAt: new Date(now - 7_200_000).toISOString(), deliveredAt: new Date(now - 7_190_000).toISOString(), late: true, result: '未触发，维持' } });
