@@ -2,7 +2,7 @@
 status: active
 started: 2026-11-10
 exit: 三个体验问题在真实页面按约定行为验证，两项用户已选定的展示取舍生效，用户在实际使用中确认
-evidence: none yet
+evidence: https://github.com/Lanbasara/zhongshu/pull/67
 ---
 
 # 对话状态提示与过程展示
