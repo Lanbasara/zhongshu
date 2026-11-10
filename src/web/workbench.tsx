@@ -151,6 +151,8 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
   const [moreOutput, setMoreOutput] = useState(false);
   /** The conversation whose accepted message still has no native run after the delay; only then is waiting a hint. */
   const [stuckConversation, setStuckConversation] = useState<string>();
+  /** The conversation whose unknown state outlasted the grace period; a fresh unknown is a normal first read. */
+  const [lingeredUnknown, setLingeredUnknown] = useState<string>();
   const pagesRef = useRef(pages); pagesRef.current = pages;
   const newerRef = useRef(newer); newerRef.current = newer;
   const loadingOlderRef = useRef(false);
@@ -602,8 +604,20 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
     return () => clearTimeout(timer);
   }, [previousMessageSettled, selected]);
   const stuckMessage = stuckConversation !== undefined && stuckConversation === selected;
+  // A conversation that was just created or opened reads as unknown until its first observation; only a lasting
+  // unknown is worth a hint, so a new conversation or a switch does not flash one.
+  const unknownStatus = conversation?.state.status === 'unknown';
+  useEffect(() => {
+    setLingeredUnknown(undefined);
+    if (!unknownStatus || !conversation) return;
+    const id = conversation.id;
+    const timer = setTimeout(() => setLingeredUnknown(id), 2_000);
+    return () => clearTimeout(timer);
+  }, [unknownStatus, conversation?.id]);
+  // Clear as soon as the state stops being unknown, without waiting for the effect to rerun.
+  const unknownLingered = !!conversation && conversation.state.status === 'unknown' && lingeredUnknown === conversation.id;
   // The delayed flag can outlive the wait by one render; a settled message never becomes a hint.
-  const attentionNotice = conversation ? conversationAttention({ conversation, operations: snapshot?.operations ?? [], stuckMessage: stuckMessage && !previousMessageSettled }) : null;
+  const attentionNotice = conversation ? conversationAttention({ conversation, operations: snapshot?.operations ?? [], stuckMessage: stuckMessage && !previousMessageSettled, unknownLingered }) : null;
   /** Keep the prop stable while nothing about the run changes (typing must not re-render the transcript). */
   const transcriptRunState = useCallback((runId: string) => (conversation ? nativeRunState(conversation.state, runId) : undefined), [conversation?.state]);
   const removedWorkspace = configuration?.removedWorkspaces?.find(workspace => workspace.id === conversation?.workspaceId);

@@ -15,6 +15,8 @@ export type AttentionInput = {
   operations: readonly WorkbenchOperation[];
   /** An accepted message that still has no native run after the workbench's delay (8 s). */
   stuckMessage?: boolean;
+  /** The current unknown state has outlasted the workbench's grace period (about 2 s). */
+  unknownLingered?: boolean;
 };
 
 /** What is kept whenever the workbench cannot confirm what the native side did. */
@@ -56,6 +58,22 @@ export function reasonText(reason: string | null | undefined): string {
  * conversation can and cannot do now; the detail gives the cause and what happens to existing content.
  */
 const blockedReasons: Record<string, Omit<Attention, 'tone'>> = {
+  // The native state could not be read; the cause is known, so this does not wait for the grace period.
+  native_state_unavailable: {
+    title: '运行状态暂时无法核实',
+    detail: '原生服务没有返回可以确认的运行状态。已收到的内容都会保留，消息不会自动重发；页面打开期间会自动重试。',
+    action: 'reconcile',
+  },
+  native_observation_unavailable: {
+    title: '与原生服务的连接中断',
+    detail: '暂时读不到运行状态。已收到的内容都会保留，消息不会自动重发；页面打开期间会自动重试。',
+    action: 'reconcile',
+  },
+  database_restored_requires_reconciliation: {
+    title: '运行状态暂时无法核实',
+    detail: '应用数据库已从备份恢复，之前的执行记录需要重新核对。已收到的内容都会保留，消息不会自动重发；页面打开期间会自动重试。',
+    action: 'reconcile',
+  },
   conversation_configuration_changed: {
     title: '这段对话暂时不能继续',
     detail: '工作区或原生服务的配置发生了变化，需要核对后才能继续。已有内容都会保留，消息不会自动重发。',
@@ -139,10 +157,14 @@ const stuck: Attention = {
  * message that still has no native run after the delay. Ordinary waiting (queued, dispatching,
  * an accepted message that has just been associated with a run) shows nothing.
  */
-export function conversationAttention({ conversation, operations, stuckMessage = false }: AttentionInput): Attention | null {
+export function conversationAttention({ conversation, operations, stuckMessage = false, unknownLingered = false }: AttentionInput): Attention | null {
   // A removed workspace keeps its own explanation and restore entry where they are; it is not an execution hint.
   if (conversation.error === 'workspace_removed') return null;
-  if (conversation.state.status === 'unknown') return unknownState(conversation);
+  // A conversation that was just created or opened starts as unknown until the first observation; during the grace
+  // period that is a normal first read, so stay quiet and do not fall through to operation or stuck hints either.
+  if (conversation.state.status === 'unknown' && !conversation.error && !unknownLingered) return null;
+  // An explicit error is a known cause: show it as blocked at once, without waiting for the grace period.
+  if (conversation.state.status === 'unknown' && !conversation.error) return unknownState(conversation);
   if (conversation.error) return blocked(conversation.error);
   const unknownValue = operations.find(operation => operation.status === 'unknown');
   if (unknownValue) return unknownOperation(unknownValue);

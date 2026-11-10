@@ -5,10 +5,10 @@ import { Page, Section, Stage, phone, useReadout } from './catalog.tsx';
 /** The same words the feature module produces; these examples check layout, tone and the action, not the copy rules. */
 const situations = {
   'state-unavailable': {
-    label: '状态无法核实 · 原生连接中断',
+    label: '状态无法核实 · 持续约 2 秒仍没有结果（没有已知原因）',
     attention: {
       tone: 'unknown', title: '运行状态暂时无法核实', action: 'reconcile',
-      detail: '与原生服务的连接中断，暂时读不到运行状态。已收到的内容都会保留，消息不会自动重发；页面打开期间会自动重试。',
+      detail: '原生服务没有返回可以确认的运行状态。已收到的内容都会保留，消息不会自动重发；页面打开期间会自动重试。',
     },
   },
   'state-restored': {
@@ -16,6 +16,13 @@ const situations = {
     attention: {
       tone: 'unknown', title: '运行状态暂时无法核实', action: 'reconcile',
       detail: '应用数据库已从备份恢复，之前的执行记录需要重新核对。已收到的内容都会保留，消息不会自动重发；页面打开期间会自动重试。',
+    },
+  },
+  'blocked-connection': {
+    label: '对话被阻断 · 原生连接中断',
+    attention: {
+      tone: 'blocked', title: '与原生服务的连接中断', action: 'reconcile',
+      detail: '暂时读不到运行状态。已收到的内容都会保留，消息不会自动重发；页面打开期间会自动重试。',
     },
   },
   'blocked-config': {
@@ -72,19 +79,19 @@ function Catalog() {
   const [readout, say] = useReadout();
   return <Page title="对话状态提示" lead="只在真正无法核实或需要处理时出现一条：一句话说清现在是什么状态，次要行说明已知原因、已保留的内容、不会自动重发和是否自动重试。同一时刻最多一条；正常等待不显示。">
     {readout}
-    <Section title="无法核实状态" note="原生状态读不到。明确说明正在自动重试，并提供“查询原生结果”。">
+    <Section title="无法核实状态" note="原生状态读不到、也没有已知原因。状态未知需持续约 2 秒才提示，避免新建或切换对话时首次核实的那一下闪烁；提示明确说明正在自动重试，并提供“查询原生结果”。">
       <Stage stack style={{ maxWidth: 760 }}>{(['state-unavailable', 'state-restored'] as const).map(situation =>
         <ConversationAttention key={situation} attention={situations[situation].attention} onReconcile={() => say(`查询原生结果（${situations[situation].label}）`)}/>)}</Stage>
     </Section>
     <Section title="对话被阻断" note="准备或配置不满足继续执行的条件；说清现在不能做什么，以及已有内容仍然保留。能再次核实的才提供“查询原生结果”。">
-      <Stage stack style={{ maxWidth: 760 }}>{(['blocked-config', 'blocked-workspace', 'blocked-verifying'] as const).map(situation =>
+      <Stage stack style={{ maxWidth: 760 }}>{(['blocked-connection', 'blocked-config', 'blocked-workspace', 'blocked-verifying'] as const).map(situation =>
         <ConversationAttention key={situation} attention={situations[situation].attention} onReconcile={() => say(`查询原生结果（${situations[situation].label}）`)}/>)}</Stage>
     </Section>
     <Section title="结果待核实" note="消息已提交但原生接收结果未知，或已发送却还没有对应原生轮次；说明不会重复发送。">
       <Stage stack style={{ maxWidth: 760 }}>{(['pending-operation', 'pending-run'] as const).map(situation =>
         <ConversationAttention key={situation} attention={situations[situation].attention} onReconcile={() => say(`查询原生结果（${situations[situation].label}）`)}/>)}</Stage>
     </Section>
-    <Section title="正常等待时不出现" note="发送后的排队、派发中、刚拿到操作号但消息还没有原生轮次，都只是正常等待；超过一段明确延迟仍未核实时才升级为上面的提示，避免每次发送闪烁。">
+    <Section title="正常等待时不出现" note="发送后的排队、派发中、刚拿到操作号但消息还没有原生轮次，都只是正常等待；超过一段明确延迟仍未核实时才升级为上面的提示，避免每次发送闪烁。新对话和切换对话的首次状态核实同理：状态未知持续约 2 秒才提示。">
       <Stage style={{ maxWidth: 760 }}><p className="catalog-muted"><code>conversationAttention(...)</code> 返回 <code>null</code>，正文区顶部保持空白。</p></Stage>
     </Section>
   </Page>;

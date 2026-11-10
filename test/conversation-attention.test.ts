@@ -22,8 +22,8 @@ function operation(status: WorkbenchOperation['status'], overrides: Partial<Work
     status, runId: null, reason: null, createdAt: sequence, updatedAt: sequence, type: 'message', ...overrides,
   };
 }
-const attentionOf = (conversationValue: Conversation, operations: WorkbenchOperation[] = [], stuckMessage = false): Attention | null =>
-  conversationAttention({ conversation: conversationValue, operations, stuckMessage });
+const attentionOf = (conversationValue: Conversation, operations: WorkbenchOperation[] = [], stuckMessage = false, unknownLingered = false): Attention | null =>
+  conversationAttention({ conversation: conversationValue, operations, stuckMessage, unknownLingered });
 /** Detail is the only place a machine code may appear; the title always reads as a state in words. */
 function assertWordsOnly(attention: Attention | null): Attention {
   assert.ok(attention);
@@ -39,8 +39,8 @@ test('ordinary waiting after a send shows no hint', () => {
   assert.equal(attentionOf(conversation(), [operation('accepted')]), null);
   assert.equal(attentionOf(conversation({ status: 'running', runId: 'run-1' }), [operation('accepted', { runId: 'run-1' })]), null);
 });
-test('an unverifiable native state is one unknown hint that names the cause and the promise', () => {
-  const attention = assertWordsOnly(attentionOf(conversation({ status: 'unknown', reason: 'native_observation_unavailable' }), [operation('unknown')], true));
+test('a lasting unverifiable native state is one unknown hint that names the cause and the promise', () => {
+  const attention = assertWordsOnly(attentionOf(conversation({ status: 'unknown', reason: 'native_observation_unavailable' }), [operation('unknown')], true, true));
   assert.equal(attention.tone, 'unknown');
   assert.equal(attention.title, '运行状态暂时无法核实');
   assert.equal(attention.action, 'reconcile');
@@ -51,24 +51,43 @@ test('an unverifiable native state is one unknown hint that names the cause and 
 });
 test('every known state reason has words of its own', () => {
   for (const [code, words] of Object.entries(stateReasonText)) {
-    const attention = assertWordsOnly(attentionOf(conversation({ status: 'unknown', reason: code })));
+    const attention = assertWordsOnly(attentionOf(conversation({ status: 'unknown', reason: code }), [], false, true));
     assert.equal(attention.tone, 'unknown', code);
     assert.ok(attention.detail!.includes(words), `${code} should read as its own sentence`);
     assert.doesNotMatch(attention.detail!, /原因码/, `${code} must not fall back to the neutral code sentence`);
   }
 });
 test('an unrecognised reason code stays neutral and keeps the code in the detail', () => {
-  const attention = assertWordsOnly(attentionOf(conversation({ status: 'unknown', reason: 'future_native_loss' })));
+  const attention = assertWordsOnly(attentionOf(conversation({ status: 'unknown', reason: 'future_native_loss' }), [], false, true));
   assert.equal(attention.tone, 'unknown');
   assert.match(attention.detail!, /无法识别/);
   assert.match(attention.detail!, /原因码：future_native_loss/);
   assert.doesNotMatch(attention.title, /future_native_loss/);
   assert.doesNotMatch(attention.detail!, /成功/);
 });
+test('a fresh unknown state waits out the grace period instead of flashing a hint', () => {
+  // A just-created conversation is stored as unknown until its first observation; so is a conversation that was
+  // just opened. Both are normal first reads, not something the reader must act on.
+  assert.equal(attentionOf(conversation({ status: 'unknown' })), null);
+  // Nor does the fresh unknown fall through to the operation or stuck hints.
+  assert.equal(attentionOf(conversation({ status: 'unknown' }), [operation('unknown')], true), null);
+  // The same state after the grace period is the one hint.
+  assert.equal(attentionOf(conversation({ status: 'unknown' }), [], false, true)!.tone, 'unknown');
+});
+test('an explicit error shows at once as blocked, without the unknown grace period', () => {
+  // While the state reads unknown but an error names the cause, it is a known blocker: no wait, no unknown hint.
+  const attention = attentionOf(conversation({ status: 'unknown', configurationVerified: false }, { error: 'native_configuration_unverified', readiness: 'blocked' }), [], false, false);
+  assert.equal(attention!.tone, 'blocked');
+  assert.equal(attention!.action, 'reconcile');
+  assert.equal(attentionOf(conversation({ status: 'unknown' }, { error: 'conversation_configuration_changed' }), [], false, false)!.tone, 'blocked');
+  // A state-read failure set by the server also arrives with an error; it does not wait for the grace period.
+  assert.equal(attentionOf(conversation({ status: 'unknown', reason: 'native_state_unavailable' }, { error: 'native_state_unavailable' }), [], false, false)!.tone, 'blocked');
+});
 test('blocked conversation errors say what cannot continue, with their own words', () => {
   const codes = ['conversation_configuration_changed', 'conversation_preparation_incomplete', 'native_creation_result_unknown',
     'native_configuration_unverified', 'workspace_restore_pending', 'workspace_directory_changed', 'workspace_directory_unavailable',
-    'workspace_identity_unavailable', 'native_receipt_unknown', 'native_run_changed', 'harness_unavailable'];
+    'workspace_identity_unavailable', 'native_receipt_unknown', 'native_run_changed', 'harness_unavailable',
+    'native_state_unavailable', 'native_observation_unavailable', 'database_restored_requires_reconciliation'];
   for (const code of codes) {
     const attention = assertWordsOnly(attentionOf(conversation({ status: 'idle', configurationVerified: code !== 'native_configuration_unverified' }, { error: code, readiness: 'blocked' })));
     assert.equal(attention.tone, 'blocked', code);
@@ -112,10 +131,13 @@ test('a message still without a native run only becomes a hint after the delay',
   assert.match(attention.detail!, /不会重复发送/);
   // The workbench combines the flag with the settled check, so a settled message never passes `true`.
 });
-test('the hint priority is: unknown state, then blocked error, then unknown operation, then a stuck message', () => {
-  const everything = attentionOf(conversation({ status: 'unknown', reason: 'native_state_unavailable' }, { error: 'workspace_directory_unavailable', readiness: 'blocked' }), [operation('unknown')], true);
+test('the hint priority is: a lasting unknown state, then a blocked error, then an unknown operation, then a stuck message', () => {
+  const everything = attentionOf(conversation({ status: 'unknown', reason: 'native_state_unavailable' }), [operation('unknown')], true, true);
   assert.equal(everything!.tone, 'unknown');
-  const blockedFirst = attentionOf(conversation({}, { error: 'workspace_directory_unavailable', readiness: 'blocked' }), [operation('unknown')], true);
+  // A fresh unknown hides itself and does not fall through to the operation/stuck hints.
+  assert.equal(attentionOf(conversation({ status: 'unknown', reason: 'native_state_unavailable' }), [operation('unknown')], true, false), null);
+  // An explicit error is a known cause: it shows as blocked at once rather than as an unknown state.
+  const blockedFirst = attentionOf(conversation({ status: 'unknown' }, { error: 'workspace_directory_unavailable', readiness: 'blocked' }), [operation('unknown')], true);
   assert.equal(blockedFirst!.tone, 'blocked');
   const operationFirst = attentionOf(conversation(), [operation('unknown')], true);
   assert.match(operationFirst!.title, /消息/);
