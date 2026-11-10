@@ -48,7 +48,7 @@
 .message-actions button { display:grid; place-items:center; width:28px; height:28px; border-radius:6px; color:var(--zs-text-muted); transition:background var(--zs-duration-response),color var(--zs-duration-response); }
 .message-actions button:hover { background:var(--zs-surface-hover); color:var(--zs-text); }
 
-/* Process block: steps while running, one line when done. */
+/* Process block: a folded summary line; the reader alone opens it and the steps stay folded too. */
 .process { margin:16px 0; border:1px solid var(--zs-line); border-radius:var(--zs-radius-item); background:var(--zs-surface); font-size:var(--zs-type-control); transition:border-color var(--zs-duration-state); }
 .process[data-open=false] { border-color:transparent; background:transparent; }
 .process[data-open=false]:hover { background:var(--zs-surface-hover); }
@@ -57,10 +57,12 @@
 .process-summary:hover { color:var(--zs-text); }
 .process-icon { display:grid; place-items:center; width:16px; height:16px; flex:none; color:var(--zs-status-unread); }
 .process[data-tone=failed] .process-icon { color:var(--zs-status-failed); }
+.process[data-tone=warning] .process-icon { color:var(--zs-warning); }
 .process[data-tone=unknown] .process-icon { color:var(--zs-status-unknown); }
 .process[data-tone=stopped] .process-icon { color:var(--zs-status-interrupted); }
 .process-text { min-width:0; display:flex; gap:6px; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
 .process[data-tone=failed] .process-text { color:var(--zs-danger); }
+.process[data-tone=warning] .process-text { color:var(--zs-warning); }
 .process-current { min-width:0; overflow:hidden; text-overflow:ellipsis; color:var(--zs-text-secondary); background:linear-gradient(90deg,var(--zs-text-muted) 0%,var(--zs-text) 45%,var(--zs-text-muted) 70%) 0 0/200% 100%; -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent; animation:zs-shimmer 1.6s linear infinite; }
 @keyframes zs-shimmer { from { background-position:100% 0; } to { background-position:-100% 0; } }
 .process-count { flex:none; color:var(--zs-text-placeholder); font-size:var(--zs-type-caption); font-variant-numeric:tabular-nums; }
@@ -80,6 +82,7 @@
 .process-step-icon { display:grid; place-items:center; width:16px; height:16px; flex:none; color:var(--zs-text-placeholder); }
 .process-step[data-status=failed] .process-step-icon { color:var(--zs-status-failed); }
 .process-step[data-status=unknown] .process-step-icon { color:var(--zs-status-unknown); }
+.process-step[data-status=stopped] .process-step-icon { color:var(--zs-status-interrupted); }
 .process-step-name { flex:none; max-width:45%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--zs-text); }
 .process-step-input { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--zs-text-muted); font:var(--zs-type-caption)/1.4 var(--zs-font-code); }
 .process-step-state { flex:none; margin-left:auto; color:var(--zs-text-placeholder); font-size:var(--zs-type-caption); }

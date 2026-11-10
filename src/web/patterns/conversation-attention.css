@@ -1,0 +1,19 @@
+/* One compact state line above the transcript, on the conversation's reading axis. The words carry the
+   meaning; the icon and a faint border carry only the tone, so it reads as a note rather than an alert. */
+.conversation-attention-slot { flex:none; width:min(100%,var(--zs-reading-width)); margin:0 auto; padding:12px 24px 0; }
+.conversation-attention { display:flex; align-items:flex-start; gap:8px; padding:8px 10px 8px 12px; border:1px solid var(--zs-line); border-radius:var(--zs-radius-item); background:var(--zs-neutral-25); color:var(--zs-text-secondary); font-size:var(--zs-type-control); line-height:1.55; animation:zs-fade-in var(--zs-duration-state) var(--zs-ease); }
+.conversation-attention-icon { flex:none; margin-top:3px; color:var(--zs-text-muted); }
+.conversation-attention[data-tone=unknown] .conversation-attention-icon { color:var(--zs-status-unknown); }
+.conversation-attention[data-tone=blocked] .conversation-attention-icon { color:var(--zs-warning); }
+.conversation-attention-text { flex:1; min-width:0; display:grid; gap:2px; }
+.conversation-attention-title { color:var(--zs-text); font-weight:500; }
+.conversation-attention-detail { color:var(--zs-text-muted); font-size:var(--zs-type-caption); }
+.conversation-attention .zs-button { align-self:center; }
+@media(max-width:759px) {
+  .conversation-attention-slot { padding:10px 16px 0; }
+  .conversation-attention { flex-wrap:wrap; }
+  /* The words keep the full line; the action moves under them instead of squeezing the explanation. */
+  .conversation-attention-text { flex:1 1 calc(100% - 23px); }
+  .conversation-attention .zs-button { margin-left:23px; }
+}
+@media(prefers-reduced-motion:reduce) { .conversation-attention { animation:none; } }
