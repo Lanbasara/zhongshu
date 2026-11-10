@@ -14,7 +14,7 @@ import { openDatabase } from '../src/server/database.ts';
 import { productMigrations } from '../src/server/migrations.ts';
 import type { PushEvent } from '../src/server/push.ts';
 import { createWorkbenchStore } from '../src/server/workbench-store.ts';
-import { readWorkspaceTimeline } from '../src/server/workspace-documents.ts';
+import { appendWorkspaceTimeline, compactTimeline, readWorkspaceTimeline } from '../src/server/workspace-documents.ts';
 import { pushMessage } from '../src/shared/push.ts';
 
 function database(t: TestContext) {
@@ -167,6 +167,30 @@ test('the store adopts a session an automation created once, finds it by native 
   assert.deepEqual(store.listConversations().map(entry => entry.id), [adopted.id, ordinary.id]);
 });
 
+test('one task\'s runs are counted by index, and an archived run frees a capacity slot', t => {
+  const db = database(t); const store = createWorkbenchStore(db);
+  const configuration = { modelId: 'fixture-model', permissionId: 'danger-full-access' };
+  const adopt = (native: string) => store.adoptConversation({ id: randomUUID(), harnessId: 'dsh', workspaceId: 'fixture', cwd: '/workspace/stock', title: '运行',
+    configuration, binding: { id: native, cwd: '/workspace/stock', configuration, details: {} }, automationId: 'task-1' });
+  const first = adopt('s-1'); const second = adopt('s-2');
+  store.setConversationState(second.id, { state: { status: 'idle', pendingInputs: 0, configurationVerified: true } });
+  assert.equal(store.automationRuns('task-1').count, 2);
+  assert.equal(store.automationRuns('task-1').latest?.id, store.listConversations({ automationId: 'task-1', limit: 1 })[0]!.id);
+  assert.deepEqual(store.conversationCapacity(), { used: 2, limit: 10_000 });
+  store.setArchived(first.id, true, () => true);
+  assert.deepEqual(store.conversationCapacity(), { used: 1, limit: 10_000 });
+  assert.equal(store.automationRuns('task-1').count, 2, 'an archived run still belongs to the task');
+  assert.deepEqual(store.listConversations({ automationId: 'task-1' }).map(row => row.id).sort(), [first.id, second.id].sort(),
+    'archived runs still appear under their task');
+  assert.deepEqual(store.idleAutomationConversationIds(Date.now() + 1), [second.id]);
+  store.setConversationState(second.id, { state: { status: 'running', runId: 'run-1', pendingInputs: 0, configurationVerified: true } });
+  assert.deepEqual(store.idleAutomationConversationIds(Date.now() + 1), [], 'a running conversation is never auto-archived');
+  store.setConversationState(second.id, { state: { status: 'failed', pendingInputs: 0, configurationVerified: true } });
+  assert.deepEqual(store.idleAutomationConversationIds(Date.now() + 1), [second.id], 'a settled failed run may be archived');
+  store.setConversationState(second.id, { state: { status: 'unknown', pendingInputs: 0, configurationVerified: false } });
+  assert.deepEqual(store.idleAutomationConversationIds(Date.now() + 1), [], 'an unknown state stays for the user to look at');
+});
+
 test('the workspace timeline file is read whole from its fixed hidden path; bad lines are reported and the last line per id wins', async t => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'zhongshu-timeline-'))); t.after(() => rmSync(root, { recursive: true, force: true }));
   assert.equal(await readWorkspaceTimeline(root), null);
@@ -193,6 +217,31 @@ test('the workspace timeline file is read whole from its fixed hidden path; bad 
   mkdirSync(join(outside, 'data')); writeFileSync(join(outside, 'data', 'timeline.jsonl'), lines[0]!);
   symlinkSync(join(outside, 'data'), join(other, '.zhongshu'));
   assert.equal(await readWorkspaceTimeline(other), null, 'nothing is read through the link');
+});
+
+test('timeline compaction keeps the last valid line per id, every malformed line, and the same visible entries', () => {
+  const first = JSON.stringify({ id: 'a', date: '2026-11-01', kind: 'action', title: '旧' });
+  const second = JSON.stringify({ id: 'b', date: '2026-11-02', kind: 'event', title: 'b' });
+  const invalid = JSON.stringify({ id: 'a', date: '2026-11-04', kind: 'gossip', title: '坏' });
+  const last = JSON.stringify({ id: 'a', date: '2026-11-03', kind: 'action', title: '新', status: 'done' });
+  const text = [first, 'not json', second, invalid, last, ''].join('\n');
+  const compacted = compactTimeline(text);
+  assert.equal(compacted, ['not json', second, invalid, last, ''].join('\n'), 'malformed lines survive, superseded lines do not');
+  const before = parseTimeline(text, { id: 'w', label: 'W' });
+  const after = parseTimeline(compacted, { id: 'w', label: 'W' });
+  assert.deepEqual(after.entries, before.entries);
+  assert.deepEqual(after.problems.map(problem => problem.reason), before.problems.map(problem => problem.reason));
+});
+
+test('a timeline near its size limit is compacted before the next line is appended', async t => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'zhongshu-timeline-big-'))); t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, '.zhongshu'));
+  const repeated = JSON.stringify({ id: 'same', date: '2026-11-01', kind: 'action', title: '同一条', detail: 'y'.repeat(1500) });
+  writeFileSync(join(root, '.zhongshu', 'timeline.jsonl'), Array.from({ length: 6_000 }, () => repeated).join('\n') + '\n');
+  const fresh = JSON.stringify({ id: 'fresh', date: '2026-11-10', kind: 'event', title: '新' });
+  await appendWorkspaceTimeline(root, fresh);
+  const lines = (await readWorkspaceTimeline(root))!.trimEnd().split('\n');
+  assert.deepEqual(lines.map(line => JSON.parse(line).id), ['same', 'fresh'], 'the old file is compacted, then the new line appended');
 });
 
 test('a run an automation started does not push its completion, since the agent decides; its failure still pushes', async () => {
@@ -261,6 +310,7 @@ test('the automation service shows native tasks in product terms, adopts session
 
   const first = (await app.inject({ method: 'GET', url: '/automations' })).json();
   const byId = new Map(first.automations.map((task: { id: string }) => [task.id, task]));
+  assert.deepEqual(first.capacity, { used: store.conversationCapacity().used, limit: 10_000 }, 'the page sees the capacity that decides adoption');
   const adopted = store.conversationForNative('dsh', 's-run-1');
   assert.ok(adopted, 'the session a routine task created is adopted into its workspace');
   assert.equal(adopted.automationId, 'routine');
@@ -343,4 +393,14 @@ test('the automation service shows native tasks in product terms, adopts session
   }
   assert.deepEqual(sessions, [], 'no session was opened ahead of a run');
   assert.deepEqual((await app.inject({ method: 'POST', url: '/automations/missing/run' })).json(), { outcome: 'not_found' });
+
+  // The calendar asks only for the range it displays; truncation and the near-limit warning are explicit (ADR 0025).
+  mkdirSync(join(directory, '.zhongshu'), { recursive: true });
+  writeFileSync(join(directory, '.zhongshu', 'timeline.jsonl'), [
+    JSON.stringify({ id: 'inside', date: '2026-11-10', kind: 'action', title: '窗内' }),
+    JSON.stringify({ id: 'outside', date: '2026-12-20', kind: 'event', title: '窗外' }),
+  ].join('\n') + '\n');
+  const windowed = (await app.inject({ method: 'GET', url: '/timeline?from=2026-11-01&to=2026-11-30' })).json();
+  assert.deepEqual(windowed.entries.map((entry: { id: string }) => entry.id), ['inside']);
+  assert.deepEqual([windowed.truncated, windowed.nearLimit], [false, false]);
 });

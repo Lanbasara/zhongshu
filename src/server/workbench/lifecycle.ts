@@ -21,6 +21,9 @@ function neverRan(conversation: Conversation) {
   return state.status === 'idle' && !state.runId && !state.terminalRunId && !state.latest;
 }
 
+/** ADR 0025: a run conversation idle this long moves to the archive, where it stays fully readable. */
+export const AUTOMATION_RETENTION_MS = 90 * 24 * 60 * 60_000;
+
 export class Lifecycle {
   private readonly store: WorkbenchStore;
   private readonly tasks: Tasks;
@@ -56,6 +59,20 @@ export class Lifecycle {
       conversation.binding ? this.observation.messageAllowed(conversation) || neverRan(conversation) :
         conversation.readiness === 'blocked' && conversation.state.pendingInputs === 0 &&
         !['running', 'waiting'].includes(conversation.state.status));
+  }
+  /** ADR 0025: idle automation-run conversations free their capacity slot after the retention period. */
+  archiveIdleAutomations(now = Date.now()): number {
+    if (this.tasks.closed) return 0;
+    let archived = 0;
+    for (const id of this.store.idleAutomationConversationIds(now - AUTOMATION_RETENTION_MS, 100)) {
+      try {
+        if (this.readers.reading(id) || this.gate.busy(id) || this.gate.preparing(id) || this.gate.isDeleting(id)) continue;
+        this.store.setArchived(id, true, conversation => !conversation.archived && ['idle', 'interrupted', 'failed'].includes(conversation.state.status) &&
+          !conversation.subagents?.running && !conversation.subagents?.unverified);
+        archived++;
+      } catch { /* a run or a deletion raced the sweep; the next hourly pass looks again */ }
+    }
+    return archived;
   }
   /** Caller persists the deletion intent before cleaning native data. No new work can enter this fence. */
   async quiesceForDeletion(id: string): Promise<Conversation> {

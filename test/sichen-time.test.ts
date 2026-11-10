@@ -50,6 +50,14 @@ test('upcoming runs follow the zone, skip past times, cross months and years, an
   assert.deepEqual(upcoming({ rule: { kind: 'cron', expression: '0 9 * * *' }, timeZone: SH }, now, 3), []);
 });
 
+test('a before boundary stops expansion at the view edge instead of walking dates nobody sees', () => {
+  const daily: When = { rule: { kind: 'daily', time: '09:00' }, timeZone: SH };
+  const end = at('2026-11-12T01:00:00Z');
+  assert.deepEqual(upcoming(daily, now, 800, end).map(value => new Date(value).toISOString()),
+    ['2026-11-10T01:00:00.000Z', '2026-11-11T01:00:00.000Z', '2026-11-12T01:00:00.000Z']);
+  assert.deepEqual(upcoming({ rule: { kind: 'once', date: '2026-11-13', time: '09:00' }, timeZone: SH }, now, 1, end), []);
+});
+
 test('what the Harness reports reads back as the rule that wrote it', () => {
   const scan: When = { rule: { kind: 'weekly', weekdays: [1, 2, 3, 4, 5], time: '14:45' }, timeZone: SH, until: '2027-01-31' };
   const native = toNative(scan, now) as { kind: 'rrule'; rrule: string };

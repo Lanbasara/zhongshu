@@ -45,9 +45,19 @@ export function realDate(value: string): boolean {
 }
 export const realClock = (value: string) => CLOCK.test(value);
 
+/** A formatter is expensive to build and reusable; a page expands hundreds of occurrences per render (ADR 0025). */
+const zoneFormats = new Map<string, Intl.DateTimeFormat>();
+function zoneFormat(timeZone: string): Intl.DateTimeFormat {
+  let format = zoneFormats.get(timeZone);
+  if (!format) {
+    format = new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23', weekday: 'short' });
+    zoneFormats.set(timeZone, format);
+  }
+  return format;
+}
 /** Wall-clock parts of an instant in a zone. */
 export function zoned(instant: number, timeZone: string) {
-  const parts = Object.fromEntries(new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23', weekday: 'short' })
+  const parts = Object.fromEntries(zoneFormat(timeZone)
     .formatToParts(new Date(instant)).map(part => [part.type, part.value]));
   return { date: `${parts.year}-${parts.month}-${parts.day}`, time: `${parts.hour}:${parts.minute}`, weekday: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].indexOf(String(parts.weekday)) + 1 };
 }
@@ -192,21 +202,27 @@ export function describe(when: When, viewerZone?: string): string {
 }
 export function zoneLabel(zone: string): string { return zone === 'Asia/Shanghai' ? '上海时间' : zone; }
 
-/** The next `count` occurrences strictly after `after`, within `from`/`until`; none for cron, which only the Harness expands. */
-export function upcoming(when: When, after: number, count: number): number[] {
+/** The next `count` occurrences strictly after `after`, within `from`/`until`; none for cron, which only the Harness expands.
+ * `before` bounds the work to a view window as well, so a page never computes dates it cannot show (ADR 0025). */
+export function upcoming(when: When, after: number, count: number, before?: number): number[] {
   const { rule, timeZone } = when; const result: number[] = [];
   if (rule.kind === 'cron' || !validZone(timeZone)) return result;
-  if (rule.kind === 'once') { const at = zonedInstant(rule.date, rule.time, timeZone); return at > after && count > 0 ? [at] : []; }
+  if (rule.kind === 'once') { const at = zonedInstant(rule.date, rule.time, timeZone); return at > after && at <= (before ?? Infinity) && count > 0 ? [at] : []; }
   let day = zoned(after, timeZone).date;
+  const lastDay = before === undefined ? undefined : zoned(before, timeZone).date;
   if (when.from && when.from > day) day = when.from;
   for (let guard = 0; result.length < count && guard < 3700; guard++, day = addDays(day, 1)) {
     if (when.until && day > when.until) break;
+    if (lastDay !== undefined && day > lastDay) break;
     const [, m, d] = day.split('-').map(Number);
     const fits = rule.kind === 'daily' || (rule.kind === 'weekly' && rule.weekdays.includes(weekdayOf(day)))
       || (rule.kind === 'monthly' && d === rule.day && (!rule.months?.length || rule.months.includes(m!)));
     if (!fits) continue;
     const at = zonedInstant(day, rule.time, timeZone);
-    if (at > after) result.push(at);
+    if (at > after) {
+      if (before !== undefined && at > before) break;
+      result.push(at);
+    }
   }
   return result;
 }

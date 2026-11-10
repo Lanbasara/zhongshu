@@ -1006,3 +1006,23 @@ test('what a run did before observation started reaches the observers through th
   await delay(30);
   assert.equal(seen.length, reports, 'reading an unchanged page reports nothing again');
 });
+
+test('idle automation runs archive after the retention period and stay readable under their task (ADR 0025)', async t => {
+  const f = fixture(t);
+  const configuration = { modelId: 'model', permissionId: 'workspace' };
+  const adopt = (native: string) => f.store.adoptConversation({ id: randomUUID(), harnessId: 'dsh', workspaceId: 'fixture',
+    cwd: f.workspaces[0]!.directory, title: '运行', configuration,
+    binding: { id: native, cwd: f.workspaces[0]!.directory, configuration, details: {} }, automationId: 'task-1' });
+  const idle = adopt('native-idle'); const busy = adopt('native-busy');
+  f.store.setConversationState(idle.id, { state: terminal() });
+  f.store.setConversationState(busy.id, { state: { status: 'running', runId: 'run-busy', pendingInputs: 0, configurationVerified: true } });
+  const old = Date.now() - 91 * 24 * 60 * 60_000;
+  f.db.prepare('UPDATE workbench_conversations SET last_activity_at=? WHERE id IN (?,?)').run(old, idle.id, busy.id);
+  assert.equal(f.service.archiveIdleAutomations(), 1);
+  assert.equal(f.store.getConversation(idle.id)?.archived, true);
+  assert.equal(f.store.getConversation(busy.id)?.archived, false, 'a running run is never archived');
+  assert.deepEqual(f.store.listConversations({ automationId: 'task-1' }).map(row => row.id).sort(), [idle.id, busy.id].sort(),
+    'archived runs stay in the task history');
+  assert.equal(f.store.getConversation(idle.id)?.binding?.id, 'native-idle', 'archiving keeps the full native identity');
+  assert.equal(f.service.archiveIdleAutomations(), 0, 'the next pass has nothing left to archive');
+});

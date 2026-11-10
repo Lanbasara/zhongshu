@@ -45,9 +45,25 @@ export function movable(task: AutomationView, now: number): boolean {
   return task.status === 'active' && oneShot && Date.parse(task.scheduledAt) > now && !task.executing;
 }
 
+const OCCURRENCE_CACHE = new Map<string, number[]>();
+const OCCURRENCE_CACHE_LIMIT = 2048;
+/** Occurrences of one task inside one visible range; the 30-second heartbeat reuses them (ADR 0025). */
+function occurrencesFor(task: AutomationView, rule: When, from: string, to: string): number[] {
+  const key = JSON.stringify([task.id, task.scheduledAt, task.timing, from, to]);
+  const cached = OCCURRENCE_CACHE.get(key);
+  if (cached) return cached;
+  const end = zonedInstant(addDays(to, 2), '00:00', rule.timeZone);
+  // Dates before the first visible day are never shown, so do not walk them; the next plan may already be later.
+  const start = Math.max(Date.parse(task.scheduledAt) - 60_000, zonedInstant(from, '00:00', rule.timeZone) - 1);
+  const occurrences = upcoming(rule, start, 800, end);
+  if (OCCURRENCE_CACHE.size >= OCCURRENCE_CACHE_LIMIT) OCCURRENCE_CACHE.clear();
+  OCCURRENCE_CACHE.set(key, occurrences);
+  return occurrences;
+}
 /** Items of all tasks and timeline entries between two local dates, inclusive. */
 export function scheduleItems(input: { automations: AutomationView[]; timeline: TimelineEntry[]; notifications: AgentNotificationView[]; from: string; to: string; now: number }): ScheduleItem[] {
   const items: ScheduleItem[] = [];
+  const viewerZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   const at = (instant: number) => { const date = new Date(instant); return { date: localDate(date), time: localTime(date), at: instant }; };
   const inRange = (date: string) => date >= input.from && date <= input.to;
   const placed = input.notifications.filter(entry => entry.conversationId).sort((a, b) => a.createdAt - b.createdAt);
@@ -76,10 +92,9 @@ export function scheduleItems(input: { automations: AutomationView[]; timeline: 
     const occurrences: number[] = [];
     // Recurring rules the time model reads (daily, weekly, monthly, with starts and ends) are laid out up to their end;
     // other rules show only the occurrence the Harness reports.
-    const rule = task.status === 'active' ? fromNative(task.timing, Intl.DateTimeFormat().resolvedOptions().timeZone) : undefined;
+    const rule = task.status === 'active' ? fromNative(task.timing, viewerZone) : undefined;
     if (rule && rule.rule.kind !== 'once' && rule.rule.kind !== 'cron' && validZone(rule.timeZone)) {
-      const end = zonedInstant(addDays(input.to, 2), '00:00', rule.timeZone);
-      for (const instant of upcoming(rule, planned - 60_000, 800)) { if (instant > end) break; occurrences.push(instant); }
+      occurrences.push(...occurrencesFor(task, rule, input.from, input.to));
     } else occurrences.push(planned);
     for (const instant of occurrences) {
       if (delivered && Math.abs(Date.parse(delivered.scheduledAt) - instant) < 60_000) continue; // already shown as delivered
