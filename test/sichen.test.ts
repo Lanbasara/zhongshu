@@ -115,6 +115,7 @@ test('timeline entries are validated, appended to the workspace file and marked 
   assert.match(entry.id, /^action-20991111-[0-9a-f]{6}$/); assert.equal(entry.tz, SH);
   const escaping = await f.request('POST', '/sichen/v1/timeline/add', { cwd: f.directory, kind: 'event', title: 'x', date: '2099-11-11', link: '../secret.md' });
   assert.equal(escaping.json().error, 'timeline_entry_invalid');
+  assert.deepEqual(escaping.json().problems, ['链接要写工作区里的相对路径，不能是网址、绝对路径或带 ..'], 'the command line prints a sentence, not a code');
   const done = await f.request('POST', `/sichen/v1/timeline/${entry.id}/done`, { cwd: f.directory });
   assert.equal(done.json().entry.status, 'done');
   const lines = readFileSync(join(f.directory, '.zhongshu/timeline.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));

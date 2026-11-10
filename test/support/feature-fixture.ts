@@ -26,6 +26,11 @@ import { parseStorageBudget } from '../../src/server/storage.ts';
 import { Workbench } from '../../src/server/workbench.ts';
 import { createWorkbenchHttp } from '../../src/server/workbench-http.ts';
 import { WorkspaceRegistry } from '../../src/server/workspace-registry.ts';
+import { createPluginManagement } from '../../src/server/plugins.ts';
+import { createPush } from '../../src/server/push.ts';
+import { createHarnessAccounts } from '../../src/server/harness-accounts.ts';
+import { createAgentNotifications } from '../../src/server/agent-notifications.ts';
+import { createAutomations } from '../../src/server/automations.ts';
 import { itemSchema, stateSchema, subagentStatusSchema, teamSchema, usageSchema } from '../../src/shared/workbench.ts';
 
 process.umask(0o077);
@@ -39,10 +44,13 @@ const cliSchema = z.object({
   count: z.coerce.number().int().min(1).max(200_000).default(650),
   chars: z.coerce.number().int().min(32).max(80_000).default(80),
   storageBudget: z.string().max(32).optional(),
+  /** tool-step: status given to the step that was running, and whether the new record is an empty completed tool record. */
+  stepStatus: z.enum(['running', 'completed', 'failed', 'unknown']).optional(),
+  empty: z.boolean().optional(),
 });
 const recordSchema = z.object({
   id: z.uuid(), title: z.string().max(200), harnessId: z.enum(['codex', 'dsh']),
-  cwd: z.string().max(4096), configuration: z.object({ modelId: z.string(), permissionId: z.string(), reasoningEffort: z.string().optional() }),
+  cwd: z.string().max(4096), configuration: z.object({ modelId: z.string(), permissionId: z.string(), reasoningEffort: z.string().optional(), agentPreset: z.string().optional() }),
   state: stateSchema, items: z.array(itemSchema).max(200_000),
   submissions: z.array(z.object({ id: z.string(), text: z.string().max(16_000), runId: z.string() })).max(100),
   rejectedOperationIds: z.array(z.uuid()).max(100).default([]), rejectNext: z.boolean().default(false),
@@ -66,9 +74,9 @@ function privateFile(path: string): void {
 }
 
 async function main() {
-  const args = parseArgs({ options: { root: { type: 'string' }, port: { type: 'string' }, title: { type: 'string' }, count: { type: 'string' }, chars: { type: 'string' }, 'storage-budget': { type: 'string' }, help: { type: 'boolean' } }, allowPositionals: true, strict: true });
+  const args = parseArgs({ options: { root: { type: 'string' }, port: { type: 'string' }, title: { type: 'string' }, count: { type: 'string' }, chars: { type: 'string' }, 'storage-budget': { type: 'string' }, stepStatus: { type: 'string' }, empty: { type: 'boolean' }, help: { type: 'boolean' } }, allowPositionals: true, strict: true });
   if (args.values.help) {
-    console.log(`node test/support/feature-fixture.ts <${cliSchema.shape.command.options.join('|')}> --root ABSOLUTE_DIRECTORY [--port 4391] [--title TITLE] [--count 650 --chars 80] [--storage-budget 16GiB]`);
+    console.log(`node test/support/feature-fixture.ts <${cliSchema.shape.command.options.join('|')}> --root ABSOLUTE_DIRECTORY [--port 4391] [--title TITLE] [--count 650 --chars 80] [--storage-budget 16GiB] [--stepStatus running|completed|failed|unknown] [--empty]`);
     return;
   }
   if (args.positionals.length !== 1) throw new Error('one_command_required');
@@ -180,11 +188,17 @@ async function main() {
           }
           if (input.command === 'prove' || input.command === 'complete') prove(value);
           if (input.command === 'tool-step') {
-            // One more native tool step in the running turn; the previous step finishes.
+            // One more native tool step in the running turn; the previous step takes --stepStatus (default completed)
+            // so mid-turn failures and unknown steps can be driven, then --empty appends a record with nothing to show.
             if (value.state.status !== 'running') throw new Error('fixture_must_be_running');
             const runId = value.state.runId!;
-            for (const item of value.items) if (item.kind === 'tool' && item.status === 'running' && item.runId === runId) item.status = 'completed';
+            const previous = input.stepStatus ?? 'completed';
+            for (const item of value.items) if (item.kind === 'tool' && item.status === 'running' && item.runId === runId) item.status = previous;
             const index = value.items.filter(item => item.kind === 'tool' && item.runId === runId).length;
+            if (input.empty) {
+              value.items.push({ id: `tool:${runId}:${index}`, kind: 'tool', text: '', status: 'completed', runId, tool: { name: '' } });
+              return;
+            }
             const steps = [['读取文件', 'notes.md'], ['运行命令', 'rg -n fixture notes.md'], ['编辑文件', 'notes.md'], ['运行命令', 'npm test']] as const;
             const [name, command] = steps[index % steps.length]!;
             value.items.push({ id: `tool:${runId}:${index}`, kind: 'tool', text: '', status: 'running', runId, tool: { name, input: command, output: `FIXTURE TOOL OUTPUT ${index + 1}` } });
@@ -193,7 +207,8 @@ async function main() {
             if (value.state.status !== 'running') throw new Error('fixture_must_be_running');
             const runId = value.state.runId!;
             for (const item of value.items) if (item.kind === 'tool' && item.status === 'running' && item.runId === runId) item.status = 'failed';
-            value.state = { ...idle(), status: 'failed', runId };
+            // Like a real Host, a failed run reports its own terminal result.
+            value.state = { ...idle(), status: 'failed', runId, terminalRunId: runId, terminalStatus: 'failed' };
           }
           if (input.command === 'complete') {
             if (value.state.status !== 'running') throw new Error('fixture_must_be_running');
@@ -285,7 +300,9 @@ async function main() {
         return { id, available: true, ...(id === 'codex' ? { defaultModelId: 'fixture-model' } : {}), models: [
           { id: 'fixture-model', label: 'Fixture · 非真实模型', reasoningEfforts, ...(id === 'codex' ? { defaultReasoningEffort: 'medium' } : {}) },
           { id: 'fixture-alternate', label: 'Fixture Alternate · 非真实模型', reasoningEfforts: reasoningEfforts.slice(0, 3), ...(id === 'codex' ? { defaultReasoningEffort: 'low' } : {}) },
-        ], permissions: [{ id: 'fixture-write', label: 'Fixture write', description: 'Synthetic boundary; no actual agent execution.' }, { id: 'fixture-read', label: 'Fixture read', description: 'Synthetic configuration selection only.' }] }; },
+        ], permissions: [{ id: 'fixture-write', label: 'Fixture write', description: 'Synthetic boundary; no actual agent execution.' }, { id: 'fixture-read', label: 'Fixture read', description: 'Synthetic configuration selection only.' }],
+        // Like the real DSH adapter, the stand-in DSH offers both Agent presets with standard as Zhongshu's default (ADR 0017).
+        ...(id === 'dsh' ? { presets: [{ id: 'standard', label: '标准', description: 'Fixture · 逐个调用工具。', available: true }, { id: 'ptc', label: 'PTC', description: 'Fixture · 批量调用工具。', available: true }], defaultPresetId: 'standard' } : {}) }; },
       ...(id === 'dsh' ? { async prepareDraft(input: { id: string; cwd: string }) {
         const row = native.prepare('SELECT body FROM sessions WHERE id=?').get(input.id);
         if (!row) {
@@ -391,22 +408,42 @@ async function main() {
   const registry = new WorkspaceRegistry(db, workspaces, [{ id: 'fixture-root', label: 'Fixture directories', directory }]);
   let transport: ReturnType<typeof createWorkbenchHttp> | undefined;
   const store = createWorkbenchStore(db, { onChange: event => transport?.changed(event), storageBudget: parseStorageBudget(input.storageBudget) });
-  const workbench = new Workbench(store, workspaces, new Map<HarnessId, HarnessAdapter>([['codex', adapter('codex')], ['dsh', adapter('dsh')]]), registry);
+  const adapters = new Map<HarnessId, HarnessAdapter>([['codex', adapter('codex')], ['dsh', adapter('dsh')]]);
+  const workbench = new Workbench(store, workspaces, adapters, registry);
   transport = createWorkbenchHttp(workbench);
   const origin = 'http://127.0.0.1:' + input.port;
+  // The same private routes as the product (main.ts), so every page loads. The stand-in Harnesses have no accounts,
+  // automations or plugin backends, and push never leaves this machine.
+  const offline = (() => Promise.reject(new Error('fixture_push_offline'))) as typeof fetch;
+  const push = createPush(db, { origin, fetch: offline, log: () => {}, badge: () => workbench.attention().unread });
+  const plugins = createPluginManagement(db, {});
+  const accounts = createHarnessAccounts([...adapters.values()], { notify: () => {}, log: () => {} });
+  const notifications = createAgentNotifications(db, { push: () => {}, title: id => store.getConversation(id)?.title });
+  const automations = createAutomations(db, workbench, adapters, notifications, () => {});
   let app: Awaited<ReturnType<typeof buildApp>> | undefined;
   let stopping = false;
   const stop = async () => {
     if (stopping) return; stopping = true;
     const timeout = setTimeout(() => process.exit(1), 10_000).unref();
-    try { transport!.close(); await workbench.close(); await app?.close(); db.close(); native.close(); unlinkSync(lock); clearTimeout(timeout); console.log(JSON.stringify({ event: 'stopped', pid: process.pid })); }
+    try {
+      automations.close(); accounts.close(); push.close(); transport!.close(); await plugins.close(); await workbench.close(); await app?.close();
+      db.close(); native.close(); unlinkSync(lock); clearTimeout(timeout); console.log(JSON.stringify({ event: 'stopped', pid: process.pid }));
+    }
     catch { process.exitCode = 1; }
   };
   process.once('SIGINT', () => { void stop(); }); process.once('SIGTERM', () => { void stop(); });
   try {
     const metadata = z.object({ name: z.literal('zhongshu'), version: z.string(), revision: z.string() }).parse(JSON.parse(readFileSync(join(repository, 'dist/version.json'), 'utf8')));
-    app = await buildApp({ db, origin, assetsDirectory: join(repository, 'dist/public'), metadata, privateRoutes: transport.routes, onLogout: transport.logout });
-    await workbench.start(); await app.listen({ host: '127.0.0.1', port: input.port });
+    app = await buildApp({ db, origin, assetsDirectory: join(repository, 'dist/public'), metadata, onLogout: transport.logout,
+      privateRoutes: async (scope, context) => {
+        await transport!.routes(scope, context);
+        await scope.register(plugins.routes, { prefix: '/workbench' });
+        await scope.register(push.routes, { prefix: '/push' });
+        await scope.register(accounts.routes, { prefix: '/accounts' });
+        await scope.register(automations.routes, { prefix: '/workbench' });
+      } });
+    await workbench.start(); accounts.start(); await automations.start();
+    await app.listen({ host: '127.0.0.1', port: input.port });
     console.log(JSON.stringify({ event: 'ready', mode: 'fixture', pid: process.pid, root, origin, revision: metadata.revision }));
   } catch (error) { await stop(); throw error; }
 }

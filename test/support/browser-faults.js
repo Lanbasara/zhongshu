@@ -22,6 +22,12 @@ export function installBrowserFaults() {
       if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error('verification_json_body_required');
       outgoing = { ...options, body: JSON.stringify({ ...body, fixtureFault: match.kind === 'invalid-request' ? true : 'x'.repeat(70 * 1024) }) };
     }
+    // Hold a request before it leaves the browser, so another device can change native state first.
+    // Release it within the app's own request timeout, or the app gives up and the result proves nothing.
+    if (match?.kind === 'hold-request') {
+      await new Promise(resolve => { held = { release: resolve, path, request: true }; });
+      held = undefined;
+    }
     // Deliberately allow a captured stale response to arrive after the app aborts
     // its read. This exercises the UI's generation/epoch checks independently.
     const response = await original.call(this, url, match?.kind === 'hold' ? { ...outgoing, signal: undefined } : outgoing);
@@ -45,12 +51,13 @@ export function installBrowserFaults() {
   window.zhVerify = {
     dropNext: (path, method = 'POST') => arm('drop', path, method),
     holdNext: (path, method = 'GET') => arm('hold', path, method),
+    holdNextRequest: (path, method = 'POST') => arm('hold-request', path, method),
     rejectNextRequest: (path, status) => {
       if (![400, 413].includes(status) || !/^\/api\/private\/workbench\/conversations\/[0-9a-f-]{36}\/operations$/i.test(path)) throw new Error('invalid_rejection_fault');
       arm(status === 400 ? 'invalid-request' : 'oversized-request', path, 'POST');
     },
-    status: () => ({ armed: !!armed, held: held?.path ?? null, journal: [...journal] }),
-    release: () => { if (!held) throw new Error('no_held_response'); held.release(); },
+    status: () => ({ armed: !!armed, held: held?.path ?? null, heldBefore: held ? (held.request ? 'request' : 'response') : null, journal: [...journal] }),
+    release: () => { if (!held) throw new Error('nothing_held'); held.release(); },
     denyDraftStorage: () => { Storage.prototype.setItem = function (key, value) { if (key.startsWith('zhongshu:draft:v1:')) throw new DOMException('verification quota', 'QuotaExceededError'); return originalStorage.call(this, key, value); }; },
     restore: () => { armed = undefined; held?.release(); window.fetch = original; Storage.prototype.setItem = originalStorage; delete window.zhVerify; },
   };

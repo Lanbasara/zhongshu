@@ -537,6 +537,79 @@ test('DSH rechecks current execution after target paging and refuses to queue be
   } finally { await context.close(); }
 });
 
+test('DSH keeps proving a long running turn when native events arrive while it pages back to the turn start', async () => {
+  const context = await setup();
+  try {
+    const binding = await context.create(); const native = context.fixture.sessions.get(binding.id)!;
+    await context.adapter.submit(binding, { id: randomUUID(), text: 'Synthetic long turn' });
+    // The turn start falls out of the latest five-record window, so state pages back to it.
+    for (let index = 0; index < 12; index++) context.fixture.append(native, 'synthetic/step', { index });
+    // A step boundary lands while the page is in flight: a few events, then more than one window.
+    context.fixture.onNextPage(() => { for (let index = 0; index < 3; index++) context.fixture.append(native, 'synthetic/step', { index: 100 + index }); });
+    const first = await context.adapter.state(binding);
+    assert.equal(first.status, 'running', first.reason); assert.equal(first.runId, `dsh:${binding.id}:turn:1`);
+    context.fixture.onNextPage(() => { for (let index = 0; index < 20; index++) context.fixture.append(native, 'synthetic/step', { index: 200 + index }); });
+    const second = await context.adapter.state(binding);
+    assert.equal(second.status, 'running', second.reason); assert.equal(second.runId, `dsh:${binding.id}:turn:1`);
+    context.fixture.append(native, 'turn/end', { turn: 1, reason: { kind: 'completed' } }); native.open = null;
+    assert.equal((await context.adapter.state(binding)).status, 'idle');
+  } finally { await context.close(); }
+});
+
+test('A watch opened in the middle of a long DSH turn reports it running, never a false unknown', async () => {
+  const context = await setup();
+  try {
+    const binding = await context.create(); const native = context.fixture.sessions.get(binding.id)!;
+    await context.adapter.submit(binding, { id: randomUUID(), text: 'Synthetic long turn' });
+    // More events than the watch's thirty-record window: its snapshot cannot see the turn start.
+    for (let index = 0; index < 40; index++) context.fixture.append(native, 'synthetic/step', { index });
+    const changes: NativeChange[] = [];
+    const unsubscribe = await context.adapter.watch(binding, change => changes.push(change));
+    await until(() => changes.some(change => change.type === 'state'));
+    const states = changes.flatMap(change => change.type === 'state' ? [change.state] : []);
+    assert.deepEqual(states.map(state => state.status), ['running']); assert.equal(states[0]!.runId, `dsh:${binding.id}:turn:1`);
+    unsubscribe();
+  } finally { await context.close(); }
+});
+
+test('After a stop, child messages left in next-step do not lock the conversation; unknown next-step input still does', async () => {
+  const context = await setup();
+  try {
+    const binding = await context.create(); const native = context.fixture.sessions.get(binding.id)!;
+    await context.adapter.submit(binding, { id: randomUUID(), text: 'Synthetic parent turn' });
+    const child = randomUUID();
+    // Native rc.4: a child's relay and settle notice land in next-step while the parent's own tool runs.
+    native.stepInbox.push(
+      { id: randomUUID(), role: 'user', source: { kind: 'agent-message', form: 'relay', senderSessionId: child }, content: [{ type: 'text', text: 'Agent sent a message' }, { type: 'text', text: 'synthetic result' }] },
+      { id: randomUUID(), role: 'user', source: { kind: 'subagent-settled', form: 'notice', summary: 'Background subagent finished', senderSessionId: child }, content: [{ type: 'text', text: 'Background subagent finished' }] });
+    // A user stop ends the turn; nothing wakes the parent, so the notices wait for the next prompt.
+    context.fixture.append(native, 'turn/end', { turn: 1, reason: { kind: 'aborted', reason: { kind: 'user' } } }); native.open = null;
+    const stopped = await context.adapter.state(binding);
+    assert.equal(stopped.status, 'interrupted'); assert.equal(stopped.pendingInputs, 0);
+    assert.equal((await context.adapter.submit(binding, { id: randomUUID(), text: 'Next prompt after the stop' })).outcome, 'accepted');
+    context.fixture.append(native, 'turn/end', { turn: 2, reason: { kind: 'completed' } }); native.open = null;
+    native.stepInbox.push({ id: randomUUID(), role: 'user', source: { kind: 'user', rpcId: randomUUID() }, content: [{ type: 'text', text: 'Unknown queued work' }] });
+    assert.equal((await context.adapter.state(binding)).pendingInputs, 1);
+    assert.equal((await context.adapter.submit(binding, { id: randomUUID(), text: 'Must not run behind unknown input' })).outcome, 'rejected');
+  } finally { await context.close(); }
+});
+
+test('A schedule change notice waiting in an idle session does not lock it; a schedule-looking unknown input still does', async () => {
+  const context = await setup();
+  try {
+    const binding = await context.create(); const native = context.fixture.sessions.get(binding.id)!;
+    const notice = (text: string) => ({ id: randomUUID(), role: 'user', source: { kind: 'schedule' }, content: [{ type: 'text', text }] });
+    // DSH 0.2.2 injects this into next-step when a task involving the idle session is created, edited or deleted elsewhere.
+    native.stepInbox.push(notice('[SCHEDULE CHANGE]\nA scheduled task involving this session was changed outside this session. This notice is not a delivery of the task and needs no action.\nchange: deleted\nschedule_id_json: "s"\nschedule_title_json: "t"'));
+    const idle = await context.adapter.state(binding);
+    assert.equal(idle.status, 'idle'); assert.equal(idle.pendingInputs, 0);
+    assert.equal((await context.adapter.submit(binding, { id: randomUUID(), text: 'Send after a schedule change' })).outcome, 'accepted');
+    context.fixture.append(native, 'turn/end', { turn: 1, reason: { kind: 'completed' } }); native.open = null;
+    native.stepInbox.push(notice('[SCHEDULE REMINDER]\nnot a change notice'));
+    assert.equal((await context.adapter.state(binding)).pendingInputs, 1);
+  } finally { await context.close(); }
+});
+
 test('DSH discards target proof if the Host history moves backwards during lookup', async () => {
   const context = await setup();
   try {

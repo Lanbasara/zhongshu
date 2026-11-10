@@ -30,11 +30,11 @@
 
 | 场景 | 初始条件与动作 | 判据和独立观察 |
 | --- | --- | --- |
-| E01 | 建“执行 A”，输入含本轮独有标记的两行文本；先按 Enter，再发送。CLI complete 后输入新文本再发送 | Enter 不派发；首次发送 inspect 的 submitCalls=1、正文有两行用户输入、出现停止按钮。complete 后出现 `FIXTURE COMPLETED <runId>`、恢复发送，再发后 submitCalls=2；两轮同原生身份、配置不变。运行中快捷键的排队行为见 E06 |
-| E02 | 按 [空原生会话故障前提](conversations.md#空原生会话故障前提) 建“未知回执”；先运行 unknown-receipt，再发送唯一文本。保存产品操作 ID、inspect 调用数；在“核对同一发送”重试两次；再运行 prove，点“查询原生结果” | 未发布证据前，操作 unknown、保留 pending 草稿，同编号重试不增加 submitCalls。发布后 accepted，草稿中的 pending 被清除；inspect 始终只调用一次，原生 operationIds 只有原 ID。最后 complete 收尾 |
-| E03 | 在已接受且 running 的 fixture 对话点“停止当前轮” | inspect 的 stopCalls 加一、目标 runId 等于被停止轮，产品操作 type=stop；页面变“已中断”，显示后台工具可能仍运行/改动不撤销的提示。发下一条能再次运行；fixture 不证明真实工具退出 |
+| E01 | 在草稿输入含本轮独有标记的两行文本（草稿首发即为首次发送；之后的 `--title` 用 inspect 中折叠后的实际标题）；先按 Enter，再发送。CLI complete 后输入新文本再发送 | Enter 不派发；首次发送 inspect 的 submitCalls=1、正文有两行用户输入、出现停止按钮。complete 后出现 `FIXTURE COMPLETED <runId>`、恢复发送，再发后 submitCalls=2；两轮同原生身份、配置不变。运行中快捷键的排队行为见 E06 |
+| E02 | 按 [空原生会话故障前提](conversations.md#空原生会话故障前提) 建“未知回执”；先运行 unknown-receipt，再发送唯一文本。保存产品操作 ID、inspect 调用数；在“核对同一发送”重试两次；再运行 prove；页面若已自动核实（accepted、pending 清除、按钮消失），记为有效恢复，按钮仍在时再点“查询原生结果” | 未发布证据前，操作 unknown、保留 pending 草稿，同编号重试不增加 submitCalls。发布后 accepted，草稿中的 pending 被清除；inspect 始终只调用一次，原生 operationIds 只有原 ID。最后 complete 收尾 |
+| E03 | 在已接受且 running 的 fixture 对话点“停止当前轮” | inspect 的 stopCalls 加一、state.runId 仍是被停止轮且 status=interrupted；产品 type=stop 操作的 runId 等于被停止轮；页面变“已中断”，显示后台工具可能仍运行/改动不撤销的提示。发下一条能再次运行；fixture 不证明真实工具退出 |
 | E04 | 按下方五个独立分支，分别驱动存储失败、编码预算、HTTP 400、HTTP 413、原生 rejected | 每个分支都核对输入、pending、原操作编号、独立调用计数与编辑后再次发送；不能用其中一条代替其他分支 |
-| E05 | 按下面真实分支分别使用 Codex、DSH | 文件字节独立读回、原生身份/配置及正文共同符合预期；每个 Harness 单独结论 |
+| E05 | 按下面真实分支分别使用 Codex、DSH | 文件字节独立读回、原生身份/配置及正文共同符合预期；每个 Harness 单独结论。期间以约 1 秒间隔读对话状态，运行中的轮次在工具结果、审批回答和步骤交界处不出现“待核实”。审批分支只在原生出现 `[sandbox: …]` 拒绝时触发：workspace-write 下 /tmp 可写不触发，容器根只读时 /opt 是 EROFS 而非沙箱拒绝、无法提权，缺此前提示记为 UNCOVERED |
 
 ```sh
 node test/support/feature-fixture.ts complete --root "$zh_verify_root" --title '执行 A'
@@ -74,8 +74,8 @@ node test/support/feature-fixture.ts inspect --root "$zh_verify_root" --title '�
 1. 按共同入口先核对整个 Host 的读取边界，分别保留 shell 与原生文件工具的禁止/允许读写结果，再准备两个独立合成工作区。各写 `notes.md`，含执行者本轮确定的三条事实；创建前确认 `result.md` 不存在。记录预期字节/事实，不让模型生成预期。
 2. 第一轮消息要求读取 notes、把事实写入 result，并只在首轮消息中给一个随机标记。终态后用工作区外的可信读取核对文件三条事实。不能采信“已写入”的自然语言。
 3. 第二轮只问“上一轮我给的标记是什么”，不再次提供标记、不让首轮写入文件。核对正文与首轮保存的预期一致，且原生身份/模型/权限未变。
-4. 为停止场景把 [workspace-gate.mjs](../../test/support/workspace-gate.mjs) 复制进本次合成目录，给 8–40 位小写字母数字标记。页面要求真实运行 `node workspace-gate.mjs <标记>`，等待 `gate-<标记>.started.json`，从可信端核对 PID/目录和进程存活，再点停止。
-5. 等原生本轮 terminal/interrupted、页面中断提示；同时独立检查工具是否仍存活，单独记录。退出工具可在本次目录创建 `gate-<标记>.release`，等待 finished 文件与 PID 退出；脚本最多 90 秒自终止，`outcome: timeout` 不算释放成功。不要把清理动作当作原生 stop 的效果。
+4. 为停止场景把 [workspace-gate.mjs](../../test/support/workspace-gate.mjs) 复制进本次合成目录，给 8–40 位小写字母数字标记。页面要求真实运行 `node workspace-gate.mjs <标记>`，等待 `gate-<标记>.started.json`（Codex 沙箱里其中的 pid 属于沙箱命名空间：在容器内按 cmdline `node workspace-gate.mjs <标记>` 找进程，核对 `/proc/<pid>/status` 里 NSpid 的末项等于该 pid；一条命令里可用 `;` 串联多个不同标记的 gate，逐个 release，以免 90 秒时限不够），从可信端核对 PID/目录和进程存活，再点停止。
+5. 等原生本轮 terminal/interrupted、页面中断提示；同时独立检查工具是否仍存活，单独记录。退出工具可在本次目录创建 `gate-<标记>.release`，等待 finished 文件与 PID 退出；脚本最多 90 秒自终止，`outcome: timeout` 不算释放成功。DSH 的原生停止会直接结束前台 shell 工具，不会生成 finished 文件；这时记为“工具随停止退出”，无需 release。不要把清理动作当作原生 stop 的效果。
 
 真实后台通知产生后继轮后，继续发送需要核实“上一条用户消息对应轮”的终态与当前空闲，不能只比较最新 runId。此反例的精确历史/竞争分支由定向回归提供；未实际触发真实后台通知时不宣称该原生分支通过。
 
@@ -83,7 +83,7 @@ node test/support/feature-fixture.ts inspect --root "$zh_verify_root" --title '�
 
 1. 两端分别新建一个对话。fixture 发任意带标记的开场消息。真实 Host 按 E05 安排工作区 gate，在可信端核对工具已启动。逐条加入带唯一标记的 A、B、C，至少一条用 ⌘/Ctrl + Enter。刷新后队列应为 A、B、C。编辑 A，删除 C，再加入 D。检查未派发文字仍在队列，原生历史此时只有开场输入。
 2. 在当前轮仍活动时，点击 B 所在行的提前发送按钮，核对其余行仍按 A、D 排列。真实 Host 可在 gate 尚未释放时接收 B。先核对接收回执或 DSH `next-step` 中的请求编号，再 release gate。待 B 出现在原生历史，核对它只出现一次，且与开场消息属于同一轮。让本轮正常结束，再逐轮核对编辑后的 A 和 D 各自开启一轮，原 A 和 C 的标记未进入历史。fixture 使用 `complete`，真实 Host 对照原生历史及配置。另建一个队列，点停止，核对保留与暂停，再点“继续派发”核对新轮。
-3. 分别新建只有一个队列项的对话，浏览器拦截该对话的下一次 `POST /api/private/workbench/conversations/<id>/queue`，让按钮点击产生请求并暂存，核对它是该队列项的 `send`。在独立端结束原轮。为避免队首先被自动派发，先在第二个已登录页面点停止，使队列暂停，等待原生终态后才放行暂存的请求。Codex 应保留条目，原生历史没有该输入。DSH 应出现新轮和唯一输入，界面显示“提前发送的消息已送达后续轮”。保留点击时目标轮和实际历史轮的对应证据。正常结束与自动派发竞争由定向测试另测。
+3. 分别新建只有一个队列项的对话，用 browser-faults 的 `zhVerify.holdNextRequest('/api/private/workbench/conversations/<id>/queue')` 在请求发出前暂存，让按钮点击产生请求（`status().heldBefore` 为 `request`），核对它是该队列项的 `send`。在独立端结束原轮。为避免队首先被自动派发，先在第二个已登录页面点停止，使队列暂停，等待原生终态后才 `release()` 放行暂存的请求；从点击到放行须在应用请求超时内（数秒）完成，放行后确认该请求返回 200，否则应用已放弃这次请求，结果不能作为证据。Codex 应保留条目，原生历史没有该输入。DSH 应出现新轮和唯一输入，界面显示“提前发送的消息已送达后续轮”。保留点击时目标轮和实际历史轮的对应证据。正常结束与自动派发竞争由定向测试另测。
 4. fixture 中让原轮保持运行，排入一条消息后装载 `unknown-receipt`，点该条目的提前发送。核对队列显示“接收结果待核实”。刷新并点“查询原生结果”两次，原生 inspect 的提交计数不得增加。执行 `prove` 后核对用户条目恰好一次且属于正确轮。真实 Host 若只能丢弃浏览器 HTTP 响应，单独记录为浏览器重试证据，原生回执丢失仍需通过隔离的原生连接故障验证。
 
 ### E08–E10 提问与审批
@@ -94,7 +94,7 @@ node test/support/feature-fixture.ts inspect --root "$zh_verify_root" --title '�
 | --- | --- | --- |
 | E08 DSH 提问 | DSH、任意权限（至少覆盖完全访问）。发送“用 ask_user_question 问我一次，id 为 X，选项 A、B；收到后只回复选择”。另一个已登录的隔离浏览器上下文打开同一对话 | 页头与侧栏为“等待处理”，两端都出现“Agent 在问你”卡片。在一端选择并提交：两端都变为“已回答「…」”，原生工具输出的 answers 与提交一致（单选时自己填写的文字以 `selected: []` 加 `custom` 送出）。另起一题后重启应用并刷新页面，卡片仍在、可回答 |
 | E09 Codex 审批 | Codex、工作区读写。要求运行联网命令，被沙箱拦下后请求更高权限 | 卡片标题为“Agent 请求运行命令”，显示原生理由、命令与目录；按钮只有原生 `availableDecisions` 中的普通决定。允许后原生历史出现提权重跑；同一指令在完全访问的对话中不产生卡片 |
-| E09 DSH 审批 | DSH、工作区读写，同样的联网指令 | 卡片只有“允许运行 / 拒绝”，理由来自原生中文说明，命令从会话记录按调用编号找回。拒绝后 Agent 报告提权被拒 |
+| E09 DSH 审批 | DSH、工作区读写。要求写入工作区之外的合成路径，被沙箱拒绝后按提示提权。DSH 0.2.1 的工作区读写不一定拦网络（命令照常执行，只在网络层失败），用联网命令时须先确认原生结果出现 `[sandbox: …]` 拒绝 | 命令卡片只有“允许运行 / 拒绝”，理由来自原生中文说明，命令从会话记录按调用编号找回；原生 `write` 的卡片是“Agent 请求修改文件”，按钮“允许修改 / 拒绝”。拒绝后 Agent 报告提权被拒 |
 | E10 回执与失效 | 自动化覆盖，见下方回归命令；真实 Host 只能观察“正在提交 → 已回答” | 未知回执查询不增加原生回答次数；原生仍在等待时卡片重新可选，原生停止或结束本轮后显示已失效 |
 
 ### E11–E13 Plan 模式
@@ -104,7 +104,7 @@ node test/support/feature-fixture.ts inspect --root "$zh_verify_root" --title '�
 | 场景 | 驱动 | 判据和独立观察 |
 | --- | --- | --- |
 | E11 开关 | 两端各一段对话，点工具栏的 Plan；发一条消息后在运行中再点 | 开着时说明条出现、页面刷新后仍开着、另一个浏览器上下文看到相同状态；运行中开关为灰；服务端对运行中的切换返回 `plan_change_while_running` |
-| E12 Codex | 打开 Plan，发“先用 request_user_input 问我计划要几步，再给出计划，不要改文件” | 提问卡片的选项与原生一致（含“(Recommended)”）；回答后出现带“计划”标题的块和“计划已就绪”。点“按计划执行”：Plan 关闭，对话出现“按上面的计划开始执行。”，原生下一轮为默认模式。点“继续规划”只收起卡片 |
+| E12 Codex | 打开 Plan，发“先用 request_user_input 问我计划要几步，再给出计划，不要改文件” | 提问卡片的选项与原生 request_user_input 参数逐字一致（推荐项的后缀由模型给出，如“(Recommended)”或“（推荐）”）；提问与回答不在 thread/items/list 中，用隔离 rollout 核对：function_call(request_user_input) 的选项、function_call_output 的 answers（单选为 `{"answers":{"<id>":{"answers":["<label>"]}}}`），模式看 turn_context.collaboration_mode.mode，取不到 rollout 记 BLOCKED；回答后出现带“计划”标题的块和“计划已就绪”。点“按计划执行”：Plan 关闭，对话出现“按上面的计划开始执行。”，原生下一轮为默认模式。点“继续规划”只收起卡片 |
 | E13 DSH | 打开 Plan，发“规划后提交审核，批准前不要改文件” | 原生 Plan 为开启；审核卡片显示原生计划正文。“继续规划”附意见后 Agent 交回修改后的计划；“批准并执行”后原生 Plan 关闭、Agent 在同一轮继续，开关随之关闭 |
 
 ## Gotchas

@@ -240,9 +240,10 @@ export function ManageDialog({ conversation, workspaceLabel, csrf, close, change
     } catch (reason) {
       if (reason instanceof RequestError && reason.status === 401) report(reason);
       const code = reason instanceof RequestError ? reason.code : '';
-      setError(code === 'conversation_archive_busy' ? '这段对话正在运行、等待输入或尚待核实。请在结果明确后归档。'
+      setError(code === 'conversation_archive_busy' ? '这段对话正在运行、等待输入、尚待核实，或队列里还有未发送的消息。请在结果明确或清空队列后归档。'
         : code === 'subagents_running' ? '仍有子 Agent 在运行或停止结果待核实。归档会让原生服务停止它们；请等它们结束或先停止，再归档。'
-        : code === 'subagents_unverified' ? '暂时无法核对子 Agent 状态，请重新连接后再归档。' : '暂时无法确认更改。可以重试。');
+        : code === 'subagents_unverified' ? '暂时无法核对子 Agent 状态，请重新连接后再归档。'
+        : code === 'workspace_removed' ? '这段对话所在的工作区已移除，现在不能归档或删除。能在「设置 › 工作区」恢复工作区时，恢复后再操作。' : '暂时无法确认更改。可以重试。');
     } finally { setBusy(false); }
   };
   const remove = async () => {
@@ -273,7 +274,9 @@ export function ManageDialog({ conversation, workspaceLabel, csrf, close, change
         <p>这会永久删除原生对话和中书保存的对话内容，无法恢复。工作区文件和其他对话仍引用的资源会保留。</p>
         {error && <p role="alert">{error}</p>}
         <div className="management-actions">
-          <button ref={cancelDelete} type="button" disabled={busy} onClick={() => { setConfirmDelete(false); setError(''); }}>返回</button>
+          {/* Own keys: leaving the confirmation must not turn this very button into the submit button below while its click is
+              still being handled, or the browser submits the rename form. */}
+          <button key="delete-back" ref={cancelDelete} type="button" disabled={busy} onClick={() => { setConfirmDelete(false); setError(''); }}>返回</button>
           <button type="button" className="danger" disabled={busy} onClick={() => void remove()}>{deleteAttempted ? '重试删除' : '确认永久删除'}</button>
         </div>
       </> : <>
@@ -281,7 +284,7 @@ export function ManageDialog({ conversation, workspaceLabel, csrf, close, change
       <input id="managed-title" value={title} maxLength={200} disabled={busy} onChange={event => setTitle(event.target.value)} />
       {error && <p role="alert">{error}</p>}
       <div className="management-actions">
-        <button className="primary" disabled={busy || title.trim() === conversation.title || !conversationTitleSchema.safeParse(title.trim()).success}>保存名称</button>
+        <button key="rename-save" type="submit" className="primary" disabled={busy || title.trim() === conversation.title.trim() || !conversationTitleSchema.safeParse(title.trim()).success}>保存名称</button>
       </div>
       <div className="manage-archive">
         <p>{conversation.archived ? '恢复后，对话会回到未归档列表。' : '归档后仍可在「已归档」查看历史。'}</p>

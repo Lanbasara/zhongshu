@@ -148,11 +148,10 @@ export function createHost(options: HostOptions) {
     if (parsed.forbidden.length) return refused(`不支持 ${parsed.forbidden.join('、')}：浏览器由司门统一管理，一个实例只有一个。`);
     const session = request.session;
     const command = parsed.command;
-    if (!command || !official.table[command]) {
-      if (command && MANAGED.has(command)) return refused('浏览器和后台进程由司门管理，不需要 start、stop 或 status。看状态用 chrome-devtools doctor。');
-      // Help, version and unknown commands: the official command line explains them itself.
-      return forward(parsed.argv, request.cwd, session);
-    }
+    if (command && MANAGED.has(command)) return refused('浏览器和后台进程由司门管理，不需要 start、stop 或 status。看状态用 chrome-devtools doctor。');
+    // Help, version and unknown commands: the official command line explains them itself. They need no page, so they
+    // run in the shared directory: only a window owns a conversation's directory, which goes when the window does.
+    if (!command || !official.table[command] || parsed.help) return forward(parsed.argv, request.cwd, undefined);
     const holder = session ? windows.holder(session) : undefined;
     if (command === 'new_page') {
       if (!session) return refused('new_page 只能在 DSH 对话里用（需要 DSH_SESSION_ID），司门靠它分配窗口。');

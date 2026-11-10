@@ -186,6 +186,19 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
     });
   }
 
+  /** Records after `cursor` through a newer snapshot, paging the gap its window does not cover. A gap left open stays visible to the boundary proof. */
+  async function recordsSince(binding: Binding, cursor: number, latest: Snapshot): Promise<Snapshot['records']> {
+    let records = latest.records.filter(record => record.event.seq > cursor);
+    let before = Math.min(latest.cursor + 1, ...records.map(record => record.event.seq));
+    for (let pages = 0; before > cursor + 1 && pages < 10; pages++) {
+      const page = pageSchema.parse(await connection.call('session/page', request(binding, { throughSeq: latest.cursor, beforeSeq: before, maxMessages: 100 })));
+      const older = page.records.filter(record => record.event.seq > cursor && record.event.seq < before);
+      if (!older.length) break;
+      records = [...older, ...records]; before = Math.min(...older.map(record => record.event.seq));
+    }
+    return records;
+  }
+
   async function state(binding: Binding, targetRunId?: string): Promise<NativeState> {
     try {
       let current = await snapshot(binding, 5); let bytes = Buffer.byteLength(JSON.stringify(current.records)); let pages = 0;
@@ -224,7 +237,9 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
         // looking up old evidence, without treating a later turn as that proof.
         const latest = await snapshot(binding, 5);
         if (latest.cursor < current.cursor) throw new HarnessError('DSH_HISTORY_CHANGED');
-        current = latest.cursor === current.cursor ? { ...latest, records: current.records, hasMore: current.hasMore } : latest;
+        // Events that landed while paging extend the records already read; dropping those
+        // would lose the turn start again and report a running turn as unknown.
+        current = { ...latest, records: [...current.records, ...await recordsSince(binding, current.cursor, latest)], hasMore: current.hasMore };
         terminalStatus = terminalStatusFrom(binding.id, current, targetRunId, proofRecords);
       }
       const result = stateFrom(binding, current);
@@ -706,9 +721,12 @@ export function createDshAdapter(options: { launchFile: string }): HarnessAdapte
               const frame = object(value);
               if (frame.type === 'snapshot') {
                 const current = snapshotSchema.parse(value); watermark = current.cursor; attempt = 0;
-                emit({ type: 'state', state: remember(binding, stateFrom(binding, current)) }); emit({ type: 'invalidate' });
-                outline = current.projections.values.turnOutline ?? [];
                 const boundary = boundaryFrom(current);
+                // A window that does not reach the turn start proves nothing yet; the refresh below
+                // pages back to it and emits the proven state instead of a false "unknown".
+                if (boundary) emit({ type: 'state', state: remember(binding, stateFrom(binding, current)) });
+                emit({ type: 'invalidate' });
+                outline = current.projections.values.turnOutline ?? [];
                 for (const item of historyItems(binding.id, current.records.map(record => record.event), boundary?.openTurnStartSeq !== null ? boundary?.lastTurn : undefined, outline, binding.cwd)) emit({ type: 'item', item });
                 if (!boundary) refresh();
                 const item = live.restore(current); if (item) emit({ type: 'item', item });

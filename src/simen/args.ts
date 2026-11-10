@@ -16,6 +16,8 @@ export type Parsed = {
   argv: string[];
   /** Flags 司门 does not allow, such as the official `--sessionId` that would start a second daemon. */
   forbidden: string[];
+  /** The line asks for help (`--help` or `-h`); the official command line answers without a page. */
+  help?: true;
 };
 
 /** Flags of the official command line itself, not of a tool. */
@@ -38,6 +40,7 @@ export function parseCommand(argv: string[], table: CommandTable, cwd: string): 
   const absolute = (value: string) => (value === '' || isAbsolute(value) ? value : resolve(cwd, value));
   let positionalIndex = 0;
   let pageId: number | undefined;
+  let help = false;
   const take = (name: string, value: string, index: number) => {
     if (name === 'pageId') { const number = Number(value); if (Number.isInteger(number)) pageId = number; }
     if (isPathArg(name)) out[index] = absolute(value);
@@ -52,7 +55,7 @@ export function parseCommand(argv: string[], table: CommandTable, cwd: string): 
       const [rawName, inline] = splitOnce(token.slice(2));
       const name = camel(rawName);
       if (FORBIDDEN_FLAGS.has(name)) forbidden.push(`--${rawName}`);
-      if (GLOBAL_BARE_FLAGS.has(name)) continue;
+      if (GLOBAL_BARE_FLAGS.has(name)) { if (name === 'help' || name === 'h') help = true; continue; }
       if (inline !== undefined) {
         if (isPathArg(name)) out[index] = `--${rawName}=${absolute(inline)}`;
         else take(name, inline, -1);
@@ -65,13 +68,13 @@ export function parseCommand(argv: string[], table: CommandTable, cwd: string): 
       if (spec[name] || GLOBAL_VALUE_FLAGS.has(name) || !next.startsWith('--')) { index++; take(name, next, index); }
       continue;
     }
-    if (token.startsWith('-') && token.length === 2) continue;
+    if (token.startsWith('-') && token.length === 2) { if (token === '-h') help = true; continue; }
     // An array argument, such as upload_file's paths, takes every remaining positional value.
     const name = positionalNames[positionalIndex];
     if (name && spec[name]?.type !== 'array') positionalIndex++;
     if (name) take(name, token, index);
   }
-  return { command: first, ...(pageId !== undefined ? { pageId } : {}), argv: out, forbidden };
+  return { command: first, ...(pageId !== undefined ? { pageId } : {}), argv: out, forbidden, ...(help ? { help: true as const } : {}) };
 }
 
 function splitOnce(value: string): [string, string | undefined] {

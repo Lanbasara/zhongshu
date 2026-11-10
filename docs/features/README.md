@@ -12,7 +12,7 @@
 | 工作区分组、侧栏调整、搜索与跳转、重命名、归档、删除、存储预算与未读同步 | [conversation-management](conversation-management.md)：M01–M10 | fixture、真实 Harness 与手机分支 |
 | 发送、接续、停止、排队与提前发送 | [execution](execution.md)：E01–E07 | fixture；原生轮次与接收语义需真实 Harness |
 | 刷新/关页/应用中断后恢复、草稿、连续回溯长历史与停机缺口 | [continuity](continuity.md)：R01–R07 | fixture；原生恢复与长历史需另跑真实分支 |
-| 完整图文对话、工具阅读、输入与引用、本轮文件、技能、用量、恢复接续 | [conversation-usability](conversation-usability.md)：U01–U13 | 两个真实 Harness、合成图片及工作区文件 |
+| 完整图文对话、工具阅读、输入与引用、本轮文件、技能、用量、恢复接续 | [conversation-usability](conversation-usability.md)：U01–U14 | 两个真实 Harness、合成图片及工作区文件 |
 | 查看主 Agent 派生的子 Agent 与 DSH 团队，单独停止子 Agent | [subagents](subagents.md)：S01–S09 | fixture；原生派生、停止与团队需真实 Harness |
 | 工作区文件、只读 HTML 与条件保存 | [workspace-files](workspace-files.md) | 浏览器、合成报告与纯文本、两个真实 Harness |
 | 添加目录、管理、移除与恢复工作区登记 | [workspace-management](workspace-management.md) | fixture、两个真实 Harness、本地与 VPS 测试实例 |
@@ -62,7 +62,7 @@ node test/support/feature-fixture.ts serve --root "$zh_verify_root" --port 4391
 
 最后一条常驻前台。端口被占用时退出，不接管已有进程；换一个空闲端口并同步浏览器 origin。同一 root 同时只运行一套应用。此入口忽略个人 `ZHONGSHU_*` 配置，首次要求 root 为空且权限为 `0700`；新现场**尚未初始化管理员**，先跑 A01。修改源码或重新构建后重启应用；静态路由在启动时登记，不能边重建 dist 边把旧进程当作新版本验收。
 
-另开终端，将 READY 输出的绝对 root 赋给同名变量，再初始化：
+另开终端，等 serve 输出 `"event":"ready"` 的 JSON 行，把其中的绝对 root 赋给同名变量，再初始化：
 
 ```sh
 node test/support/feature-fixture.ts init --root "$zh_verify_root"
@@ -75,7 +75,7 @@ node test/support/feature-fixture.ts init --root "$zh_verify_root"
 ## Doctor：确认对象和可操作性
 
 1. 保存 `git rev-parse HEAD`、`git status --short`、diff，以及 Node/浏览器版本；工作树有改动时保存补丁和涉及文件的哈希。构建标签只能关联 HEAD，不能证明未提交内容。
-2. READY 应给出 `mode: fixture`、本次 PID、root、origin。检查本次 `/api/health` 与 `/api/version`，再打开该 origin；不能用健康接口代替页面验收。
+2. ready 行应给出 `mode: fixture`、本次 PID、root、origin。检查本次 `/api/health` 与 `/api/version`，再打开该 origin；不能用健康接口代替页面验收。
 3. 初始化并登录后，应能看到“新对话”。工作区“＋”直接进入草稿，hash 为 `#new:<工作区ID>`，不弹表单、不提前创建正式对话；DSH 会准备原生空会话，按 C10 核对；全局无历史且多工作区时先选区。输入框内选择 Codex/DSH、Fixture 模型、思考深度和 fixture 权限。Codex 可靠默认是 fixture-model / medium；DSH 须明确选择，无原生默认。保存选值；首次发送/核对成功后等 hash 变成本次对话 ID，再核对标题、状态、正文及 inspect。草稿或旧对话的输入框存在不能证明新对话已创建。
 4. 一般条件等待上限为 10 秒；登录与操作请求上限为 20 秒。fixture 等待的是明确 DOM/接口状态，超时保留最后状态并判失败。真实模型另记录本轮时间预算，超时不自动宣称产品失败。
 5. 进程中断前，核对应用自身 PID、实际端口监听者和本次数据目录。`spawn` 返回的 PID 可能只是 Node/Volta 启动器；不能只杀启动器就宣称应用中断。停止后需确认实际监听者退出、端口无监听且健康请求连接被拒绝，再执行停机期间的动作。重启后同样记录新监听者与版本。
@@ -84,7 +84,7 @@ node test/support/feature-fixture.ts init --root "$zh_verify_root"
 
 以下命令在仓库根目录执行，使用同一 root。`--title` 必须精确匹配 inspect 中唯一的原生创建标题；不要复用名称。新建不再单独填标题：首条文字折叠空白后截取前 32 个 Unicode 字符作为标题，无文字为“新对话”。下文命令的示例标题都须替换成本轮 inspect 实际值；页面重命名只改产品标题，不能假定原生控制标题也改变。
 
-页内切换可用侧栏，也可直接改变地址。每个页面有自己的 hash：对话 `#<ID>`、草稿 `#new:<工作区ID>`、`#schedule[:标签]`、`#settings[:标签]`、`#archive`。已打开页面改变 hash（包括自动化工具的同文档导航）和浏览器后退、前进都会切换到对应页面，行为与验证见[界面 I07](interface.md)。判定仍以标题与内容的变化为准，不能只看地址变化。
+页内切换可用侧栏，也可直接改变地址。每个页面有自己的 hash：对话 `#<ID>`、草稿 `#new:<工作区ID>`、`#schedule[:标签]`、`#settings[:标签]`、`#archive`。已打开页面改变 hash（包括自动化工具的同文档导航）和浏览器后退、前进都会切换到对应页面，行为与验证见[界面 I07](interface.md)。判定仍以标题与内容的变化为准，不能只看地址变化。「对话操作」等菜单只响应真实的指针事件，页面脚本里的 `.click()` 打不开，用浏览器工具的点击。
 
 ```sh
 node test/support/feature-fixture.ts inspect --root "$zh_verify_root"
@@ -104,7 +104,7 @@ await page.evaluate(installBrowserFaults);
 await page.evaluate(() => window.zhVerify.dropNext('/api/private/workbench/conversations'));
 ```
 
-其他工具可读取该文件，去掉导出关键字后执行函数。`status()` 的 `held` 非空才表示已捕获响应；`release()` 释放它，`restore()` 恢复 fetch 和存储方法。drop 在服务端应答后丢弃一次响应；hold 故意让旧响应在应用取消后仍返回，以检验时序保护。`rejectNextRequest(path, 400或413)` 只匹配同源指定对话的下一次发送POST，通过未知字段/超限字段触发真实服务端拒绝，见 [E04](execution.md)。这些工具均不改变响应正文，journal只留路径/方法/状态/操作ID，不记认证头或消息。每个故障单独安装/恢复，刷新也会清除注入。
+其他工具可读取该文件，去掉导出关键字后执行函数。`status()` 的 `held` 非空才表示已捕获响应；`release()` 释放它，`restore()` 恢复 fetch 和存储方法。drop 在服务端应答后丢弃一次响应；hold 故意让旧响应在应用取消后仍返回，以检验时序保护；`holdNextRequest(path, method)` 则在请求发出前暂存，放行后才真正发送，用来先在另一端改变原生状态；须在应用的请求超时（约 20 秒）内放行，否则应用已放弃这次请求，结果无效。`rejectNextRequest(path, 400或413)` 只匹配同源指定对话的下一次发送POST，通过未知字段/超限字段触发真实服务端拒绝，见 [E04](execution.md)。这些工具均不改变响应正文，journal只留路径/方法/状态/操作ID，不记认证头或消息。每个故障单独安装/恢复，刷新也会清除注入。
 
 ## Native：真实接入分支
 
@@ -112,7 +112,7 @@ await page.evaluate(() => window.zhVerify.dropNext('/api/private/workbench/conve
 
 操作者明确用于实验的既有登录可以复用；本次 Host 使用独占连接地址，只创建本轮会话，不操作既有会话或改账号配置。不同 OS UID 不是唯一隔离方式；同 UID、HOME 目录隔离、权限 profile 名称也不能单独证明有效边界。按 [ADR 0001](../adr/0001-native-harness-boundary.md) 核对实际 HOME、原生数据、工作区及必要系统依赖；使用本次明确不允许区域的合成 canary，从原生工具结果核验读/写限制，不接触真实凭据。只限制写入但仍能读取认证数据所在区域，不满足所需读取边界。行为已观察到、环境隔离前提合格，是两项分别记录的结论。
 
-读取边界必须覆盖整个 Host：分别驱动真实 shell 和原生文件 read/write 工具，核对禁止区域的读/写均拒绝、允许工作区的读/写成功，并由可信端独立读回准确字节。保留 tool/call 与 tool/result 的对应关系；不能用 shell 代替原生文件工具，也不能只凭模型总结或启动参数。禁止区域 canary 内容不要预先给模型；必要运行依赖及专用原生目录本来可以读取，不能把“所有工作区外文件不可读”当作判据。
+读取边界必须覆盖整个 Host：分别驱动真实 shell 和原生文件 read/write 工具（Codex 没有独立的原生读文件工具，只有写入用的 apply_patch，原生 read 记 N/A，读取边界由 shell 覆盖；被沙箱拒绝的 shell 调用可能没有原生条目，以可信端读回为准），核对禁止区域的读/写均拒绝、允许工作区的读/写成功，并由可信端独立读回准确字节。保留 tool/call 与 tool/result 的对应关系；不能用 shell 代替原生文件工具，也不能只凭模型总结或启动参数。禁止区域 canary 内容不要预先给模型；必要运行依赖及专用原生目录本来可以读取，不能把“所有工作区外文件不可读”当作判据。
 
 DSH rc.4 的原生 workspace-write 只围栏写入，原生文件读取也不按工作区限制；操作者需提供额外有效的完整 Host 边界。容器/VM 现场应先核对实际非 root 身份、镜像/启动配置、最小挂载及连接暴露，确保中书认证数据、其他宿主区域与宿主管理通道不进入执行环境。未挂载文件的不可见（ENOENT）与实际存在但拒绝访问（EACCES）分别记录；后者须由可信监督端先确认合成文件确实存在。内外路径不同时先说明映射；产品与原生 cwd/绑定仍须一致，不能只凭目录名字签通过。本机启动方法与凭据仍从仓库外的操作者入口取得。
 

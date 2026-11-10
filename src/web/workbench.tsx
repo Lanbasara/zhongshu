@@ -21,7 +21,7 @@ import {
 } from '../shared/workbench.ts';
 import { applyLiveFrame } from './live-items.ts';
 import { adoptFull, applyState } from './snapshot-merge.ts';
-import { request, RequestError, readDraft, sameInput, saveDraft, type Draft } from './workbench-client.ts';
+import { request, RequestError, readDraft, sameInput, saveDraft, sendRefused, type Draft } from './workbench-client.ts';
 import { sessionSchema } from '../shared/http.ts';
 import './workbench.css';
 import { Transcript, FilePicker } from './conversation-content.tsx';
@@ -72,6 +72,14 @@ const failures: Record<string, string> = {
   native_history_page_limit: '这一页原生内容过大，暂时无法显示。',
   history_no_progress: '原生历史暂时无法继续读取；已加载的内容仍然保留。',
 };
+/** Names what the manage dialog offers; only Codex conversations can be deleted (the dialog says so for DSH). */
+function manageLabel(conversation: Conversation): string {
+  const deletable = conversation.harnessId === 'codex';
+  return conversation.archived ? (deletable ? '重命名、恢复或删除' : '重命名或恢复') : (deletable ? '重命名、归档或删除' : '重命名或归档');
+}
+function failureText(reason: unknown): string {
+  return reason instanceof RequestError ? failures[reason.code] ?? '暂时无法确认结果。输入和已有内容仍保留，请重新连接。' : '连接暂时中断。输入和已有内容仍保留，请重试。';
+}
 const historyNotes: Record<string, string> = {
   native_history_unavailable: '原生暂时不可用：已加载的内容仍然保留，恢复后可以继续阅读。',
   native_history_page_limit: '最新一页原生内容过大，暂时无法显示。',
@@ -90,6 +98,8 @@ const stateReasons: Record<string, string> = {
   native_receipt_unknown: '原生接收结果暂时无法确认，本次操作不会自动重发。',
   native_run_changed: '当前运行已经变化，请先刷新状态。',
 };
+/** A rejection or unknown reason in words; a bare machine code without a sentence of its own gets the fallback. */
+const describe = (reason: string, fallback: string) => failures[reason] ?? (/^[a-z][a-z0-9_]*$/.test(reason) ? fallback : reason);
 const explain = (value: string) => stateReasons[value] ?? (/^[a-z0-9_]+$/.test(value) ? '暂时无法核对原生状态；已有内容保留，任务不会自动重发。' : value);
 /** A file opened from a turn's file list, or from elsewhere (a timeline entry) with no turn behind it. */
 type ReaderTarget = { conversationId: string; runId: string; workspaceId: string; path: string } | { conversationId?: undefined; runId?: undefined; workspaceId: string; path: string };
@@ -215,8 +225,10 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
   const report = useCallback((reason: unknown) => {
     if (!alive.current || (reason instanceof DOMException && reason.name === 'AbortError')) return;
     if (reason instanceof RequestError && reason.status === 401) { expired(); return; }
-    setError(reason instanceof RequestError ? failures[reason.code] ?? '暂时无法确认结果。输入和已有内容仍保留，请重新连接。' : '连接暂时中断。输入和已有内容仍保留，请重试。');
+    setError(failureText(reason));
   }, [expired]);
+  /** Why a draft's first message was refused; shown once its conversation opens, after the view resets its notice. */
+  const arrivalNotice = useRef<{ id: string; message: string } | undefined>(undefined);
   const refreshConfiguration = () => {
     const serial = ++configurationSerial.current;
     void request('/configuration', workbenchConfigurationSchema).then(value => {
@@ -280,7 +292,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
       rememberConversation(result.conversation);
       setDraft(current => { const { pending: _pending, ...editable } = current; const next = sameInput(editable, pending) ? { text: '' } : editable; saveDraft(id, next); return next; });
       setError('');
-    } else if (operation?.status === 'rejected') setError(operation.reason ? failures[operation.reason] ?? operation.reason : '本次发送未被接受，输入已保留。');
+    } else if (operation?.status === 'rejected') setError(operation.reason ? describe(operation.reason, '本次发送未被接受，输入已保留。') : '本次发送未被接受，输入已保留。');
   };
   /** Re-read only the conversation's state; history and live items stay as they are (ADR 0020). */
   const loadState = async (id: string) => {
@@ -322,6 +334,8 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
     setSnapshot(undefined); snapshotRef.current = undefined; liveView.current = undefined; liveLog.current = []; stateRevision.current = 0; pendingScope.current = undefined; setPages([]); setNewer([]); pagesRef.current = []; newerRef.current = []; setUnavailableFiles(new Set()); setError(''); setMoreOutput(false); atBottom.current = true;
     const next = selected ? readDraft(selected) : { text: '' }; draftRef.current = next; setDraft(next);
     if (selected) { setUnavailableNotice(''); void loadRef.current(selected, true); }
+    const notice = arrivalNotice.current; arrivalNotice.current = undefined;
+    if (notice && notice.id === selected) setError(notice.message);
     return () => viewController.current?.abort();
   }, [selected]);
   // Reading means the conversation is on screen: Settings and Archive cover it, so they release the lease (unread rule).
@@ -489,14 +503,14 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
         setDraft(current => { const { pending: _pending, ...editable } = current; const clean = sameInput(editable, operation) ? { text: '' } : editable; saveDraft(id, clean); return clean; });
       } else if (result && ['unknown', 'rejected'].includes(result.operation.status)) {
         const reason = result.operation.reason;
-        setError(reason ? failures[reason] ?? reason : '操作结果待核实。');
+        setError(reason ? describe(reason, '操作结果待核实，任务不会自动重发。') : '操作结果待核实。');
       }
       atBottom.current = true;
       // The sent message arrives on the live stream and with the next history change; only the operation state is read now.
       // A reader in older content still needs the full read that brings the window back to the latest page (ADR 0020).
       if (newerRef.current.length > 0) await load(id, true); else await loadState(id);
     } catch (reason) {
-      if (gen === generation.current && reason instanceof RequestError && ([400, 413].includes(reason.status) || ['conversation_archived','workspace_save_in_progress','workspace_execution_blocked','workspace_removed','workspace_remove_busy','workspace_directory_changed','workspace_directory_unavailable','workspace_identity_unavailable','operation_needs_reconciliation','file_reference_unavailable','file_reference_forbidden','quote_source_changed','image_reference_changed','image_unavailable','queue_full','queue_mode_unavailable'].includes(reason.code))) {
+      if (gen === generation.current && sendRefused(reason)) {
         setDraft(current => { const { pending: _pending, ...editable } = current; saveDraft(id, editable); return editable; });
       }
       report(reason);
@@ -667,6 +681,8 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
   const configurationLabel = conversationConfigurationLabel(conversation, configuration?.harnesses);
   const permission = configuration?.harnesses.find(h => h.id === conversation?.harnessId)?.permissions.find(p => p.id === conversation?.configuration.permissionId);
   const storage = useStorage();
+  // Deleting a conversation or sending images changes the list; read storage then too, so the budget badge follows promptly.
+  useEffect(() => { const timer = setTimeout(storage.refresh, 400); return () => clearTimeout(timer); }, [listRevision, storage.refresh]);
   const attention = useAttention(listRevision + attentionRevision, report);
   const accounts = useAccounts(report);
   const connectionView = { text: connection, state: connection === '已连接' ? 'online' as const : connection.startsWith('离线') ? 'offline' as const : 'connecting' as const };
@@ -702,7 +718,12 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
     window.addEventListener('keydown', shortcut);
     return () => window.removeEventListener('keydown', shortcut);
   }, [setCollapsed]);
-  const openFiles = () => { if (!configuration?.workspaces.length) return; setSubagentPanel(undefined); setReader(true); setNavigation(false); };
+  const openFiles = () => {
+    if (!configuration?.workspaces.length) return;
+    // The reader opens beside a conversation or draft; from Settings, the archive or the schedule, go back to that page first.
+    if (view) { pageHistory.page(routeHash(creating ? (typeof creating === 'string' ? { kind: 'draft', workspaceId: creating } : { kind: 'draft' }) : selected ? { kind: 'conversation', id: selected } : { kind: 'home' }), 'push'); setView(undefined); }
+    setSubagentPanel(undefined); setReader(true); setNavigation(false);
+  };
   const showSettings = (tab?: SettingsTab) => { if (tab) setSettingsTab(tab); setView('settings'); setReader(false); setSubagentPanel(undefined); setNavigation(false); };
   const openSettings = (tab?: SettingsTab) => { pageHistory.page(routeHash({ kind: 'settings', tab: tab ?? settingsTab }), 'push'); showSettings(tab); };
   const changeSettingsTab = (tab: SettingsTab) => { setSettingsTab(tab); pageHistory.page(routeHash({ kind: 'settings', tab }), 'replace'); };
@@ -795,7 +816,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
     {!view && !narrow && <IconButton label="打开工作区文件" tooltip="工作区文件" aria-expanded={reader} disabled={!configuration?.workspaces.length} onClick={openFiles}><FolderOpen size={16}/></IconButton>}
     {conversationView && conversation && <Menu label="对话操作" trigger={<MoreHorizontal size={17}/>} align="end">
       {narrow && <MenuItem disabled={!configuration?.workspaces.length} onSelect={openFiles}><FolderOpen size={15}/>打开工作区文件</MenuItem>}
-      <MenuItem onSelect={() => setManaging(conversation)}><Pencil size={15}/>{conversation.archived ? '重命名、恢复或删除' : '重命名、归档或删除'}</MenuItem>
+      <MenuItem onSelect={() => setManaging(conversation)}><Pencil size={15}/>{manageLabel(conversation)}</MenuItem>
       <MenuItem onSelect={() => { scheduleRefresh(); refreshConfiguration(); }}><RefreshCw size={15}/>重新连接并刷新状态</MenuItem>
     </Menu>}
   </div>;
@@ -814,8 +835,9 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
         badge={storageState(storage.value) && <span className="sidebar-badge" data-state={storageState(storage.value)} aria-label={storage.value?.full ? '存储已满' : '存储接近上限'}/>}/>
       {!narrow && <div className="sidebar-status"><ConnectionStatus {...connectionView}/></div>}
     </>}>
-    <ConversationNavigation workspaces={configuration?.workspaces} workspaceAction={setWorkspaceAction} selected={view ? undefined : selected}
-      revision={listRevision} csrf={csrf} choose={choose} create={createInWorkspace} manage={setManaging} report={report} attention={attention?.conversations}/>
+    {/* On phones the drawer is a modal; a dialog opened from it replaces it, or the drawer would take the dialog's first tap. */}
+    <ConversationNavigation workspaces={configuration?.workspaces} workspaceAction={action => { setNavigation(false); setWorkspaceAction(action); }} selected={view ? undefined : selected}
+      revision={listRevision} csrf={csrf} choose={choose} create={createInWorkspace} manage={conversation => { setNavigation(false); setManaging(conversation); }} report={report} attention={attention?.conversations}/>
   </SidebarShell>;
   const panel = view ? undefined : subagentPanel && conversation && !narrow ? subagentHost : reader && configuration ? <WorkspaceReader workspaces={configuration.workspaces} initialWorkspace={conversation?.workspaceId}
       target={readerTarget} onTargetUnavailable={target => {
@@ -832,7 +854,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
         : view === 'schedule' ? <ScheduleView csrf={csrf} report={report} configuration={configuration} revision={listRevision} tab={scheduleTab}
           onTab={changeScheduleTab} openConversation={choose} openFile={openWorkspaceFile}
           createFor={createFor} onCreateHandled={() => setCreateFor(undefined)}/>
-        : creating ? configuration ? <NewConversation key={String(creating)} configuration={configuration} initialWorkspace={typeof creating==='string'?creating:undefined} addedWorkspace={addedWorkspace} csrf={csrf} onWorkspace={switchDraftWorkspace} onAddWorkspace={()=>setWorkspaceAction({kind:'add'})} onCreated={c=>{refreshList(value=>value+1);adoptConversation(c.id);}} report={report}/> : <p className="view-status" role="status">正在读取工作区与配置…</p>
+        : creating ? configuration ? <NewConversation key={String(creating)} configuration={configuration} initialWorkspace={typeof creating==='string'?creating:undefined} addedWorkspace={addedWorkspace} csrf={csrf} onWorkspace={switchDraftWorkspace} onAddWorkspace={()=>setWorkspaceAction({kind:'add'})} onCreated={(c,refused)=>{setError('');refreshList(value=>value+1);if(refused)arrivalNotice.current={id:c.id,message:failureText(refused)};adoptConversation(c.id);}} report={report}/> : <p className="view-status" role="status">正在读取工作区与配置…</p>
         : !selected ? <section className="empty-workbench">
           <h2>选择一段对话，或开始新的工作</h2>
           <p>对话按工作区列在左侧。离开页面后 Agent 仍在工作，回来接着看就行。</p>

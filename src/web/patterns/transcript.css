@@ -118,7 +118,7 @@
   .process-step-input { display:none; }
   .attachment-card button,.reference-card button { width:34px; height:34px; }
 }
-@media(prefers-reduced-motion:reduce) { .message,.process-step { animation:none; } .process-current { animation:none; -webkit-text-fill-color:currentColor; background:none; } .process-body,.process-step-detail,.process-chevron { transition:none; } }
+@media(prefers-reduced-motion:reduce) { .message,.process-step,.process-spinner { animation:none; } .process-current { animation:none; -webkit-text-fill-color:currentColor; background:none; } .process-body,.process-step-detail,.process-chevron { transition:none; } }
 /* ADR 0021: a message a native automation delivered. Dashed, so it never reads as something the user typed. */
 .message-bubble.message-automation { background:var(--zs-surface); border:1px dashed var(--zs-accent-line); font-size:var(--zs-type-control); color:var(--zs-text-body); }
 .message-automation-label { display:flex; align-items:center; gap:5px; font-size:var(--zs-type-micro); color:var(--zs-accent-text); margin-bottom:3px; }

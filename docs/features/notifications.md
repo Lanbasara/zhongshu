@@ -30,7 +30,7 @@ iPhone 和 iPad 只给主屏幕应用发通知：先从 Safari 添加到主屏�
 - 应用所在机器也要能访问同一推送服务。
 - `http://127.0.0.1` 属于安全上下文，本地实例可以直接测。
 
-**自动化浏览器。** 可以用独立配置目录的 Chrome（包括 headless）。
+**自动化浏览器。** 可以用独立配置目录的 Chrome（包括 headless），但要能发原始 CDP，且不是无痕上下文。chrome-devtools MCP 的 isolatedContext 是无痕的：通知权限被自动拒绝，订阅报 permission denied；这时 N01–N05 的设备端记 BLOCKED，服务端规则仍可按下面的 `failedAt`/`deliveredAt` 读回核对。
 
 - 用 CDP `Browser.grantPermissions({ origin, permissions: ['notifications'] })` 代替点击权限弹窗。这个授权只在本次浏览器会话有效，每次启动都要重新授予。
 - 用同源页面脚本读取 `navigator.serviceWorker.ready.then(r => r.getNotifications())` 的 `title`、`body`、`tag`、`data.url`，作为“设备显示了什么”的读回。
@@ -39,7 +39,7 @@ iPhone 和 iPad 只给主屏幕应用发通知：先从 Safari 添加到主屏�
 **N02/N03 驱动。**
 
 1. 浏览器停在「设置 → 通知」（设置页不算在看对话）。
-2. 另起一个已登录的 API 客户端，新建合成对话，发一条“只回复 OK”的消息，等对话回到 idle，读回通知。
+2. 另起一个已登录的 API 客户端，新建合成对话，发一条“只回复 OK”的消息，等对话回到 idle，读回通知。“在看”由页面上报的 `POST …/conversations/<id>/reading` 决定，API 客户端的普通 GET 轮询不算在看。拒绝审批用 `POST /api/private/workbench/conversations/<id>/requests/<请求ID>/answer`，正文 `{"id":<新 uuid>,"answer":{"kind":"approval","decision":"decline"}}`；停止用 `POST …/conversations/<id>/operations`，正文 `{"id":<新 uuid>,"type":"stop","payload":{"runId":<当前 runId>}}`。
 3. 等待：用 DSH 只读权限请求写文件，出现审批即应收到「在等你回答或批准」；拒绝后运行结束，同一 tag 的通知被替换为「已完成」。
 4. 不打扰：让页面打开该对话（`#<对话ID>`，页面可见）再发一轮，`deliveredAt` 不变。
 5. 主动停止：在运行中发 `stop`，终态为 interrupted，`deliveredAt` 不变。

@@ -160,10 +160,13 @@ export class Workspaces {
     }
     return (await Promise.all(batch)).every(Boolean);
   }
+  /**
+   * The saved facts allow editing: configured, nothing in flight, idle and settled. A save also reads each
+   * conversation's native state (confirmIdle); a conversation need not be open in a page to be idle.
+   */
   private idleForEditing(conversation: Conversation): boolean {
-    const runtime = this.observation.slot(conversation.id);
     return this.bindings.configured(conversation) && !this.gate.preparing(conversation.id) &&
-      !this.gate.busy(conversation.id) && !!runtime?.stop && !runtime.syncing &&
+      !this.gate.busy(conversation.id) && !this.observation.slot(conversation.id)?.syncing &&
       conversation.state.status === 'idle' && this.observation.messageAllowed(conversation);
   }
   editStatus(id: string) {
@@ -223,7 +226,9 @@ export class Workspaces {
             this.tasks.assertOpen(); this.bindings.assertWorkspaceAvailable(id);
           }, identity);
         }
-        for (const conversation of this.conversations(directory)) await this.observation.sync(conversation.id);
+        // Every related conversation passes a native idle check before the write (workspace-files map). The saving
+        // fence above already keeps Zhongshu from dispatching into the directory meanwhile.
+        if (!await this.confirmIdle(directory)) throw new StoreError('workspace_not_idle', 409);
         const assertWritable = () => {
           this.tasks.assertOpen();
           this.bindings.assertWorkspaceAvailable(id);

@@ -572,6 +572,32 @@ test('workspace saving fences a competing send and retains a newer file on stale
   assert.equal((await f.service.openWorkspaceFile(workspace.id, 'notes.md')).text, 'saved');
 });
 
+test('an idle conversation nobody is reading still allows a save, which checks native state first', async t => {
+  const f = fixture(t);
+  const { mkdtemp, readFile, realpath, rm, writeFile } = await import('node:fs/promises');
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'zhongshu-edit-unobserved-')));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const configuration = { modelId: 'model', permissionId: 'workspace' };
+  const id = randomUUID();
+  const workspace = { id: 'unobserved', label: 'Unobserved', directory: root, managedWrites: true };
+  f.service.workspaces.push(workspace);
+  f.store.createConversation({ id, harnessId: 'codex', workspaceId: workspace.id, cwd: root, configuration });
+  f.store.saveBinding(id, { id: 'native-unobserved', cwd: root, configuration, details: {} });
+  await writeFile(join(root, 'notes.md'), 'original');
+  const original = await f.service.openWorkspaceFile(workspace.id, 'notes.md');
+  await f.service.reconcile(id);
+  // No page reads the conversation, so its runtime is released; it is still idle.
+  await delay(400);
+  assert.equal(f.service.workspaceEditStatus(workspace.id).editable, true);
+  await f.service.saveWorkspaceFile(workspace.id, 'notes.md', original.version, 'saved');
+  assert.equal(await readFile(join(root, 'notes.md'), 'utf8'), 'saved');
+  // A run started elsewhere is found by the save's own native read, and nothing is written.
+  const current = await f.service.openWorkspaceFile(workspace.id, 'notes.md');
+  f.peer.stateRead = async () => ({ status: 'running', runId: 'elsewhere', pendingInputs: 0, configurationVerified: true });
+  await assert.rejects(f.service.saveWorkspaceFile(workspace.id, 'notes.md', current.version, 'unsafe'), { code: 'workspace_not_idle' });
+  assert.equal(await readFile(join(root, 'notes.md'), 'utf8'), 'saved');
+});
+
 test('dedicated Host maintenance gates execution, persists through controller state and fails closed', async t => {
   const f = fixture(t);
   const { mkdtemp, readFile, realpath, rm, writeFile } = await import('node:fs/promises');
