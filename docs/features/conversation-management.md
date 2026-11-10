@@ -24,7 +24,7 @@ M01 工作区分组与接续，M02 搜索与重命名，M03 归档与恢复，M0
 
 M06：在两个页面打开同一已完成对话，再关闭一个、随后关闭全部。真实 Host 上通过原生调用记录核对同一对话共享观察；fixture 的 inspect 没有观察计数，只能看到页面每 15 秒的 `/reading` 续期，共享观察与释放由下面的协议回归覆盖；结束阅读且没有执行责任后解除观察，不继续每 5 秒读取正文。顺序阅读超过 16 段历史仍能继续打开；运行中的对话关页后继续，重新打开保留原身份与结果。阅读租约每 15 秒续期，失联 45 秒后回收；这不是任务超时。协议回归运行 `node --test test/workbench.test.ts`。
 
-M07：在空闲 Codex 对话的管理窗口点击「删除对话」，核对标题、工作区、Harness 和不可恢复提示；先取消，确认历史仍在，再次进入并确认。删除完成后列表、搜索、另一页面正文和旧链接均不再展示该内容。通过原生独立读取和中书资源检查验证清理，工作区文件及其他对话保持。当前 Codex adapter 提供原生删除；DSH 仅提供归档恢复，不显示删除入口；直接请求其删除接口（带 CSRF 的 `POST /api/private/workbench/conversations/<id>/delete`，正文 `{"confirm":true}`）也应返回 409 `conversation_delete_unsupported`，并保留历史及绑定。fixture 的 Codex 删除从自己的 native.sqlite 清除正文；DSH 替身即使具备测试删除能力也不能绕过产品限制。可用 `node test/support/feature-fixture.ts inspect-deletions --root "$zh_verify_root"` 独立检查仅含身份和结果的调用记录；它不能替代真实 Host 验证。
+M07：在空闲 Codex 对话的管理窗口点击「删除对话」，核对标题、工作区、Harness 和不可恢复提示；先取消，确认历史仍在，再次进入并确认。再检查未保存改名：把名称改成 X 但不保存，进入删除确认框后点「返回」，应回到管理视图且标题、列表与接口标题仍是原值（未保存改名不得被提交）。删除完成后列表、搜索、另一页面正文和旧链接均不再展示该内容。通过原生独立读取和中书资源检查验证清理，工作区文件及其他对话保持。当前 Codex adapter 提供原生删除；DSH 仅提供归档恢复，不显示删除入口；直接请求其删除接口（带 CSRF 的 `POST /api/private/workbench/conversations/<id>/delete`，正文 `{"confirm":true}`）也应返回 409 `conversation_delete_unsupported`，并保留历史及绑定。fixture 的 Codex 删除从自己的 native.sqlite 清除正文；DSH 替身即使具备测试删除能力也不能绕过产品限制。可用 `node test/support/feature-fixture.ts inspect-deletions --root "$zh_verify_root"` 独立检查仅含身份和结果的调用记录；它不能替代真实 Host 验证。
 
 fixture 可用 `node test/support/feature-fixture.ts reject-delete-next --root "$zh_verify_root" --title '本轮唯一标题'` 在适配器边界注入一次拒绝；标题取原生 inspect 的精确值，不能把中书重命名后的标题当原生标题。
 

@@ -17,7 +17,7 @@
 
 ## Driving it with Harness
 
-遵循[共同入口](README.md#独立执行验收)。fixture 可从[标准启动入口](README.md#launch从干净克隆开始)启动，合成工作区位于本次 root 的 `workspace-a` 和 `workspace-b`，已启用条件保存。真实 Codex 与 DSH 按[真实 Host 前提](README.md#native真实接入分支)各跑一轮。使用全新的合成工作区和管理员会话，准备 Markdown、TXT、一个配置文件及一份有长文、宽表、图形的自包含报告。报告放在子目录，分别链接一个存在、一个不存在和一个越界的底稿。以测试专用的合成私有请求和脚本标记检查报告隔离。
+遵循[共同入口](README.md#独立执行验收)。fixture 可从[标准启动入口](README.md#launch从干净克隆开始)启动，合成工作区位于本次 root 的 `workspace-a` 和 `workspace-b`，已启用条件保存。受管写入（原地保存）场景先读目标工作区的 `GET /api/private/workbench/workspaces/<id>/edit-status`：返回 `editable:false` 且 reason 为 `workspace_writes_unmanaged` 说明实例没有启用 managedWrites 协调，受管写入相关步骤记 BLOCKED（缺操作者前提，不是产品缺陷）；真实 Codex 的受管写入需要操作者提供带 `"managedWrites": true` 的 harness 配置。真实 Codex 与 DSH 按[真实 Host 前提](README.md#native真实接入分支)各跑一轮。使用全新的合成工作区和管理员会话，准备 Markdown、TXT、一个配置文件及一份有长文、宽表、图形的自包含报告。报告放在子目录，分别链接一个存在、一个不存在和一个越界的底稿。以测试专用的合成私有请求和脚本标记检查报告隔离。
 
 1. 从桌面和手机侧栏打开报告，核对版式和可读内容。从滚动后的位置点开工作区内的底稿，再返回，观察原位置。拒绝越界和不存在的目标，报告不发出私有请求，脚本标记不出现。
 2. 双页面打开同一 Markdown 版本。在一端编辑、预览、保存，独立检查原文件字节并在另一页面重读。另一端保存旧版本时核对冲突、草稿及磁盘仍是先保存的版本。另测试 TXT、配置样本和 HTML 只读。

@@ -34,7 +34,7 @@
 | E02 | 按 [空原生会话故障前提](conversations.md#空原生会话故障前提) 建“未知回执”；先运行 unknown-receipt，再发送唯一文本。保存产品操作 ID、inspect 调用数；在“核对同一发送”重试两次；再运行 prove；页面若已自动核实（accepted、pending 清除、按钮消失），记为有效恢复，按钮仍在时再点“查询原生结果” | 未发布证据前，操作 unknown、保留 pending 草稿，同编号重试不增加 submitCalls。发布后 accepted，草稿中的 pending 被清除；inspect 始终只调用一次，原生 operationIds 只有原 ID。最后 complete 收尾 |
 | E03 | 在已接受且 running 的 fixture 对话点“停止当前轮” | inspect 的 stopCalls 加一、state.runId 仍是被停止轮且 status=interrupted；产品 type=stop 操作的 runId 等于被停止轮；页面变“已中断”，显示后台工具可能仍运行/改动不撤销的提示。发下一条能再次运行；fixture 不证明真实工具退出 |
 | E04 | 按下方五个独立分支，分别驱动存储失败、编码预算、HTTP 400、HTTP 413、原生 rejected | 每个分支都核对输入、pending、原操作编号、独立调用计数与编辑后再次发送；不能用其中一条代替其他分支 |
-| E05 | 按下面真实分支分别使用 Codex、DSH | 文件字节独立读回、原生身份/配置及正文共同符合预期；每个 Harness 单独结论。期间以约 1 秒间隔读对话状态，运行中的轮次在工具结果、审批回答和步骤交界处不出现“待核实” |
+| E05 | 按下面真实分支分别使用 Codex、DSH | 文件字节独立读回、原生身份/配置及正文共同符合预期；每个 Harness 单独结论。期间以约 1 秒间隔读对话状态，运行中的轮次在工具结果、审批回答和步骤交界处不出现“待核实”。审批分支只在原生出现 `[sandbox: …]` 拒绝时触发：workspace-write 下 /tmp 可写不触发，容器根只读时 /opt 是 EROFS 而非沙箱拒绝、无法提权，缺此前提示记为 UNCOVERED |
 
 ```sh
 node test/support/feature-fixture.ts complete --root "$zh_verify_root" --title '执行 A'
