@@ -29,4 +29,4 @@ W01 选择已有目录或新建空目录并添加。W02 改显示名、置顶、
 
 ## Implementation and regression
 
-[登记与目录边界](../../src/server/workspace-registry.ts)、[工作台状态和派发](../../src/server/workbench.ts)、[浏览器管理入口](../../src/web/workspace-management.tsx)。定向回归入口为 `node --test test/workbench-http.test.ts`。
+[登记与目录边界](../../src/server/workspace-registry.ts)、[工作区岗](../../src/server/workbench/workspaces.ts)、[占用与围栏](../../src/server/workbench/gate.ts)、[浏览器管理入口](../../src/web/workspace-management.tsx)。定向回归入口为 `node --test test/workbench-http.test.ts`。

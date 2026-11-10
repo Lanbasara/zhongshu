@@ -105,7 +105,7 @@
 
 ## Implementation and regression
 
-- [共享内容契约](../../src/shared/content.ts)、[Workbench](../../src/server/workbench.ts)、[存储](../../src/server/workbench-store.ts)、[资源](../../src/server/resources.ts)负责内容、原操作身份、资源归属与原文件校验。
+- [共享内容契约](../../src/shared/content.ts)、[引用核对](../../src/server/workbench/execution.ts)、[消息内图片](../../src/server/workbench/transcript.ts)、[存储](../../src/server/workbench-store.ts)、[资源](../../src/server/resources.ts)负责内容、原操作身份、资源归属与原文件校验。
 - [Codex](../../src/harness/codex/index.ts) / [DSH](../../src/harness/dsh/index.ts)接原生图片输入、工具结构及文件图片读取；生成图片按原生能力处理，不由前端伪造。
 - [正文与工具组件](../../src/web/conversation-content.tsx)、[输入组件](../../src/web/composer.tsx)、[上传暂存](../../src/web/upload-drafts.ts)、[页面恢复](../../src/web/workbench.tsx)为实际页面入口。
 - 定向运行 `node --test test/markdown.test.ts test/resources.test.ts test/workbench.test.ts test/codex.test.ts test/dsh.test.ts`；资源测试覆盖认证/CSRF、归属、文件越界与符号链接、资源引用/回收、备份恢复、Markdown 原生读取及快照。它不证明真实模型识图或浏览器交互。

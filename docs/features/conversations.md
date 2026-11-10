@@ -80,6 +80,6 @@ C03 丢的是浏览器 HTTP 回执；C04 在 onBound 后失败。原生 Host 创
 
 - 草稿页与首发生命周期：[new-conversation.tsx](../../src/web/new-conversation.tsx)；草稿身份：[new-conversation-state.ts](../../src/web/new-conversation-state.ts)；偏好与标题：[conversation-preferences.ts](../../src/web/conversation-preferences.ts)。
 - 配置交互：[draft-configuration.tsx](../../src/web/patterns/draft-configuration.tsx)；工作台导航：[workbench.tsx](../../src/web/workbench.tsx)。
-- 创建、默认历史、草稿能力：[workbench.ts](../../src/server/workbench.ts)、[workbench-http.ts](../../src/server/workbench-http.ts)；不可变配置与接受记录：[workbench-store.ts](../../src/server/workbench-store.ts)。
+- 创建、默认历史、草稿能力：[creation.ts](../../src/server/workbench/creation.ts)、[workbench-http.ts](../../src/server/workbench-http.ts)；不可变配置与接受记录：[workbench-store.ts](../../src/server/workbench-store.ts)。
 - 原生 effort 与技能：[Codex](../../src/harness/codex/index.ts)、[DSH](../../src/harness/dsh/index.ts)。
 - `node --test test/workbench.test.ts test/workbench-store.test.ts test/workbench-http.test.ts test/codex.test.ts test/dsh.test.ts` 只证明测试覆盖的状态与协议边界，不等于浏览器或真实 Harness 已通过。

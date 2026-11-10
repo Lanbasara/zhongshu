@@ -134,7 +134,7 @@ node test/support/feature-fixture.ts inspect --root "$zh_verify_root" --title '�
 ## Implementation and regression
 
 - 页面门禁、草稿、发送/停止：[workbench.tsx](../../src/web/workbench.tsx)；请求与 pending 草稿：[workbench-client.ts](../../src/web/workbench-client.ts)。
-- 持久队列、claim、终态核对与 reconcile：[workbench.ts](../../src/server/workbench.ts)、[workbench-store.ts](../../src/server/workbench-store.ts)。
+- 发送、停止与 reconcile：[execution.ts](../../src/server/workbench/execution.ts)；持久队列、claim 与终态核对：[queue.ts](../../src/server/workbench/queue.ts)、[workbench-store.ts](../../src/server/workbench-store.ts)。
 - 原生派发/停止：[Codex](../../src/harness/codex/index.ts)、[DSH](../../src/harness/dsh/index.ts)。
 - E04 永久故障入口与真实HTTP/CLI回归：[feature-fixture.ts](../../test/support/feature-fixture.ts)、[browser-faults.js](../../test/support/browser-faults.js)、[feature-fixture.test.ts](../../test/feature-fixture.test.ts)。运行 `node --test test/feature-fixture.test.ts`；覆盖两个替身的单次拒绝/同ID不重派/新ID恢复、装载不失效、真实400/413及故障只消费一次；Node中的最小页面表面不证明DOM行为，仍须跑上述真实浏览器分支。
 - `node --test test/workbench.test.ts test/workbench-store.test.ts test/workbench-http.test.ts test/codex.test.ts test/dsh.test.ts`：覆盖 ACK 门禁、目标轮终态、目标变化、未知回执、重复提交、当前停止目标与派发中崩溃。实际浏览器判据仍是 E01–E04。
