@@ -6,7 +6,7 @@ import { Check, ClipboardList, Clock, Copy, FileText, Info, Quote, X, ImageIcon 
 import type { TurnFileSummary, WorkbenchItem } from '../shared/workbench.ts';
 import type { MessageReference, ImageAttachment } from '../shared/content.ts';
 import { referenceSchema } from '../shared/content.ts';
-import { workspaceImages } from './markdown.ts';
+import { markedWorkspacePath, workspaceImages, workspaceLinks } from './markdown.ts';
 import { TurnFiles } from './patterns/turn-files.tsx';
 import { ProcessBlock } from './patterns/process.tsx';
 import { AutomationTitles, deliveredReminders } from './automation-delivery.ts';
@@ -28,30 +28,43 @@ function safeUrl(url: string) {
 function imageSource(source: string) {
   try { return referenceSchema.safeParse({ type: 'file', path: decodeURIComponent(source).replace(/^\.\//, '') }).success; } catch { return false; }
 }
+/** Keep safe external links and workspace links; anything else becomes plain text. */
+const linkUrl = (url: string) => safeUrl(url) || (markedWorkspacePath(url) !== undefined ? url : '');
 const markdownComponents = {
-  a: ({ href, children }: React.ComponentProps<'a'>) => <a href={safeUrl(href ?? '') || undefined} target="_blank" rel="noopener noreferrer">{children}</a>,
+  // Without a place to open it, a workspace link reads as its text.
+  a: ({ href, children }: React.ComponentProps<'a'>) => markedWorkspacePath(href ?? '') !== undefined ? <span className="message-file-name">{children}</span>
+    : <a href={safeUrl(href ?? '') || undefined} target="_blank" rel="noopener noreferrer">{children}</a>,
 };
 
-const plainRemarkPlugins = Object.values(defaultRemarkPlugins);
+const plainRemarkPlugins = [...Object.values(defaultRemarkPlugins), workspaceLinks];
 /** Agent-written markdown outside the transcript (for example a plan under review): no raw HTML, safe links only, no workspace images. */
 export function MarkdownText({ text }: { text: string }) {
-  return <div className="message-text"><Streamdown plugins={{ code, cjk }} remarkPlugins={plainRemarkPlugins} components={markdownComponents} skipHtml urlTransform={url => safeUrl(url)}>{text}</Streamdown></div>;
+  return <div className="message-text"><Streamdown plugins={{ code, cjk }} remarkPlugins={plainRemarkPlugins} components={markdownComponents} skipHtml urlTransform={(url, key) => key === 'href' ? linkUrl(url) : safeUrl(url)}>{text}</Streamdown></div>;
 }
 
-export function Message({ item, conversation, onQuote }: { item: WorkbenchItem; conversation: string; onQuote(reference: MessageReference): void }) {
+export function Message({ item, conversation, onQuote, onOpenLink }: {
+  item: WorkbenchItem; conversation: string; onQuote(reference: MessageReference): void;
+  /** Open a workspace file the message links to; without it such links read as text. */
+  onOpenLink?(path: string, trigger: HTMLButtonElement): void;
+}) {
   const ref = useRef<HTMLElement>(null);
   const [copied, setCopied] = useState(false);
   const [quoteHint, setQuoteHint] = useState(false);
   const titles = useContext(AutomationTitles);
   const reminders = useMemo(() => (item.automation ? deliveredReminders(item.text) : undefined), [item.automation, item.text]);
   // The explicit options also distinguish Streamdown's shared processor cache.
-  const remarkPlugins = useMemo(() => [...Object.values(defaultRemarkPlugins), [workspaceImages, { conversation, item: item.id }] as [typeof workspaceImages, { conversation: string; item: string }]], [conversation, item.id]);
+  const remarkPlugins = useMemo(() => [...Object.values(defaultRemarkPlugins), workspaceLinks, [workspaceImages, { conversation, item: item.id }] as [typeof workspaceImages, { conversation: string; item: string }]], [conversation, item.id]);
   const components = useMemo(() => ({ ...markdownComponents,
+    a: ({ href, children }: React.ComponentProps<'a'>) => {
+      const path = markedWorkspacePath(href ?? '');
+      if (path === undefined || !onOpenLink) return markdownComponents.a({ href, children });
+      return <button type="button" className="message-file-link" title={`在阅读器中打开 ${path}`} onClick={event => onOpenLink(path, event.currentTarget)}>{children}</button>;
+    },
     img: ({ src, alt }: { src?: string; alt?: string }) => {
       const url = src && (safeUrl(src) || (imageSource(src) ? `/api/private/workbench/conversations/${conversation}/workspace-image?item=${encodeURIComponent(item.id)}&source=${encodeURIComponent(src)}` : ''));
       return url ? <ImageView src={url} alt={alt || '消息图片'}/> : <span>图片地址不可用</span>;
     },
-  }), [conversation, item.id]);
+  }), [conversation, item.id, onOpenLink]);
   function quote() {
     const selection = window.getSelection();
     const text = selection?.anchorNode && ref.current?.contains(selection.anchorNode) ? selection.toString() : '';
@@ -62,7 +75,7 @@ export function Message({ item, conversation, onQuote }: { item: WorkbenchItem; 
     <button type="button" aria-label="复制消息" title={copied ? '已复制' : '复制'} onClick={() => { void navigator.clipboard.writeText(item.text).then(() => { setCopied(true); setTimeout(() => setCopied(false),1500); }).catch(() => {}); }}>{copied ? <Check size={14}/> : <Copy size={14}/>}</button>
     <button type="button" aria-label="引用所选文字" title="引用所选文字" onClick={quote}><Quote size={14}/></button>
   </div>;
-  const body = <div className="message-text">{item.kind === 'assistant' ? <Streamdown plugins={{ code, cjk }} remarkPlugins={remarkPlugins} components={components} skipHtml urlTransform={(url, key) => safeUrl(url) || (key === 'src' && imageSource(url) ? url : '')} isAnimating={item.status === 'running'}>{item.text || (item.status === 'running' ? '正在生成…' : '')}</Streamdown> : item.text}</div>;
+  const body = <div className="message-text">{item.kind === 'assistant' ? <Streamdown plugins={{ code, cjk }} remarkPlugins={remarkPlugins} components={components} skipHtml urlTransform={(url, key) => key === 'href' ? linkUrl(url) : safeUrl(url) || (key === 'src' && imageSource(url) ? url : '')} isAnimating={item.status === 'running'}>{item.text || (item.status === 'running' ? '正在生成…' : '')}</Streamdown> : item.text}</div>;
   if (item.kind === 'assistant' && !item.text && item.status !== 'running' && !item.images?.length && !item.references?.length) return null;
   return <article ref={ref} tabIndex={-1} className={`message message-${item.kind}`} data-message-id={item.id} data-status={item.status}>
     {item.kind === 'notice' && <Info size={14} className="message-notice-icon" aria-hidden="true"/>}
@@ -106,11 +119,13 @@ export function ToolGroup({ items }: { items: WorkbenchItem[] }) {
 }
 
 /** Group tools without reordering text or merging actions from separate native turns. */
-export const Transcript = memo(function Transcript({ items, conversation, onQuote, turnFiles, activeRun, activeFile, unavailableFiles, workspaceUnavailable, onOpenFile, renderCollaboration }: {
+export const Transcript = memo(function Transcript({ items, conversation, onQuote, turnFiles, activeRun, activeFile, unavailableFiles, workspaceUnavailable, onOpenFile, onOpenLink, renderCollaboration }: {
   items: WorkbenchItem[]; conversation: string; onQuote(reference: MessageReference): void;
   turnFiles?: ReadonlyMap<string, TurnFileSummary>; activeRun?: string; activeFile?: { runId: string; path: string };
   unavailableFiles?: ReadonlySet<string>; workspaceUnavailable?: boolean;
   onOpenFile?(runId: string, path: string, trigger: HTMLButtonElement): void;
+  /** A workspace file linked from a message body. */
+  onOpenLink?(path: string, trigger: HTMLButtonElement): void;
   /** Native collaboration records render as compact cards; adjacent records of one action and turn share a card. */
   renderCollaboration?(items: WorkbenchItem[]): ReactNode;
 }) {
@@ -133,7 +148,7 @@ export const Transcript = memo(function Transcript({ items, conversation, onQuot
     const run = last.runId;
     const summary = run && run !== activeRun && lastItem.get(run) === last.id ? turnFiles?.get(run) : undefined;
     return <Fragment key={group.key}>
-      {group.collaboration ? renderCollaboration!(group.collaboration) : group.tools ? <ToolGroup items={group.tools}/> : <Message item={group.message!} conversation={conversation} onQuote={onQuote}/>}
+      {group.collaboration ? renderCollaboration!(group.collaboration) : group.tools ? <ToolGroup items={group.tools}/> : <Message item={group.message!} conversation={conversation} onQuote={onQuote} {...(onOpenLink ? { onOpenLink } : {})}/>}
       {summary && onOpenFile && <TurnFiles key={summary.runId} activePath={activeFile?.runId === summary.runId ? activeFile.path : undefined}
         limited={summary.limited} onOpen={(path, trigger) => onOpenFile(summary.runId, path, trigger)}
         files={summary.paths.map(path => ({ path, unavailable: workspaceUnavailable || unavailableFiles?.has(JSON.stringify([summary.runId, path])) }))}/>}

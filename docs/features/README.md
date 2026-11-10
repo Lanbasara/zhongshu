@@ -84,7 +84,7 @@ node test/support/feature-fixture.ts init --root "$zh_verify_root"
 
 以下命令在仓库根目录执行，使用同一 root。`--title` 必须精确匹配 inspect 中唯一的原生创建标题；不要复用名称。新建不再单独填标题：首条文字折叠空白后截取前 32 个 Unicode 字符作为标题，无文字为“新对话”。下文命令的示例标题都须替换成本轮 inspect 实际值；页面重命名只改产品标题，不能假定原生控制标题也改变。
 
-页内切换使用侧栏。hash 只在页面初次装载读取；已打开页面直接改变 hash（包括自动化工具的同文档导航）会改变地址但不切换内容。恢复指定地址时新页打开或完整刷新，不能以地址变化代替标题/内容变化。这是当前导航限制，hash-only 导航不记录为通过。
+页内切换可用侧栏，也可直接改变地址。每个页面有自己的 hash：对话 `#<ID>`、草稿 `#new:<工作区ID>`、`#schedule[:标签]`、`#settings[:标签]`、`#archive`。已打开页面改变 hash（包括自动化工具的同文档导航）和浏览器后退、前进都会切换到对应页面，行为与验证见[界面 I07](interface.md)。判定仍以标题与内容的变化为准，不能只看地址变化。
 
 ```sh
 node test/support/feature-fixture.ts inspect --root "$zh_verify_root"

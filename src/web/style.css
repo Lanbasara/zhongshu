@@ -9,6 +9,9 @@
 * { box-sizing:border-box; }
 html,body,#root { min-height:100%; margin:0; }
 body { min-width:320px; background:var(--zs-canvas); }
+/* While a Radix modal (drawer, search) is open the page behind must not scroll. Radix marks the body and would add this
+   rule as an inline <style>, which the strict CSP (style-src 'self') blocks, so the rule lives here. */
+body[data-scroll-locked] { overflow:hidden !important; overscroll-behavior:contain; }
 button,input,textarea,select { font:inherit; letter-spacing:inherit; }
 button { cursor:pointer; color:inherit; background:transparent; border:0; padding:0; touch-action:manipulation; }
 button:disabled { opacity:.45; cursor:default; }

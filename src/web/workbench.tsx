@@ -39,7 +39,8 @@ import { SubagentActivity, SubagentTrigger } from './patterns/subagents.tsx';
 import { SubagentPanelHost, subagentDisplays, useSubagentList } from './subagents.tsx';
 import { ConversationRequests } from './requests.tsx';
 import { PlanArea, PlanToolbarToggle, usePlan } from './plan.tsx';
-import { onNotificationOpen, parseEntry, setBadge } from './push-client.ts';
+import { onNotificationOpen, setBadge } from './push-client.ts';
+import { navigation as pageHistory, parseRoute, routeHash, useBackDismiss, type Route } from './navigation.ts';
 import { AccountBanner, useAccounts } from './harness-accounts.tsx';
 
 const failures: Record<string, string> = {
@@ -97,14 +98,14 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
   const [configuration, setConfiguration] = useState<WorkbenchConfiguration>();
   const [workspaceAction, setWorkspaceAction] = useState<WorkspaceAction>();
   /** Instance-level pages replace the conversation column; the selected conversation stays selected underneath. */
-  /** `#settings` or `#settings:<tab>` opens Settings, so a notification can open it in a new window. */
-  const opened = useMemo(() => parseEntry(location.hash), []);
-  const entry = opened?.kind === 'settings' ? opened : undefined;
-  const [view, setView] = useState<'settings' | 'archive' | 'schedule' | undefined>(() => entry ? 'settings' : opened?.kind === 'schedule' ? 'schedule' : undefined);
+  /** Every page has its own address (navigation.ts): a conversation, a draft, the schedule, settings or the archive. */
+  const opened = useMemo(() => parseRoute(location.hash), []);
+  const entry = opened.kind === 'settings' ? opened : undefined;
+  const [view, setView] = useState<'settings' | 'archive' | 'schedule' | undefined>(() => entry ? 'settings' : opened.kind === 'schedule' ? 'schedule' : opened.kind === 'archive' ? 'archive' : undefined);
   /** `#schedule` or `#schedule:<tab>` opens the schedule (ADR 0021). */
-  const [scheduleTab, setScheduleTab] = useState<ScheduleTab>(() => scheduleTabs.find(tab => opened?.kind === 'schedule' && tab.id === opened.tab)?.id ?? 'calendar');
+  const [scheduleTab, setScheduleTab] = useState<ScheduleTab>(() => scheduleTabs.find(tab => opened.kind === 'schedule' && tab.id === opened.tab)?.id ?? 'calendar');
   /** An agent notification to show in place once its conversation is open (`#<conversation>:notice:<id>`). */
-  const [pendingNotice, setPendingNotice] = useState<string | undefined>(() => opened?.kind === 'conversation' ? opened.notice : undefined);
+  const [pendingNotice, setPendingNotice] = useState<string | undefined>(() => opened.kind === 'conversation' ? opened.notice : undefined);
   const [createFor, setCreateFor] = useState<string>();
   const [settingsTab, setSettingsTab] = useState<SettingsTab>(() => settingsTabs.find(tab => tab.id === entry?.tab)?.id ?? 'workspaces');
   const [searching, setSearching] = useState(false);
@@ -132,14 +133,14 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
   const [readerTarget, setReaderTarget] = useState<ReaderTarget>();
   const [unavailableFiles, setUnavailableFiles] = useState<ReadonlySet<string>>(new Set());
   const readerOrigin = useRef<{ button: HTMLButtonElement; row: HTMLLIElement | null }>(null);
-  const [selected, setSelected] = useState<string | undefined>(() => opened?.kind === 'conversation' ? opened.id : undefined);
+  const [selected, setSelected] = useState<string | undefined>(() => opened.kind === 'conversation' ? opened.id : undefined);
   const [snapshot, setSnapshot] = useState<WorkbenchSnapshot>();
   const [pages, setPages] = useState<Page[]>([]);
   /** Cursors of pages dropped from the newer end, nearest last; empty means the window ends at the latest page. */
   const [newer, setNewer] = useState<(string | null)[]>([]);
   const items = useMemo(() => pageItems(pages), [pages]);
   const [draft, setDraft] = useState<Draft>({ text: '' });
-  const [creating, setCreating] = useState<string | true | undefined>(() => location.hash.startsWith('#new:') ? decodeURIComponent(location.hash.slice(5)) || true : undefined);
+  const [creating, setCreating] = useState<string | true | undefined>(() => opened.kind === 'draft' ? opened.workspaceId || true : undefined);
   const [addedWorkspace,setAddedWorkspace]=useState<string>();
   const [pickingFile, setPickingFile] = useState(false);
   const [navigation, setNavigation] = useState(false);
@@ -255,7 +256,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
       if (gen === generation.current) {
         if (reason instanceof RequestError && reason.status === 404) {
           saveDraft(id, { text: '' }); setSnapshot(undefined); liveView.current = undefined; setPages([]); setNewer([]); setDraft({ text: '' }); draftRef.current = { text: '' };
-          setSelected(undefined); history.replaceState(null, '', location.pathname + location.search);
+          setSelected(undefined); pageHistory.page('', 'replace');
           setUnavailableNotice('对话已不可用。'); refreshList(value => value + 1);
         } else report(reason);
       }
@@ -409,7 +410,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
           if (change.deleted) {
             saveDraft(change.conversationId, { text: '' });
             if (change.conversationId === selectedRef.current) {
-              history.replaceState(null, '', location.pathname + location.search);
+              pageHistory.page('', 'replace');
               setSelected(undefined); setSnapshot(undefined); liveView.current = undefined; setPages([]); setNewer([]); setDraft({ text: '' }); draftRef.current = { text: '' };
               setUnavailableNotice('对话已删除。');
             }
@@ -441,8 +442,15 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
     else if (atBottom.current) { node.scrollTop = node.scrollHeight; setMoreOutput(false); }
     else setMoreOutput(true);
   }, [pages, snapshot?.history.liveItems]);
-  const choose = useCallback((id: string) => { history.replaceState(null, '', `#${id}`); setSelected(id); setCreating(undefined); setView(undefined); setNavigation(false); }, []);
-  const startDraft = useCallback((id?:string) => { setUnavailableNotice(''); history.replaceState(null,'','#new:'+encodeURIComponent(id??''));setSelected(undefined);setCreating(id||true);setView(undefined);setReader(false);setNavigation(false); },[]);
+  const showConversation = useCallback((id: string) => { setSelected(id); setCreating(undefined); setView(undefined); setNavigation(false); }, []);
+  const choose = useCallback((id: string) => { pageHistory.page(routeHash({ kind: 'conversation', id }), 'push'); showConversation(id); }, [showConversation]);
+  /** A draft that became a conversation takes over the draft's entry, so back does not return to an empty draft. */
+  const adoptConversation = useCallback((id: string) => { pageHistory.page(routeHash({ kind: 'conversation', id }), 'replace'); showConversation(id); }, [showConversation]);
+  const showDraft = useCallback((id?: string) => { setUnavailableNotice(''); setSelected(undefined); setCreating(id || true); setView(undefined); setReader(false); setNavigation(false); }, []);
+  const draftHash = (id?: string) => routeHash(id ? { kind: 'draft', workspaceId: id } : { kind: 'draft' });
+  const startDraft = useCallback((id?: string) => { pageHistory.page(draftHash(id), 'push'); showDraft(id); }, [showDraft]);
+  /** Choosing another workspace inside a draft corrects the same page. */
+  const switchDraftWorkspace = useCallback((id?: string) => { pageHistory.page(draftHash(id), 'replace'); showDraft(id); }, [showDraft]);
   const createInWorkspace = useCallback((id:string)=>startDraft(id),[startDraft]);
   const refreshNavigation = useCallback(() => {
     refreshList(value => value + 1);
@@ -607,6 +615,14 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
     setReaderTarget({ conversationId: conversation.id, runId, workspaceId: conversation.workspaceId, path });
     setReader(true);
   }
+  /** A workspace file a message links to opens beside the conversation, like a file of the turn. */
+  function openLinkedFile(path: string, button: HTMLButtonElement) {
+    if (!conversation || workspaceRemoved || conversation.id !== selected) return;
+    readerOrigin.current = { button, row: null };
+    setSubagentPanel(undefined);
+    setReaderTarget({ workspaceId: conversation.workspaceId, path });
+    setReader(true);
+  }
   function closeReader() {
     const origin = readerOrigin.current;
     readerOrigin.current = null;
@@ -687,7 +703,9 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
     return () => window.removeEventListener('keydown', shortcut);
   }, [setCollapsed]);
   const openFiles = () => { if (!configuration?.workspaces.length) return; setSubagentPanel(undefined); setReader(true); setNavigation(false); };
-  const openSettings = (tab?: SettingsTab) => { if (tab) setSettingsTab(tab); setView('settings'); setReader(false); setSubagentPanel(undefined); setNavigation(false); };
+  const showSettings = (tab?: SettingsTab) => { if (tab) setSettingsTab(tab); setView('settings'); setReader(false); setSubagentPanel(undefined); setNavigation(false); };
+  const openSettings = (tab?: SettingsTab) => { pageHistory.page(routeHash({ kind: 'settings', tab: tab ?? settingsTab }), 'push'); showSettings(tab); };
+  const changeSettingsTab = (tab: SettingsTab) => { setSettingsTab(tab); pageHistory.page(routeHash({ kind: 'settings', tab }), 'replace'); };
   const openSettingsRef = useRef(openSettings); openSettingsRef.current = openSettings;
   // A notification clicked while this page is open switches it in place (ADR 0018).
   useEffect(() => onNotificationOpen(request => {
@@ -695,11 +713,39 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
     else if (request.kind === 'settings') openSettingsRef.current(settingsTabs.find(tab => tab.id === request.tab)?.id);
     else if (request.kind === 'schedule') openScheduleRef.current(scheduleTabs.find(tab => tab.id === request.tab)?.id);
   }), [choose]);
-  const openSchedule = (tab?: ScheduleTab) => { if (tab) setScheduleTab(tab); history.replaceState(null, '', '#schedule'); setView('schedule'); setReader(false); setSubagentPanel(undefined); setNavigation(false); };
+  const showSchedule = (tab?: ScheduleTab) => { if (tab) setScheduleTab(tab); setView('schedule'); setReader(false); setSubagentPanel(undefined); setNavigation(false); };
+  const openSchedule = (tab?: ScheduleTab) => { pageHistory.page(routeHash({ kind: 'schedule', tab: tab ?? scheduleTab }), 'push'); showSchedule(tab); };
+  const changeScheduleTab = (tab: ScheduleTab) => { setScheduleTab(tab); pageHistory.page(routeHash({ kind: 'schedule', tab }), 'replace'); };
   const openScheduleRef = useRef(openSchedule); openScheduleRef.current = openSchedule;
   /** A workspace file named by a timeline entry: a new draft in that workspace with the file open beside it. */
   const openWorkspaceFile = (workspaceId: string, path: string) => { startDraft(workspaceId); readerOrigin.current = null; setSubagentPanel(undefined); setReaderTarget({ workspaceId, path }); setReader(true); };
-  const openArchive = () => { setView('archive'); setReader(false); setSubagentPanel(undefined); setNavigation(false); };
+  const showArchive = () => { setView('archive'); setReader(false); setSubagentPanel(undefined); setNavigation(false); };
+  const openArchive = () => { pageHistory.page(routeHash({ kind: 'archive' }), 'push'); showArchive(); };
+  const showHome = () => { setSelected(undefined); setCreating(undefined); setView(undefined); setNavigation(false); };
+  /** The page this state shows, to tell a real page change from a step over an overlay entry. */
+  const currentRoute: Route = view === 'settings' ? { kind: 'settings', tab: settingsTab } : view === 'schedule' ? { kind: 'schedule', tab: scheduleTab }
+    : view === 'archive' ? { kind: 'archive' } : creating ? (typeof creating === 'string' ? { kind: 'draft', workspaceId: creating } : { kind: 'draft' })
+    : selected ? { kind: 'conversation', id: selected } : { kind: 'home' };
+  const showRoute = (route: Route) => {
+    if (route.kind === 'conversation') { showConversation(route.id); if (route.notice) setPendingNotice(route.notice); }
+    else if (route.kind === 'draft') showDraft(route.workspaceId);
+    else if (route.kind === 'schedule') showSchedule(scheduleTabs.find(tab => tab.id === route.tab)?.id ?? 'calendar');
+    else if (route.kind === 'settings') showSettings(settingsTabs.find(tab => tab.id === route.tab)?.id ?? 'workspaces');
+    else if (route.kind === 'archive') showArchive();
+    else showHome();
+  };
+  const followHistory = useRef<() => void>(() => {});
+  followHistory.current = () => {
+    const route = parseRoute(location.hash);
+    if (routeHash(route) !== routeHash(currentRoute)) showRoute(route);
+    else if (route.kind === 'conversation' && route.notice) setPendingNotice(route.notice);
+  };
+  // Back, forward and a typed address move between pages; overlays close themselves through useBackDismiss.
+  useEffect(() => pageHistory.subscribe(() => followHistory.current()), []);
+  useBackDismiss(navigation, () => setNavigation(false), narrow);
+  useBackDismiss(searching, () => setSearching(false), narrow);
+  useBackDismiss(!view && reader && !!configuration, closeReader, narrow);
+  useBackDismiss(!view && !!subagentPanel && !!conversation, closeSubagents, narrow);
   const searchActions: SearchActions = { open: choose, draft: startDraft, files: openFiles, archive: openArchive, settings: openSettings,
     ...(narrow ? {} : { toggleSidebar: () => setCollapsed(current => !current) }) };
   const workspaceName = conversation && (removedWorkspace?.label ?? configuration?.workspaces.find(w => w.id === conversation.workspaceId)?.label ?? '工作区');
@@ -780,13 +826,13 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
   return <><WorkbenchFrame style={sidebarWidth.style} navigationOpen={navigation} onNavigationChange={setNavigation} collapsed={collapsed} onCollapsedChange={setCollapsed}
     sidebar={sidebar} header={<>{header}{headerActions}</>} panel={panel} panelExpanded={!!reader && readerExpanded && !subagentPanel}>
       {view !== 'settings' && <AccountBanner accounts={accounts.accounts} onOpen={() => openSettings('account')}/>}
-      {view === 'settings' ? <SettingsView tab={settingsTab} onTab={setSettingsTab} configuration={configuration} workspaceAction={setWorkspaceAction} csrf={csrf} report={report}
+      {view === 'settings' ? <SettingsView tab={settingsTab} onTab={changeSettingsTab} configuration={configuration} workspaceAction={setWorkspaceAction} csrf={csrf} report={report}
           storage={storage} connection={connectionView} logout={logout} busy={busy} revision={listRevision} choose={choose} manage={setManaging} accounts={accounts}/>
         : view === 'archive' ? <ArchiveView configuration={configuration} revision={listRevision} csrf={csrf} report={report} choose={choose} manage={setManaging}/>
         : view === 'schedule' ? <ScheduleView csrf={csrf} report={report} configuration={configuration} revision={listRevision} tab={scheduleTab}
-          onTab={tab => { setScheduleTab(tab); history.replaceState(null, '', tab === 'calendar' ? '#schedule' : `#schedule:${tab}`); }} openConversation={choose} openFile={openWorkspaceFile}
+          onTab={changeScheduleTab} openConversation={choose} openFile={openWorkspaceFile}
           createFor={createFor} onCreateHandled={() => setCreateFor(undefined)}/>
-        : creating ? configuration ? <NewConversation key={String(creating)} configuration={configuration} initialWorkspace={typeof creating==='string'?creating:undefined} addedWorkspace={addedWorkspace} csrf={csrf} onWorkspace={startDraft} onAddWorkspace={()=>setWorkspaceAction({kind:'add'})} onCreated={c=>{refreshList(value=>value+1);choose(c.id);}} report={report}/> : <p className="view-status" role="status">正在读取工作区与配置…</p>
+        : creating ? configuration ? <NewConversation key={String(creating)} configuration={configuration} initialWorkspace={typeof creating==='string'?creating:undefined} addedWorkspace={addedWorkspace} csrf={csrf} onWorkspace={switchDraftWorkspace} onAddWorkspace={()=>setWorkspaceAction({kind:'add'})} onCreated={c=>{refreshList(value=>value+1);adoptConversation(c.id);}} report={report}/> : <p className="view-status" role="status">正在读取工作区与配置…</p>
         : !selected ? <section className="empty-workbench">
           <h2>选择一段对话，或开始新的工作</h2>
           <p>对话按工作区列在左侧。离开页面后 Agent 仍在工作，回来接着看就行。</p>
@@ -813,7 +859,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
             <AutomationTitles.Provider value={automationTitles}>
               <Transcript items={visible} conversation={selected} onQuote={quote} turnFiles={turnFiles} renderCollaboration={collaboration}
                 activeRun={running ? conversation?.state.runId : undefined} activeFile={readerTarget?.runId !== undefined && readerTarget.conversationId === selected ? { runId: readerTarget.runId, path: readerTarget.path } : undefined}
-                workspaceUnavailable={workspaceRemoved} unavailableFiles={unavailableFiles} onOpenFile={openTurnFile}/>
+                workspaceUnavailable={workspaceRemoved} unavailableFiles={unavailableFiles} onOpenFile={openTurnFile} {...(workspaceRemoved ? {} : { onOpenLink: openLinkedFile })}/>
             </AutomationTitles.Provider>
             {windowed && <button className="load-history" disabled={loadingNewer} onClick={() => void loadNewer()}>{loadingNewer ? '正在读取…' : '查看更新的内容'}</button>}
           </div>
