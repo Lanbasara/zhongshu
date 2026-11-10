@@ -18,8 +18,9 @@ export function Stage({ children, tone, stack, style }: { children: ReactNode; t
   return <div className="catalog-stage" data-tone={tone} data-stack={stack || undefined} style={style}>{children}</div>;
 }
 
-/** Shows what a callback would have done; the catalog never sends anything anywhere. */
+/** Shows what a callback would have done; the catalog never sends anything anywhere.
+ * It is a span so stories may place it inside a paragraph (`Page`/`Section` lead or note); `.catalog-readout` gives it a block box. */
 export function useReadout(initial = '尚未操作') {
   const [text, setText] = useState(initial);
-  return [<p key="readout" className="catalog-readout" role="status">{text}</p>, setText] as const;
+  return [<span key="readout" className="catalog-readout" role="status">{text}</span>, setText] as const;
 }

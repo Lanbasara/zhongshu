@@ -44,6 +44,9 @@ const cliSchema = z.object({
   count: z.coerce.number().int().min(1).max(200_000).default(650),
   chars: z.coerce.number().int().min(32).max(80_000).default(80),
   storageBudget: z.string().max(32).optional(),
+  /** tool-step: status given to the step that was running, and whether the new record is an empty completed tool record. */
+  stepStatus: z.enum(['running', 'completed', 'failed', 'unknown']).optional(),
+  empty: z.boolean().optional(),
 });
 const recordSchema = z.object({
   id: z.uuid(), title: z.string().max(200), harnessId: z.enum(['codex', 'dsh']),
@@ -71,9 +74,9 @@ function privateFile(path: string): void {
 }
 
 async function main() {
-  const args = parseArgs({ options: { root: { type: 'string' }, port: { type: 'string' }, title: { type: 'string' }, count: { type: 'string' }, chars: { type: 'string' }, 'storage-budget': { type: 'string' }, help: { type: 'boolean' } }, allowPositionals: true, strict: true });
+  const args = parseArgs({ options: { root: { type: 'string' }, port: { type: 'string' }, title: { type: 'string' }, count: { type: 'string' }, chars: { type: 'string' }, 'storage-budget': { type: 'string' }, stepStatus: { type: 'string' }, empty: { type: 'boolean' }, help: { type: 'boolean' } }, allowPositionals: true, strict: true });
   if (args.values.help) {
-    console.log(`node test/support/feature-fixture.ts <${cliSchema.shape.command.options.join('|')}> --root ABSOLUTE_DIRECTORY [--port 4391] [--title TITLE] [--count 650 --chars 80] [--storage-budget 16GiB]`);
+    console.log(`node test/support/feature-fixture.ts <${cliSchema.shape.command.options.join('|')}> --root ABSOLUTE_DIRECTORY [--port 4391] [--title TITLE] [--count 650 --chars 80] [--storage-budget 16GiB] [--stepStatus running|completed|failed|unknown] [--empty]`);
     return;
   }
   if (args.positionals.length !== 1) throw new Error('one_command_required');
@@ -185,11 +188,17 @@ async function main() {
           }
           if (input.command === 'prove' || input.command === 'complete') prove(value);
           if (input.command === 'tool-step') {
-            // One more native tool step in the running turn; the previous step finishes.
+            // One more native tool step in the running turn; the previous step takes --stepStatus (default completed)
+            // so mid-turn failures and unknown steps can be driven, then --empty appends a record with nothing to show.
             if (value.state.status !== 'running') throw new Error('fixture_must_be_running');
             const runId = value.state.runId!;
-            for (const item of value.items) if (item.kind === 'tool' && item.status === 'running' && item.runId === runId) item.status = 'completed';
+            const previous = input.stepStatus ?? 'completed';
+            for (const item of value.items) if (item.kind === 'tool' && item.status === 'running' && item.runId === runId) item.status = previous;
             const index = value.items.filter(item => item.kind === 'tool' && item.runId === runId).length;
+            if (input.empty) {
+              value.items.push({ id: `tool:${runId}:${index}`, kind: 'tool', text: '', status: 'completed', runId, tool: { name: '' } });
+              return;
+            }
             const steps = [['读取文件', 'notes.md'], ['运行命令', 'rg -n fixture notes.md'], ['编辑文件', 'notes.md'], ['运行命令', 'npm test']] as const;
             const [name, command] = steps[index % steps.length]!;
             value.items.push({ id: `tool:${runId}:${index}`, kind: 'tool', text: '', status: 'running', runId, tool: { name, input: command, output: `FIXTURE TOOL OUTPUT ${index + 1}` } });

@@ -10,7 +10,7 @@
 .catalog-stage { display:flex; flex-wrap:wrap; align-items:center; gap:12px; padding:20px; border:1px solid var(--zs-line); border-radius:var(--zs-radius-item); background:var(--zs-surface); }
 .catalog-stage[data-tone=sidebar] { background:var(--zs-sidebar); }
 .catalog-stage[data-stack] { display:grid; align-items:stretch; }
-.catalog-readout { margin-top:12px; min-height:18px; color:var(--zs-text-muted); font-size:var(--zs-type-caption); }
+.catalog-readout { display:block; margin-top:12px; min-height:18px; color:var(--zs-text-muted); font-size:var(--zs-type-caption); }
 .catalog-readout::before { content:"示例回调 · "; color:var(--zs-text-placeholder); }
 .catalog-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:12px; }
 .catalog-table { width:100%; border-collapse:collapse; font-size:var(--zs-type-control); }
