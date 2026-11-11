@@ -10,6 +10,7 @@ import { openDatabase } from '../src/server/database.ts';
 import { productMigrations } from '../src/server/migrations.ts';
 import { createWorkbenchStore, type OperationInput } from '../src/server/workbench-store.ts';
 import { Workbench } from '../src/server/workbench.ts';
+import { createCodexAutomations } from '../src/server/codex-automations.ts';
 import type { LiveEvent, QueueDelivery } from '../src/shared/workbench.ts';
 
 function deferred<T>() { let resolve!: (value: T) => void; let reject!: (reason: unknown) => void; const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; }
@@ -188,6 +189,40 @@ function fixture(t: TestContext) {
   t.after(async () => { await service.close(); closeDatabase(); rmSync(directory, { recursive: true, force: true }); });
   return { db, directory, store, peer, service, id, workspaces, closeDatabase };
 }
+
+test('Codex scheduler recovers one due occurrence, reconciles a lost ACK and marks the original conversation', async t => {
+  const f = fixture(t);
+  let clock = Date.parse('2027-01-01T00:00:00.000Z');
+  const scheduler = () => createCodexAutomations(f.db, f.service, f.peer, () => {}, () => clock);
+  const old = scheduler();
+  const task = await old.operations.create({ title: 'check', prompt: 'synthetic scheduled task',
+    timing: { kind: 'cron', expression: '*/5 * * * *', timeZone: 'Asia/Shanghai' },
+    target: { kind: 'session', sessionId: 'native-fixture' } });
+  await old.close();
+  clock += 17 * 60_000;
+  const resumed = scheduler();
+  f.peer.submitRead = async id => {
+    const runId = 'scheduled-run';
+    const message = f.store.getOperation(id);
+    assert.equal(message?.conversationId, f.id);
+    f.peer.records.push({ id: 'scheduled-input', kind: 'user', text: 'native delivery', status: 'completed', runId, operationId: id });
+    f.peer.current = { ...terminal(runId), terminalRunId: runId, terminalStatus: 'completed' };
+    return { outcome: 'unknown', reason: 'synthetic_lost_ack' };
+  };
+  try {
+    resumed.start();
+    await until(() => f.peer.submitCalls.length === 1);
+    await f.service.reconcile(f.id);
+    await until(() => f.store.isScheduledRun(f.id, 'scheduled-run'));
+    await until(() => !!f.db.prepare('SELECT 1 FROM codex_automation_runs WHERE task_id=? AND settled=1').get(task.id));
+    const latest = await resumed.operations.view(task.id);
+    assert.equal(latest?.lastDelivery?.scheduledAt, '2027-01-01T00:15:00.000Z');
+    assert.equal(latest?.scheduledAt, '2027-01-01T00:20:00.000Z');
+    assert.equal(latest?.lastDelivery?.runId, 'scheduled-run');
+    assert.equal(f.peer.submitCalls.length, 1);
+    assert.equal((await f.service.open(f.id)).history.items.find(item => item.id === 'scheduled-input')?.automation?.messageId, f.peer.submitCalls[0]);
+  } finally { await resumed.close(); }
+});
 
 test('accepted ACK cannot open the next send until the same native run reaches a terminal state', async t => {
   const f = fixture(t); const first = operation(f.id); await f.service.enqueue(first);

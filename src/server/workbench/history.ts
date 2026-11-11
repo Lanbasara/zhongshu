@@ -51,6 +51,7 @@ export class History {
           item.text = operation.payload.text;
           item.images = operation.payload.images;
           item.references = operation.payload.references;
+          if (this.store.isScheduledOperation(operation.id)) item.automation = { messageId: operation.id };
         }
       }
       output.push(item);

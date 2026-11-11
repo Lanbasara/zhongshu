@@ -65,7 +65,7 @@ export class Execution implements Participant {
   /** The native input for a message operation. */
   messageInput(operation: Extract<Operation, { type: 'message' }>) {
     // Per-turn Harnesses take the conversation's Plan choice as it stands when the message is dispatched.
-    const plan = !!this.store.getConversation(operation.conversationId)?.planMode;
+    const plan = !!this.store.getConversation(operation.conversationId)?.planMode && !this.store.isScheduledOperation(operation.id);
     return { ...operation.payload, id: operation.id, text: nativeText(operation.payload), ...(plan ? { plan: true } : {}), imageData: operation.payload.images?.map(image => {
       const resource = this.store.resources.get(operation.conversationId, image.id);
       return { mediaType: resource.mediaType, data: resource.data.toString('base64') };

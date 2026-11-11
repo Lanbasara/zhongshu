@@ -1,6 +1,6 @@
 # 自动任务与日程
 
-当前能力：在中书里看见、管理 DSH 原生自动任务，接住它们的运行结果；Agent 可以用一句话主动通知用户；日历把原生任务和工作区时间轴文件放在一起。决定见 [ADR 0021](../adr/0021-automations.md)，推送规则见 [ADR 0018](../adr/0018-push-notifications.md)，未读规则见 [ADR 0012](../adr/0012-conversation-lifecycle.md)。
+当前能力：在中书里看见、管理 DSH 和 Codex 自动任务，接住它们的运行结果；Agent 可以用一句话主动通知用户；日历把原生任务和工作区时间轴文件放在一起。DSH 原生调度见 [ADR 0021](../adr/0021-automations.md)，Codex 调度见 [ADR 0026](../adr/0026-shared-agent-capabilities.md)，推送规则见 [ADR 0018](../adr/0018-push-notifications.md)，未读规则见 [ADR 0012](../adr/0012-conversation-lifecycle.md)。
 
 ## Sub-features
 
@@ -48,6 +48,8 @@
 6. **T08。** 让 Agent 用 heredoc 原样写一份样本：有效行、重复 id、坏 JSON、不存在的日期、`../` 链接、网址链接各一行。读回 `/timeline` 的条目与 `problems`，再在日历、未来、回看里核对位置和时区。
 7. **T07b。** 在已登记工作区建一个 2–3 分钟后、每次新开对话的任务，指令里只写要做的事，不提回填。运行结束后读 `GET /automations`：这个任务的 `lastDelivery.result` 是 Agent 写的一句结论，原生事件里有一次 `record_result` 工具调用，推送设备没有收到新推送。日历那一格和任务的运行记录显示同一句结论；点那一格先打开任务卡，卡上的运行记录或「打开对话」打开这次运行的对话。没有推送设备时，“没有收到新推送”记 UNCOVERED。
 8. **T09。** 需要宿主在某次触发前停机、过点后再启动，由操作者执行；做不到时记为未覆盖。规则由回归测试覆盖。
+
+Codex 用日程页「执行 Power → Codex」或在 Codex 对话里用 `sichen` 新建，重跑 T01、T02、T04、T05、T07、T07b。另用一个原有 DSH 任务确认其编号、下次运行与历史仍可读。对同一 Codex 触发，核对恢复后只出现一条投递，任务卡结论指向实际执行的轮次。
 
 ## Gotchas
 

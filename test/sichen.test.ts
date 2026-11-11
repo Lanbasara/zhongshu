@@ -41,7 +41,7 @@ function fixture(t: TestContext) {
     },
     async remove(id: string) { return tasks.delete(id) ? 'deleted' as const : 'notFound' as const; },
     async run(id: string) { return tasks.get(id) ?? 'notFound' as const; },
-    available: () => true,
+    available: (harness = 'dsh') => harness === 'dsh',
   };
   const workbench = { workspaces: [{ id: 'w', label: '工作区', directory }], workspaceView: () => ({ workspaces: [{ id: 'w', label: '工作区' }] }) } as never;
   const tools = createAgentTools({ token: TOKEN, port: 0, version: '0.1.1', notify: () => ({ id: 'x' }), record: () => ({ id: 'x' }),

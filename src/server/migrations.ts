@@ -331,6 +331,39 @@ export const productMigrations: Migration[] = [{ version: 2, sql: `
 ` }, { version: 26, sql: `
   -- ADR 0025: one task's conversations are read by its own index, not by scanning every conversation in activity order.
   CREATE INDEX workbench_conversations_automation ON workbench_conversations(automation_id, last_activity_at, id);
+` }, { version: 27, sql: `
+  CREATE TABLE codex_automations (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    prompt TEXT NOT NULL,
+    timing_json TEXT NOT NULL,
+    target_json TEXT NOT NULL,
+    reused_conversation_id TEXT,
+    status TEXT NOT NULL CHECK (status IN ('active','paused','ended')),
+    scheduled_at INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  ) STRICT;
+  CREATE INDEX codex_automations_due ON codex_automations(status, scheduled_at);
+  CREATE TABLE codex_automation_runs (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL REFERENCES codex_automations(id) ON DELETE CASCADE,
+    conversation_id TEXT NOT NULL,
+    scheduled_at INTEGER NOT NULL,
+    prompt TEXT NOT NULL,
+    delivered_at INTEGER,
+    run_id TEXT,
+    session_id TEXT,
+    settled INTEGER NOT NULL DEFAULT 0 CHECK (settled IN (0,1)),
+    problem TEXT
+  ) STRICT;
+  CREATE INDEX codex_automation_runs_history ON codex_automation_runs(task_id, scheduled_at DESC, id DESC);
+  CREATE UNIQUE INDEX codex_automation_run_pending ON codex_automation_runs(task_id) WHERE settled=0;
+  CREATE INDEX codex_automation_runs_target ON codex_automation_runs(conversation_id, run_id);
+  ALTER TABLE workbench_operations ADD COLUMN automation_id TEXT;
+  CREATE INDEX workbench_operations_automation_run ON workbench_operations(conversation_id, run_id) WHERE automation_id IS NOT NULL;
+  ALTER TABLE agent_results ADD COLUMN run_id TEXT;
+  CREATE INDEX agent_results_run ON agent_results(conversation_id, run_id, created_at);
 ` }];
 
 /** Runs inside restoreDatabase's private staging transaction, before the database is published. */

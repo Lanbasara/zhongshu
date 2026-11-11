@@ -63,7 +63,7 @@ It reaches the app's `agentTools` endpoint, so `agentTools` must be configured (
 - `SICHEN_URL`, default `http://127.0.0.1:3100`;
 - `SICHEN_TOKEN_FILE`, default `/links/sichen-token`, pointing at a copy of the same token.
 
-DSH sets `DSH_SESSION_ID` for shell commands; that is how `--to 本对话` finds the conversation.
+DSH supplies `DSH_SESSION_ID` and Codex supplies `CODEX_THREAD_ID` to shell commands. `--to 本对话` resolves the native conversation in the selected Power. DSH owns its native schedules. Zhongshu persists Codex schedules and delivers each occurrence through its App Server. See [ADR 0026](docs/adr/0026-shared-agent-capabilities.md).
 
 To make it available to agents, put `dist/sichen/bin` on the Host's `PATH` and give it the token file read-only. The app tells agents about it through the MCP server's instructions. Disabling the Host's native schedule tools is optional instance configuration.
 
@@ -94,7 +94,7 @@ The host reads these environment variables:
 
 The agents' workspace should be mounted in the browser's environment at the same path.
 
-The command reads `SIMEN_URL` (default `http://127.0.0.1:3200`) and `SIMEN_TOKEN_FILE` (default `/links/simen-token`), and uses `DSH_SESSION_ID` to know the conversation. Put `dist/simen/bin` first on the Host's `PATH` so `chrome-devtools` resolves to it, and set `agentTools.browser: true` in the Harness configuration so the app tells agents about it. Do not give the Harness a Chromium of its own.
+The command reads `SIMEN_URL` (default `http://127.0.0.1:3200`) and `SIMEN_TOKEN_FILE` (default `/links/simen-token`), and uses `DSH_SESSION_ID` or `CODEX_THREAD_ID` to know the conversation. Put `dist/simen/bin` first on the Host's `PATH` so `chrome-devtools` resolves to it, and set `agentTools.browser: true` in the Harness configuration so the app tells agents about it. Do not give the Harness a Chromium of its own.
 
 ## UI development
 

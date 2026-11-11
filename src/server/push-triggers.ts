@@ -9,6 +9,7 @@ type Source = {
   isReading(id: string): boolean;
   /** Conversations that may be mid-run when the process starts. */
   active(): Conversation[];
+  isScheduledRun?(id: string, runId: string): boolean;
 };
 
 /**
@@ -57,7 +58,7 @@ export function createPushTriggers(source: Source, notify: (event: PushEvent) =>
     if (results.size > 4096) results.delete(results.keys().next().value!);
     const followedRun = active.delete(id);
     if (!terminal || key === before || (!followedRun && !known)) return;
-    if (latest && terminal === 'completed') return;
+    if (terminal === 'completed' && (latest || (conversation.state.terminalRunId && source.isScheduledRun?.(id, conversation.state.terminalRunId)))) return;
     if (source.unread([conversation]).has(id)) notify({ kind: terminal, ...event });
   }
   function flush(): void {

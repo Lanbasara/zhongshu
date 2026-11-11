@@ -154,7 +154,7 @@ export function createHost(options: HostOptions) {
     if (!command || !official.table[command] || parsed.help) return forward(parsed.argv, request.cwd, undefined);
     const holder = session ? windows.holder(session) : undefined;
     if (command === 'new_page') {
-      if (!session) return refused('new_page 只能在 DSH 对话里用（需要 DSH_SESSION_ID），司门靠它分配窗口。');
+      if (!session) return refused('new_page 需要在 Codex 或 DSH 对话里运行，司门靠 CODEX_THREAD_ID 或 DSH_SESSION_ID 分配窗口。');
       if (holder?.pageId !== undefined && browser.running()) {
         const alive = (await official.pages()).some(page => page.id === holder.pageId);
         if (alive) return refused(`这段对话已经有窗口了（页面 ${holder.pageId}）。一段对话只占一个窗口，请继续用它，例如 chrome-devtools navigate_page ${holder.pageId} --url <网址>；用完可以 close_page ${holder.pageId}。`);

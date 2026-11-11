@@ -56,7 +56,7 @@ export type AutomationTarget =
   | { kind: 'session'; sessionId: string }
   | { kind: 'new_once'; sessionId?: string; cwd?: string; preset?: string }
   | { kind: 'new'; cwd?: string; preset?: string };
-export type AutomationDelivery = { scheduledAt: string; deliveredAt: string; messageId: string; sessionId: string; prompt?: string };
+export type AutomationDelivery = { scheduledAt: string; deliveredAt: string; messageId: string; sessionId: string; prompt?: string; runId?: string };
 /** One native automation as the Harness stores it; Zhongshu keeps no copy (ADR 0021). */
 export type NativeAutomation = {
   id: string; title: string; prompt: string; timing: AutomationTiming;
@@ -72,6 +72,7 @@ export type NativeAutomation = {
   /** A delivery is queued or running in its reused session. */
   executing: boolean;
   lastDelivery?: AutomationDelivery;
+  problem?: string;
 };
 export type AutomationTimingInput =
   | { kind: 'at'; at: string }

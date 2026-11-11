@@ -61,6 +61,7 @@ async function main() {
       ...(harnesses.agentTools.browser ? { browser: true } : {}) });
     triggers = createPushTriggers({
       conversation: id => source.store.getConversation(id), unread: values => source.unread(values), isReading: id => source.isReading(id),
+      isScheduledRun: (id, runId) => store.isScheduledRun(id, runId),
       active: () => source.attention().conversations.map(entry => entry.conversation),
     }, event => { void push.notify(event); });
     app = await buildApp({ db, origin: config.origin, metadata, assetsDirectory: import.meta.url.endsWith('.ts') ? undefined : fileURLToPath(new URL('../public/', import.meta.url)), logger: true,
@@ -76,7 +77,7 @@ async function main() {
       if (closing) return;
       closing = true;
       const timeout = setTimeout(() => process.exit(1), 10_000).unref();
-      try { await tools?.close(); automations?.close(); accounts?.close(); triggers?.close(); push.close(); transport!.close(); await plugins!.close(); await workbench!.close(); await app!.close(); db.close(); clearTimeout(timeout); }
+      try { await tools?.close(); await automations?.close(); accounts?.close(); triggers?.close(); push.close(); transport!.close(); await plugins!.close(); await workbench!.close(); await app!.close(); db.close(); clearTimeout(timeout); }
       catch { process.exitCode = 1; }
     };
     process.once('SIGINT', () => { void stop(); });
@@ -86,7 +87,7 @@ async function main() {
     await automations.start();
     await tools?.listen();
     await app.listen({ port: config.port, host: config.host });
-  } catch (error) { await tools?.close(); automations?.close(); accounts?.close(); triggers?.close(); push.close(); transport?.close(); await plugins?.close(); await workbench?.close(); await app?.close(); db.close(); throw error; }
+  } catch (error) { await tools?.close(); await automations?.close(); accounts?.close(); triggers?.close(); push.close(); transport?.close(); await plugins?.close(); await workbench?.close(); await app?.close(); db.close(); throw error; }
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

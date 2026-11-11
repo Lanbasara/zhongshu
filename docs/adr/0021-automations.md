@@ -4,6 +4,8 @@ status: accepted
 
 # 自动任务由原生 Harness 执行，中书负责看见、管理与叫用户
 
+> [ADR 0026](0026-shared-agent-capabilities.md) 补充 Codex 的持久调度与原生投递，DSH 原生任务沿用本决策。
+
 > 2026-11-10：[ADR 0025](0025-schedule-performance.md) 补充读取与保留规则：自动任务运行出的对话在 90 天无活动后自动归档并释放容量名额；归档仍完整可读。任务、时间与投递的所有权不变。
 
 ## 背景与依据

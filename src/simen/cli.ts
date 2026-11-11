@@ -1,6 +1,6 @@
 /**
  * The `chrome-devtools` command agents run on an instance with 司门 (ADR 0023). It takes the official Chrome DevTools
- * command line unchanged, adds the conversation (`DSH_SESSION_ID`) and the current directory, and lets 司门's host decide:
+ * command line unchanged, adds the native conversation and current directory, and lets 司门's host decide:
  * wait for a window, refuse with a reason, or run it with the official command line. Output and exit code come back as
  * the official command line wrote them. `chrome-devtools doctor` is 司门's own: it shows the browser, windows and queue.
  * Only Node built-ins; the token is read from a file and never printed.
@@ -18,7 +18,9 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env,
   let token: string;
   try { token = readFileSync(tokenFile, 'utf8').trim(); }
   catch { io.err(say(`读不到令牌文件 ${tokenFile}。浏览器服务没有配好，请联系实例管理员。`)); return EXIT.unavailable; }
-  const session = env.DSH_SESSION_ID && /^[A-Za-z0-9_-]{1,128}$/.test(env.DSH_SESSION_ID) ? env.DSH_SESSION_ID : undefined;
+  const session = env.CODEX_THREAD_ID && /^[A-Za-z0-9_-]{1,122}$/.test(env.CODEX_THREAD_ID)
+    ? `codex-${env.CODEX_THREAD_ID}`
+    : env.DSH_SESSION_ID && /^[A-Za-z0-9_-]{1,128}$/.test(env.DSH_SESSION_ID) ? env.DSH_SESSION_ID : undefined;
   if (argv[0] === 'doctor') return doctor(url, token, session, io);
 
   let lastNotice = '';
@@ -66,7 +68,7 @@ async function doctor(url: string, token: string, session: string | undefined, i
     `窗口：${status.windows.held.length}/${status.windows.limit}${status.windows.held.map(held => `；对话 ${held.session}${held.pageId !== undefined ? ` 页面 ${held.pageId}` : ''} 闲置 ${held.idleSeconds} 秒`).join('')}`,
     `排队：${status.waiting}；闲置 ${status.idleMinutes} 分钟收回，最多等 ${status.waitMinutes} 分钟`,
     ...(status.memoryBytes !== undefined ? [`内存：${Math.round(status.memoryBytes / 1048576)} MB`] : []),
-    `本对话：${session ? '在 DSH 对话里，可以开窗口' : '不在 DSH 对话里，不能 new_page'}`,
+    `本对话：${session ? '已识别，可以开窗口' : '未识别，不能 new_page'}`,
   ];
   io.out(`${lines.join('\n')}\n`);
   if (status.protocol !== SIMEN_PROTOCOL) { io.err(say(`命令行协议是 ${SIMEN_PROTOCOL}，司门是 ${status.protocol}，需要更新。`)); return EXIT.unavailable; }

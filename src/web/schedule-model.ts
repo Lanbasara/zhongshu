@@ -164,15 +164,16 @@ export function instructionWithSkill(prompt: string, skill?: { name: string }) {
 
 /** What the runs of a task use, in words: the conversation's fixed configuration, or the Harness defaults with a preset. */
 export function runConfigurationText(task: AutomationView, configuration?: WorkbenchConfiguration) {
-  const dsh = configuration?.harnesses.find(item => item.id === 'dsh');
+  const harness = configuration?.harnesses.find(item => item.id === task.harnessId);
   const fixed = task.target.configuration;
   if (fixed) {
-    const label = conversationConfigurationLabel({ harnessId: 'dsh', configuration: fixed }, configuration?.harnesses);
-    const permission = dsh?.permissions.find(item => item.id === fixed.permissionId)?.label ?? fixed.permissionId;
+    const label = conversationConfigurationLabel({ harnessId: task.harnessId, configuration: fixed }, configuration?.harnesses);
+    const permission = harness?.permissions.find(item => item.id === fixed.permissionId)?.label ?? fixed.permissionId;
     return [label.model, label.reasoningEffort, permission, label.agentPreset].filter(Boolean).join(' · ');
   }
   if (task.target.kind === 'new' || task.target.kind === 'new_once') {
-    const preset = task.target.preset ? dsh?.presets?.find(item => item.id === task.target.preset)?.label ?? task.target.preset : '默认预设';
+    if (task.harnessId === 'codex') return 'Codex · 默认模型 · 工作区读写';
+    const preset = task.target.preset ? harness?.presets?.find(item => item.id === task.target.preset)?.label ?? task.target.preset : '默认预设';
     return `${preset} · 模型、思考深度和权限用宿主默认`;
   }
   return '中书之外的会话';

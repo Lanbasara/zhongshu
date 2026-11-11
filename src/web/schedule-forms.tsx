@@ -60,23 +60,25 @@ export function TimingFields({ draft, change }: { draft: TimingDraft; change(dra
     </div>
     {(draft.kind === 'daily' || draft.kind === 'weekly') && <div className="sch-inline sch-until">
       <label className="sch-suffix"><span>结束日期</span><input type="date" aria-label="结束日期" value={draft.until} onChange={event => change({ ...draft, until: event.target.value })}/></label>
-      {draft.until ? <button type="button" className="text-button" onClick={() => change({ ...draft, until: '' })}>不设结束</button> : <small className="sch-help">不填就一直运行；填了，运行到那天为止（含当天），到期由 DSH 自己结束。</small>}
+      {draft.until ? <button type="button" className="text-button" onClick={() => change({ ...draft, until: '' })}>不设结束</button> : <small className="sch-help">不填就一直运行；填了，运行到那天为止（含当天），到期自动结束。</small>}
     </div>}
   </Field>;
 }
 
 /** The skills of the workspace or conversation the runs will happen in; choosing one names it at the start of the instruction. */
-function SkillPicker({ scope, where, csrf, value, change }: { scope?: { workspaceId: string } | { conversationId: string }; where: string; csrf: string; value?: SkillOption; change(skill?: SkillOption): void }) {
+function SkillPicker({ scope, where, csrf, value, change, harness }: { scope?: { workspaceId: string } | { conversationId: string }; where: string; csrf: string; harness: AutomationView['harnessId']; value?: SkillOption; change(skill?: SkillOption): void }) {
   const [open, setOpen] = useState(false);
   const [skills, setSkills] = useState<SkillOption[]>(); const [failed, setFailed] = useState(false);
   const key = !scope ? '' : 'conversationId' in scope ? `c:${scope.conversationId}` : `w:${scope.workspaceId}`;
-  useEffect(() => { setSkills(undefined); setFailed(false); setOpen(false); }, [key]);
+  useEffect(() => { setSkills(undefined); setFailed(false); setOpen(false); }, [key, harness]);
   const load = async () => {
     if (!scope) return; setFailed(false);
     try {
       // A DSH workspace lists its skills through the same prepared draft session the new-conversation page uses.
       const value = 'conversationId' in scope ? await request(`/conversations/${encodeURIComponent(scope.conversationId)}/skills`, skillCatalogSchema)
-        : await request('/draft-preparation', skillCatalogSchema.extend({ preparationId: z.string() }), { csrf, body: { workspaceId: scope.workspaceId, harnessId: 'dsh' }, timeoutMs: 30_000 });
+        : harness === 'dsh'
+          ? await request('/draft-preparation', skillCatalogSchema.extend({ preparationId: z.string() }), { csrf, body: { workspaceId: scope.workspaceId, harnessId: 'dsh' }, timeoutMs: 30_000 })
+          : await request(`/draft-skills?workspaceId=${encodeURIComponent(scope.workspaceId)}&harnessId=codex`, skillCatalogSchema);
       setSkills(value.skills);
     } catch { setFailed(true); }
   };
@@ -91,7 +93,7 @@ function SkillPicker({ scope, where, csrf, value, change }: { scope?: { workspac
       {skills && <button type="button" role="option" aria-selected={!value} onClick={() => { change(undefined); setOpen(false); }}><span><b>不使用技能</b></span>{!value && <Check size={14}/>}</button>}
       {skills?.map(skill => <button key={skill.id} type="button" role="option" aria-selected={value?.id === skill.id} onClick={() => { change(skill); setOpen(false); }}>
         <span><b>{skill.label}</b>{skill.description && <small>{skill.description}</small>}</span>{value?.id === skill.id && <Check size={14}/>}</button>)}
-      {skills && !skills.length && <p className="sch-help">{where}里还没有可用的技能。工作区技能放在 <code>.dsh/skills/名称/SKILL.md</code>；已安装插件带的技能也会列在这里。</p>}
+      {skills && !skills.length && <p className="sch-help">{where}里还没有可用的技能。安装的插件和工作区技能会列在这里。</p>}
     </div>}
   </Field>;
 }
@@ -102,11 +104,14 @@ const targets = {
   new_once: ['首次新开，之后回到那段', '所有运行都在同一段对话里，适合持续跟踪。'],
 } as const;
 
-export function CreateForm({ configuration, csrf, report, close, reload, conversationId }: {
-  configuration?: WorkbenchConfiguration; csrf: string; report(reason: unknown): void; close(): void; reload(): Promise<void>; conversationId?: string;
+export function CreateForm({ configuration, csrf, report, close, reload, conversationId, powers }: {
+  configuration?: WorkbenchConfiguration; csrf: string; report(reason: unknown): void; close(): void; reload(): Promise<void>; conversationId?: string; powers?: AutomationView['harnessId'][];
 }) {
   const dsh = configuration?.harnesses.find(item => item.id === 'dsh');
-  const presets = dsh?.presets ?? [];
+  const choices: AutomationView['harnessId'][] = powers ?? ['dsh'];
+  const [pickedHarness, setHarness] = useState<AutomationView['harnessId']>();
+  const harness = pickedHarness && choices.includes(pickedHarness) ? pickedHarness : choices[0] ?? 'dsh';
+  const presets = harness === 'dsh' ? dsh?.presets ?? [] : [];
   const [title, setTitle] = useState(''); const [prompt, setPrompt] = useState('');
   const [timing, setTiming] = useState(initialTiming());
   const [target, setTarget] = useState<keyof typeof targets>(conversationId ? 'conversation' : 'new');
@@ -116,7 +121,7 @@ export function CreateForm({ configuration, csrf, report, close, reload, convers
   const [preset, setPreset] = useState(dsh?.defaultPresetId ?? presets.find(item => item.available)?.id ?? '');
   const [skill, setSkill] = useState<SkillOption>();
   const [busy, setBusy] = useState(false); const [tried, setTried] = useState(false); const [problem, setProblem] = useState<string>();
-  useEffect(() => { setSkill(undefined); }, [target, workspace]);
+  useEffect(() => { setSkill(undefined); }, [target, workspace, harness]);
 
   const missing = [!title.trim() && '名称', !prompt.trim() && !skill && '指令或技能', target !== 'conversation' && !workspace && '工作区'].filter(Boolean) as string[];
   const submit = async () => {
@@ -124,9 +129,9 @@ export function CreateForm({ configuration, csrf, report, close, reload, convers
     if (missing.length) return;
     setBusy(true);
     try {
-      const body = { harnessId: 'dsh', title: title.trim(), prompt: instructionWithSkill(prompt, skill), timing: timingFrom(timing),
+      const body = { harnessId: harness, title: title.trim(), prompt: instructionWithSkill(prompt, skill), timing: timingFrom(timing),
         target: target === 'conversation' && conversationId ? { kind: 'conversation', conversationId }
-          : { kind: target, workspaceId: workspace, ...(preset ? { preset } : {}) } };
+          : { kind: target, workspaceId: workspace, ...(harness === 'dsh' && preset ? { preset } : {}) } };
       await request('/automations', automationResultSchema, { csrf, body, timeoutMs: 60_000 });
       await reload(); close();
     } catch (error) {
@@ -138,13 +143,16 @@ export function CreateForm({ configuration, csrf, report, close, reload, convers
   return <form className="sch-form-shell" noValidate onSubmit={event => { event.preventDefault(); void submit(); }}>
     <div className="sch-panel-body sch-form">
       <Field label="名称"><input aria-invalid={tried && !title.trim() || undefined} maxLength={120} value={title} onChange={event => setTitle(event.target.value)} placeholder="例如：收盘后研判"/></Field>
+      {choices.length > 1 && <Field label="执行 Power">
+        <Segments<AutomationView['harnessId']> label="执行 Power" value={harness} change={setHarness} options={choices.map(id => [id, id === 'codex' ? 'Codex' : 'DSH'])}/>
+      </Field>}
       {target !== 'conversation' && <Field label="工作区" hint="任务在这个工作区里运行，下面的技能也来自这里。">
         <span className="sch-select"><select aria-label="工作区" value={workspace} onChange={event => setPicked(event.target.value)}>
           {configuration?.workspaces.map(entry => <option key={entry.id} value={entry.id}>{entry.label}</option>)}</select><ChevronDown size={14} aria-hidden="true"/></span>
       </Field>}
       <Field label="交给 Agent 的指令"><textarea aria-invalid={tried && !prompt.trim() && !skill || undefined} maxLength={32000} value={prompt} onChange={event => setPrompt(event.target.value)}
         placeholder="先确认今天是否开市；读最近的计划文件，写研判；需要我关注时用一句话通知我。"/></Field>
-      <SkillPicker scope={scope} where={target === 'conversation' ? '这段对话' : `「${configuration?.workspaces.find(entry => entry.id === workspace)?.label ?? '工作区'}」`} csrf={csrf} value={skill} change={setSkill}/>
+      <SkillPicker harness={harness} scope={scope} where={target === 'conversation' ? '这段对话' : `「${configuration?.workspaces.find(entry => entry.id === workspace)?.label ?? '工作区'}」`} csrf={csrf} value={skill} change={setSkill}/>
       <TimingFields draft={timing} change={setTiming}/>
       <div className="sch-field" role="radiogroup" aria-label="结果放哪"><span className="sch-label">结果放哪</span>
         {(Object.keys(targets) as (keyof typeof targets)[]).filter(id => id !== 'conversation' || conversationId).map(id =>
@@ -152,6 +160,7 @@ export function CreateForm({ configuration, csrf, report, close, reload, convers
             <span><b>{targets[id][0]}</b><small>{targets[id][1]}</small></span>{target === id && <Check size={15} aria-hidden="true"/>}</button>)}
       </div>
       <Field label="Agent 配置" hint={target === 'conversation' ? undefined
+        : harness === 'codex' ? '到点后新开 Codex 对话，使用默认模型和工作区读写权限。'
         : '运行到点时由宿主新开对话，只能选预设；模型、思考深度和权限用宿主默认。要用别的配置，先自己开一段配好的对话，再让任务投递到那里。'}>
         {target === 'conversation' ? <p className="sch-static">沿用这段对话的配置。</p>
           : presets.length ? <Segments label="Agent 预设" value={preset} change={setPreset} options={presets.map(item => [item.id, item.label, !item.available] as const)}/>

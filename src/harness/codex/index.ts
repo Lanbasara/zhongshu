@@ -16,7 +16,7 @@ const titleSchema = z.string().min(1).max(200).refine(value => Buffer.byteLength
 const bindingSchema = z.object({ id: nativeId, cwd: workspace, configuration, details: z.object({ version: z.literal(1), approvalPolicy: z.enum(['never', 'on-request']), title: titleSchema.optional() }) });
 /** ADR 0016: full access never asks; every other permission asks when the agent needs more. Fixed at creation. */
 const approvalPolicyFor = (permissionId: string) => permissionId === ':danger-full-access' ? 'never' as const : 'on-request' as const;
-const operationSchema = z.object({ id: nativeId, text: z.string().max(100_000), skills: inputFields.skills, imageData: z.array(z.object({ mediaType: z.enum(['image/png', 'image/jpeg', 'image/webp']), data: z.string().max(3 * 1024 * 1024) })).max(4).optional() }).refine(v => v.text.trim() || v.imageData?.length);
+const operationSchema = z.object({ id: nativeId, text: z.string().max(256_000), skills: inputFields.skills, imageData: z.array(z.object({ mediaType: z.enum(['image/png', 'image/jpeg', 'image/webp']), data: z.string().max(3 * 1024 * 1024) })).max(4).optional() }).refine(v => v.text.trim() || v.imageData?.length);
 const nativeSkillRow = z.object({
   name: z.string().min(1).max(120).regex(/^[\p{L}\p{N}_.:-]+$/u), description: z.string().max(16_000), enabled: z.literal(true),
   path: workspace.refine(path => basename(path) === 'SKILL.md'), interface: z.object({ displayName: z.string().nullish() }).nullish(),
@@ -52,9 +52,11 @@ function reason(error: unknown): string {
   if (error instanceof RpcError && error.nativeCode === -32601) return 'codex_native_result_unknown';
   return error instanceof HarnessError ? error.code : 'codex_unavailable';
 }
-function matches(binding: Binding, native: z.infer<typeof configuredThread>): boolean {
+function matches(binding: Binding, native: z.infer<typeof configuredThread>, workspaceToolsProfile?: string): boolean {
   return native.thread.id === binding.id && native.cwd === binding.cwd && native.model === binding.configuration.modelId
-    && native.activePermissionProfile?.id === binding.configuration.permissionId && native.approvalPolicy === binding.details.approvalPolicy
+    && (native.activePermissionProfile?.id === binding.configuration.permissionId
+      || (binding.configuration.permissionId === ':workspace' && !!workspaceToolsProfile && native.activePermissionProfile?.id === workspaceToolsProfile))
+    && native.approvalPolicy === binding.details.approvalPolicy
     && (binding.configuration.reasoningEffort === undefined || native.reasoningEffort === binding.configuration.reasoningEffort);
 }
 
@@ -116,8 +118,10 @@ class CodexAdapter implements HarnessAdapter {
   /** Whether this process last saw a stored ChatGPT account, and whether it was lost (could no longer be renewed). */
   private hadAccount: boolean | undefined;
   private accountLost = false;
+  private readonly workspaceToolsProfile: string | undefined;
 
-  constructor(socketPath: string) {
+  constructor(socketPath: string, workspaceToolsProfile?: string) {
+    this.workspaceToolsProfile = workspaceToolsProfile;
     this.rpc = new CodexRpc(socketPath, {
       notification: (method, params) => this.notification(method, params),
       serverRequest: request => this.serverRequest(request),
@@ -240,13 +244,17 @@ class CodexAdapter implements HarnessAdapter {
     return confirmed ? { outcome: 'accepted' } : { outcome: 'unknown', reason: 'codex_answer_unconfirmed' };
   }
 
+  private nativePermission(id: string): string {
+    return id === ':workspace' && this.workspaceToolsProfile ? this.workspaceToolsProfile : id;
+  }
+
   /**
    * A resumed thread reports no effort until its first turn. Every turn names the conversation's
    * effort explicitly (turn/start), so only that gap is accepted; every other field must still match.
    */
   private async effortUnsetBeforeFirstTurn(binding: Binding, loaded: z.infer<typeof configuredThread>): Promise<boolean> {
     if (loaded.reasoningEffort != null || binding.configuration.reasoningEffort === undefined) return false;
-    if (!matches(binding, { ...loaded, reasoningEffort: binding.configuration.reasoningEffort })) return false;
+    if (!matches(binding, { ...loaded, reasoningEffort: binding.configuration.reasoningEffort }, this.workspaceToolsProfile)) return false;
     const turns = parse(z.object({ data: z.array(turn).max(100), nextCursor: cursor.nullable() }), await this.rpc.request('thread/turns/list', { threadId: binding.id, limit: 1, sortDirection: 'desc', itemsView: 'notLoaded' }));
     return turns.data.length === 0;
   }
@@ -270,7 +278,7 @@ class CodexAdapter implements HarnessAdapter {
         response = await this.rpc.request('thread/resume', { threadId: binding.id, excludeTurns: true });
       }
       const loaded = parse(configuredThread, response);
-      const verified = matches(binding, loaded) || await this.effortUnsetBeforeFirstTurn(binding, loaded);
+      const verified = matches(binding, loaded, this.workspaceToolsProfile) || await this.effortUnsetBeforeFirstTurn(binding, loaded);
       const watch = this.watches.get(binding.id);
       if (watch) watch.verified = verified;
       return verified;
@@ -395,7 +403,11 @@ class CodexAdapter implements HarnessAdapter {
       if (next) throw new HarnessError('codex_catalog_limit');
       for (let page = 0; page < 10; page++) {
         const response = parse(z.object({ data: z.array(z.object({ id: nativeId, description: z.string().max(10_000).nullable(), allowed: z.boolean() })).max(200), nextCursor: cursor.nullable() }), await this.rpc.request('permissionProfile/list', { limit: 100, ...(next ? { cursor: next } : {}) }));
-        permissions.push(...response.data.filter(profile => profile.allowed).map(profile => ({ id: profile.id, label: permissionLabels[profile.id] ?? profile.id, description: `${profile.description ?? '实际权限由所选原生配置决定。'}\n${profile.id === ':danger-full-access' ? '不会请求审批。' : '需要越界时会请求你批准。'}` })));
+        const allowed = response.data.filter(profile => profile.allowed && (!this.workspaceToolsProfile || profile.id !== ':workspace'));
+        permissions.push(...allowed.map(profile => {
+          const id = profile.id === this.workspaceToolsProfile ? ':workspace' : profile.id;
+          return { id, label: permissionLabels[id] ?? id, description: `${profile.description ?? '实际权限由所选原生配置决定。'}\n${profile.id === ':danger-full-access' ? '不会请求审批。' : '需要越界时会请求你批准。'}` };
+        }));
         next = response.nextCursor ?? undefined;
         if (!next) break;
       }
@@ -411,7 +423,7 @@ class CodexAdapter implements HarnessAdapter {
       if (!model?.reasoningEfforts?.some(value => value.id === selected.configuration.reasoningEffort)) throw new HarnessError('codex_reasoning_effort_unavailable');
     }
     const approvalPolicy = approvalPolicyFor(selected.configuration.permissionId);
-    const response = await this.rpc.request('thread/start', { ...(selected.configuration.reasoningEffort ? { config: { model_reasoning_effort: selected.configuration.reasoningEffort } } : {}), cwd: selected.cwd, model: selected.configuration.modelId, permissions: selected.configuration.permissionId, approvalPolicy, historyMode: 'paginated', ephemeral: false });
+    const response = await this.rpc.request('thread/start', { ...(selected.configuration.reasoningEffort ? { config: { model_reasoning_effort: selected.configuration.reasoningEffort } } : {}), cwd: selected.cwd, model: selected.configuration.modelId, permissions: this.nativePermission(selected.configuration.permissionId), approvalPolicy, historyMode: 'paginated', ephemeral: false });
     // Persist only identity and requested configuration before examining the remaining native response.
     const identity = parse(z.object({ thread: z.object({ id: nativeId }) }), response);
     const binding: Binding = { id: identity.thread.id, cwd: selected.cwd, configuration: selected.configuration, details: { version: 1, approvalPolicy, ...(selected.title ? { title: selected.title } : {}) } };
@@ -419,7 +431,7 @@ class CodexAdapter implements HarnessAdapter {
     try {
       try { onBound(binding); } catch { throw new HarnessError('codex_binding_persistence_failed'); }
       this.retain(binding.id); retained = true;
-      if (!matches(binding, parse(configuredThread, response))) throw new HarnessError('codex_configuration_mismatch');
+      if (!matches(binding, parse(configuredThread, response), this.workspaceToolsProfile)) throw new HarnessError('codex_configuration_mismatch');
       // Naming the user's new conversation also materializes its native rollout before the first turn.
       if (selected.title) await this.rpc.request('thread/name/set', { threadId: binding.id, name: selected.title });
       return binding;
@@ -548,7 +560,7 @@ class CodexAdapter implements HarnessAdapter {
       // Every send pins the saved selection as well as checking the live native configuration. The mode is a
       // thread setting natively, so every turn names it explicitly; it carries the conversation's model and effort.
       const collaborationMode = { mode: rawOperation.plan === true ? 'plan' : 'default', settings: { model: binding.configuration.modelId, reasoning_effort: binding.configuration.reasoningEffort ?? null, developer_instructions: null } };
-      const result = parse(z.object({ turn }), await this.rpc.request('turn/start', { threadId: binding.id, clientUserMessageId: operation.id, ...(binding.configuration.reasoningEffort ? { effort: binding.configuration.reasoningEffort } : {}), model: binding.configuration.modelId, permissions: binding.configuration.permissionId, approvalPolicy: binding.details.approvalPolicy, collaborationMode, input: nativeInput }));
+      const result = parse(z.object({ turn }), await this.rpc.request('turn/start', { threadId: binding.id, clientUserMessageId: operation.id, ...(binding.configuration.reasoningEffort ? { effort: binding.configuration.reasoningEffort } : {}), model: binding.configuration.modelId, permissions: this.nativePermission(binding.configuration.permissionId), approvalPolicy: binding.details.approvalPolicy, collaborationMode, input: nativeInput }));
       return { outcome: 'accepted', runId: result.turn.id };
     } catch (error) {
       if (error instanceof RpcError && error.nativeCode === -32602) return { outcome: 'rejected', reason: 'codex_native_rejected' };
@@ -577,6 +589,8 @@ class CodexAdapter implements HarnessAdapter {
       }
       if (current.status === 'unknown')
         return { outcome: 'rejected', reason: 'codex_conversation_busy' };
+      if (binding.configuration.permissionId === ':workspace' && this.workspaceToolsProfile)
+        await this.rpc.request('thread/settings/update', { threadId: binding.id, permissions: this.workspaceToolsProfile });
       const response = parse(z.object({ queuedSubmission: queuedMessage }), await this.rpc.request('thread/queue/add', params));
       if (response.queuedSubmission.clientUserMessageId !== operation.id) return { outcome: 'unknown', reason: 'codex_queue_identity_mismatch' };
       if (current.status === 'interrupted' && current.pendingInputs === 0) {
@@ -935,6 +949,7 @@ class CodexAdapter implements HarnessAdapter {
   }
 }
 
-export function createCodexAdapter(options: { socketPath: string }): HarnessAdapter {
-  return new CodexAdapter(parse(z.object({ socketPath: z.string() }), options).socketPath);
+export function createCodexAdapter(options: { socketPath: string; workspaceToolsProfile?: string }): HarnessAdapter {
+  const settings = parse(z.object({ socketPath: z.string(), workspaceToolsProfile: z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/).optional() }), options);
+  return new CodexAdapter(settings.socketPath, settings.workspaceToolsProfile);
 }

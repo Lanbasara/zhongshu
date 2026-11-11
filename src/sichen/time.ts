@@ -227,6 +227,24 @@ export function upcoming(when: When, after: number, count: number, before?: numb
   return result;
 }
 
+/** Latest calendar occurrence in a committed delivery window. */
+export function latestOccurrence(when: When, at: number, floor: number): number {
+  const { rule, timeZone } = when;
+  if (rule.kind === 'once' || rule.kind === 'cron') return floor;
+  const firstDay = zoned(floor, timeZone).date;
+  let day = zoned(at, timeZone).date;
+  if (when.until && when.until < day) day = when.until;
+  for (let guard = 0; guard < 3700 && day >= firstDay; guard++, day = addDays(day, -1)) {
+    const [, month, date] = day.split('-').map(Number);
+    const fits = rule.kind === 'daily' || (rule.kind === 'weekly' && rule.weekdays.includes(weekdayOf(day)))
+      || (rule.kind === 'monthly' && date === rule.day && (!rule.months?.length || rule.months.includes(month!)));
+    if (!fits) continue;
+    const occurrence = zonedInstant(day, rule.time, timeZone);
+    if (occurrence <= at && occurrence >= floor) return occurrence;
+  }
+  return floor;
+}
+
 /** Weekday words a person or an agent writes: 工作日, 每天, 周一,三, mon-fri, 1-5. */
 export function parseWeekdays(text: string): number[] | 'daily' | undefined {
   const value = text.trim().toLowerCase();

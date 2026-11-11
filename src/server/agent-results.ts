@@ -35,13 +35,18 @@ export function createAgentResults(db: DatabaseSync, options: { now?: () => numb
       for (const item of items) {
         if (item.kind !== 'tool' || !item.tool || !toolNames.has(item.tool.name)) continue;
         const id = numbered.exec(item.tool.output ?? '')?.[1];
-        if (id) db.prepare('UPDATE agent_results SET conversation_id=?, item_id=? WHERE id=? AND conversation_id IS NULL').run(conversationId, item.id, id);
+        if (id) db.prepare('UPDATE agent_results SET conversation_id=?, item_id=?, run_id=? WHERE id=? AND conversation_id IS NULL').run(conversationId, item.id, item.runId ?? null, id);
       }
     },
     /** The latest line written in a conversation within [from, until): the conclusion of the run delivered at `from`. */
     within(conversationId: string, from: number, until = Number.MAX_SAFE_INTEGER): string | undefined {
       const value = db.prepare('SELECT summary FROM agent_results WHERE conversation_id=? AND created_at>=? AND created_at<? ORDER BY created_at DESC LIMIT 1')
         .get(conversationId, from, until) as { summary: string } | undefined;
+      return value?.summary;
+    },
+    forRun(conversationId: string, runId: string): string | undefined {
+      const value = db.prepare('SELECT summary FROM agent_results WHERE conversation_id=? AND run_id=? ORDER BY created_at DESC LIMIT 1')
+        .get(conversationId, runId) as { summary: string } | undefined;
       return value?.summary;
     },
   };

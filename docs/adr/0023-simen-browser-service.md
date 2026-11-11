@@ -4,6 +4,8 @@ status: accepted
 
 # 司门：Agent 与 Chrome DevTools 之间的中间层
 
+> [ADR 0026](0026-shared-agent-capabilities.md) 将司门接入 Codex，继续使用实例共用的浏览器与窗口配额。
+
 ## 背景与依据
 
 Agent 用 Chrome DevTools 操作浏览器，用来检查自己生成的 HTML，或在别的办法都不行时去操作网页。问题是，每次使用都可能新开一个浏览器，数量不受控。小主机上几个浏览器就能吃满内存和 CPU，把中书和 Harness 拖垮。
