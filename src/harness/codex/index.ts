@@ -248,6 +248,11 @@ class CodexAdapter implements HarnessAdapter {
     return id === ':workspace' && this.workspaceToolsProfile ? this.workspaceToolsProfile : id;
   }
 
+  private workspaceToolConfig(id: string): { features: { network_proxy: true } } | undefined {
+    if (id === ':workspace' && this.workspaceToolsProfile) return { features: { network_proxy: true } };
+    return undefined;
+  }
+
   /**
    * A resumed thread reports no effort until its first turn. Every turn names the conversation's
    * effort explicitly (turn/start), so only that gap is accepted; every other field must still match.
@@ -268,14 +273,16 @@ class CodexAdapter implements HarnessAdapter {
     if (this.loading.size >= 64) throw new HarnessError('codex_load_limit');
     const promise = (async () => {
       await this.releasing.get(binding.id);
+      const config = this.workspaceToolConfig(binding.configuration.permissionId);
+      const params = { threadId: binding.id, excludeTurns: true, ...(config ? { config } : {}) };
       let response: unknown;
-      try { response = await this.rpc.request('thread/resume', { threadId: binding.id, excludeTurns: true }); }
+      try { response = await this.rpc.request('thread/resume', params); }
       catch (error) {
         const title = titleSchema.safeParse(binding.details.title);
         if (!(error instanceof RpcError) || error.nativeKind !== 'missing_rollout' || !title.success) throw error;
         // Complete an interrupted naming step using the saved user title and existing identity only.
         await this.rpc.request('thread/name/set', { threadId: binding.id, name: title.data });
-        response = await this.rpc.request('thread/resume', { threadId: binding.id, excludeTurns: true });
+        response = await this.rpc.request('thread/resume', params);
       }
       const loaded = parse(configuredThread, response);
       const verified = matches(binding, loaded, this.workspaceToolsProfile) || await this.effortUnsetBeforeFirstTurn(binding, loaded);
@@ -423,7 +430,11 @@ class CodexAdapter implements HarnessAdapter {
       if (!model?.reasoningEfforts?.some(value => value.id === selected.configuration.reasoningEffort)) throw new HarnessError('codex_reasoning_effort_unavailable');
     }
     const approvalPolicy = approvalPolicyFor(selected.configuration.permissionId);
-    const response = await this.rpc.request('thread/start', { ...(selected.configuration.reasoningEffort ? { config: { model_reasoning_effort: selected.configuration.reasoningEffort } } : {}), cwd: selected.cwd, model: selected.configuration.modelId, permissions: this.nativePermission(selected.configuration.permissionId), approvalPolicy, historyMode: 'paginated', ephemeral: false });
+    const config = { ...this.workspaceToolConfig(selected.configuration.permissionId),
+      ...(selected.configuration.reasoningEffort ? { model_reasoning_effort: selected.configuration.reasoningEffort } : {}) };
+    const response = await this.rpc.request('thread/start', { ...(Object.keys(config).length ? { config } : {}),
+      cwd: selected.cwd, model: selected.configuration.modelId, permissions: this.nativePermission(selected.configuration.permissionId),
+      approvalPolicy, historyMode: 'paginated', ephemeral: false });
     // Persist only identity and requested configuration before examining the remaining native response.
     const identity = parse(z.object({ thread: z.object({ id: nativeId }) }), response);
     const binding: Binding = { id: identity.thread.id, cwd: selected.cwd, configuration: selected.configuration, details: { version: 1, approvalPolicy, ...(selected.title ? { title: selected.title } : {}) } };
