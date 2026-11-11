@@ -10,7 +10,7 @@ import { z } from 'zod';
 import { whenSchema, type AutomationView } from '../shared/automations.ts';
 import { describe, fromNative, upcoming, validZone, zoned, type When } from '../sichen/time.ts';
 import { PROTOCOL_HEADER, SICHEN_PROTOCOL, ZONE_HEADER, type SichenTask } from '../sichen/protocol.ts';
-import { AutomationError, nativeTiming, parseTimeline, type createAutomations } from './automations.ts';
+import { AutomationError, automationFailureStatus, nativeTiming, parseTimeline, type createAutomations } from './automations.ts';
 import type { Workbench } from './workbench.ts';
 import { appendWorkspaceTimeline, readWorkspaceTimeline } from './workspace-documents.ts';
 import { HarnessError } from '../harness/types.ts';
@@ -23,7 +23,7 @@ const session = z.string().min(1).max(240).regex(/^[A-Za-z0-9._:-]+$/);
 const id = z.string().min(1).max(240).regex(/^[A-Za-z0-9._:-]+$/);
 const dateText = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 const clock = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/);
-const addSchema = z.object({ name, prompt, when: whenSchema, to: z.enum(['here', 'new', 'new_once']), session: session.optional(), cwd, preset: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/).optional() }).strict();
+const addSchema = z.object({ name, prompt, when: whenSchema, to: z.enum(['here', 'new', 'new_once']), harness: z.enum(['dsh', 'codex']).default('dsh'), session: session.optional(), cwd, preset: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/).optional() }).strict();
 const editSchema = z.object({ name: name.optional(), prompt: prompt.optional(), when: whenSchema.optional(), until: dateText.nullable().optional(), expectedUpdatedAt: z.string().max(40).optional() }).strict()
   .refine(value => Object.keys(value).some(key => key !== 'expectedUpdatedAt'));
 const timelineAdd = z.object({ cwd, kind: z.enum(['action', 'event', 'decision', 'research']), title: z.string().trim().min(1).max(200), date: dateText, time: clock.optional(), tz: z.string().max(80).optional(),
@@ -33,15 +33,17 @@ const message: Record<string, string> = {
   protocol_mismatch: '命令行和中书的版本不一致，请更新 sichen。',
   invalid_request: '参数不完整或格式不对，请运行 sichen --help 查看用法。',
   not_in_workspace: '当前目录不在中书登记的任何工作区里，请在工作区目录里运行。',
-  session_required: '“回到本对话”需要在 DSH 的对话里运行（缺少 DSH_SESSION_ID）。',
-  automations_unavailable: '这个实例没有接通 DSH 定时任务。',
+  session_required: '“回到本对话”需要在 Codex 或 DSH 对话里运行。',
+  automations_unavailable: '这个实例没有接通所选 Power 的定时任务。',
+  automation_target_unavailable: '目标对话或工作区不可用，请检查任务的投递目标。',
+  automation_capacity_reached: '自动任务数量已达上限。',
   automation_not_found: '找不到这个任务，可能已被删除。请用 sichen schedule list 查看编号。',
   conflict: '这个任务刚在别处改过，请重新读取后再改。',
   ended: '这个任务已经结束，不能再改。',
   pending: '上一次运行还没结束，请稍后再试。',
   rule_not_editable: '这个任务的时间规则不是司辰能改的写法，请用 --every/--monthly/--at 重新给出完整时间。',
   invalid_time: '时间写法有问题。',
-  harness_unavailable: '暂时连不上 DSH，请稍后再试。',
+  harness_unavailable: '暂时连不上任务所属的 Power，请稍后再试。',
   timeline_entry_invalid: '这一条日历条目不合格。',
   timeline_entry_not_found: '时间轴里找不到这个编号。',
   workspace_file_unavailable: '无法读写这个工作区的时间轴文件。',
@@ -77,6 +79,7 @@ export function sichenRoutes(options: { operations: Operations; workbench: Workb
       : target.kind === 'new_once' ? `首次新开，之后回到那段${target.workspaceLabel ? `（${target.workspaceLabel}）` : ''}` : '中书之外的原生会话';
     const conversationId = target.conversationId ?? task.latestRun?.conversationId;
     return { id: task.id, name: task.title, status: task.status, prompt: task.prompt, ...(task.updatedAt ? { updatedAt: task.updatedAt } : {}),
+      harness: task.harnessId, ...(task.problem ? { problem: task.problem } : {}),
       rule: when ? describe(when, zone) : `原生规则：${JSON.stringify(task.timing)}`, ...(when ? { timeZone: when.timeZone } : {}), ...(when?.until ? { until: when.until } : {}),
       next, to, ...(conversationId ? { conversationId } : {}),
       ...(task.lastDelivery ? { lastRun: { at: task.lastDelivery.deliveredAt, late: task.lastDelivery.late, ...(task.lastDelivery.result ? { result: task.lastDelivery.result } : {}) } } : {}) };
@@ -103,11 +106,11 @@ export function sichenRoutes(options: { operations: Operations; workbench: Workb
     app.setErrorHandler((error, _request, reply) => {
       const failure = error instanceof SichenFailure ? error
         : error instanceof AutomationError ? new SichenFailure(error.message, error.statusCode, error.problems)
-        : error instanceof HarnessError ? new SichenFailure('harness_unavailable', 502) : new SichenFailure('invalid_request', 400);
+        : error instanceof HarnessError ? new SichenFailure(automationFailureStatus(error.code) ? error.code : 'harness_unavailable', automationFailureStatus(error.code) ?? 502) : new SichenFailure('invalid_request', 400);
       return reply.code(failure.statusCode).send({ error: failure.code, message: message[failure.code] ?? failure.code, ...(failure.problems?.length ? { problems: failure.problems } : {}) });
     });
     // The version answers even across protocols, so the command can say which side to update.
-    app.get('/sichen/v1/version', { preHandler: guard }, async () => ({ protocol: SICHEN_PROTOCOL, version: options.version, ...(options.revision ? { revision: options.revision } : {}), schedule: operations.available() }));
+    app.get('/sichen/v1/version', { preHandler: guard }, async () => ({ protocol: SICHEN_PROTOCOL, version: options.version, ...(options.revision ? { revision: options.revision } : {}), schedule: operations.available(), ...(operations.available('codex') ? { codexSchedule: true } : {}) }));
     app.register(async scoped => {
       scoped.addHook('preHandler', guard);
       scoped.addHook('preHandler', async request => { if (request.headers[PROTOCOL_HEADER] !== String(SICHEN_PROTOCOL)) throw new SichenFailure('protocol_mismatch', 409); });
@@ -117,7 +120,7 @@ export function sichenRoutes(options: { operations: Operations; workbench: Workb
           ? (input.session ? { kind: 'session' as const, sessionId: input.session } : (() => { throw new SichenFailure('session_required'); })())
           : { kind: input.to, cwd: workspaceFor(input.cwd).directory, ...(input.preset ? { preset: input.preset } : {}) };
         if (input.to !== 'here') workspaceFor(input.cwd);
-        const task = await operations.create({ title: input.name, prompt: input.prompt, timing: nativeTiming({ kind: 'when', when: input.when }), target });
+        const task = await operations.create({ title: input.name, prompt: input.prompt, timing: nativeTiming({ kind: 'when', when: input.when }), target }, input.harness);
         return { task: taskView(task, zoneOf(request)) };
       });
       scoped.get('/sichen/v1/schedule', async request => {

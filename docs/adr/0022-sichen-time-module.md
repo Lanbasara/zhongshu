@@ -4,6 +4,8 @@ status: accepted
 
 # 司辰：中书的时间模块与命令行
 
+> [ADR 0026](0026-shared-agent-capabilities.md) 补充 Codex 会话身份与定时任务接入。
+
 ## 背景与依据
 
 2026-11-09 迁移投资工作区时暴露出时间系统不够扎实：

@@ -32,7 +32,7 @@ const HELP = `司辰 sichen：定时任务与日历条目（中书的时间模�
   --tz Asia/Shanghai                           换时区
 
 结果放哪（--to）：
-  本对话（here）    回到正在运行这条命令的 DSH 对话
+  本对话（here）    回到正在运行这条命令的对话
   新对话（new）     每次新开一段对话（默认）
   首次新开（new_once） 第一次新开一段，之后都回到那段
 
@@ -123,7 +123,7 @@ function when(iso: string, timeZone: string, now = Date.now()): string {
 function showTask(task: SichenTask, timeZone: string, heading: string): string {
   const status = { active: '开启', paused: '已暂停', ended: '已结束' }[task.status];
   return [heading, `规则：${task.rule}`, `状态：${status}`, task.next.length ? `接下来：${task.next.map(value => when(value, timeZone)).join('、')}` : '',
-    `结果：${task.to}`, task.lastRun ? `最近一次：${when(task.lastRun.at, timeZone)}${task.lastRun.late ? '（迟到）' : ''}${task.lastRun.result ? ` —— ${task.lastRun.result}` : ''}` : ''].filter(Boolean).join('\n');
+    `结果：${task.to}`, task.harness ? `Power：${task.harness === 'codex' ? 'Codex' : 'DSH'}` : '', task.problem ? '投递状态需要处理，请查看任务卡或目标对话。' : '', task.lastRun ? `最近一次：${when(task.lastRun.at, timeZone)}${task.lastRun.late ? '（迟到）' : ''}${task.lastRun.result ? ` —— ${task.lastRun.result}` : ''}` : ''].filter(Boolean).join('\n');
 }
 
 async function call(path: string, init: { method?: string; body?: unknown; values: Values }): Promise<Record<string, unknown>> {
@@ -153,9 +153,10 @@ async function schedule(action: string | undefined, args: string[], values: Valu
       if (!args[0]) throw new Stop('缺少任务名称：sichen schedule add <名称> …');
       const rule = checked(whenFrom(values, true))!;
       const to = targetFrom(values.to);
-      const session = process.env.DSH_SESSION_ID;
-      if (to === 'here' && !session) throw new Stop('“本对话”需要在 DSH 的对话里运行（没有 DSH_SESSION_ID）。');
-      const data = await call('/sichen/v1/schedule/add', { values, body: { name: args[0], prompt: promptFrom(values, true), when: rule, to, ...(to === 'here' ? { session } : {}), cwd: process.cwd(), ...(values.preset ? { preset: values.preset } : {}) } });
+      const harness = process.env.CODEX_THREAD_ID || process.env.ZHONGSHU_POWER === 'codex' ? 'codex' : 'dsh';
+      const session = harness === 'codex' ? process.env.CODEX_THREAD_ID : process.env.DSH_SESSION_ID;
+      if (to === 'here' && !session) throw new Stop('“本对话”需要在 Codex 或 DSH 对话里运行（缺少 CODEX_THREAD_ID 或 DSH_SESSION_ID）。');
+      const data = await call('/sichen/v1/schedule/add', { values, body: { name: args[0], prompt: promptFrom(values, true), when: rule, to, ...(harness === 'codex' ? { harness } : {}), ...(to === 'here' ? { session } : {}), cwd: process.cwd(), ...(values.preset ? { preset: values.preset } : {}) } });
       const task = data.task as SichenTask;
       return print(values, data, showTask(task, timeZone, `已建好「${task.name}」（编号 ${task.id}）`));
     }
@@ -221,12 +222,13 @@ async function doctor(values: Values): Promise<void> {
   lines.push(`命令行：sichen ${own.version}${own.revision && own.revision !== 'development' ? ` (${own.revision.slice(0, 7)})` : ''}，协议 ${SICHEN_PROTOCOL}，时区 ${zone(values)}`);
   try { readFileSync(file, 'utf8'); lines.push(`令牌：可读（${file}）`); } catch { ok = false; lines.push(`令牌：读不到（${file}）`); }
   try {
-    const server = await call('/sichen/v1/version', { values }) as { protocol: number; version: string; revision?: string; schedule: boolean };
-    lines.push(`中书：${server.version}${server.revision ? ` (${server.revision.slice(0, 7)})` : ''}，协议 ${server.protocol}，${server.schedule ? '已接通 DSH 定时任务' : '没有接通 DSH 定时任务'}`);
+    const server = await call('/sichen/v1/version', { values }) as { protocol: number; version: string; revision?: string; schedule: boolean; codexSchedule?: boolean };
+    lines.push(`中书：${server.version}${server.revision ? ` (${server.revision.slice(0, 7)})` : ''}，协议 ${server.protocol}，${server.schedule ? '已接通 DSH 定时任务' : '未接通 DSH 定时任务'}${server.codexSchedule ? '，已接通 Codex 定时任务' : ''}`);
     if (server.protocol !== SICHEN_PROTOCOL) { ok = false; lines.push('协议不一致：请更新 sichen 或中书，使两边一致。'); }
     if (own.revision && server.revision && own.revision !== server.revision) lines.push('提示：命令行和中书不是同一次构建。');
   } catch (error) { ok = false; lines.push(`中书：${(error as Error).message}`); }
-  lines.push(process.env.DSH_SESSION_ID ? '对话：在 DSH 对话里运行，可以用 --to 本对话' : '对话：不在 DSH 对话里，不能用 --to 本对话');
+  const harness = process.env.CODEX_THREAD_ID ? 'Codex' : process.env.DSH_SESSION_ID ? 'DSH' : undefined;
+  lines.push(harness ? `对话：在 ${harness} 对话里运行，可以用 --to 本对话` : '对话：未识别，不能用 --to 本对话');
   print(values, { ok, lines }, (ok ? '正常\n' : '有问题\n') + lines.join('\n'));
   if (!ok) process.exitCode = 3;
 }

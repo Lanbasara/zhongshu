@@ -19,6 +19,8 @@ const webTextResult = z.object({
   url: z.string().max(16000).nullish(), snippet: z.string().max(128000).nullish(),
 });
 const webResult = z.union([webTextResult, z.object({ type: z.string().max(100).refine(type => type !== 'text_result') })]);
+const mcpResult = z.object({ content: z.array(z.unknown()).max(200) });
+const mcpText = z.object({ type: z.literal('text'), text: z.string().max(128000) });
 export const nativeItem = z.object({
   id: nativeId, type: z.string().max(100), text: nativeText.optional(), clientId: nativeId.nullable().optional(),
   status: z.string().max(64).optional(), command: nativeText.optional(), aggregatedOutput: nativeText.nullable().optional(),
@@ -27,7 +29,7 @@ export const nativeItem = z.object({
   query: nativeText.optional(),
   action: z.object({ type: z.string().max(100), query: nativeText.nullish(), queries: z.array(nativeText).max(200).nullish(), url: nativeText.nullish(), pattern: nativeText.nullish() }).nullish(),
   results: z.array(webResult).max(200).nullish(),
-  result: z.string().max(8 * 1024 * 1024).optional(), savedPath: z.string().max(4096).optional(),
+  server: z.string().max(200).optional(), result: z.union([z.string().max(8 * 1024 * 1024), mcpResult]).nullish(), savedPath: z.string().max(4096).optional(),
   changes: z.array(z.object({ path: z.string().max(4096), diff: nativeText.optional(),
     kind: z.object({ type: z.string(), move_path: z.string().max(4096).nullish() }).optional() })).max(200).optional(),
   // Native collaboration records: collabAgentToolCall (v1 tools, v2 wait) and subAgentActivity (v2).
@@ -77,7 +79,14 @@ export function mapItem(input: z.infer<typeof nativeItem>, runId: string, cwd: s
         output: changes.map(c => c.path + '\n' + (c.diff ?? '')).join('\n').slice(0,128000) }, status,
         ...(paths.size ? { fileEdits: [...paths] } : {}) };
     }
-    case 'mcpToolCall': case 'dynamicToolCall': return { ...base, kind: 'tool', text: input.tool ?? input.name ?? '调用工具', tool: { name: input.tool ?? input.name ?? '调用工具' }, status };
+    case 'mcpToolCall': {
+      const tool = input.tool ?? '调用工具';
+      const name = input.server ? `mcp__${input.server}__${tool}` : tool;
+      const content = typeof input.result === 'object' ? input.result?.content ?? [] : [];
+      const output = content.map(part => mcpText.safeParse(part).data?.text ?? '').filter(Boolean).join('\n').slice(0, 128000);
+      return { ...base, kind: 'tool', text: tool, tool: { name, ...(output ? { output } : {}) }, status };
+    }
+    case 'dynamicToolCall': return { ...base, kind: 'tool', text: input.tool ?? input.name ?? '调用工具', tool: { name: input.tool ?? input.name ?? '调用工具' }, status };
     case 'webSearch': {
       const action = input.action;
       const name = action?.type === 'openPage' ? '打开网页' : action?.type === 'findInPage' ? '页内查找' : !action || action.type === 'search' ? '网页搜索' : '网页操作';
@@ -95,7 +104,10 @@ export function mapItem(input: z.infer<typeof nativeItem>, runId: string, cwd: s
       const output = resultsText.length > 128000 ? resultsText.slice(0, 127950) + '\n\n[结果过长，仅显示前部内容]' : resultsText;
       return { ...base, kind: 'tool', text: output ? name : '原生记录未提供可展示的结果内容。', tool: { name, ...(inputText ? { input: inputText } : {}), ...(output ? { output } : {}) }, status: observedStatus };
     }
-    case 'imageGeneration': return { ...base, kind: 'assistant', text: status === 'failed' ? '图片生成未完成。' : status === 'completed' && !input.result && !input.savedPath ? '原生图片资源暂不可读取。' : '', status, ...((input.result || input.savedPath) ? { imageSources: [{ ...(input.result ? { data: input.result } : { path: input.savedPath }) }] } : {}) };
+    case 'imageGeneration': {
+      const result = typeof input.result === 'string' ? input.result : undefined;
+      return { ...base, kind: 'assistant', text: status === 'failed' ? '图片生成未完成。' : status === 'completed' && !result && !input.savedPath ? '原生图片资源暂不可读取。' : '', status, ...((result || input.savedPath) ? { imageSources: [{ ...(result ? { data: result } : { path: input.savedPath }) }] } : {}) };
+    }
     case 'collabAgentToolCall': {
       const action = collabActions[input.tool ?? ''];
       const agentIds = (input.receiverThreadIds ?? []).filter(id => subagentId.safeParse(id).success).slice(0, 32);

@@ -1,6 +1,6 @@
 # 司辰：时间模块与命令行
 
-当前能力：Agent 和人用 `sichen` 命令管理定时任务和日历条目。时间用日期和钟点写，命令先检查再交给中书，中书再交给 DSH 原生定时任务执行；建好后会读回接下来几次的运行时间。网页「日程」和命令行共用同一个时间模块，所以都能设结束日期。决定见 [ADR 0022](../adr/0022-sichen-time-module.md)，自动任务本身见 [automations](automations.md)。
+当前能力：Agent 和人用 `sichen` 命令管理定时任务和日历条目。时间用日期和钟点写，命令先检查再交给中书，DSH 任务由原生调度，Codex 任务由中书定时交给原生对话执行（[ADR 0026](../adr/0026-shared-agent-capabilities.md)）；建好后会读回接下来几次的运行时间。网页「日程」和命令行共用同一个时间模块，所以都能设结束日期。决定见 [ADR 0022](../adr/0022-sichen-time-module.md)，自动任务本身见 [automations](automations.md)。
 
 ## Sub-features
 
@@ -9,7 +9,7 @@
 | S01 · 说人话建任务 | `sichen schedule add <名称> --prompt … <时间> --to …` 建出 DSH 原生任务。输出编号、规则描述（如"每个工作日 14:45 · 到 2027-01-31"）、接下来三次运行时间（带"明天 / N 天后"）和结果放哪。时间写法有：`--at`、`--every 每天/工作日/周一,周三/mon-fri`、`--monthly N [--months …]`、`--cron`，可加 `--from`、`--until`、`--tz`，默认取本机时区 |
 | S02 · 先检查再建 | 日期不存在、钟点不对、一次性时间已过、结束早于开始、所选月份没有那一天、规则到结束前一次都不跑，都会在命令行里用中文说明，以退出码 2 结束，不发请求，也不建任务。服务端用同一个模块再查一遍，不合格时返回 `invalid_time` 和原因列表 |
 | S03 · 结束日期 | 有结束日期（或开始日期、按月）的规则，以带 `UNTIL` 的 RRULE 交给 DSH，`UNTIL` 是结束那天最后一秒换算成的 UTC 时间。DSH 到期后自己结束任务。卡片和 `sichen` 的描述里写"到 YYYY-MM-DD"，日历只排到那天。网页新建和修改每天、每周的任务时也能设、能去掉结束日期 |
-| S04 · 回到本对话 | `--to 本对话` 投递到运行命令的那段 DSH 对话，靠 DSH 给 shell 设的 `DSH_SESSION_ID` 认出。没有这个变量时，命令行直接拒绝。`--to 新对话` 和 `--to 首次新开` 在命令所在目录对应的已登记工作区里新开对话，目录不在任何工作区时拒绝 |
+| S04 · 回到本对话 | `--to 本对话` 投递到运行命令的对应 Power 的原对话，靠 shell 的 `DSH_SESSION_ID` 或 `CODEX_THREAD_ID` 认出。缺少会话身份时，命令行直接拒绝。`--to 新对话` 和 `--to 首次新开` 在命令所在目录对应的已登记工作区里新开对话，目录不在任何工作区时拒绝 |
 | S05 · 管理任务 | `list [--state 开启/暂停/结束/全部]`、`show`、`edit`（可改名称、指令、时间，或用 `--until`/`--no-until` 只改结束日期，保留原来的日子和钟点）、`pause`、`resume`、`delete`、`run`。任务已结束时，`edit`、`pause`、`resume` 都拒绝并说明（原生会接受并让一次性任务重新开启，所以中书先查）；页面/接口对已结束任务改动的契约是 HTTP 200、正文 `{"outcome":"ended"}` 且不写入，命令行以非 0 退出。命令行不带版本号，只有原生自己报冲突时才说“别处改过” |
 | S06 · 日历条目 | `sichen timeline add <操作/大事/决定/研究> <标题> --at "日期 钟点"\|--date 日期 [--link] [--detail] [--id]` 往当前工作区的 `.zhongshu/timeline.jsonl` 追加一行。先用日历的同一个解析器检查，越出工作区的链接会被拒绝。`done` 和 `cancel` 用同一编号追加完成或取消；`list` 列出从今天起的条目 |
 | S07 · Agent 知道它 | 中书 MCP 服务在 `initialize` 里返回说明（DSH 会放进 Agent 的提示）：定时任务和日历条目用 `sichen`，先看 `--help`，不要手写 RRULE 或时间轴 JSON |
@@ -17,11 +17,11 @@
 
 ## How to get to it (user POV)
 
-Agent 在 DSH 的 shell 里运行 `sichen …`。人也可以在 DSH 容器里，或任何能访问中书回环端点并有令牌的地方运行。网页上，「日程」里新建、修改每天或每周的任务时，表单下方有"结束日期"。
+Agent 在 Codex 或 DSH 的 shell 里运行 `sichen …`。人也可以在 DSH 容器里，或任何能访问中书回环端点并有令牌的地方运行。网页上，「日程」里新建、修改每天或每周的任务时，表单下方有"结束日期"。
 
 ## Driving it with Harness
 
-遵循[共同入口](README.md#独立执行验收)。需要 [native 现场](README.md#native真实接入分支)的 DSH 0.2.2 及以上，以及操作者按 [README](../../README.md#sichen) 配好的 `agentTools`，再把 `sichen` 和令牌交给 DSH 运行环境。
+遵循[共同入口](README.md#独立执行验收)。需要 [native 现场](README.md#native真实接入分支)的 DSH 0.2.2 及以上，以及操作者按 [README](../../README.md#sichen) 配好的 `agentTools`，再把 `sichen` 和令牌交给两边运行环境。在 Codex 重跑 S01、S03、S04、S06 和 S07，核对日程归属、原线程运行、任务卡结论以及 DSH 原有任务编号和历史。
 
 1. **S07/S01/S04。** 在一个没有任何工作区约定的对话里，对 Agent 说"每个工作日 14:45 检查……，到某天为止，结果回到这段对话"。期望看到：
    - Agent 运行了 `sichen`，而不是原生 `schedule_create`；

@@ -24,7 +24,7 @@ export type Conversation = {
   /** Plan mode chosen in Zhongshu for Harnesses that take the mode per turn (Codex). */
   planMode?: true;
 };
-export type CreateConversation = Pick<Conversation, 'id' | 'harnessId' | 'workspaceId' | 'cwd' | 'configuration'> & { title?: string; preparationId?: string };
+export type CreateConversation = Pick<Conversation, 'id' | 'harnessId' | 'workspaceId' | 'cwd' | 'configuration'> & { title?: string; preparationId?: string; automationId?: string };
 export type OperationStatus = 'queued' | 'dispatching' | 'accepted' | 'unknown' | 'rejected';
 export type OperationInput = { id: string; conversationId: string } & (
   { type: 'message'; payload: InputContent; queuedInput?: { entryId: string; version: number; delivery: QueueDelivery } }
@@ -95,6 +95,8 @@ export interface WorkbenchStore {
   setUsage(id: string, value: ConversationUsage): void;
   enqueueOperation(input: OperationInput): { operation: Operation; created: boolean };
   getOperation(id: string): Operation | null;
+  isScheduledOperation(id: string): boolean;
+  isScheduledRun(conversationId: string, runId: string): boolean;
   listOperations(options?: ListOperations): Operation[];
   claimOperation(id: string): Operation | null;
   settleOperation(id: string, receipt: Receipt): Operation;
@@ -372,11 +374,11 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
     },
     completePreparation(id) { parse(uuid,id); storage(() => db.prepare('UPDATE workbench_conversations SET native_preparation_id=NULL WHERE id=?').run(id)); },
     createConversation(value) {
-      const input = parse(createConversationSchema, value);
+      const input = parse(createConversationSchema.extend({ automationId: z.string().min(1).max(240).optional() }), value);
       const creationDigest = digest([input.harnessId, input.workspaceId, input.cwd, input.configuration.modelId, input.configuration.permissionId,
         ...(input.configuration.reasoningEffort === undefined ? [] : [input.configuration.reasoningEffort]), ...(input.preparationId ? ['prepared', input.preparationId] : []),
         // Appended only when chosen, so digests of conversations created before presets stay the same (ADR 0017).
-        ...(input.configuration.agentPreset === undefined ? [] : ['preset', input.configuration.agentPreset])]);
+        ...(input.configuration.agentPreset === undefined ? [] : ['preset', input.configuration.agentPreset]), ...(input.automationId ? ['automation', input.automationId] : [])]);
       return mutate(changed => {
         if (db.prepare('SELECT 1 FROM workbench_deletions WHERE id=?').get(input.id)) throw new StoreError('conversation_deleted', 409);
         const existing = conversationRow(input.id);
@@ -397,8 +399,8 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
         }
         const initial: NativeState = { status: 'unknown', pendingInputs: 0, configurationVerified: false };
         db.prepare(`INSERT INTO workbench_conversations(id,harness_id,workspace_id,cwd,title,configuration_json,creation_digest,
-          readiness,state_json,created_at) VALUES(?,?,?,?,?,?,?,'preparing',?,?)`).run(input.id, input.harnessId, input.workspaceId,
-          input.cwd, input.title ?? '新对话', JSON.stringify(input.configuration), creationDigest, JSON.stringify(initial), now());
+          readiness,state_json,created_at,automation_id) VALUES(?,?,?,?,?,?,?,'preparing',?,?,?)`).run(input.id, input.harnessId, input.workspaceId,
+          input.cwd, input.title ?? '新对话', JSON.stringify(input.configuration), creationDigest, JSON.stringify(initial), now(), input.automationId ?? null);
         db.prepare('UPDATE workbench_conversations SET last_activity_at=created_at WHERE id=?').run(input.id);
         if (nativePreparationId) db.prepare('UPDATE workbench_conversations SET native_preparation_id=? WHERE id=?').run(nativePreparationId,input.id);
         changed(input.id);
@@ -633,14 +635,19 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
         if (count >= 50_000) throw new StoreError('operation_capacity_reached', 409);
         if (input.type === 'message') for (const image of input.payload.images ?? []) resources.pin(input.conversationId, image.id, input.id);
         const at = now();
-        db.prepare(`INSERT INTO workbench_operations(id,conversation_id,type,payload_json,digest,status,created_at,updated_at)
-          VALUES(?,?,?,?,?,'queued',?,?)`).run(input.id, input.conversationId, input.type, JSON.stringify(input.payload), contentDigest, at, at);
+        const task = db.prepare('SELECT task_id FROM codex_automation_runs WHERE id=? AND conversation_id=?').get(input.id, input.conversationId);
+        db.prepare(`INSERT INTO workbench_operations(id,conversation_id,type,payload_json,digest,status,created_at,updated_at,automation_id)
+          VALUES(?,?,?,?,?,'queued',?,?,?)`).run(input.id, input.conversationId, input.type, JSON.stringify(input.payload), contentDigest, at, at, task?.task_id ?? null);
         if (input.type === 'stop' && hasQueue(input.conversationId)) setPause(input.conversationId, 'stopped');
         changed(input.conversationId, undefined, 'state');
         return { operation: requireOperation(input.id), created: true };
       });
     },
     getOperation(id) { parse(uuid, id); return storage(() => { const row = operationRow(id); return row ? operationFromRow(row) : null; }); },
+    isScheduledOperation(id) { return !!db.prepare('SELECT 1 FROM workbench_operations WHERE id=? AND automation_id IS NOT NULL').get(id); },
+    isScheduledRun(conversationId, runId) {
+      return !!db.prepare('SELECT 1 FROM workbench_operations WHERE conversation_id=? AND run_id=? AND automation_id IS NOT NULL').get(conversationId, runId);
+    },
     listOperations(value = {}) {
       const input = parse(z.object({ conversationId: uuid.optional(), status: statusSchema.optional(), type: z.enum(['message', 'stop']).optional(),
         order: z.enum(['asc', 'desc']).default('asc'), afterId: uuid.optional(), limit: z.number().int().min(1).max(1000).default(100) }).strict(), value);

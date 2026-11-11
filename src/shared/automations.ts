@@ -46,7 +46,7 @@ export const automationTargetInputSchema = z.discriminatedUnion('kind', [
 ]);
 const title = z.string().trim().min(1).max(120);
 const prompt = z.string().trim().min(1).max(32_000);
-export const automationCreateSchema = z.object({ harnessId: z.enum(['dsh']), title, prompt, timing: automationTimingInputSchema, target: automationTargetInputSchema }).strict();
+export const automationCreateSchema = z.object({ harnessId: z.enum(['dsh', 'codex']), title, prompt, timing: automationTimingInputSchema, target: automationTargetInputSchema }).strict();
 export const automationEditSchema = z.object({
   patch: z.object({ title: title.optional(), prompt: prompt.optional(), timing: automationTimingInputSchema.optional(), active: z.boolean().optional() }).strict()
     .refine(value => Object.keys(value).length > 0),
@@ -72,16 +72,17 @@ export const automationTargetSchema = z.object({
   configuration: configurationSchema.optional(),
 }).strict();
 export const automationSchema = z.object({
-  id: z.string().min(1).max(240), harnessId: z.enum(['dsh']), title: z.string().max(200), prompt: z.string().max(64_000),
+  id: z.string().min(1).max(240), harnessId: z.enum(['dsh', 'codex']), title: z.string().max(200), prompt: z.string().max(64_000),
   timing: automationTimingSchema, scheduledAt: instant, status: z.enum(['active', 'paused', 'ended']),
   target: automationTargetSchema, executing: z.boolean(), createdAt: instant.optional(), updatedAt: instant.optional(),
   lastDelivery: automationDeliverySchema.optional(),
+  problem: z.string().max(4096).optional(),
   /** Conversations this automation created and Zhongshu adopted, and the newest one's state for the sidebar row. */
   runs: z.number().int().nonnegative(),
   latestRun: z.object({ conversationId: z.uuid(), status: z.enum(['idle', 'running', 'waiting', 'interrupted', 'failed', 'unknown']), unread: z.boolean() }).strict().optional(),
 }).strict();
 export const automationListSchema = z.object({
-  available: z.boolean(), automations: z.array(automationSchema).max(5000),
+  available: z.boolean(), powers: z.array(z.enum(['dsh', 'codex'])).max(2).optional(), automations: z.array(automationSchema).max(10_000),
   /** Unarchived conversations against the instance limit, so the page can warn before a run cannot be adopted (ADR 0025). */
   capacity: z.object({ used: z.number().int().nonnegative(), limit: z.number().int().positive() }).strict(),
 }).strict();

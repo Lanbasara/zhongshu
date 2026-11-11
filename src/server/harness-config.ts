@@ -14,7 +14,7 @@ const absolutePath = z.string().min(1).max(4096).refine(isAbsolute);
 const configuration = z.object({
   workspaces: z.array(z.object({ id: workspaceIdSchema, label: z.string().min(1).max(100), directory: absolutePath, managedWrites: z.boolean().optional() }).strict()).max(16).default([]),
   workspaceRoots: z.array(z.object({ id: workspaceIdSchema, label: workspaceLabelSchema, directory: absolutePath }).strict()).max(16).default([]),
-  codex: z.object({ socketPath: absolutePath, pluginManagerSocketPath: absolutePath.optional() }).strict().optional(),
+  codex: z.object({ socketPath: absolutePath, workspaceToolsProfile: z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/).optional(), pluginManagerSocketPath: absolutePath.optional() }).strict().optional(),
   dsh: z.object({ launchFile: absolutePath, maintenanceExecutable: absolutePath.optional(), pluginSources: dshPluginSources.optional() }).strict().optional(),
   // ADR 0021: the loopback tool endpoint agents call (`notify_user`); the token file is operator-owned and 0600.
   // ADR 0023: `browser` says the instance gave the Harness 司门's `chrome-devtools` command; agents are then told about it.
@@ -71,7 +71,7 @@ export async function loadHarnesses(file: string | undefined, dataDirectory: str
   const adapters = new Map<HarnessId, HarnessAdapter>();
   const plugins: Partial<Record<HarnessId, PluginBackend>> = {};
   if (config.codex) {
-    adapters.set('codex', createCodexAdapter({ socketPath: config.codex.socketPath }));
+    adapters.set('codex', createCodexAdapter(config.codex));
     if (config.codex.pluginManagerSocketPath) plugins.codex = codexPluginClient(config.codex.pluginManagerSocketPath, config.codex.socketPath);
   }
   if (config.dsh) {

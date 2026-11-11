@@ -15,6 +15,7 @@ import {
 } from '../shared/automations.ts';
 import type { Workbench } from './workbench.ts';
 import type { AgentNotifications } from './agent-notifications.ts';
+import { createCodexAutomations, isCodexAutomation } from './codex-automations.ts';
 import { createAgentResults } from './agent-results.ts';
 import { StoreError } from './workbench-store.ts';
 import { readWorkspaceTimelineFile, workspaceTimelineStat, TIMELINE_NEAR_LIMIT_BYTES } from './workspace-documents.ts';
@@ -25,6 +26,11 @@ const POLL_MS = 60_000;
 const ADOPT_RETRY_MS = 3_000;
 const ADOPT_WINDOW_MS = 10 * 60_000;
 const FRESH_MS = 3_000;
+export function automationFailureStatus(code: string): number | undefined {
+  if (code === 'invalid_time' || code === 'automation_history_cursor_invalid') return 400;
+  if (code === 'automation_target_unavailable' || code === 'automation_capacity_reached') return 409;
+  return undefined;
+}
 export class AutomationError extends Error {
   readonly statusCode: number;
   /** For `invalid_time`: what is wrong with the rule, in plain words (ADR 0022). */
@@ -42,6 +48,8 @@ const late = (delivery: { scheduledAt: string; deliveredAt: string }) => Date.pa
 
 export function createAutomations(db: DatabaseSync, workbench: Workbench, adapters: Map<HarnessId, HarnessAdapter>, notifications: AgentNotifications, log: (event: Record<string, unknown>) => void) {
   const sources = new Map<'dsh', HarnessAutomations>();
+  const codexAdapter = adapters.get('codex');
+  const codex = codexAdapter && createCodexAutomations(db, workbench, codexAdapter, log);
   /** Conclusions agents write back to the card of the run they finished (ADR 0021, 2026-11-09). */
   const results = createAgentResults(db);
   const dsh = adapters.get('dsh')?.automations;
@@ -66,8 +74,8 @@ export function createAutomations(db: DatabaseSync, workbench: Workbench, adapte
    */
   const forget = (present: Set<string>) => {
     const rows = db.prepare('SELECT automation_id FROM automation_reservations').all() as { automation_id: string }[];
-    for (const row of rows) if (!present.has(row.automation_id)) db.prepare('DELETE FROM automation_reservations WHERE automation_id=?').run(row.automation_id);
-    for (const owner of workbench.store.automationOwners()) if (!present.has(owner)) { workbench.store.releaseAutomation(owner); log({ event: 'automation_conversations_released' }); }
+    for (const row of rows) if (!isCodexAutomation(row.automation_id) && !present.has(row.automation_id)) db.prepare('DELETE FROM automation_reservations WHERE automation_id=?').run(row.automation_id);
+    for (const owner of workbench.store.automationOwners()) if (!isCodexAutomation(owner) && !present.has(owner)) { workbench.store.releaseAutomation(owner); log({ event: 'automation_conversations_released' }); }
   };
   /** The session a task created for itself: every run of a "new" task, or the one a "new once" task reserved. */
   const createdFor = (task: NativeAutomation, sessionId: string) => task.target.kind === 'new' || task.target.kind === 'new_once' || reserved(task.id) === sessionId;
@@ -156,17 +164,20 @@ export function createAutomations(db: DatabaseSync, workbench: Workbench, adapte
     return next;
   }
   /** `until`: when the next delivery arrived; without it, the next one known in the same session. */
-  function deliveryView(delivery: AutomationDelivery, until = nextInSession(delivery)): AutomationDeliveryView {
-    const conversation = workbench.store.conversationForNative('dsh', delivery.sessionId);
+  function deliveryView(harness: HarnessId, delivery: AutomationDelivery, until = nextInSession(delivery)): AutomationDeliveryView {
+    const conversation = workbench.store.conversationForNative(harness, delivery.sessionId);
     // A conclusion is written after its delivery and before the next one into the same session.
-    const result = conversation ? results.within(conversation.id, Date.parse(delivery.deliveredAt), until ? Date.parse(until) : undefined) : undefined;
+    const result = conversation && (harness === 'codex'
+      ? delivery.runId && results.forRun(conversation.id, delivery.runId)
+      : results.within(conversation.id, Date.parse(delivery.deliveredAt), until ? Date.parse(until) : undefined));
     return { scheduledAt: delivery.scheduledAt, deliveredAt: delivery.deliveredAt, late: late(delivery), ...(conversation ? { conversationId: conversation.id } : {}),
       ...(delivery.prompt ? { prompt: delivery.prompt } : {}), ...(result ? { result } : {}) };
   }
   function view(task: NativeAutomation): AutomationView {
+    const harness = taskHarness(task.id);
     let target: AutomationView['target'];
     if (task.target.kind === 'session') {
-      const conversation = workbench.store.conversationForNative('dsh', task.target.sessionId);
+      const conversation = workbench.store.conversationForNative(harness, task.target.sessionId);
       const workspace = conversation && workbench.workspaceView().workspaces.find(entry => entry.id === conversation.workspaceId);
       // A "new once" task after its first run: still shown as such, with the conversation it created and reuses.
       target = conversation?.automationId === task.id ? { kind: 'new_once', conversationId: conversation.id, workspaceId: conversation.workspaceId, ...(workspace ? { workspaceLabel: workspace.label } : {}), configuration: conversation.configuration }
@@ -177,16 +188,19 @@ export function createAutomations(db: DatabaseSync, workbench: Workbench, adapte
     }
     const runs = workbench.store.automationRuns(task.id);
     const latest = runs.latest;
-    return { id: task.id, harnessId: 'dsh', title: task.title, prompt: task.prompt, timing: task.timing, scheduledAt: task.scheduledAt, status: task.status, target,
-      executing: task.executing, ...(task.createdAt ? { createdAt: task.createdAt } : {}), ...(task.updatedAt ? { updatedAt: task.updatedAt } : {}),
-      ...(task.lastDelivery ? { lastDelivery: deliveryView(task.lastDelivery) } : {}), runs: runs.count,
+    return { id: task.id, harnessId: harness, title: task.title, prompt: task.prompt, timing: task.timing, scheduledAt: task.scheduledAt, status: task.status, target,
+      executing: task.executing, ...(task.problem ? { problem: task.problem } : {}), ...(task.createdAt ? { createdAt: task.createdAt } : {}), ...(task.updatedAt ? { updatedAt: task.updatedAt } : {}),
+      ...(task.lastDelivery ? { lastDelivery: deliveryView(harness, task.lastDelivery) } : {}), runs: runs.count,
       ...(latest ? { latestRun: { conversationId: latest.id, status: latest.state.status, unread: workbench.unread([latest]).has(latest.id) } } : {}) };
   }
   function source(harness: string): HarnessAutomations {
-    const value = harness === 'dsh' ? sources.get('dsh') : undefined;
+    const value = harness === 'dsh' ? sources.get('dsh') : codex?.operations;
     if (!value) throw new AutomationError('automations_unavailable', 409);
     return value;
   }
+  function taskHarness(id: string): HarnessId { return isCodexAutomation(id) ? 'codex' : 'dsh'; }
+  const sourceFor = (id: string) => source(taskHarness(id));
+  const available = (harness: HarnessId) => harness === 'codex' ? !!codex : sources.has('dsh');
   async function current(): Promise<NativeAutomation[]> {
     const entry = cache.get('dsh');
     if (!entry || Date.now() - entry.at > FRESH_MS) await refresh();
@@ -194,20 +208,21 @@ export function createAutomations(db: DatabaseSync, workbench: Workbench, adapte
   }
   /** DSH 0.2.2 accepts an edit to an ended task and revives a one-shot one, so the rule is kept here, on a fresh native read. */
   async function update(id: string, patch: AutomationPatch, expectedUpdatedAt?: string): Promise<AutomationEdit> {
-    const task = await source('dsh').view(id);
+    const task = await sourceFor(id).view(id);
     if (!task) return 'notFound';
     if (task.status === 'ended') return 'ended';
-    return source('dsh').update(id, patch, expectedUpdatedAt);
+    return sourceFor(id).update(id, patch, expectedUpdatedAt);
   }
   async function find(id: string): Promise<NativeAutomation> {
-    const task = (await current()).find(entry => entry.id === id) ?? await source('dsh').view(id);
+    const cached = taskHarness(id) === 'dsh' ? (await current()).find(entry => entry.id === id) : undefined;
+    const task = cached ?? await sourceFor(id).view(id);
     if (!task) throw new AutomationError('automation_not_found', 404);
     return task;
   }
-  function targetInput(input: z.infer<typeof automationCreateSchema>['target']) {
+  function targetInput(harness: HarnessId, input: z.infer<typeof automationCreateSchema>['target']) {
     if (input.kind === 'conversation') {
       const conversation = workbench.store.getConversation(input.conversationId);
-      if (!conversation?.binding || conversation.harnessId !== 'dsh') throw new AutomationError('automation_target_unavailable', 409);
+      if (!conversation?.binding || conversation.harnessId !== harness) throw new AutomationError('automation_target_unavailable', 409);
       return { kind: 'session' as const, sessionId: conversation.binding.id };
     }
     // New sessions start in the workspace the user chose, never the Host's default directory.
@@ -254,7 +269,10 @@ export function createAutomations(db: DatabaseSync, workbench: Workbench, adapte
   async function routes(app: FastifyInstance): Promise<void> {
     app.setErrorHandler((error, _request, reply) => {
       if (error instanceof AutomationError) return reply.code(error.statusCode).send({ error: error.message, ...(error.problems ? { problems: error.problems } : {}) });
-      if (error instanceof HarnessError) return reply.code(502).send({ error: 'harness_unavailable' });
+      if (error instanceof HarnessError) {
+        const status = automationFailureStatus(error.code);
+        return reply.code(status ?? 502).send({ error: status ? error.code : 'harness_unavailable' });
+      }
       const code = typeof error === 'object' && error !== null && 'statusCode' in error ? error.statusCode : undefined;
       const status = typeof code === 'number' && code >= 400 && code < 500 ? code : 500;
       if (status === 500) app.log.error({ event: 'automation_request_failed' });
@@ -263,20 +281,20 @@ export function createAutomations(db: DatabaseSync, workbench: Workbench, adapte
     const parse = <T>(schema: z.ZodType<T>, value: unknown): T => { const parsed = schema.safeParse(value); if (!parsed.success) throw new AutomationError('invalid_request'); return parsed.data; };
     const params = z.object({ id: z.string().min(1).max(240) }).strict();
     app.get('/automations', async () => {
-      if (!sources.size) return { available: false, automations: [], capacity: workbench.store.conversationCapacity() };
-      await current();
+      const powers = (['dsh', 'codex'] as const).filter(available);
+      const automations = await operations.list();
       // Read after the refresh: an adoption in this same request already consumed a slot (ADR 0025).
-      return { available: true, automations: (cache.get('dsh')?.tasks ?? []).map(view), capacity: workbench.store.conversationCapacity() };
+      return { available: powers.length > 0, powers, automations, capacity: workbench.store.conversationCapacity() };
     });
     app.get('/automations/:id/history', async request => {
       const { id } = parse(params, request.params);
       const query = parse(z.object({ before: z.string().min(1).max(240).optional() }).strict(), request.query);
-      const page = await source('dsh').history(id, 50, query.before);
+      const page = await sourceFor(id).history(id, 50, query.before);
       if (!page) throw new AutomationError('automation_not_found', 404);
       // Each run ends where the next later delivery of the same task arrived; its conclusion is written before that.
       const times = page.records.map(record => record.deliveredAt).sort();
       const next = (record: AutomationDelivery) => [times.find(other => other > record.deliveredAt), nextInSession(record)].filter((value): value is string => !!value).sort()[0];
-      return { records: page.records.map(record => deliveryView(record, next(record))), earlierUnavailable: page.earlierUnavailable, ...(page.before ? { before: page.before } : {}) };
+      return { records: page.records.map(record => deliveryView(taskHarness(id), record, next(record))), earlierUnavailable: page.earlierUnavailable, ...(page.before ? { before: page.before } : {}) };
     });
     app.get('/automations/:id/runs', async request => {
       const { id } = parse(params, request.params);
@@ -284,7 +302,7 @@ export function createAutomations(db: DatabaseSync, workbench: Workbench, adapte
     });
     app.post('/automations', { bodyLimit: 64 * 1024 }, async request => {
       const input = parse(automationCreateSchema, request.body);
-      const task = await source(input.harnessId).create({ title: input.title, prompt: input.prompt, timing: nativeTiming(input.timing), target: targetInput(input.target) });
+      const task = await source(input.harnessId).create({ title: input.title, prompt: input.prompt, timing: nativeTiming(input.timing), target: targetInput(input.harnessId, input.target) });
       log({ event: 'automation_created' }); await refresh();
       return { outcome: 'ok', automation: view(task) };
     });
@@ -304,7 +322,7 @@ export function createAutomations(db: DatabaseSync, workbench: Workbench, adapte
     app.post('/automations/:id/delete', async request => {
       const { id } = parse(params, request.params);
       const input = parse(automationDeleteSchema, request.body ?? {});
-      const result = await source('dsh').remove(id, input.expectedUpdatedAt);
+      const result = await sourceFor(id).remove(id, input.expectedUpdatedAt);
       await refresh();
       if (result === 'conflict') return { outcome: 'conflict' };
       if (result === 'notFound') return { outcome: 'not_found' };
@@ -313,7 +331,7 @@ export function createAutomations(db: DatabaseSync, workbench: Workbench, adapte
     });
     app.post('/automations/:id/run', async request => {
       const { id } = parse(params, request.params);
-      const result = await source('dsh').run(id);
+      const result = await sourceFor(id).run(id);
       await refresh();
       if (result === 'pending') return { outcome: 'pending' };
       if (result === 'notFound') return { outcome: 'not_found' };
@@ -335,11 +353,14 @@ export function createAutomations(db: DatabaseSync, workbench: Workbench, adapte
 
   /** The same operations, for 司辰's command line (ADR 0022); it reaches them through the agent endpoint, not the page. */
   const operations = {
-    async list() { return (await current()).map(view); },
+    async list() {
+      const [dshTasks, codexTasks] = await Promise.all([current(), codex?.operations.list() ?? []]);
+      return [...dshTasks, ...codexTasks].map(view);
+    },
     async get(id: string) { return view(await find(id)); },
     async native(id: string) { return find(id); },
-    async create(input: { title: string; prompt: string; timing: AutomationTimingInput; target: AutomationTargetInput }) {
-      const task = await source('dsh').create(input);
+    async create(input: { title: string; prompt: string; timing: AutomationTimingInput; target: AutomationTargetInput }, harness: HarnessId = 'dsh') {
+      const task = await source(harness).create(input);
       log({ event: 'automation_created', via: 'sichen' }); await refresh();
       return view(task);
     },
@@ -352,32 +373,34 @@ export function createAutomations(db: DatabaseSync, workbench: Workbench, adapte
       return view(result);
     },
     async remove(id: string, expectedUpdatedAt?: string) {
-      const result = await source('dsh').remove(id, expectedUpdatedAt); await refresh();
+      const result = await sourceFor(id).remove(id, expectedUpdatedAt); await refresh();
       if (result === 'deleted') log({ event: 'automation_deleted', via: 'sichen' });
       return result;
     },
-    async run(id: string) { const result = await source('dsh').run(id); await refresh(); return typeof result === 'string' ? result : view(result); },
-    available: () => sources.has('dsh'),
+    async run(id: string) { const result = await sourceFor(id).run(id); await refresh(); return typeof result === 'string' ? result : view(result); },
+    available: (harness: HarnessId = 'dsh') => available(harness),
   };
 
   return {
     routes,
     results,
     operations,
-    available: () => sources.size > 0,
+    available: () => sources.size > 0 || !!codex,
     async start(): Promise<void> {
       for (const value of sources.values()) unsubscribe.push(value.onChange(changed));
+      codex?.start();
       unsubscribe.push(workbench.onObserved((id, items) => { notifications.observed(id, items); results.observed(id, items); }));
       notifications.start();
       // Missed events are recovered by a slow re-list; deliveries still reach observation within a minute.
       poll = setInterval(() => { void refresh(); }, POLL_MS); poll.unref();
       void refresh();
     },
-    close(): void {
+    async close(): Promise<void> {
       closed = true;
       if (debounce) clearTimeout(debounce); if (poll) clearInterval(poll); if (retry) clearTimeout(retry);
       for (const stop of unsubscribe.splice(0)) stop();
       notifications.close();
+      await codex?.close();
     },
   };
 }

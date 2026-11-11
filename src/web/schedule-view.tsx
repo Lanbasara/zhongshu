@@ -32,6 +32,7 @@ const HOUR = 48; const START = 7; const END = 24;
 function useScheduleData(csrf: string, revision: number, report: (reason: unknown) => void) {
   const [automations, setAutomations] = useState<AutomationView[]>([]);
   const [available, setAvailable] = useState(true);
+  const [powers, setPowers] = useState<AutomationView['harnessId'][]>();
   const [timeline, setTimeline] = useState<TimelineView>({ entries: [], problems: [], truncated: false, nearLimit: false });
   const [notifications, setNotifications] = useState<AgentNotificationView[]>([]);
   const [capacity, setCapacity] = useState<{ used: number; limit: number }>();
@@ -42,7 +43,7 @@ function useScheduleData(csrf: string, revision: number, report: (reason: unknow
       // Only the range the page can show; a large timeline file never becomes a large response (ADR 0025).
       const [list, line, notes] = await Promise.all([request('/automations', automationListSchema),
         request(`/timeline?from=${addDays(day, -402)}&to=${addDays(day, 402)}`, timelineSchema), request('/notifications', agentNotificationListSchema)]);
-      setAutomations(list.automations); setAvailable(list.available); setTimeline(line); setNotifications(notes.notifications); setCapacity(list.capacity);
+      setAutomations(list.automations); setAvailable(list.available); setPowers(list.powers); setTimeline(line); setNotifications(notes.notifications); setCapacity(list.capacity);
     } catch (error) { report(error); } finally { setLoaded(true); }
   }, [report]);
   useEffect(() => { void reload(); }, [reload, revision]);
@@ -52,7 +53,7 @@ function useScheduleData(csrf: string, revision: number, report: (reason: unknow
     return () => clearInterval(timer);
   }, [reload]);
   void csrf;
-  return { automations, available, timeline, notifications, capacity, loaded, reload };
+  return { automations, available, powers, timeline, notifications, capacity, loaded, reload };
 }
 
 /** The dates one tab can actually show; occurrences outside them are never computed (ADR 0025). */
@@ -133,11 +134,11 @@ export function ScheduleView({ csrf, report, configuration, revision, tab, onTab
     </div>
     <div className="schedule-body">
       {notice && !panel && <p className="sch-notice" role="status">{notice}</p>}
-      {!data.available && data.loaded && <p className="schedule-note">这个实例没有可用的原生自动任务（需要 DSH 0.2.2 及以上）。时间轴文件仍会显示。</p>}
+      {!data.available && data.loaded && <p className="schedule-note">这个实例没有可用的自动任务。时间轴文件仍会显示。</p>}
       {notices.map(text => <p key={text} className="schedule-note sch-warn-note">{text}</p>)}
       {content}
     </div>
-    {panel && <SchedulePanel panel={panel} automations={data.automations} configuration={configuration} csrf={csrf} report={report} close={() => setPanel(undefined)} now={now}
+    {panel && <SchedulePanel panel={panel} powers={data.powers} automations={data.automations} configuration={configuration} csrf={csrf} report={report} close={() => setPanel(undefined)} now={now}
       notice={notice} notify={setNotice} reload={data.reload} edit={edit} openConversation={id => { setPanel(undefined); openConversation(id); }} openFile={(workspaceId, path) => { setPanel(undefined); openFile(workspaceId, path); }} notifications={data.notifications}/>}
   </div>;
 }
@@ -420,8 +421,8 @@ function TasksTab({ automations, open, now }: { automations: AutomationView[]; o
   </section>;
 }
 
-function SchedulePanel({ panel, automations, configuration, csrf, report, close, notice, notify, reload, edit, openConversation, openFile, notifications, now }: {
-  panel: Panel; automations: AutomationView[]; configuration?: WorkbenchConfiguration; csrf: string; report(reason: unknown): void; close(): void;
+function SchedulePanel({ panel, powers, automations, configuration, csrf, report, close, notice, notify, reload, edit, openConversation, openFile, notifications, now }: {
+  panel: Panel; powers?: AutomationView['harnessId'][]; automations: AutomationView[]; configuration?: WorkbenchConfiguration; csrf: string; report(reason: unknown): void; close(): void;
   notice?: string; notify(message: string): void;
   reload(): Promise<void>; edit(task: AutomationView, body: { patch: Record<string, unknown> }): Promise<boolean>; openConversation(id: string): void;
   openFile(workspaceId: string, path: string): void; notifications: AgentNotificationView[]; now: number;
@@ -436,7 +437,7 @@ function SchedulePanel({ panel, automations, configuration, csrf, report, close,
     <div className="sch-scrim" onClick={close}/>
     <aside className="sch-panel" ref={ref} tabIndex={-1} role="dialog" aria-modal="true" aria-label={panel.kind === 'create' ? '新建自动任务' : '详情'}>
       {panel.kind === 'task' ? <TaskDetail task={automations.find(task => task.id === panel.id)} configuration={configuration} csrf={csrf} report={report} close={close} notice={notice} notify={notify} reload={reload} edit={edit} openConversation={openConversation} notifications={notifications} now={now}/>
-        : panel.kind === 'create' ? <><PanelHead title="新建自动任务" close={close}/><CreateForm configuration={configuration} csrf={csrf} report={report} close={close} reload={reload} conversationId={panel.conversationId}/></>
+        : panel.kind === 'create' ? <><PanelHead title="新建自动任务" close={close}/><CreateForm powers={powers} configuration={configuration} csrf={csrf} report={report} close={close} reload={reload} conversationId={panel.conversationId}/></>
         : <EntryDetail item={panel.item} close={close} openFile={openFile}/>}
     </aside>
   </>;
@@ -447,6 +448,17 @@ const refusals: Record<string, string> & { conflict: string; not_found: string }
   pending: '这个任务正在运行，等它结束再试。',
   not_found: '这个任务已经不存在。',
 };
+function automationProblem(code: string): string {
+  const messages: Record<string, string> = {
+    automation_target_unavailable: '投递目标不可用，请检查对话或工作区。',
+    workspace_not_found: '任务所在工作区不可用。',
+    automation_codex_defaults_unavailable: '暂时读不到 Codex 的默认配置。',
+    automation_delivery_unknown: '正在核对 Codex 是否收到这次投递。',
+    automation_run_failed: '上次定时运行失败。',
+    automation_run_interrupted: '上次定时运行已中断。',
+  };
+  return messages[code] ?? '任务投递遇到问题，请查看目标对话。';
+}
 function PanelHead({ title, close }: { title: string; close(): void }) {
   return <header className="sch-panel-head"><Clock size={15}/><h2>{title}</h2><IconButton label="关闭" onClick={close}><X size={16}/></IconButton></header>;
 }
@@ -504,6 +516,7 @@ function TaskDetail({ task, configuration, csrf, report, close, notice, notify, 
     <PanelHead title={task.title} close={close}/>
     <div className="sch-panel-body sch-card">
       {notice && <p className="sch-notice" role="status">{notice}</p>}
+      {task.problem && <p className="sch-notice" role="status">{automationProblem(task.problem)}</p>}
       <p className="sch-card-when">
         <span className={`sch-chip${task.executing ? ' sch-chip-next' : ''}`}>{status}</span>
         {task.status === 'active' && <span>下次运行 {whenText(Date.parse(task.scheduledAt), now)}</span>}

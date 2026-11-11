@@ -15,6 +15,7 @@ export type TimelineKind = 'action' | 'event' | 'decision' | 'research';
 /** A task as the command shows it: the rule in words, the next runs and where results go. */
 export type SichenTask = {
   id: string; name: string; status: 'active' | 'paused' | 'ended'; prompt: string; updatedAt?: string;
+  harness?: 'dsh' | 'codex'; problem?: string;
   rule: string; timeZone?: string; until?: string; next: string[];
   to: string; conversationId?: string;
   lastRun?: { at: string; late: boolean; result?: string };

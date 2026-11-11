@@ -7,7 +7,7 @@
 | 场景 | 可证伪的结果 |
 | --- | --- |
 | B01 · 照官方写法用 | `chrome-devtools new_page <网址>`、`take_snapshot <页面>`、`click <页面> <uid>`、`take_screenshot <页面>`、`emulate`、`evaluate_script`、`list_console_messages` 等，输出和官方命令行一致。`--help`（包括 `chrome-devtools <命令> --help`）由官方命令行回答，不需要窗口，也不在这段对话的临时目录里留下东西 |
-| B02 · 一段对话一个窗口 | `new_page` 给这段对话（`DSH_SESSION_ID`）分配窗口，实例最多 2 个。同一段对话再 `new_page` 时，以退出码 2 拒绝，并说出它自己的页面编号。用别的对话的页面编号也会以退出码 2 拒绝；没人拥有的页面（例如网页弹出的窗口）只有已有窗口的对话能用 |
+| B02 · 一段对话一个窗口 | `new_page` 给这段对话（`DSH_SESSION_ID` 或 `CODEX_THREAD_ID`）分配窗口，实例最多 2 个。同一段对话再 `new_page` 时，以退出码 2 拒绝，并说出它自己的页面编号。用别的对话的页面编号也会以退出码 2 拒绝；没人拥有的页面（例如网页弹出的窗口）只有已有窗口的对话能用 |
 | B03 · 排队 | 两个窗口都在用时，`new_page` 在 stderr 显示"正在排队（前面还有 N 个）"，先来先得；轮到时照常执行。等 5 分钟还没轮到，以退出码 4 结束并说明原因 |
 | B04 · 收回 | `close_page` 自己的页面后，窗口立刻释放。窗口 5 分钟没用，司门会关掉它的页面，并删掉这段对话的临时目录。之后再用这个页面，会被拒绝并提示"闲置 5 分钟，已经收回" |
 | B05 · 用时才开 | 没有窗口时，浏览器和官方后台进程都不在运行。除 `new_page` 外，其他页面命令会被拒绝，并提示先开窗口。最后一个窗口释放后，两者都退出，浏览器容器的内存回落 |
@@ -19,16 +19,16 @@
 
 ## How to get to it (user POV)
 
-用户不直接操作。在接了司门的实例里，对 DSH 对话里的 Agent 说"打开某个网页看看""检查这个 HTML 在手机上会不会溢出并截图"，Agent 会运行 `chrome-devtools`。
+用户不直接操作。在接了司门的实例里，对 Codex 或 DSH 对话里的 Agent 说"打开某个网页看看""检查这个 HTML 在手机上会不会溢出并截图"，Agent 会运行 `chrome-devtools`。
 
 ## Driving it with Harness
 
-遵循[共同入口](README.md#独立执行验收)。需要 [native 现场](README.md#native真实接入分支)的 DSH，以及操作者按 [README](../../README.md#simen) 配好的浏览器服务（司门宿主 + Chromium + 固定版本的 chrome-devtools-mcp）和放进 DSH 的 `chrome-devtools`。
+遵循[共同入口](README.md#独立执行验收)。需要 [native 现场](README.md#native真实接入分支)的 DSH，以及操作者按 [README](../../README.md#simen) 配好的浏览器服务（司门宿主 + Chromium + 固定版本的 chrome-devtools-mcp）和放进两个 Power 的 `chrome-devtools`。Codex 工作区读写还需实例配置的专用工具服务网络路径（[ADR 0026](../adr/0026-shared-agent-capabilities.md)）。
 
-1. **B01/B07/B10。** 在一段 DSH 对话里，让 Agent 检查工作区里的一个 HTML 在电脑和手机宽度下的样子并截图。期望看到：
+1. **B01/B07/B10。** 分别在一段 DSH 和 Codex 对话里，让 Agent 检查工作区里的一个 HTML 在电脑和手机宽度下的样子并截图。期望看到：
    - Agent 运行了 `chrome-devtools new_page file://…`、`emulate`、`take_screenshot`；
    - 截图在 `/simen/tmp/<对话>/…` 下，Agent 能读到。
-2. **B02/B03。** 同时开三段对话，各自 `new_page`。期望看到：
+2. **B02/B03。** 同时开三段对话，包含 Codex 和 DSH，各自 `new_page`。期望看到：
    - 第三段在 stderr 看到排队提示；
    - 前两段之一 `close_page` 后，第三段拿到窗口；
    - 拿别的对话的页面编号去操作会被拒绝；
