@@ -7,6 +7,7 @@ import { test } from 'node:test';
 import type { PluginCommand, PluginEntry, PluginSourceCommand } from '../src/shared/plugins.ts';
 import { buildApp } from '../src/server/app.ts';
 import { createAuth } from '../src/server/auth.ts';
+import { preservesInstalledPeers } from '../src/server/codex-plugin-host.ts';
 import { openDatabase } from '../src/server/database.ts';
 import { productMigrations } from '../src/server/migrations.ts';
 import type { PluginBackend } from '../src/server/plugin-backend.ts';
@@ -152,4 +153,15 @@ test('browser market inputs allow public GitHub forms and reject alternate fetch
   ]) assert.throws(() => githubIndex(address), { message: 'invalid_plugin_source' });
   for (const address of ['file:///tmp/market', '/etc', 'git@github.com:a/b', 'https://github.com/a/../b', 'https://github.com/a/b?x=1'])
     assert.throws(() => githubRepository(address), { message: 'invalid_plugin_source' });
+});
+
+test('a Codex marketplace advance fences other installed plugins, including disabled ones', () => {
+  const installed = [{ name: 'selected', installed: true }, { name: 'peer', installed: true, enabled: false }];
+  const peer = { name: 'peer', source: { sha: 'a'.repeat(40) }, policy: { installation: 'AVAILABLE' } };
+  const previous = new Map([['peer', peer]]);
+  assert.equal(preservesInstalledPeers(installed, previous, new Map([['peer', { ...peer }]]), 'selected'), true);
+  assert.equal(preservesInstalledPeers(installed, previous, new Map(), 'selected'), false);
+  assert.equal(preservesInstalledPeers(installed, previous, new Map([['peer', { ...peer, source: { sha: 'b'.repeat(40) } }]]), 'selected'), false);
+  assert.equal(preservesInstalledPeers(installed, previous, new Map([['peer', { ...peer, policy: { installation: 'NOT_AVAILABLE' } }]]), 'selected'), false);
+  assert.equal(preservesInstalledPeers([{ name: 'peer', installed: false }], previous, new Map(), 'selected'), true);
 });

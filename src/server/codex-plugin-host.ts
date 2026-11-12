@@ -4,7 +4,7 @@ import { constants } from 'node:fs';
 import { lstat, open, realpath, rename, unlink } from 'node:fs/promises';
 import { dirname, isAbsolute, join, normalize, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { promisify } from 'node:util';
+import { isDeepStrictEqual, promisify } from 'node:util';
 import Fastify from 'fastify';
 import { z } from 'zod';
 import { CodexRpc } from '../harness/codex/rpc.ts';
@@ -37,7 +37,7 @@ const catalogSchema = z.object({ installed: z.array(rowSchema).max(500), availab
 const manifestMetadata = z.object({ name, interface: z.object({ displayName: z.string().min(1).max(240).optional() }).optional(), plugins: z.array(z.object({
   name, description: z.string().max(1000).optional(), interface: z.object({ displayName: z.string().min(1).max(240).optional() }).optional(),
   source: z.unknown().optional(),
-})).max(500) });
+}).passthrough()).max(500) });
 const packageSource = z.object({
   source: z.enum(['url', 'git', 'git-subdir']), url: gitUrl, sha: commit,
   path: z.string().max(240).regex(/^(?:\.\/)?[a-zA-Z0-9_-]+(?:\/[a-zA-Z0-9_-]+)*$/).optional(),
@@ -46,7 +46,7 @@ const gitRef = z.string().max(128).regex(/^(?!.*(?:\.\.|\/\/))[A-Za-z0-9_][A-Za-
 const managedMarket = market.extend({ label: z.string().min(1).max(240), ref: gitRef.optional(), pendingRevision: commit.optional() });
 type ManagedMarket = z.infer<typeof managedMarket>;
 type PackageSource = z.infer<typeof packageSource>;
-type Candidate = NonNullable<PluginEntry['update']> & { source: PackageSource };
+type Candidate = NonNullable<PluginEntry['update']> & { source: PackageSource; manifest: Map<string, MarketplaceItem> };
 const targetSchema = z.string().regex(/^\d+:\d+$/);
 const inputSchema = z.object({ target: targetSchema, command: pluginCommand }).strict();
 const inside = (root: string, path: string) => {
@@ -92,6 +92,12 @@ async function privateDirectory(path: string): Promise<void> {
 }
 
 type MarketplaceItem = z.infer<typeof manifestMetadata>['plugins'][number];
+export function preservesInstalledPeers(installed: readonly { name: string; installed: boolean }[],
+  current: ReadonlyMap<string, unknown>, next: ReadonlyMap<string, unknown>, selected: string): boolean {
+  return installed.every(row => !row.installed || row.name === selected ||
+    current.has(row.name) && isDeepStrictEqual(current.get(row.name), next.get(row.name)));
+}
+
 async function marketplaceMetadata(root: string): Promise<Map<string, MarketplaceItem>> {
   const file = join(root, '.agents', 'plugins', 'marketplace.json');
   try {
@@ -170,6 +176,8 @@ export async function createCodexPluginHost(input: CodexPluginHostSettings) {
     } catch (error) { await unlink(temporary).catch(() => {}); throw error; }
   }
   const nativeMarkets = async () => marketList.parse(JSON.parse(await cli(['plugin', 'marketplace', 'list', '--json']))).marketplaces;
+  const nativeCatalog = async (name: string) =>
+    catalogSchema.parse(JSON.parse(await cli(['plugin', 'list', '--marketplace', name, '--available', '--json'])));
   const sourceRecords = async () => [
     ...settings.markets.map(item => ({ ...item, label: item.name, removable: false })),
     ...(await managed()).map(item => ({ ...item, removable: true })),
@@ -191,7 +199,7 @@ export async function createCodexPluginHost(input: CodexPluginHostSettings) {
       if (!current) return [];
 
       const metadata = await marketplaceMetadata(current.root);
-      const rows = catalogSchema.parse(JSON.parse(await cli(['plugin', 'list', '--marketplace', allowed.name, '--available', '--json'])));
+      const rows = await nativeCatalog(allowed.name);
       return [...rows.installed, ...rows.available].flatMap(row => {
         if (!name.safeParse(row.name).success || row.marketplaceName !== allowed.name ||
           row.pluginId !== row.name + '@' + allowed.name ||
@@ -205,7 +213,7 @@ export async function createCodexPluginHost(input: CodexPluginHostSettings) {
         const candidate = allowed.removable ? updates.get(row.pluginId) : undefined;
         const update = candidate && row.installed && row.installPolicy === 'AVAILABLE' &&
           samePackage(candidate.source, packageInfo) && newerVersion(candidate.version, row.version)
-          ? { version: candidate.version, revision: candidate.revision, commit: candidate.commit } : undefined;
+          ? { version: candidate.version, revision: candidate.revision, commit: candidate.commit, marketConflict: candidate.marketConflict } : undefined;
         const entry: PluginEntry = {
           id: row.pluginId, name: details?.interface?.displayName ?? row.name,
           description: details?.description ?? '', source: allowed.label, sourceId: allowed.name, version: row.version,
@@ -213,7 +221,8 @@ export async function createCodexPluginHost(input: CodexPluginHostSettings) {
           releases: row.version ? [{ version: row.version, installable: false, repository: packageInfo.url, commit: packageInfo.sha, directory: packageInfo.path }] : undefined,
           installed: row.installed, enabled: row.enabled, application: 'unverified',
           update,
-          actions: row.installed ? [row.enabled ? 'disable' : 'enable', 'remove', ...(row.enabled && update ? ['update'] as const : [])] :
+          actions: row.installed ? [row.enabled ? 'disable' : 'enable', 'remove',
+            ...(row.enabled && update && !update.marketConflict ? ['update'] as const : [])] :
             row.installPolicy === 'AVAILABLE' ? ['install'] : [],
         };
         return [entry];
@@ -247,23 +256,27 @@ export async function createCodexPluginHost(input: CodexPluginHostSettings) {
       const repository = githubRepository(source.url);
       const revision = await resolveRevision(repository.url, source.ref ?? 'HEAD');
       const manifest = manifestMetadata.parse(await readGithubManifest(repository.path, revision, deadline));
-      if (manifest.name !== source.name || new Set(manifest.plugins.map(item => item.name)).size !== manifest.plugins.length)
+      const proposed = new Map(manifest.plugins.map(item => [item.name, item]));
+      if (manifest.name !== source.name || proposed.size !== manifest.plugins.length)
         throw new Error('plugin_update_market_mismatch');
       const previous = await marketplaceMetadata(current.root);
+      const native = revision === source.revision ? [] : (await nativeCatalog(source.name)).installed;
       for (let offset = 0; offset < installed.length; offset += 8) {
         deadline.throwIfAborted();
         const releases = await Promise.allSettled(installed.slice(offset, offset + 8).map(async entry => {
           const name = entry.id.slice(0, -(source.name.length + 1));
           const before = packageSource.safeParse(previous.get(name)?.source).data;
-          const after = packageSource.safeParse(manifest.plugins.find(item => item.name === name)?.source).data;
+          const after = packageSource.safeParse(proposed.get(name)?.source).data;
           if (!before || !after || !samePackage(before, after)) return;
           const packageRepo = githubRepository(after.url);
           if (packageRepo.url !== after.url) return;
           const directory = after.path?.replace(/^\.\//, '');
           const descriptor = z.object({ name: z.string(), version: z.string().max(128) }).parse(await readGithubJson(
             packageRepo.path, after.sha, (directory ? directory + '/' : '') + '.codex-plugin/plugin.json', deadline));
-          if (descriptor.name === name && newerVersion(descriptor.version, entry.version))
-            next.set(entry.id, { version: descriptor.version, revision, commit: after.sha, source: after });
+          if (descriptor.name === name && newerVersion(descriptor.version, entry.version)) {
+            const marketConflict = preservesInstalledPeers(native, previous, proposed, name) ? undefined : true;
+            next.set(entry.id, { version: descriptor.version, revision, commit: after.sha, source: after, manifest: proposed, marketConflict });
+          }
         }));
         if (releases.some(release => release.status === 'rejected')) throw new Error('plugin_release_unavailable');
       }
@@ -282,7 +295,7 @@ export async function createCodexPluginHost(input: CodexPluginHostSettings) {
       const current = markets.find(item => item.name === source.name);
       if (current) {
         await verifyMarket(source, current);
-        const catalog = catalogSchema.parse(JSON.parse(await cli(['plugin', 'list', '--marketplace', source.name, '--available', '--json'])));
+        const catalog = await nativeCatalog(source.name);
         if (catalog.installed.some(item => item.installed)) throw new PluginSourceError('plugin_source_in_use');
         await cli(['plugin', 'marketplace', 'remove', source.name, '--json']);
         if ((await nativeMarkets()).some(item => item.name === source.name)) throw new Error('plugin_source_removal_unconfirmed');
@@ -340,9 +353,11 @@ export async function createCodexPluginHost(input: CodexPluginHostSettings) {
   }
 
   async function updatePlugin(row: PluginEntry, candidate: Candidate, source: ManagedMarket, expectedTarget: string) {
-    const current = (await nativeMarkets()).find(item => item.name === source.name);
-    await verifyMarket(source, current);
+    const current = await verifyMarket(source, (await nativeMarkets()).find(item => item.name === source.name));
+    const pluginName = row.id.slice(0, -(source.name.length + 1));
     if (source.revision !== candidate.revision) {
+      const previous = await marketplaceMetadata(current.root);
+      if (!preservesInstalledPeers((await nativeCatalog(source.name)).installed, previous, candidate.manifest, pluginName)) return false;
       const pending = { ...source, pendingRevision: candidate.revision };
       await saveManaged((await managed()).map(item => item.name === source.name ? pending : item));
       try {
@@ -354,13 +369,13 @@ export async function createCodexPluginHost(input: CodexPluginHostSettings) {
     }
     if (source.revision !== candidate.revision) throw new Error('plugin_update_market_not_applied');
     const market = await verifyMarket(source, (await nativeMarkets()).find(item => item.name === source.name));
-    const pluginName = row.id.slice(0, -(source.name.length + 1));
     const selected = packageSource.parse((await marketplaceMetadata(market.root)).get(pluginName)?.source);
     if (selected.sha !== candidate.commit || !samePackage(selected, candidate.source) || await target() !== expectedTarget)
       throw new Error('plugin_update_package_changed');
     const result = z.object({ pluginId: pluginKey, version: z.string() }).parse(JSON.parse(
       await cli(['plugin', 'add', row.id, '--json'], 65_000)));
     if (result.pluginId !== row.id || result.version !== candidate.version) throw new Error('plugin_update_result_mismatch');
+    return true;
   }
 
   async function change(command: PluginCommand, expectedTarget: string): Promise<PluginResult> {
@@ -380,7 +395,7 @@ export async function createCodexPluginHost(input: CodexPluginHostSettings) {
         if (!source || source.pendingRevision || !candidate || row.update?.version !== command.version ||
           row.update?.revision !== command.revision) return 'failed';
         dispatched = true;
-        await updatePlugin(row, candidate, source, expectedTarget);
+        if (!await updatePlugin(row, candidate, source, expectedTarget)) return 'failed';
       } else {
         if (command.version) return 'failed';
         dispatched = true;

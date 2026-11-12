@@ -54,7 +54,7 @@ export const pluginEntry = z.object({
   enabled: z.boolean(),
   application: z.enum(['unverified', 'applied', 'restart-required', 'failed']),
   actions: z.array(pluginAction).max(5),
-  update: z.object({ version: z.string().min(1).max(128), revision, commit: revision }).strict().optional(),
+  update: z.object({ version: z.string().min(1).max(128), revision, commit: revision, marketConflict: z.literal(true).optional() }).strict().optional(),
 }).strict();
 export type PluginEntry = z.infer<typeof pluginEntry>;
 

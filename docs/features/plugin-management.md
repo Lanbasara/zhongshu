@@ -15,7 +15,7 @@
 
 登录工作台，从侧栏底部「设置」进入「插件」标签（也可在「搜索与跳转」输入“插件”）。选 Codex 或 DSH，再切换「发现」和「已安装」。使用「添加来源」录入对应原生市场，使用「管理来源」查看和移除自己添加的市场。在「发现」选择市场或搜索名称，选条目打开详情。安装、停用、启用、卸载都有确认步骤，范围为「当前实例」，不选工作区。操作后等待状态落定，然后刷新页面、重新打开同一端核对。端点失联或未配置时，页面会区别显示。
 
-在 Codex 的「已安装」点击「检查更新」。有新版本时，列表显示「可更新至」，详情显示目标版本。已启用的插件可点击「更新」，确认框列出当前版本、目标版本和包提交。已停用的插件先启用再更新。操作者预设市场由实例配置维护。
+在 Codex 的「已安装」点击「检查更新」。有新版本时，列表显示「可更新至」，详情显示目标版本。已启用的插件可点击「更新」，确认框列出当前版本、目标版本和包提交。已停用的插件先启用再更新。同一个市场的新版快照还改动了其他已安装插件时，详情会提示并暂停单独更新。操作者预设市场由实例配置维护。
 
 ## Driving it with Harness
 
@@ -57,7 +57,8 @@ ZHONGSHU_CODEX_PLUGIN_CONFIG=/run/operator/codex-plugin-manager.json node dist/s
 - P03：比较工作区摘要和独立原生环境的前后清单。从无登录上下文读私有插件入口应返回 401。从已登录的同源页面读取 `/api/session` 的 `csrfToken`，仅用于同源请求的 `x-csrf-token` 头。对 `/api/private/workbench/plugins/codex/operations` POST JSON `{ id: crypto.randomUUID(), pluginId: "gmail@openai-curated-remote", action: "install" }` 应返回 403 `plugin_action_forbidden`（这一判据需要已接通的管理进程；未接通时安装请求返回 503 `plugin_management_unavailable`）。省略 CSRF 或使用错误 Origin 返回 403，加入 `workspaceId` 返回 400。保留状态和错误码，不记录认证信息。
 - P05：从允许管理来源的空目录开始。在 Codex 添加 `Lanbasara/jianwei-marketplace`，从 GitHub 市场读出见微；在 DSH 添加 `https://raw.githubusercontent.com/Lanbasara/jianwei-marketplace/main/dsh/index.json`，确认来源下拉项和详情版本历史。在 DSH 选择一个兼容版本安装，切换到另一兼容版本，每次在原生包清单读回准确版本。DSH 来源通过 `pluginMarket/listIndexes` 核对 URL，读包清单时将下方示例中的 `zhixing` 改为 `jianwei`；在 Codex 安装当前市场固定的发行，用上面的 CLI 清单命令指定 `--marketplace jianwei`。刷新页面核对来源与状态。保留一个已安装项尝试移除其市场，预期保留来源并提示卸载；卸载后移除，另一 Harness 的来源保持原样。给 DSH 输入私有地址，预期拒绝。
 - P04：在独占现场用[浏览器故障控制](README.md#drive控制与读回)在确认前用 `window.zhVerify.dropNext("/api/private/workbench/plugins/dsh/operations")` 丢弃一次操作响应，Codex 场景替换为 `codex`。保存 `window.zhVerify.status().journal` 中的请求 ID，再刷新，从同源 `GET /api/private/workbench/plugins/<harness>` 的 `operation` 读回同一 ID 和状态，并核对原生清单。需要重启的分支必须由原生返回该结果，记录回执，再按操作者入口重启本轮 Host，点击「核对原生结果」。未观察到原生重启结果时把该分支记为未覆盖。
-- P06：使用下方的 Codex 更新现场。先从原生 CLI 清单、市场目录的 `git rev-parse HEAD` 和同一 App Server 的 `skills/list` 记录初始状态。打开「已安装」检查更新，记录旧版和候选版。打开确认框后取消，核对原生版本和市场提交仍为旧版。重新打开并确认，等待「已核对原生结果」，刷新页面并重新检查，应显示已装新版且没有可用更新。独立核对市场提交、CLI 清单的安装版本与启用状态，并用 `skills/list` 检查新版新增的 `jianwei:explain`。要验证丢响应，可在确认前按 P04 丢弃本次 POST 响应，按同一操作 ID 读回。无 CSRF 的检查请求应返回 403，提交未展示的更新提交应返回 403；有待核实操作时检查更新应返回 409。
+- P06：使用下方的 Codex 更新现场。先从原生 CLI 清单、市场目录的 `git rev-parse HEAD` 和同一 App Server 的 `skills/list` 记录初始状态。打开「已安装」检查更新，记录旧版和候选版。打开确认框后取消，核对原生版本和市场提交仍为旧版。重新打开并确认，等待「已核对原生结果」，刷新页面并重新检查，应显示已装新版且没有可用更新。独立核对市场提交、CLI 清单的安装版本与启用状态，并用 `skills/list` 检查新版新增的 `jianwei:explain`。
+- P06 反例：从已登录的同源页面 POST `/api/private/workbench/plugins/codex/check-updates`，JSON 请求体为 `{}`。省略 CSRF 头时应返回 403。在已检查并发现候选后，向同一路径前缀的 `/operations` POST `{ id: crypto.randomUUID(), pluginId: "jianwei@jianwei", action: "update", version: "0.4.0", revision: "0".repeat(40) }`，用页面显示的目标版本替换 `version`，预期 403。要验证丢响应，可按 P04 丢弃一次确认请求的响应，或用浏览器网络控制转发原 POST 后丢弃响应。在原操作仍为 `applying` 或 `unknown` 时再次检查更新应返回 409。恢复正常读回后，核对同一操作 ID 和原生版本。
 
 ### Codex 更新现场
 

@@ -20,7 +20,7 @@ type PluginEntry = {
   version: string | null; installed: boolean; enabled: boolean; system?: boolean;
   application: keyof typeof application;
   actions: PluginAction[];
-  update?: { version: string; revision: string; commit: string };
+  update?: { version: string; revision: string; commit: string; marketConflict?: true };
   releases?: { version: string; installable: boolean; publishedAt?: number; repository?: string; commit?: string; directory?: string }[];
   skills?: { name: string; description: string }[];
 };
@@ -170,7 +170,8 @@ export function PluginLibrary({ harness, onHarness, view, error, sourceError, bu
           {currentRelease?.commit && <div><dt>发行提交</dt><dd><code>{currentRelease.commit}</code></dd></div>}
           {currentRelease?.directory && <div><dt>包目录</dt><dd><code>{currentRelease.directory}</code></dd></div>}
           {active.installed && <div><dt>安装状态</dt><dd>{active.enabled ? '已启用' : '已停用'}</dd></div>}
-          {active.update && <div><dt>可用更新</dt><dd>{active.update.version}{!active.enabled && '（启用后可更新）'}</dd></div>}
+          {active.update && <div><dt>可用更新</dt><dd>{active.update.version}
+            {active.update.marketConflict ? '（同市场还有其他已安装插件变更）' : !active.enabled && '（启用后可更新）'}</dd></div>}
           {(active.application !== 'unverified' || active.installed && active.enabled) && <div><dt>加载状态</dt><dd>{application[active.application]}</dd></div>}
         </dl></section>
         {!!active.releases?.length && <section className="pl-detail-section"><h3>版本</h3>
