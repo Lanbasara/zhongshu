@@ -61,11 +61,18 @@ async function peer(t: TestContext) {
     }));
     await new Promise<void>(resolve => http!.listen(socketPath, resolve));
   }
-  async function stop() {
+  async function stop(mode: 'terminate' | 'end' = 'terminate') {
     if (!http || !ws) return;
-    for (const socket of ws.clients) socket.terminate();
+    const httpClosed = new Promise<void>((resolve, reject) => http!.close(error => error ? reject(error) : resolve()));
+    for (const socket of ws.clients) {
+      if (mode === 'end') {
+        // Flush an IPC EOF, rather than a reset that may skip end when requests are in flight.
+        socket.removeAllListeners('message');
+        (socket as WebSocket & { _socket: Socket })._socket.end();
+      } else socket.terminate();
+    }
     await new Promise<void>(resolve => ws!.close(() => resolve()));
-    await new Promise<void>((resolve, reject) => http!.close(error => error ? reject(error) : resolve()));
+    await httpClosed;
     ws = undefined; http = undefined;
   }
   t.after(async () => { for (const close of cleanups.toReversed()) await close(); await stop(); await rm(directory, { recursive: true }); });
@@ -111,7 +118,7 @@ test('reconnecting during a closing transport retires its established observatio
     assert.equal(oldTransport.readyState, 2, 'real IPC ended before the WebSocket close event');
     retry = assert.rejects(rpc.connect());
   });
-  await p.stop();
+  await p.stop('end');
   await until(() => retry !== undefined);
   await retry;
   assert.equal(oldTransport.readyState, 3);
@@ -150,7 +157,7 @@ test('Codex transport loss immediately persists unknown, preserves facts, and re
   let closingReconcile: Promise<unknown> | undefined;
   // Force ordinary reconciliation into the real IPC end -> WebSocket close window.
   oldTransport._socket.once('end', () => { closingReconcile = service.reconcile(id); });
-  await p.stop();
+  await p.stop('end');
   await until(() => closingReconcile !== undefined);
   await closingReconcile;
   await until(() => store.getConversation(id)?.state.status === 'unknown');
