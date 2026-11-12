@@ -16,7 +16,7 @@
 | 查看主 Agent 派生的子 Agent 与 DSH 团队，单独停止子 Agent | [subagents](subagents.md)：S01–S09 | fixture；原生派生、停止与团队需真实 Harness |
 | 工作区文件、只读 HTML 与条件保存 | [workspace-files](workspace-files.md) | 浏览器、合成报告与纯文本、两个真实 Harness |
 | 添加目录、管理、移除与恢复工作区登记 | [workspace-management](workspace-management.md) | fixture、两个真实 Harness、本地与 VPS 测试实例 |
-| 实例级插件发现、安装、启停与卸载 | [plugin-management](plugin-management.md)：P01–P05 | 浏览器、隔离的 Codex 与 DSH 原生环境 |
+| 实例级插件发现、安装、启停、卸载与 Codex 更新 | [plugin-management](plugin-management.md)：P01–P06 | 浏览器、隔离的 Codex 与 DSH 原生环境 |
 | 开启推送、完成/失败/等待提醒、点击直达、设备管理与安装 | [notifications](notifications.md)：N01–N07 | 能连上推送服务的真实浏览器；触发分支需真实 Harness |
 | 日程与原生自动任务、自动运行的结果、Agent 主动通知、工作区时间轴 | [automations](automations.md)：T01–T10 | 真实 DSH 0.2.2+；主动通知需操作者配置的通知工具 |
 | 用 `sichen` 命令说人话地管理定时任务（含结束日期、回到本对话）与日历条目 | [sichen](sichen.md)：S01–S08 | 真实 DSH 0.2.2+ 和 Codex；操作者配置的 `agentTools`，两边运行环境可用的 `sichen` 与令牌 |

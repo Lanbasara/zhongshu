@@ -17,6 +17,10 @@ test('private plugin operations fence targets and reconcile a lost receipt witho
   const origin = 'https://plugin.example';
   const password = randomBytes(32).toString('base64url');
   const nativeId = 'sample@approved';
+  const revision = 'a'.repeat(40);
+  const release = { version: '2', revision, commit: 'b'.repeat(40) };
+  let checked = false;
+  let updated = false;
   const record: Record<'codex' | 'dsh', { installed: boolean; sent: string[] }> = {
     codex: { installed: false, sent: [] }, dsh: { installed: false, sent: [] },
   };
@@ -26,21 +30,29 @@ test('private plugin operations fence targets and reconcile a lost receipt witho
     const state = record[harness];
     return {
       async list() {
+        const update = harness === 'codex' && checked && state.installed && !updated ? release : undefined;
         const entry: PluginEntry = {
-          id: nativeId, name: 'Sample', description: '', source: harness, version: '1',
+          id: nativeId, name: 'Sample', description: '', source: harness, version: harness === 'codex' && updated ? '2' : '1',
           installed: state.installed, enabled: state.installed, application: 'unverified',
-          actions: state.installed ? ['remove'] : ['install'],
+          actions: update ? ['remove', 'update'] : state.installed ? ['remove'] : ['install'],
+          update,
         };
         return [entry];
+      },
+      async checkUpdates() {
+        checked = true;
+        return { checked: 1, unavailable: 0 };
       },
       async updateSource(command) { sourceEdits[harness].push(command); },
       async change(command) {
         state.sent.push(command.id);
-        state.installed = command.action === 'install';
+        if (command.action === 'update') updated = true;
+        else state.installed = command.action === 'install';
         if (loseReceipt) throw new Error('receipt lost after native change');
         return 'applied';
       },
       async recover(command) {
+        if (command.action === 'update') return updated && command.revision === revision ? 'applied' : 'unknown';
         return state.installed === (command.action === 'install') ? 'applied' : 'unknown';
       },
     };
@@ -66,6 +78,9 @@ test('private plugin operations fence targets and reconcile a lost receipt witho
   const send = (harness: string, payload: object, override?: Record<string, string>) =>
     f.app.inject({ method: 'POST', url: base + '/' + harness + '/operations', headers: { ...f.headers, ...override }, payload });
   const view = (harness: string) => f.app.inject({ method: 'GET', url: base + '/' + harness, headers: f.headers });
+  const check = (headers: Record<string, string>) => f.app.inject({
+    method: 'POST', url: base + '/codex/check-updates', headers, payload: {},
+  });
   assert.equal((await f.app.inject({ url: base + '/codex' })).statusCode, 401);
   const source = { action: 'add', source: 'author/market' };
   const editSource = (harness: string, headers: Record<string, string>) => f.app.inject({
@@ -90,6 +105,7 @@ test('private plugin operations fence targets and reconcile a lost receipt witho
   const remove: PluginCommand = { ...install, id: randomUUID(), action: 'remove' };
   assert.equal((await send('codex', remove)).statusCode, 409);
   assert.equal((await editSource('codex', f.headers)).statusCode, 409);
+  assert.equal((await check(f.headers)).statusCode, 409);
   await f.close();
   f = await start();
   assert.equal((await send('codex', install)).json().status, 'unknown');
@@ -97,6 +113,23 @@ test('private plugin operations fence targets and reconcile a lost receipt witho
   assert.equal(reconcile.statusCode, 200);
   assert.equal(reconcile.json().status, 'applied');
   assert.deepEqual(record.codex.sent, [install.id]);
+  const update: PluginCommand = { id: randomUUID(), pluginId: nativeId, action: 'update', version: release.version, revision };
+  assert.equal((await check({ origin })).statusCode, 401);
+  assert.equal((await check({ ...f.headers, 'x-csrf-token': '' })).statusCode, 403);
+  assert.equal((await send('codex', update)).statusCode, 403);
+  assert.deepEqual((await check(f.headers)).json().entries[0].update, release);
+  assert.equal((await send('codex', { ...update, revision: 'c'.repeat(40) })).statusCode, 403);
+  assert.equal((await send('dsh', update)).statusCode, 403);
+  assert.equal((await send('codex', update)).statusCode, 202);
+  assert.equal((await view('codex')).json().operation.status, 'unknown');
+  await f.close();
+  f = await start();
+  assert.equal((await send('codex', { ...update, revision: 'c'.repeat(40) })).statusCode, 409);
+  const recoveredUpdate = await f.app.inject({ method: 'POST', url: base + '/codex/reconcile', headers: f.headers, payload: { id: update.id } });
+  assert.equal(recoveredUpdate.json().status, 'applied');
+  assert.equal(recoveredUpdate.json().revision, revision);
+  assert.equal((await view('codex')).json().entries[0].version, '2');
+  assert.deepEqual(record.codex.sent, [install.id, update.id]);
   loseReceipt = false;
   assert.equal((await send('codex', remove)).statusCode, 202);
   assert.equal((await view('codex')).json().entries[0].installed, false);

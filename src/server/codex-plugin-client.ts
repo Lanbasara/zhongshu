@@ -1,7 +1,7 @@
 import { request } from 'node:http';
 import { stat } from 'node:fs/promises';
 import { z } from 'zod';
-import { pluginEntry, pluginSource, pluginStatus, type PluginCommand, type PluginSourceCommand } from '../shared/plugins.ts';
+import { pluginEntry, pluginSource, pluginStatus, pluginUpdateCheck, type PluginCommand, type PluginSourceCommand } from '../shared/plugins.ts';
 import { PluginSourceError, type PluginBackend } from './plugin-backend.ts';
 
 export async function socketIdentity(path: string): Promise<string> {
@@ -14,18 +14,19 @@ const inventory = z.object({ target: z.string(), entries: z.array(pluginEntry).m
 const details = z.object({ target: z.string(), entry: pluginEntry.nullable() }).strict();
 const targetOnly = z.object({ target: z.string() }).strict();
 const outcome = z.object({ target: z.string(), status: pluginStatus.exclude(['applying']) }).strict();
+const checked = z.object({ target: z.string(), updateCheck: pluginUpdateCheck }).strict();
 const sourceError = z.object({ error: z.enum(['invalid_plugin_source', 'plugin_source_conflict', 'plugin_source_in_use']) });
 
 export function codexPluginClient(socketPath: string, nativeSocket: string): PluginBackend {
-  async function call<T extends { target: string }>(path: '/catalog' | '/change' | '/recover' | '/sources' | '/detail',
-    schema: z.ZodType<T>, input?: { command: PluginCommand | PluginSourceCommand } | { id: string }): Promise<T> {
+  async function call<T extends { target: string }>(path: '/catalog' | '/change' | '/recover' | '/sources' | '/detail' | '/check-updates',
+    schema: z.ZodType<T>, input?: { command: PluginCommand | PluginSourceCommand } | { id: string } | Record<string, never>): Promise<T> {
     const target = await socketIdentity(nativeSocket);
     await socketIdentity(socketPath);
     const body = input && JSON.stringify({ target, ...input });
     return await new Promise<T>((resolve, reject) => {
       const req = request({ socketPath, path, method: body ? 'POST' : 'GET',
         headers: body ? { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) } : undefined,
-        signal: AbortSignal.timeout(path === '/change' || path === '/sources' ? 150_000 : 35_000),
+        signal: AbortSignal.timeout(['/change', '/sources', '/check-updates', '/recover'].includes(path) ? 150_000 : 35_000),
       }, res => {
         let size = 0;
         const chunks: Buffer[] = [];
@@ -61,5 +62,6 @@ export function codexPluginClient(socketPath: string, nativeSocket: string): Plu
     change: async command => (await call('/change', outcome, { command })).status,
     recover: async command => (await call('/recover', outcome, { command })).status,
     updateSource: async command => { await call('/sources', targetOnly, { command }); },
+    checkUpdates: async () => (await call('/check-updates', checked, {})).updateCheck,
   };
 }

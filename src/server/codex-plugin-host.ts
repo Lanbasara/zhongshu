@@ -11,7 +11,7 @@ import { CodexRpc } from '../harness/codex/rpc.ts';
 import { pluginCommand, pluginSourceCommand, pluginKey, type PluginCommand, type PluginEntry, type PluginSourceCommand } from '../shared/plugins.ts';
 import { socketIdentity } from './codex-plugin-client.ts';
 import { matchesPluginAction, PluginSourceError, type PluginResult } from './plugin-backend.ts';
-import { githubRepository, publicHttps, readGithubManifest } from './plugin-sources.ts';
+import { githubRepository, publicHttps, readGithubJson, readGithubManifest } from './plugin-sources.ts';
 
 const runFile = promisify(execFile);
 const absolute = z.string().max(4096).refine(path => isAbsolute(path) && normalize(path) === path && !path.includes('\0'));
@@ -36,18 +36,54 @@ const rowSchema = z.object({
 const catalogSchema = z.object({ installed: z.array(rowSchema).max(500), available: z.array(rowSchema).max(500) });
 const manifestMetadata = z.object({ name, interface: z.object({ displayName: z.string().min(1).max(240).optional() }).optional(), plugins: z.array(z.object({
   name, description: z.string().max(1000).optional(), interface: z.object({ displayName: z.string().min(1).max(240).optional() }).optional(),
+  source: z.unknown().optional(),
 })).max(500) });
 const packageSource = z.object({
   source: z.enum(['url', 'git', 'git-subdir']), url: gitUrl, sha: commit,
   path: z.string().max(240).regex(/^(?:\.\/)?[a-zA-Z0-9_-]+(?:\/[a-zA-Z0-9_-]+)*$/).optional(),
 });
-const managedMarket = market.extend({ label: z.string().min(1).max(240) });
+const gitRef = z.string().max(128).regex(/^(?!.*(?:\.\.|\/\/))[A-Za-z0-9_][A-Za-z0-9_./-]*$/);
+const managedMarket = market.extend({ label: z.string().min(1).max(240), ref: gitRef.optional(), pendingRevision: commit.optional() });
+type ManagedMarket = z.infer<typeof managedMarket>;
+type PackageSource = z.infer<typeof packageSource>;
+type Candidate = NonNullable<PluginEntry['update']> & { source: PackageSource };
 const targetSchema = z.string().regex(/^\d+:\d+$/);
 const inputSchema = z.object({ target: targetSchema, command: pluginCommand }).strict();
 const inside = (root: string, path: string) => {
   const fromRoot = relative(root, path);
   return fromRoot !== '' && fromRoot !== '..' && !fromRoot.startsWith('../') && !isAbsolute(fromRoot);
 };
+
+function samePackage(left: PackageSource, right: PackageSource) {
+  return left.source === right.source && left.url === right.url &&
+    (left.path ?? '').replace(/^\.\//, '') === (right.path ?? '').replace(/^\.\//, '');
+}
+
+const semver = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+[0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*)?$/;
+function newerVersion(candidate: string, installed: string | null): boolean {
+  const next = semver.exec(candidate);
+  const previous = installed && semver.exec(installed);
+  if (!next || !previous) return false;
+  for (const part of [1, 2, 3]) {
+    const a = BigInt(next[part]!);
+    const b = BigInt(previous[part]!);
+    if (a !== b) return a > b;
+  }
+  if (!next[4] || !previous[4]) return !next[4] && !!previous[4];
+  const a = next[4].split('.');
+  const b = previous[4].split('.');
+  for (let i = 0; i < Math.min(a.length, b.length); i++) {
+    const x = a[i]!;
+    const y = b[i]!;
+    if (x === y) continue;
+    const xNumber = /^\d+$/.test(x);
+    const yNumber = /^\d+$/.test(y);
+    if (xNumber && yNumber) return BigInt(x) > BigInt(y);
+    if (xNumber !== yNumber) return !xNumber;
+    return x > y;
+  }
+  return a.length > b.length;
+}
 
 async function privateDirectory(path: string): Promise<void> {
   const info = await lstat(path);
@@ -91,6 +127,7 @@ export async function createCodexPluginHost(input: CodexPluginHostSettings) {
     notification() {}, serverRequest: () => false, disconnected() { boundTarget = undefined; },
   });
   let busy = false;
+  let updates = new Map<string, Candidate>();
   const completions = new Map<string, { command: PluginCommand; status: PluginResult }>();
   async function target(): Promise<string> {
     if (connectingTarget) return connectingTarget;
@@ -165,13 +202,18 @@ export async function createCodexPluginHost(input: CodexPluginHostSettings) {
           try { if (githubRepository(packageInfo.url).url !== packageInfo.url) return []; }
           catch { return []; }
         }
+        const candidate = allowed.removable ? updates.get(row.pluginId) : undefined;
+        const update = candidate && row.installed && row.installPolicy === 'AVAILABLE' &&
+          samePackage(candidate.source, packageInfo) && newerVersion(candidate.version, row.version)
+          ? { version: candidate.version, revision: candidate.revision, commit: candidate.commit } : undefined;
         const entry: PluginEntry = {
           id: row.pluginId, name: details?.interface?.displayName ?? row.name,
           description: details?.description ?? '', source: allowed.label, sourceId: allowed.name, version: row.version,
           homepage: publicHttps(packageInfo.url),
           releases: row.version ? [{ version: row.version, installable: false, repository: packageInfo.url, commit: packageInfo.sha, directory: packageInfo.path }] : undefined,
           installed: row.installed, enabled: row.enabled, application: 'unverified',
-          actions: row.installed ? [row.enabled ? 'disable' : 'enable', 'remove'] :
+          update,
+          actions: row.installed ? [row.enabled ? 'disable' : 'enable', 'remove', ...(row.enabled && update ? ['update'] as const : [])] :
             row.installPolicy === 'AVAILABLE' ? ['install'] : [],
         };
         return [entry];
@@ -181,6 +223,54 @@ export async function createCodexPluginHost(input: CodexPluginHostSettings) {
     if (entries.length > 1000 || new Set(entries.map(row => row.id)).size !== entries.length)
       throw new Error('plugin_host_catalog_invalid');
     return entries;
+  }
+
+  async function resolveRevision(url: string, ref: string) {
+    const revision = commit.safeParse(ref).data;
+    if (revision) return revision;
+    const selectors = ref === 'HEAD' || ref.startsWith('refs/') ? [ref] : ['refs/heads/' + ref, 'refs/tags/' + ref];
+    const output = await exec(settings.gitExecutable, ['-c', 'http.followRedirects=false', 'ls-remote', '--', url, ...selectors, ...selectors.map(value => value + '^{}')]);
+    const refs = new Map(output.trim().split('\n').map(line => line.split('\t')).flatMap(([sha, key]) =>
+      key && commit.safeParse(sha).success ? [[key, sha!] as const] : []));
+    const matches = selectors.map(value => refs.get(value + '^{}') ?? refs.get(value)).filter(value => value !== undefined);
+    if (matches.length !== 1) throw new PluginSourceError('invalid_plugin_source');
+    return matches[0]!;
+  }
+
+  async function checkUpdates() {
+    const [entries, sources, markets] = await Promise.all([list(), managed(), nativeMarkets()]);
+    const deadline = AbortSignal.timeout(30_000);
+    const next = new Map<string, Candidate>();
+    const results = await Promise.allSettled(sources.map(async source => {
+      const installed = entries.filter(entry => entry.installed && entry.sourceId === source.name);
+      const current = await verifyMarket(source, markets.find(item => item.name === source.name));
+      const repository = githubRepository(source.url);
+      const revision = await resolveRevision(repository.url, source.ref ?? 'HEAD');
+      const manifest = manifestMetadata.parse(await readGithubManifest(repository.path, revision, deadline));
+      if (manifest.name !== source.name || new Set(manifest.plugins.map(item => item.name)).size !== manifest.plugins.length)
+        throw new Error('plugin_update_market_mismatch');
+      const previous = await marketplaceMetadata(current.root);
+      for (let offset = 0; offset < installed.length; offset += 8) {
+        deadline.throwIfAborted();
+        const releases = await Promise.allSettled(installed.slice(offset, offset + 8).map(async entry => {
+          const name = entry.id.slice(0, -(source.name.length + 1));
+          const before = packageSource.safeParse(previous.get(name)?.source).data;
+          const after = packageSource.safeParse(manifest.plugins.find(item => item.name === name)?.source).data;
+          if (!before || !after || !samePackage(before, after)) return;
+          const packageRepo = githubRepository(after.url);
+          if (packageRepo.url !== after.url) return;
+          const directory = after.path?.replace(/^\.\//, '');
+          const descriptor = z.object({ name: z.string(), version: z.string().max(128) }).parse(await readGithubJson(
+            packageRepo.path, after.sha, (directory ? directory + '/' : '') + '.codex-plugin/plugin.json', deadline));
+          if (descriptor.name === name && newerVersion(descriptor.version, entry.version))
+            next.set(entry.id, { version: descriptor.version, revision, commit: after.sha, source: after });
+        }));
+        if (releases.some(release => release.status === 'rejected')) throw new Error('plugin_release_unavailable');
+      }
+    }));
+    updates = next;
+    const checked = results.filter(result => result.status === 'fulfilled').length;
+    return { checked, unavailable: results.length - checked };
   }
 
   async function updateSource(command: PluginSourceCommand) {
@@ -198,26 +288,17 @@ export async function createCodexPluginHost(input: CodexPluginHostSettings) {
         if ((await nativeMarkets()).some(item => item.name === source.name)) throw new Error('plugin_source_removal_unconfirmed');
       }
       await saveManaged(saved.filter(item => item.name !== source.name));
+      for (const id of updates.keys()) if (id.endsWith('@' + source.name)) updates.delete(id);
       return;
     }
     const repository = githubRepository(command.source);
-    const ref = command.ref ?? 'HEAD';
-    if (!/^(?!.*(?:\.\.|\/\/))[A-Za-z0-9_][A-Za-z0-9_./-]{0,127}$/.test(ref))
-      throw new PluginSourceError('invalid_plugin_source');
-    let revision = commit.safeParse(ref).data;
-    if (!revision) {
-      const selectors = ref === 'HEAD' || ref.startsWith('refs/') ? [ref] : ['refs/heads/' + ref, 'refs/tags/' + ref];
-      const output = await exec(settings.gitExecutable, ['-c', 'http.followRedirects=false', 'ls-remote', '--', repository.url, ...selectors, ...selectors.map(value => value + '^{}')]);
-      const refs = new Map(output.trim().split('\n').map(line => line.split('\t')).flatMap(([sha, key]) =>
-        key && commit.safeParse(sha).success ? [[key, sha!] as const] : []));
-      const matches = selectors.map(value => refs.get(value + '^{}') ?? refs.get(value)).filter(value => value !== undefined);
-      if (matches.length !== 1) throw new PluginSourceError('invalid_plugin_source');
-      revision = matches[0]!;
-    }
+    const ref = gitRef.safeParse(command.ref ?? 'HEAD').data;
+    if (!ref) throw new PluginSourceError('invalid_plugin_source');
+    const revision = await resolveRevision(repository.url, ref);
     const manifest = manifestMetadata.safeParse(await readGithubManifest(repository.path, revision));
     if (!manifest.success || manifest.data.name.toLowerCase().startsWith('openai-'))
       throw new PluginSourceError('invalid_plugin_source');
-    const source = { name: manifest.data.name, label: manifest.data.interface?.displayName ?? manifest.data.name, url: repository.url, revision };
+    const source = { name: manifest.data.name, label: manifest.data.interface?.displayName ?? manifest.data.name, url: repository.url, revision, ref };
     const existing = saved.find(item => item.name === source.name);
     if (existing?.url === source.url && existing.revision === source.revision) {
       await verifyMarket(existing, markets.find(item => item.name === source.name));
@@ -236,25 +317,78 @@ export async function createCodexPluginHost(input: CodexPluginHostSettings) {
     await saveManaged([...saved, source]);
   }
 
+  async function writeConfig(keyPath: string, value: string | boolean, expectedTarget: string) {
+    if (await target() !== expectedTarget) throw new Error('plugin_host_target_changed');
+    const filePath = join(settings.codexHome, 'config.toml');
+    const result = z.object({ filePath: absolute, status: z.string() }).parse(await rpc.requestConnected('config/value/write', {
+      keyPath, value, mergeStrategy: 'upsert', filePath,
+    }));
+    if (result.filePath !== filePath) throw new Error('plugin_host_write_target_mismatch');
+  }
+
+  async function settleMarket(source: ManagedMarket, expectedTarget: string) {
+    if (!source.pendingRevision) return source;
+    const current = (await nativeMarkets()).find(item => item.name === source.name);
+    const advanced = await verifyMarket({ ...source, revision: source.pendingRevision }, current).catch(() => undefined);
+    if (!advanced) await verifyMarket(source, current);
+    const { pendingRevision, ...previous } = source;
+    const settled = { ...previous, revision: advanced ? pendingRevision : previous.revision };
+    await writeConfig('marketplaces."' + source.name + '".ref', settled.revision, expectedTarget);
+    await verifyMarket(settled, (await nativeMarkets()).find(item => item.name === source.name));
+    await saveManaged((await managed()).map(item => item.name === source.name ? settled : item));
+    return settled;
+  }
+
+  async function updatePlugin(row: PluginEntry, candidate: Candidate, source: ManagedMarket, expectedTarget: string) {
+    const current = (await nativeMarkets()).find(item => item.name === source.name);
+    await verifyMarket(source, current);
+    if (source.revision !== candidate.revision) {
+      const pending = { ...source, pendingRevision: candidate.revision };
+      await saveManaged((await managed()).map(item => item.name === source.name ? pending : item));
+      try {
+        await writeConfig('marketplaces."' + source.name + '".ref', candidate.revision, expectedTarget);
+        await cli(['plugin', 'marketplace', 'upgrade', source.name, '--json'], 55_000);
+      } finally {
+        source = await settleMarket(pending, expectedTarget);
+      }
+    }
+    if (source.revision !== candidate.revision) throw new Error('plugin_update_market_not_applied');
+    const market = await verifyMarket(source, (await nativeMarkets()).find(item => item.name === source.name));
+    const pluginName = row.id.slice(0, -(source.name.length + 1));
+    const selected = packageSource.parse((await marketplaceMetadata(market.root)).get(pluginName)?.source);
+    if (selected.sha !== candidate.commit || !samePackage(selected, candidate.source) || await target() !== expectedTarget)
+      throw new Error('plugin_update_package_changed');
+    const result = z.object({ pluginId: pluginKey, version: z.string() }).parse(JSON.parse(
+      await cli(['plugin', 'add', row.id, '--json'], 65_000)));
+    if (result.pluginId !== row.id || result.version !== candidate.version) throw new Error('plugin_update_result_mismatch');
+  }
+
   async function change(command: PluginCommand, expectedTarget: string): Promise<PluginResult> {
     if (busy) return 'unknown';
     const prior = completions.get(command.id);
-    if (prior) return prior.command.pluginId === command.pluginId && prior.command.action === command.action && prior.command.version === command.version ? prior.status : 'failed';
+    if (prior) return prior.command.pluginId === command.pluginId && prior.command.action === command.action &&
+      prior.command.version === command.version && prior.command.revision === command.revision ? prior.status : 'failed';
     busy = true;
     let status: PluginResult = 'failed';
     let dispatched = false;
     try {
       const row = (await list()).find(entry => entry.id === command.pluginId);
-      if (command.version || !row?.actions.includes(command.action) || await target() !== expectedTarget) return 'failed';
-      dispatched = true;
-      if (command.action === 'install' || command.action === 'remove') {
-        await cli(['plugin', command.action === 'install' ? 'add' : 'remove', row.id, '--json'], 90_000);
+      if (!row?.actions.includes(command.action) || await target() !== expectedTarget) return 'failed';
+      if (command.action === 'update') {
+        const candidate = updates.get(row.id);
+        const source = (await managed()).find(item => item.name === row.sourceId);
+        if (!source || source.pendingRevision || !candidate || row.update?.version !== command.version ||
+          row.update?.revision !== command.revision) return 'failed';
+        dispatched = true;
+        await updatePlugin(row, candidate, source, expectedTarget);
       } else {
-        const result = z.object({ filePath: absolute, status: z.string() }).parse(await rpc.requestConnected('config/value/write', {
-          keyPath: 'plugins."' + row.id + '".enabled', value: command.action === 'enable', mergeStrategy: 'upsert',
-          filePath: join(settings.codexHome, 'config.toml'),
-        }));
-        if (result.filePath !== join(settings.codexHome, 'config.toml')) throw new Error('plugin_host_write_target_mismatch');
+        if (command.version) return 'failed';
+        dispatched = true;
+        if (command.action === 'install' || command.action === 'remove') {
+          await cli(['plugin', command.action === 'install' ? 'add' : 'remove', row.id, '--json'], 90_000);
+        } else {
+          await writeConfig('plugins."' + row.id + '".enabled', command.action === 'enable', expectedTarget);
+        }
       }
       status = await target() === expectedTarget && matchesPluginAction(command, await list()) ? 'applied' : 'unknown';
     } catch {
@@ -281,6 +415,21 @@ export async function createCodexPluginHost(input: CodexPluginHostSettings) {
     })));
     if (await target() !== expectedTarget) throw new Error('plugin_host_target_changed');
     return { target: expectedTarget, entries, sources };
+  });
+  app.post('/check-updates', async (request, reply) => {
+    const input = z.object({ target: targetSchema }).strict().safeParse(request.body);
+    if (!input.success) return reply.code(400).send({ error: 'invalid_request' });
+    const expectedTarget = await target();
+    if (input.data.target !== expectedTarget || busy) return reply.code(409).send({ error: 'plugin_host_target_mismatch' });
+    busy = true;
+    try {
+      const updateCheck = await checkUpdates();
+      if (await target() !== expectedTarget) {
+        updates.clear();
+        throw new Error('plugin_host_target_changed');
+      }
+      return { target: expectedTarget, updateCheck };
+    } finally { busy = false; }
   });
   app.post('/sources', async (request, reply) => {
     const input = z.object({ target: targetSchema, command: pluginSourceCommand }).strict().safeParse(request.body);
@@ -335,6 +484,20 @@ export async function createCodexPluginHost(input: CodexPluginHostSettings) {
     if (input.data.target !== expectedTarget) return reply.code(409).send({ error: 'plugin_host_target_mismatch' });
     const command = input.data.command;
     if (busy) return { target: expectedTarget, status: 'unknown' };
+    if (command.action === 'update') {
+      busy = true;
+      try {
+        const marketName = command.pluginId.split('@')[1];
+        const record = (await managed()).find(item => item.name === marketName);
+        if (!record || record.pendingRevision && record.pendingRevision !== command.revision)
+          return { target: expectedTarget, status: 'unknown' };
+        const source = await settleMarket(record, expectedTarget);
+        const entry = (await list()).find(item => item.id === command.pluginId);
+        if (await target() !== expectedTarget || !entry?.installed) return { target: expectedTarget, status: 'unknown' };
+        const status = source.revision === command.revision && entry.version === command.version && entry.enabled ? 'applied' : 'failed';
+        return { target: expectedTarget, status };
+      } finally { busy = false; }
+    }
     const entries = await list();
     const known = completions.get(command.id);
     if (busy || await target() !== expectedTarget) return { target: expectedTarget, status: 'unknown' };

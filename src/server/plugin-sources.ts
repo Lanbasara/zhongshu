@@ -20,9 +20,14 @@ export function githubIndex(input: string): string {
   return url.href;
 }
 
-export async function readGithubManifest(repository: string, commit: string): Promise<unknown> {
-  const response = await fetch('https://raw.githubusercontent.com/' + repository + '/' + commit + '/.agents/plugins/marketplace.json', {
-    redirect: 'error', signal: AbortSignal.timeout(10_000),
+export async function readGithubManifest(repository: string, commit: string, signal?: AbortSignal): Promise<unknown> {
+  return await readGithubJson(repository, commit, '.agents/plugins/marketplace.json', signal);
+}
+
+export async function readGithubJson(repository: string, commit: string, path: string, signal?: AbortSignal): Promise<unknown> {
+  const timeout = AbortSignal.timeout(10_000);
+  const response = await fetch('https://raw.githubusercontent.com/' + repository + '/' + commit + '/' + path, {
+    redirect: 'error', signal: signal ? AbortSignal.any([timeout, signal]) : timeout,
   });
   if (response.status === 404) throw new PluginSourceError('invalid_plugin_source');
   if (!response.ok || !response.body) throw new Error('plugin_manifest_unavailable');

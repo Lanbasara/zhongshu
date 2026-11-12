@@ -364,6 +364,24 @@ export const productMigrations: Migration[] = [{ version: 2, sql: `
   CREATE INDEX workbench_operations_automation_run ON workbench_operations(conversation_id, run_id) WHERE automation_id IS NOT NULL;
   ALTER TABLE agent_results ADD COLUMN run_id TEXT;
   CREATE INDEX agent_results_run ON agent_results(conversation_id, run_id, created_at);
+` }, { version: 28, sql: `
+  ALTER TABLE plugin_operations RENAME TO plugin_operations_old;
+  CREATE TABLE plugin_operations (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    id TEXT NOT NULL UNIQUE,
+    harness TEXT NOT NULL CHECK (harness IN ('codex', 'dsh')),
+    plugin_id TEXT NOT NULL,
+    action TEXT NOT NULL CHECK (action IN ('install', 'enable', 'disable', 'remove', 'update')),
+    status TEXT NOT NULL CHECK (status IN ('applying', 'unknown', 'applied', 'restart-required', 'failed')),
+    version TEXT,
+    revision TEXT
+  ) STRICT;
+  INSERT INTO plugin_operations(sequence,id,harness,plugin_id,action,status,version)
+    SELECT sequence,id,harness,plugin_id,action,status,version FROM plugin_operations_old;
+  DROP TABLE plugin_operations_old;
+  CREATE INDEX plugin_operations_target ON plugin_operations(harness, plugin_id, sequence);
+  CREATE UNIQUE INDEX plugin_operations_in_flight ON plugin_operations(harness)
+    WHERE status IN ('applying', 'unknown', 'restart-required');
 ` }];
 
 /** Runs inside restoreDatabase's private staging transaction, before the database is published. */

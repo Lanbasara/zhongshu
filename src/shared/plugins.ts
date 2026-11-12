@@ -2,7 +2,7 @@ import { z } from 'zod';
 
 export const pluginHarness = z.enum(['codex', 'dsh']);
 export type PluginHarness = z.infer<typeof pluginHarness>;
-export const pluginAction = z.enum(['install', 'enable', 'disable', 'remove']);
+export const pluginAction = z.enum(['install', 'enable', 'disable', 'remove', 'update']);
 export type PluginAction = z.infer<typeof pluginAction>;
 export const pluginKey = z.string().min(1).max(240).regex(/^[A-Za-z0-9@/_.:-]+$/);
 export const pluginStatus = z.enum(['applying', 'unknown', 'applied', 'restart-required', 'failed']);
@@ -31,6 +31,13 @@ export const pluginRelease = z.object({
   directory: z.string().max(240).optional(),
 }).strict();
 
+const revision = z.string().regex(/^[a-f0-9]{40}$/);
+export const pluginUpdateCheck = z.object({
+  checked: z.number().int().nonnegative(),
+  unavailable: z.number().int().nonnegative(),
+}).strict();
+export type PluginUpdateCheck = z.infer<typeof pluginUpdateCheck>;
+
 export const pluginEntry = z.object({
   id: pluginKey,
   name: z.string().min(1).max(240),
@@ -46,7 +53,8 @@ export const pluginEntry = z.object({
   installed: z.boolean(),
   enabled: z.boolean(),
   application: z.enum(['unverified', 'applied', 'restart-required', 'failed']),
-  actions: z.array(pluginAction).max(4),
+  actions: z.array(pluginAction).max(5),
+  update: z.object({ version: z.string().min(1).max(128), revision, commit: revision }).strict().optional(),
 }).strict();
 export type PluginEntry = z.infer<typeof pluginEntry>;
 
@@ -55,7 +63,10 @@ export const pluginCommand = z.object({
   pluginId: pluginKey,
   action: pluginAction,
   version: z.string().min(1).max(128).optional(),
-}).strict().refine(command => !command.version || command.action === 'install');
+  revision: revision.optional(),
+}).strict().refine(command => command.action === 'update'
+  ? !!command.version && !!command.revision
+  : !command.revision && (!command.version || command.action === 'install'));
 export type PluginCommand = z.infer<typeof pluginCommand>;
 
 export const pluginOperation = pluginCommand.safeExtend({ status: pluginStatus }).strict();
@@ -64,6 +75,7 @@ export const pluginView = z.object({
   availability: z.enum(['available', 'unconfigured', 'offline']),
   entries: z.array(pluginEntry).max(1000),
   sources: z.array(pluginSource).max(40).optional(),
+  updateCheck: pluginUpdateCheck.optional(),
   operation: pluginOperation.nullable(),
 }).strict();
 export type PluginView = z.infer<typeof pluginView>;

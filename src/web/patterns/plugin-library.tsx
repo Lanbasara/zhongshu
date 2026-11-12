@@ -4,7 +4,7 @@ import { Dialog } from 'radix-ui';
 import { Button, IconButton } from '../ui/controls.tsx';
 import './plugin-library.css';
 
-export const pluginActionName = { install: '安装', enable: '启用', disable: '停用', remove: '卸载' };
+export const pluginActionName = { install: '安装', enable: '启用', disable: '停用', remove: '卸载', update: '更新' };
 const nativeResult = {
   applying: '正在处理', unknown: '结果待核实', applied: '已核对原生结果',
   'restart-required': '等待原生 Host 重启', failed: '原生操作失败',
@@ -20,6 +20,7 @@ type PluginEntry = {
   version: string | null; installed: boolean; enabled: boolean; system?: boolean;
   application: keyof typeof application;
   actions: PluginAction[];
+  update?: { version: string; revision: string; commit: string };
   releases?: { version: string; installable: boolean; publishedAt?: number; repository?: string; commit?: string; directory?: string }[];
   skills?: { name: string; description: string }[];
 };
@@ -28,6 +29,7 @@ type PluginView = {
   entries: PluginEntry[];
   sources?: { id: string; name: string; url: string; removable: boolean; unavailable?: boolean }[];
   operation: { pluginId: string; action: PluginAction; status: keyof typeof nativeResult } | null;
+  updateCheck?: { checked: number; unavailable: number };
 };
 type PluginSourceCommand = { action: 'add'; source: string; ref?: string } | { action: 'remove'; id: string };
 
@@ -38,9 +40,11 @@ type Props = {
   error?: string;
   sourceError?: string;
   busy?: boolean;
+  checking?: boolean;
   uncertain?: boolean;
   detail?: PluginEntry;
   onRefresh(): void;
+  onCheckUpdates?(): void;
   onDetail(id?: string): void;
   onSource(command: PluginSourceCommand): Promise<boolean>;
   onAction(entry: PluginEntry, action: PluginAction, version?: string): void;
@@ -70,7 +74,7 @@ function EntryRow({ entry, open }: { entry: PluginEntry; open(): void }) {
     <Mark entry={entry}/>
     <span className="pl-entry-copy"><strong>{entry.name}</strong>
       {entry.description && <span>{entry.description}</span>}
-      <small>{[entry.source, entry.version, entry.author].filter(Boolean).join(' · ')}</small>
+      <small>{[entry.source, entry.version, entry.update && '可更新至 ' + entry.update.version, entry.author].filter(Boolean).join(' · ')}</small>
     </span>
     {entry.installed && <span className={entry.enabled ? 'pl-status pl-status-active' : 'pl-status'}>
       {entry.enabled && <Check size={13}/>} {entry.enabled ? '已启用' : '已停用'}
@@ -79,7 +83,7 @@ function EntryRow({ entry, open }: { entry: PluginEntry; open(): void }) {
   </button></li>;
 }
 
-export function PluginLibrary({ harness, onHarness, view, error, sourceError, busy, uncertain, detail, onRefresh, onDetail, onSource, onAction, onReconcile, onRetry }: Props) {
+export function PluginLibrary({ harness, onHarness, view, error, sourceError, busy, checking, uncertain, detail, onRefresh, onCheckUpdates, onDetail, onSource, onAction, onReconcile, onRetry }: Props) {
   const [tab, setTab] = useState<'discover' | 'installed'>('discover');
   const [source, setSource] = useState('');
   const [query, setQuery] = useState('');
@@ -107,6 +111,8 @@ export function PluginLibrary({ harness, onHarness, view, error, sourceError, bu
   const chosenMarket = sources.find(item => item.id === source);
   const detailMarket = sources.find(item => item.id === active?.sourceId);
   const currentRelease = active?.releases?.find(release => release.version === active.version);
+  const updateCount = view?.entries.filter(entry => !!entry.update).length ?? 0;
+  const updateCheck = view?.updateCheck;
   useEffect(() => {
     if (selected) heading.current?.focus({ preventScroll: true });
     else if (previous.current) rowOrigin.current?.focus({ preventScroll: true });
@@ -139,13 +145,18 @@ export function PluginLibrary({ harness, onHarness, view, error, sourceError, bu
         </nav>
       </div>
       {error && <p className="pl-notice" role="alert">{error}</p>}
+      {tab === 'installed' && !active && updateCheck && <p className="pl-notice" role="status">
+        {updateCount ? `${updateCount} 个插件有可用更新。` : updateCheck.checked ? '已检查的市场没有可用更新。' :
+          updateCheck.unavailable ? '暂时无法检查市场更新。' : '没有可检查更新的自加市场。'}
+        {updateCheck.unavailable > 0 && (updateCheck.checked > 0 || updateCount > 0) && ` ${updateCheck.unavailable} 个市场暂时无法检查。`}
+      </p>}
       {showStatus && <div className="pl-notice" role="status"><span>{pluginActionName[operation.action]} · {nativeResult[operation.status]}</span>
         {['unknown', 'restart-required'].includes(operation.status) && <Button variant="quiet" disabled={busy} onClick={onReconcile}>核对原生结果</Button>}</div>}
       {uncertain && <div className="pl-notice"><Button variant="quiet" disabled={busy} onClick={onRetry}>核对同一操作</Button></div>}
       {active ? <>
         <Button variant="quiet" className="pl-back" onClick={() => { setSelected(undefined); onDetail(); }}><ArrowLeft size={16}/>返回{tab === 'discover' ? '发现' : '已安装'}</Button>
         <div className="pl-detail-head"><Mark entry={active}/><div><h2 ref={heading} tabIndex={-1}>{active.name}</h2><p>{active.id} {active.version && <span className="pl-version">{active.version}</span>}</p></div>
-          <div className="pl-actions">{active.actions.filter(action => action !== 'install' || !active.installed).map(action => <Button key={action} disabled={locked} variant={action === 'install' || action === 'enable' ? 'primary' : 'secondary'}
+          <div className="pl-actions">{active.actions.filter(action => action !== 'install' || !active.installed).map(action => <Button key={action} disabled={locked} variant={action === 'install' || action === 'enable' || action === 'update' ? 'primary' : 'secondary'}
             onClick={() => setConfirm({ entry: active, action })}>{pluginActionName[action]}</Button>)}</div></div>
         <p className="pl-detail-copy">{active.description}</p>
         {!!active.skills?.length && <section className="pl-detail-section"><h3>技能 <small>{active.skills.length}</small></h3>
@@ -159,6 +170,7 @@ export function PluginLibrary({ harness, onHarness, view, error, sourceError, bu
           {currentRelease?.commit && <div><dt>发行提交</dt><dd><code>{currentRelease.commit}</code></dd></div>}
           {currentRelease?.directory && <div><dt>包目录</dt><dd><code>{currentRelease.directory}</code></dd></div>}
           {active.installed && <div><dt>安装状态</dt><dd>{active.enabled ? '已启用' : '已停用'}</dd></div>}
+          {active.update && <div><dt>可用更新</dt><dd>{active.update.version}{!active.enabled && '（启用后可更新）'}</dd></div>}
           {(active.application !== 'unverified' || active.installed && active.enabled) && <div><dt>加载状态</dt><dd>{application[active.application]}</dd></div>}
         </dl></section>
         {!!active.releases?.length && <section className="pl-detail-section"><h3>版本</h3>
@@ -176,6 +188,7 @@ export function PluginLibrary({ harness, onHarness, view, error, sourceError, bu
           </select>}
           <label className="pl-search"><Search size={17} aria-hidden="true"/><input type="search" aria-label="搜索插件" placeholder="搜索名称、描述或来源" value={query} maxLength={512} onChange={event => setQuery(event.target.value)}/></label>
           <IconButton label="刷新插件状态" onClick={onRefresh}><RefreshCw size={16}/></IconButton>
+          {tab === 'installed' && onCheckUpdates && <Button variant="quiet" disabled={locked || view?.availability !== 'available'} onClick={onCheckUpdates}>{checking ? '正在检查…' : '检查更新'}</Button>}
           <Button variant="quiet" className="pl-manage" aria-label="管理来源" disabled={view?.availability === 'unconfigured'} onClick={() => setLayer('sources')}><SlidersHorizontal size={17}/><span>管理来源</span></Button>
         </div>
         {chosenMarket && <p className="pl-source-hint">{chosenMarket.url}</p>}
@@ -217,6 +230,7 @@ export function PluginLibrary({ harness, onHarness, view, error, sourceError, bu
     </SurfaceDialog>}
     {confirm && <SurfaceDialog title={(confirm.action === 'install' && confirm.entry.installed ? '切换版本' : pluginActionName[confirm.action]) + ' ' + confirm.entry.name} close={() => setConfirm(undefined)}>
       <p>{confirm.entry.source} · 本实例 · {harnessName[harness]}{confirm.version ? ' · ' + confirm.version : ''}</p>
+      {confirm.action === 'update' && confirm.entry.update && <p>{confirm.entry.version} → {confirm.entry.update.version} · <code>{confirm.entry.update.commit.slice(0, 12)}</code></p>}
       <footer><Button onClick={() => setConfirm(undefined)}>取消</Button><Button variant="primary" disabled={locked}
         onClick={() => { onAction(confirm.entry, confirm.action, confirm.version); setConfirm(undefined); }}>确认{confirm.action === 'install' && confirm.entry.installed ? '切换' : pluginActionName[confirm.action]}</Button></footer>
     </SurfaceDialog>}

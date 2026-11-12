@@ -21,7 +21,7 @@ const pack: Entry = {
 };
 const entries: Entry[] = [
   pack,
-  { id: 'example-format@example-market', name: '示例格式工具', description: '统一示例文档的标题、列表和表格格式。', source: '示例市场', sourceId: 'example-market',
+  { id: 'example-format@other-market', name: '示例格式工具', description: '统一示例文档的标题、列表和表格格式。', source: '另一个示例市场', sourceId: 'other-market',
     version: '0.4.1', installed: true, enabled: true, actions: ['disable', 'remove'], application: 'applied' },
   { id: 'example-export@other-market', name: '示例导出工具', description: '把示例笔记导出为其他格式。', source: '另一个示例市场', sourceId: 'other-market',
     version: '2.0.0', installed: true, enabled: false, actions: ['enable', 'remove'], application: 'unverified' },
@@ -44,7 +44,7 @@ function initialView(scenario: Scenario): View | undefined {
   return { availability: 'available', entries, operation, sources: scenario === 'source-unavailable' ? sources.map(source => source.id === 'other-market' ? { ...source, unavailable: true } : source) : sources };
 }
 
-/** The library with local, fake state: install / enable / disable / remove and source changes only update this page. */
+/** The library with local, fake state for plugin and source changes. */
 function PluginDemo({ scenario, sourceError }: Args) {
   const [harness, setHarness] = useState<Harness>('codex');
   const [views, setViews] = useState<Record<Harness, View | undefined>>(() => ({ codex: initialView(scenario), dsh: initialView(scenario) }));
@@ -55,6 +55,14 @@ function PluginDemo({ scenario, sourceError }: Args) {
       error={scenario === 'error' ? '示例：暂时无法读取插件状态，请稍后重试。' : undefined} sourceError={sourceError || undefined}
       busy={scenario === 'busy'} uncertain={scenario === 'uncertain'}
       onRefresh={() => say('刷新插件状态')} onDetail={id => say(id ? `查看 ${id}` : '返回列表')} onRetry={() => say('核对同一操作')}
+      onCheckUpdates={harness === 'codex' ? () => {
+        say('检查更新');
+        update(view => ({ ...view, updateCheck: { checked: 1, unavailable: 0 }, entries: view.entries.map(item =>
+          item.id === 'example-format@other-market' && item.installed && item.version === '0.4.1'
+            ? { ...item, update: { version: '0.5.0', revision: 'a'.repeat(40), commit: 'b'.repeat(40) },
+              actions: item.enabled && !item.actions.includes('update') ? [...item.actions, 'update'] : item.actions }
+            : item) }));
+      } : undefined}
       onReconcile={() => { update(view => ({ ...view, operation: null })); say('核对原生结果'); }}
       onSource={async command => {
         say(command.action === 'add' ? `添加来源 ${command.source}` : `移除来源 ${command.id}`);
@@ -70,8 +78,11 @@ function PluginDemo({ scenario, sourceError }: Args) {
           if (item.id !== entry.id) return item;
           const installed = action !== 'remove';
           const enabled = installed && action !== 'disable';
-          return { ...item, installed, enabled, version: version ?? item.version, application: enabled ? 'applied' : 'unverified',
-            actions: installed ? [enabled ? 'disable' : 'enable', 'remove', ...(item.releases?.length ? ['install' as const] : [])] : ['install'] };
+          const availableUpdate = installed && action !== 'update' ? item.update : undefined;
+          return { ...item, installed, enabled, version: action === 'update' ? item.update?.version ?? item.version : version ?? item.version,
+            update: availableUpdate, application: enabled ? 'applied' : 'unverified',
+            actions: installed ? [enabled ? 'disable' : 'enable', 'remove', ...(item.releases?.length ? ['install' as const] : []),
+              ...(enabled && availableUpdate ? ['update' as const] : [])] : ['install'] };
         }) }));
       }}/>
     {readout}

@@ -1,4 +1,4 @@
-import type { PluginCommand, PluginEntry, PluginSource, PluginSourceCommand, PluginStatus } from '../shared/plugins.ts';
+import type { PluginCommand, PluginEntry, PluginSource, PluginSourceCommand, PluginStatus, PluginUpdateCheck } from '../shared/plugins.ts';
 
 export type PluginResult = Exclude<PluginStatus, 'applying'>;
 
@@ -15,6 +15,7 @@ export interface PluginBackend {
   detail?(id: string): Promise<PluginEntry | null>;
   sources?(): Promise<PluginSource[]>;
   updateSource?(command: PluginSourceCommand): Promise<void>;
+  checkUpdates?(): Promise<PluginUpdateCheck>;
   close?(): Promise<void>;
 }
 
