@@ -53,12 +53,41 @@ function fixture(t: TestContext) {
 }
 const scan = { rule: { kind: 'weekly', weekdays: [1, 2, 3, 4, 5], time: '14:45' }, timeZone: SH, until: '2099-01-31' };
 
-test('the agent server tells agents about sichen and guards its endpoints with the token and the protocol', async t => {
+test('MCP initialize exposes the same task-authoring guidance to DSH and Codex clients', async t => {
   const f = fixture(t);
-  const init = (await f.tools.inject({ method: 'POST', url: '/mcp', headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },
-    payload: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18' } }) })).json();
-  assert.equal(init.result.instructions, `${RESULT_INSTRUCTIONS}\n\n${SICHEN_INSTRUCTIONS}`);
-  assert.match(SICHEN_INSTRUCTIONS, /sichen --help/);
+  // Client metadata exercises the shared protocol endpoint, not either Host's context injection.
+  for (const name of ['dsh', 'codex']) {
+    for (const protocolVersion of ['2025-03-26', '2025-06-18', '2025-11-25', '2026-07-28']) {
+      const response = await f.tools.inject({ method: 'POST', url: '/mcp', headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },
+        payload: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion, capabilities: {}, clientInfo: { name, version: 'test' } } }) });
+      assert.equal(response.statusCode, 200);
+      const init = response.json();
+      assert.equal(init.result.protocolVersion, protocolVersion);
+      assert.equal(init.result.instructions, `${RESULT_INSTRUCTIONS}\n\n${SICHEN_INSTRUCTIONS}`);
+      // Protect the authoring clauses on the wire without snapshotting all prose. This is not a model-behavior test.
+      for (const clause of [/sichen --help/, /purpose and necessary background/, /skills or tools.*source material.*time or period.*when needed/,
+        /Date time-sensitive facts and provisional judgments/,
+        /user's requirements.*agent's provisional assumptions or conclusions/, /reassess.*not preserve.*required outcomes/,
+        /Preserve user-specified fixed rules and check them as requested/, /within the user's authorization/, /does not authorize further action/,
+        /new conversation.*cannot rely on the original chat history/]) {
+        assert.match(init.result.instructions, clause);
+      }
+    }
+  }
+  assert.equal(f.created.length, 0, 'initializing clients does not create tasks');
+  assert.equal(f.edits.length, 0, 'initializing clients does not edit tasks');
+});
+
+test('task-authoring guidance is absent when sichen is not configured', async t => {
+  const tools = createAgentTools({ token: TOKEN, port: 0, version: '0.1.1', notify: () => ({ id: 'x' }), record: () => ({ id: 'x' }) });
+  t.after(() => tools.close());
+  const init = (await tools.inject({ method: 'POST', url: '/mcp', headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },
+    payload: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize' }) })).json();
+  assert.equal(init.result.instructions, RESULT_INSTRUCTIONS);
+});
+
+test('the agent server guards sichen endpoints with the token and the protocol', async t => {
+  const f = fixture(t);
   assert.equal((await f.request('GET', '/sichen/v1/version', undefined, { authorization: 'Bearer wrong-token-0123456789abcdefgh' })).statusCode, 401);
   assert.equal((await f.request('GET', '/sichen/v1/version', undefined, { origin: 'https://example.com' })).statusCode, 403);
   assert.deepEqual((await f.request('GET', '/sichen/v1/version')).json(), { protocol: 1, version: '0.1.1', revision: 'a'.repeat(40), schedule: true });
