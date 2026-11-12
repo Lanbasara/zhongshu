@@ -122,6 +122,8 @@ DSH 原地保存要求专用 Host 和操作者提供的维护控制器。工作�
 
 Codex 经专用 Unix socket 管理进程调用固定 CLI 和同一实例的 App Server；管理进程核对连接身份、实例状态目录和操作者固定的 Git 市场。DSH 在该实例的 Web Host 上调用原生目录和包管理 API，并按市场核对包来源。中书管理员添加公开 GitHub 来源时，Codex 管理进程持有市场提交和身份，DSH Web Host 持有索引设置；来源变更与同端安装操作互斥。两个 Harness 保留各自的来源、标识和加载语义。长期取舍见 [ADR 0009](adr/0009-instance-plugin-scope.md)，原生连接配置和复验入口见[插件管理功能地图](features/plugin-management.md)。
 
+Codex 更新检查读取自加市场的上游快照，确认请求绑定具体版本与市场提交。管理进程先记录待推进的市场提交，再走 Codex 的市场升级和包安装命令。操作中断后从原生快照收敛市场记录，并按原操作核对已装版本。
+
 ## 原生子 Agent
 
 边界依据 [ADR 0013](adr/0013-native-subagent-observation.md)：子 Agent 由 Harness 派生和执行，中书只观察并可停止单个子 Agent，不派生、不分配、不发消息。

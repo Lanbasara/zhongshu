@@ -23,6 +23,7 @@ function PluginCatalog({ harness, onHarness, csrf, report }: {
   const [detailId, setDetailId] = useState<string>();
   const [uncertain, setUncertain] = useState<PluginCommand>();
   const [busy, setBusy] = useState(false);
+  const [checking, setChecking] = useState(false);
   const [error, setError] = useState('');
   const [sourceError, setSourceError] = useState('');
   const [revision, setRevision] = useState(0);
@@ -112,12 +113,29 @@ function PluginCatalog({ harness, onHarness, csrf, report }: {
     }
   }
 
+  async function checkUpdates() {
+    if (busy || checking) return;
+    setChecking(true); setError('');
+    try {
+      const current = await request(path + '/check-updates', pluginView, { csrf, body: {}, timeoutMs: 100_000 });
+      if (mounted.current) setView(current);
+    } catch (reason) {
+      if (!mounted.current) return;
+      if (reason instanceof RequestError && reason.status === 401) onReport.current(reason);
+      setError('暂时无法检查更新，请稍后重试。');
+    } finally {
+      if (mounted.current) setChecking(false);
+    }
+  }
+
   return <PluginLibrary harness={harness} onHarness={onHarness} view={view} error={error} sourceError={sourceError}
-    busy={busy} uncertain={!!uncertain}
+    busy={busy || checking} checking={checking} uncertain={!!uncertain}
     detail={selectedEntry && detail?.id === selectedEntry.id ? { ...selectedEntry, skills: detail.skills } : undefined}
     onRefresh={() => { setError(''); setSourceError(''); setRevision(value => value + 1); }}
     onDetail={setDetailId} onSource={changeSource}
-    onAction={(entry, action, version) => void update({ id: crypto.randomUUID(), pluginId: entry.id, action, version })}
+    onCheckUpdates={harness === 'codex' ? () => void checkUpdates() : undefined}
+    onAction={(entry, action, version) => void update({ id: crypto.randomUUID(), pluginId: entry.id, action,
+      version: action === 'update' ? entry.update?.version : version, revision: action === 'update' ? entry.update?.revision : undefined })}
     onReconcile={() => { if (view?.operation) void update({ id: view.operation.id }, true); }}
     onRetry={() => { if (uncertain) void update(uncertain); }}/>;
 }
