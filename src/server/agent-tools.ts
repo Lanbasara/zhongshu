@@ -41,11 +41,19 @@ export const RESULT_INSTRUCTIONS = 'When a scheduled task started this run (the 
 export const BROWSER_INSTRUCTIONS = 'Browser: use the shell command `chrome-devtools` (the official Chrome DevTools command line; run `chrome-devtools --help`). '
   + 'This instance shares one browser: `chrome-devtools new_page <url>` gives this conversation its own window (one per conversation), '
   + 'pass its page id to every page command, and `close_page <id>` when done. If both windows are busy the command waits its turn.';
-/** Where scheduling and calendar entries go (ADR 0022). */
+/** Shared scheduling entry and task-authoring guidance for both Powers (ADR 0022, ADR 0026). */
 export const SICHEN_INSTRUCTIONS = 'Scheduled tasks and calendar entries: use the shell command `sichen` (run `sichen --help` first). '
-  + 'Write times as dates and clock times, e.g. `sichen schedule add "收盘复核" --at "2026-11-10 15:10" --to here --prompt "…"` or '
+  + 'Write times as dates and clock times, e.g. `sichen schedule add "资料复核" --at "2026-11-10 15:10" --to here --prompt "…"` or '
   + '`--every 工作日 --time 14:45 --until 2027-01-31`. `--to here` returns results to this conversation. '
-  + 'It checks the rule and prints the next runs; do not write RRULE text or timeline JSON by hand.';
+  + 'It checks the rule and prints the next runs; do not write RRULE text or timeline JSON by hand. '
+  + 'When creating or editing a task, write its prompt for the future run: state the purpose and necessary background. '
+  + 'Include relevant skills or tools, where to find source material, and the time or period to examine when needed. '
+  + 'Date time-sensitive facts and provisional judgments. '
+  + 'Distinguish the user\'s requirements from the agent\'s provisional assumptions or conclusions. '
+  + 'Have the future run reassess those provisional judgments with evidence available then, not preserve them as required outcomes. '
+  + 'Preserve user-specified fixed rules and check them as requested; stay within the user\'s authorization. '
+  + 'Scheduling a check does not authorize further action. '
+  + 'Include enough context and material references for a new conversation that cannot rely on the original chat history.';
 const message = z.object({ jsonrpc: z.literal('2.0'), id: z.union([z.string().max(200), z.number()]).optional(), method: z.string().max(100), params: z.unknown().optional() }).passthrough();
 const callParams = z.object({ name: z.string().max(100), arguments: z.record(z.string(), z.unknown()).optional() }).passthrough();
 const notifyArgs = z.object({ summary: z.string(), file: z.string().optional() }).strict();
