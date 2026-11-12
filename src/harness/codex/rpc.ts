@@ -33,6 +33,7 @@ export class CodexRpc {
   private socketPath: string;
   private hooks: Hooks;
   private socket: WebSocket | undefined;
+  private retireSocket: (() => void) | undefined;
   private connecting: Promise<void> | undefined;
   private permanentlyClosed = false;
   private sequence = 0;
@@ -57,12 +58,17 @@ export class CodexRpc {
     if (this.permanentlyClosed) throw new RpcError('codex_adapter_closed');
     if (this.connecting) return this.connecting;
     if (this.socket?.readyState === WebSocket.OPEN) return;
-    const attempt = this.open();
+    // Publish the single-flight attempt before retiring a transport can notify observers.
+    const attempt = Promise.resolve().then(() => this.open());
     this.connecting = attempt;
     try { await attempt; } finally { if (this.connecting === attempt) this.connecting = undefined; }
   }
 
   private async open(): Promise<void> {
+    // A closing socket may not have emitted close yet. Retire its observation and pending
+    // requests before replacing it; its late close must not touch the next connection.
+    this.retireSocket?.();
+    if (this.permanentlyClosed) throw new RpcError('codex_adapter_closed');
     // The URL is only the HTTP Upgrade target; createConnection always opens the configured Unix socket.
     const ws = new WebSocket('ws://localhost/', {
       createConnection: () => connectUnixSocket({ path: this.socketPath }),
@@ -76,6 +82,7 @@ export class CodexRpc {
       ended = true;
       if (this.socket !== ws) return;
       this.socket = undefined;
+      this.retireSocket = undefined;
       this.home = undefined;
       if (this.heartbeat) clearInterval(this.heartbeat);
       this.heartbeat = undefined;
@@ -86,6 +93,7 @@ export class CodexRpc {
       if (established && !this.permanentlyClosed) this.hooks.disconnected();
       established = false;
     };
+    this.retireSocket = () => { disconnect(); ws.terminate(); };
     ws.on('close', disconnect);
     ws.on('error', () => { disconnect(); ws.terminate(); });
     ws.on('pong', () => { if (this.socket === ws && !this.permanentlyClosed) this.awaitingPong = false; });

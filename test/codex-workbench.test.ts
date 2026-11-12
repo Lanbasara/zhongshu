@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
+import type { Socket } from 'node:net';
 import { mkdtemp, mkdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -98,6 +99,33 @@ test('transport loss is emitted once per initialized connection, never for faile
   assert.equal(losses, 2, 'intentional shutdown does not report unexpected unavailability');
 });
 
+test('reconnecting during a closing transport retires its established observation exactly once', async t => {
+  const p = await peer(t); await p.start();
+  let losses = 0;
+  const rpc = new CodexRpc(p.socketPath, { notification() {}, serverRequest: () => false, disconnected() { losses++; } });
+  p.cleanup(() => rpc.close());
+  await rpc.request('thread/read', {});
+  const oldTransport = (rpc as unknown as { socket: WebSocket & { _socket: Socket } }).socket;
+  let retry: Promise<void> | undefined;
+  oldTransport._socket.once('end', () => {
+    assert.equal(oldTransport.readyState, 2, 'real IPC ended before the WebSocket close event');
+    retry = assert.rejects(rpc.connect());
+  });
+  await p.stop();
+  await until(() => retry !== undefined);
+  await retry;
+  assert.equal(oldTransport.readyState, 3);
+  assert.equal(losses, 1, 'a retry cannot swallow the established connection loss');
+  for (let attempt = 0; attempt < 3; attempt++) await assert.rejects(rpc.connect());
+  assert.equal(losses, 1, 'offline attempts are not new observation losses');
+  await p.start(); await rpc.request('thread/read', {});
+  oldTransport.emit('close');
+  assert.equal(rpc.connected, true, 'a stale close cannot retire the replacement');
+  assert.equal(losses, 1);
+  await rpc.close();
+  assert.equal(losses, 1, 'intentional shutdown does not report loss');
+});
+
 test('Codex transport loss immediately persists unknown, preserves facts, and recovers without redispatch', async t => {
   const p = await peer(t); await p.start();
   const adapter = createCodexAdapter({ socketPath: p.socketPath });
@@ -118,7 +146,13 @@ test('Codex transport loss immediately persists unknown, preserves facts, and re
   p.cleanup(async () => { release(); });
   const before = service.snapshot(id);
   assert.equal(before.conversation.state.pendingInputs, 3);
+  const oldTransport = (adapter as unknown as { rpc: { socket: WebSocket & { _socket: Socket } } }).rpc.socket;
+  let closingReconcile: Promise<unknown> | undefined;
+  // Force ordinary reconciliation into the real IPC end -> WebSocket close window.
+  oldTransport._socket.once('end', () => { closingReconcile = service.reconcile(id); });
   await p.stop();
+  await until(() => closingReconcile !== undefined);
+  await closingReconcile;
   await until(() => store.getConversation(id)?.state.status === 'unknown');
   const lost = service.snapshot(id);
   assert.equal(lost.conversation.state.configurationVerified, false);
