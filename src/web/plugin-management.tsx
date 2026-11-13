@@ -29,10 +29,11 @@ function PluginCatalog({ harness, onHarness, csrf, report }: {
   const [sourceError, setSourceError] = useState('');
   const [revision, setRevision] = useState(0);
   const mounted = useRef(false);
+  const refreshAbort = useRef<AbortController | undefined>(undefined);
   const onReport = useRef(report);
   const path = '/plugins/' + harness;
   useEffect(() => { onReport.current = report; }, [report]);
-  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; refreshAbort.current?.abort(); }; }, []);
   useEffect(() => {
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -116,19 +117,28 @@ function PluginCatalog({ harness, onHarness, csrf, report }: {
 
   async function refresh() {
     if (busy || checking) return;
-    setChecking(true); setError('');
+    // DSH has no update check, so its refresh keeps the old native-state read without locking the page.
+    const check = harness === 'codex';
+    if (check) setChecking(true);
+    setError('');
+    refreshAbort.current?.abort();
+    const controller = new AbortController();
+    refreshAbort.current = controller;
     try {
-      const result = await refreshPluginView(harness, csrf);
+      const result = await refreshPluginView(harness, csrf, controller.signal);
       if (!mounted.current) return;
       setView(result.view);
       setUncertain(value => value?.id === result.view.operation?.id ? undefined : value);
       setError(pluginCheckNotice(result.failure) ?? '');
+      // The old refresh restarted the effect; keep its applying-state polling.
+      if (result.view.operation?.status === 'applying') setRevision(value => value + 1);
     } catch (reason) {
-      if (!mounted.current) return;
+      if (!mounted.current || controller.signal.aborted) return;
       if (reason instanceof RequestError && reason.status === 401) onReport.current(reason);
       setError('暂时无法读取插件状态，请刷新。');
     } finally {
-      if (mounted.current) setChecking(false);
+      if (refreshAbort.current === controller) refreshAbort.current = undefined;
+      if (check && mounted.current) setChecking(false);
     }
   }
 
