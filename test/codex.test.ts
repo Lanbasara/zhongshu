@@ -20,7 +20,7 @@ const nativeConfiguration = () => ({ thread: { id: saved.id, status: { type: 'id
 const created: Binding = { ...saved, details: { version: 1, approvalPolicy: 'on-request' } };
 function userItem(id: string, clientId = id) { return { turnId: 'run-1', item: { id, type: 'userMessage', clientId, content: [{ type: 'text', text: id }] }, completedAtMs: 1 }; }
 
-async function peer(t: TestContext, override?: (request: Request, socket: WebSocket) => unknown) {
+async function peer(t: TestContext, override?: (request: Request, socket: WebSocket) => unknown, workspaceToolsProfile?: string) {
   startedPolicy = 'never';
   const dir = await mkdtemp(join(tmpdir(), 'zh codex test '));
   const socketPath = join(dir, 'rpc.sock');
@@ -58,7 +58,7 @@ async function peer(t: TestContext, override?: (request: Request, socket: WebSoc
     });
   });
   await new Promise<void>(resolve => http.listen(socketPath, resolve));
-  const adapter = createCodexAdapter({ socketPath });
+  const adapter = createCodexAdapter({ socketPath, workspaceToolsProfile });
   t.after(async () => {
     await adapter.close();
     for (const socket of sockets) socket.terminate();
@@ -348,6 +348,35 @@ test('Before its first turn a resumed thread reports no effort; that gap alone i
   native = { ...native, model: nativeConfiguration().model };
   turns = [{ id: 'run-1', status: 'completed' }];
   assert.equal((await p.adapter.state(binding)).configurationVerified, false, 'a thread with turns must report its effort');
+});
+
+test('Codex persists the managed workspace selection before releasing an empty thread', async t => {
+  const profile = 'managed-workspace';
+  const selected = { ...nativeConfiguration(), approvalPolicy: 'on-request',
+    activePermissionProfile: { id: profile }, reasoningEffort: 'max' };
+  let persisted = false;
+  const p = await peer(t, request => {
+    if (request.method === 'model/list') return { data: [{ model: 'model-a', displayName: 'Model A', hidden: false,
+      supportedReasoningEfforts: [{ reasoningEffort: 'max', description: 'Max' }] }], nextCursor: null };
+    if (request.method === 'thread/start') return selected;
+    if (request.method === 'thread/settings/update') {
+      assert.deepEqual(request.params, { threadId: saved.id, model: 'model-a', effort: 'max',
+        permissions: profile, approvalPolicy: 'on-request' });
+      persisted = true;
+      return {};
+    }
+    if (request.method === 'thread/resume') return persisted ? selected : { ...selected, model: 'default-model',
+      activePermissionProfile: { id: ':workspace' }, reasoningEffort: null };
+    return undefined;
+  }, profile);
+  const binding = await p.adapter.create({ cwd: saved.cwd, title: 'Synthetic',
+    configuration: { modelId: 'model-a', permissionId: ':workspace', reasoningEffort: 'max' } }, () => {});
+  assert.deepEqual(await p.adapter.state(binding), { status: 'idle', pendingInputs: 0, configurationVerified: true });
+  assert.equal((await p.adapter.submit(binding, { id: 'first-turn', text: 'Synthetic' })).outcome, 'accepted');
+  assert.equal(p.calls.filter(call => call.method === 'thread/start').length, 1);
+  assert.equal(p.calls.filter(call => call.method === 'thread/settings/update').length, 1);
+  assert.equal(p.calls.filter(call => call.method === 'turn/start').length, 1);
+  assert.ok(p.calls.findIndex(call => call.method === 'thread/settings/update') < p.calls.findIndex(call => call.method === 'thread/unsubscribe'));
 });
 
 test('An idle completed readback retains the latest native run identity', async t => {

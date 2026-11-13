@@ -442,9 +442,20 @@ class CodexAdapter implements HarnessAdapter {
     try {
       try { onBound(binding); } catch { throw new HarnessError('codex_binding_persistence_failed'); }
       this.retain(binding.id); retained = true;
-      if (!matches(binding, parse(configuredThread, response), this.workspaceToolsProfile)) throw new HarnessError('codex_configuration_mismatch');
+      const started = parse(configuredThread, response);
+      if (!matches(binding, started, this.workspaceToolsProfile)) throw new HarnessError('codex_configuration_mismatch');
       // Naming the user's new conversation also materializes its native rollout before the first turn.
       if (selected.title) await this.rpc.request('thread/name/set', { threadId: binding.id, name: selected.title });
+      if (selected.configuration.permissionId === ':workspace' && this.workspaceToolsProfile) {
+        // Resuming with the managed networking override can reload an empty thread with host defaults.
+        // Persist the verified selection before releasing this new thread; later reads still detect drift.
+        if (started.activePermissionProfile?.id !== this.workspaceToolsProfile) throw new HarnessError('codex_configuration_mismatch');
+        const effort = selected.configuration.reasoningEffort;
+        parse(z.object({}).strict(), await this.rpc.request('thread/settings/update', {
+          threadId: binding.id, model: selected.configuration.modelId, permissions: this.workspaceToolsProfile,
+          approvalPolicy, ...(effort !== undefined ? { effort } : {}),
+        }));
+      }
       return binding;
     } finally { if (retained) await this.release(binding.id); else await this.releaseUnused(binding.id); }
   }

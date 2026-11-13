@@ -60,6 +60,8 @@ node test/support/feature-fixture.ts repair --root "$zh_verify_root" --title '�
 
 E02/E04 的指定会话回执控制、R04 的 `seed` 要求原生会话存在但尚未接收消息。fixture 中用 C04 的 fail-create，草稿首发短唯一标题，确认失败且 submitCalls=0；运行 repair 后点“查看已创建的对话”（不要点重试核对）。等就绪，保存 hash/inspect，清空转交到输入框的合成文字，再施加各场景故障。R04 在此时 seed。这个步骤只建立故障前提，不算正常新建路径通过；正常首发必须另跑 C01。不要手写产品数据库或用 API 偷建替代用户动作。
 
+真实 Codex 配置了 `workspaceToolsProfile` 时，在独立 Host 中用「工作区读写」、一个与 Host 默认不同的模型和思考深度跑 C09 的失效文件引用分支。首条消息明确拒绝后，核对原生尚无轮次，离开对话并等阅读租约释放，再刷新并打开同一对话。原生读回应仍显示同一线程、所选模型、思考深度与受管权限配置。移除失效引用后发合成文本，核对正文和已接受的操作各一份。另在一个合成空对话按[会话管理地图](conversation-management.md)验证归档、恢复和删除，保留原生读回证据。
+
 C03 丢的是浏览器 HTTP 回执；C04 在 onBound 后失败。原生 Host 创建前后崩溃是另一实验，不能互相替代。
 
 ## Gotchas
