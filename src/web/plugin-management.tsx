@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { pluginEntry, pluginOperation, pluginView, type PluginCommand, type PluginEntry, type PluginHarness, type PluginSourceCommand, type PluginView } from '../shared/plugins.ts';
 import { PluginLibrary } from './patterns/plugin-library.tsx';
+import { pluginCheckNotice, refreshPluginView } from './plugin-refresh.ts';
 import { RequestError, request } from './workbench-client.ts';
 
 export function PluginManagement({ csrf, report }: { csrf: string; report(reason: unknown): void }) {
@@ -28,27 +29,28 @@ function PluginCatalog({ harness, onHarness, csrf, report }: {
   const [sourceError, setSourceError] = useState('');
   const [revision, setRevision] = useState(0);
   const mounted = useRef(false);
+  const refreshAbort = useRef<AbortController | undefined>(undefined);
   const onReport = useRef(report);
   const path = '/plugins/' + harness;
   useEffect(() => { onReport.current = report; }, [report]);
-  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; refreshAbort.current?.abort(); }; }, []);
   useEffect(() => {
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
-    async function refresh() {
+    async function read() {
       try {
         const current = await request(path, pluginView, { signal: controller.signal, timeoutMs: 45_000 });
         if (controller.signal.aborted) return;
         setView(current);
         setUncertain(value => value?.id === current.operation?.id ? undefined : value);
-        if (current.operation?.status === 'applying') timer = setTimeout(() => void refresh(), 1800);
+        if (current.operation?.status === 'applying') timer = setTimeout(() => void read(), 1800);
       } catch (reason) {
         if (controller.signal.aborted) return;
         if (reason instanceof RequestError && reason.status === 401) onReport.current(reason);
         setError('暂时无法读取插件状态，请刷新。');
       }
     }
-    void refresh();
+    void read();
     return () => { controller.abort(); clearTimeout(timer); };
   }, [path, revision]);
 
@@ -113,27 +115,39 @@ function PluginCatalog({ harness, onHarness, csrf, report }: {
     }
   }
 
-  async function checkUpdates() {
+  async function refresh() {
     if (busy || checking) return;
-    setChecking(true); setError('');
+    // DSH has no update check, so its refresh keeps the old native-state read without locking the page.
+    const check = harness === 'codex';
+    if (check) setChecking(true);
+    setError('');
+    refreshAbort.current?.abort();
+    const controller = new AbortController();
+    refreshAbort.current = controller;
     try {
-      const current = await request(path + '/check-updates', pluginView, { csrf, body: {}, timeoutMs: 100_000 });
-      if (mounted.current) setView(current);
-    } catch (reason) {
+      const result = await refreshPluginView(harness, csrf, controller.signal);
       if (!mounted.current) return;
+      setView(result.view);
+      setUncertain(value => value?.id === result.view.operation?.id ? undefined : value);
+      setError(pluginCheckNotice(result.failure) ?? '');
+      // The old refresh restarted the effect; keep its applying-state polling.
+      if (result.view.operation?.status === 'applying') setRevision(value => value + 1);
+    } catch (reason) {
+      if (!mounted.current || controller.signal.aborted) return;
       if (reason instanceof RequestError && reason.status === 401) onReport.current(reason);
-      setError('暂时无法检查更新，请稍后重试。');
+      setError('暂时无法读取插件状态，请刷新。');
     } finally {
-      if (mounted.current) setChecking(false);
+      if (refreshAbort.current === controller) refreshAbort.current = undefined;
+      if (check && mounted.current) setChecking(false);
     }
   }
 
   return <PluginLibrary harness={harness} onHarness={onHarness} view={view} error={error} sourceError={sourceError}
     busy={busy || checking} checking={checking} uncertain={!!uncertain}
     detail={selectedEntry && detail?.id === selectedEntry.id ? { ...selectedEntry, skills: detail.skills } : undefined}
-    onRefresh={() => { setError(''); setSourceError(''); setRevision(value => value + 1); }}
+    onRefresh={() => { setSourceError(''); void refresh(); }}
     onDetail={setDetailId} onSource={changeSource}
-    onCheckUpdates={harness === 'codex' ? () => void checkUpdates() : undefined}
+    onCheckUpdates={harness === 'codex' ? () => void refresh() : undefined}
     onAction={(entry, action, version) => void update({ id: crypto.randomUUID(), pluginId: entry.id, action,
       version: action === 'update' ? entry.update?.version : version, revision: action === 'update' ? entry.update?.revision : undefined })}
     onReconcile={() => { if (view?.operation) void update({ id: view.operation.id }, true); }}
