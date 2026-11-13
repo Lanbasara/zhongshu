@@ -70,6 +70,7 @@ C03 丢的是浏览器 HTTP 回执；C04 在 onBound 后失败。原生 Host 创
 1. 在 Fixture A 新建 Codex 草稿，选 Fixture 模型 / medium / Fixture write，输入唯一短文本并附一张合成 PNG。运行 `node test/support/feature-fixture.ts mismatch-next-create --root "$zh_verify_root"`，点击发送。页面应明确显示「Codex 配置核验失败，首条消息未发送」，原生 inspect 有一个空会话、`submitCalls=0`。记录其原生编号和创建请求中的产品编号。刷新同一草稿，文字和图片仍在，仍可核对或另开。
 2. 点「保留草稿并另开对话」，确认文字和图片保留、模型可编辑。选择 Fixture Alternate 后点击发送，核对新产品及原生身份不同，操作已接收，正文只出现一次，原会话 `submitCalls=0`，新会话 `submitCalls=1`。原会话用 [M07–M08](conversation-management.md#生命周期与删除验证) 归档、恢复和删除。用 `complete` 收尾并清理新会话。
 3. 另开合成草稿。用浏览器故障工具先暂扣 `POST /api/private/workbench/conversations` 的成功响应（`holdNext(path, 'POST')`），从 journal 取得产品 ID，待 `inspect` 找到对应空会话。放行创建响应前，按原生标题运行 `unknown-receipt`。等原生 `submitCalls=1`、应用操作状态 `unknown` 后刷新，点「重试核对首条消息」，在原生仍隐藏回执时确认没有「保留草稿并另开对话」入口。用 `prove` 显露回执，核对原产品 ID、原操作 ID、`submitCalls=1` 和正文恰一份。用 `complete` 收尾。这个分支和 C03 分别覆盖原生发送回执未知与浏览器创建回执丢失。
+4. 另做一份合成草稿。得知创建请求的产品 ID 后，在首发的 `/operations` 上用 `holdNextRequest` 暂扣请求，切到另一工作区草稿使原请求中止，再放行被取消的请求。原生 `submitCalls=0` 且应用尚无操作记录。回原工作区点「重试核对首条消息」，请求应使用原操作编号，原生最终只接收一次。用 `complete` 收尾。可在创建请求发出时用 Playwright 的请求事件读取该 ID，或先暂扣创建响应，放行后对首发请求设置暂扣。
 
 ## Gotchas
 

@@ -226,8 +226,11 @@ export function NewConversation(props:Props) {
           if (!persist({ ...value, submission: { ...submission, dispatchStarted: false } }, true)) return;
           setConfigurationFailed(true); setStatus(''); return;
         }
-        // Once dispatch started, absence in one snapshot does not prove that the request never arrived.
-        await confirmFirstSend(value.id,submission.operationId,abort.signal);return;
+        // A recorded dispatch is only reconciled. An unrecorded request can be retried
+        // with the same ID: the server commits that ID before submitting to the Harness.
+        if (known || snapshot.conversation.error === 'codex_configuration_mismatch') {
+          await confirmFirstSend(value.id,submission.operationId,abort.signal);return;
+        }
       }
       const deadline=Date.now()+30000;
       while(snapshot.conversation.readiness!=='ready'||!snapshot.conversation.state.configurationVerified){
