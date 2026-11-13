@@ -18,6 +18,10 @@
 .new-draft-page .state-notice { margin-bottom:12px; }
 .new-draft-page .state-notice p { flex:1; }
 .new-draft-page .reference-card { margin:0 6px 6px 0; }
+.draft-list { margin-top:12px; }
+.draft-list button svg { flex:none; }
+.draft-list button strong,.draft-list button small { overflow:hidden; text-overflow:ellipsis; }
+.draft-list button small { margin-left:auto; color:var(--zs-text-muted); flex-shrink:0; max-width:55%; }
 @media(max-width:759px) {
   .new-draft-page { padding:16px 8px; align-items:flex-end; }
   .new-draft-intro { padding:0 8px 14px; }

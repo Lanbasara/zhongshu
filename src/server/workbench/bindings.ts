@@ -30,7 +30,7 @@ export class Bindings {
   get workspaces(): Workspace[] { return this.registry?.active() ?? this.initialWorkspaces; }
   conversation(id: string): Conversation {
     const conversation = this.store.getConversation(id);
-    if (!conversation) throw new StoreError('conversation_not_found', 404);
+    if (!conversation) throw new StoreError(this.store.deletions.get(id)?.status === 'completed' ? 'conversation_deleted' : 'conversation_not_found', 404);
     return conversation;
   }
   workspace(id: string): Workspace {

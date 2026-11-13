@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | 主界面、输入交互、组件工作台与发布隔离 | [interface](interface.md)：I01–I05 | fixture、浏览器与本地构建；原生链路按关联地图 |
 | 登录、刷新、退出、密码重置后失效 | [access](access.md)：A01–A05 | 真实应用、两个独立浏览器上下文 |
-| 工作区草稿、首发创建、默认回退、思考深度与核对首发 | [conversations](conversations.md)：C01–C10 | fixture；C05/C08/C09 原生分支需真实 Harness |
+| 独立草稿、首发创建、默认回退、思考深度与核对首发 | [conversations](conversations.md)：C01–C14 | fixture；C05/C08/C09 原生分支需真实 Harness |
 | 工作区分组、侧栏调整、搜索与跳转、重命名、归档、删除、存储预算与未读同步 | [conversation-management](conversation-management.md)：M01–M10 | fixture、真实 Harness 与手机分支 |
 | 发送、接续、停止、排队与提前发送 | [execution](execution.md)：E01–E07 | fixture；原生轮次与接收语义需真实 Harness |
 | 刷新/关页/应用中断后恢复、草稿、连续回溯长历史与停机缺口 | [continuity](continuity.md)：R01–R07 | fixture；原生恢复与长历史需另跑真实分支 |
@@ -76,7 +76,7 @@ node test/support/feature-fixture.ts init --root "$zh_verify_root"
 
 1. 保存 `git rev-parse HEAD`、`git status --short`、diff，以及 Node/浏览器版本；工作树有改动时保存补丁和涉及文件的哈希。构建标签只能关联 HEAD，不能证明未提交内容。
 2. ready 行应给出 `mode: fixture`、本次 PID、root、origin。检查本次 `/api/health` 与 `/api/version`，再打开该 origin；不能用健康接口代替页面验收。
-3. 初始化并登录后，应能看到“新对话”。工作区“＋”直接进入草稿，hash 为 `#new:<工作区ID>`，不弹表单、不提前创建正式对话；DSH 会准备原生空会话，按 C10 核对；全局无历史且多工作区时先选区。输入框内选择 Codex/DSH、Fixture 模型、思考深度和 fixture 权限。Codex 可靠默认是 fixture-model / medium；DSH 须明确选择，无原生默认。保存选值；首次发送/核对成功后等 hash 变成本次对话 ID，再核对标题、状态、正文及 inspect。草稿或旧对话的输入框存在不能证明新对话已创建。
+3. 初始化并登录后，应能看到“新对话”。工作区“＋”直接进入新草稿，hash 为 `#draft/<草稿ID>`；首发才创建正式对话。DSH 会准备原生空会话，按 C10 核对；全局无历史且多工作区时先选区。输入框内选择 Codex/DSH、Fixture 模型、思考深度和 fixture 权限。Codex 可靠默认是 fixture-model / medium；DSH 须明确选择，无原生默认。首次发送或核对成功后，等 hash 变成本次对话 ID，再核对标题、状态、正文及 inspect。
 4. 一般条件等待上限为 10 秒；登录与操作请求上限为 20 秒。fixture 等待的是明确 DOM/接口状态，超时保留最后状态并判失败。真实模型另记录本轮时间预算，超时不自动宣称产品失败。
 5. 进程中断前，核对应用自身 PID、实际端口监听者和本次数据目录。`spawn` 返回的 PID 可能只是 Node/Volta 启动器；不能只杀启动器就宣称应用中断。停止后需确认实际监听者退出、端口无监听且健康请求连接被拒绝，再执行停机期间的动作。重启后同样记录新监听者与版本。
 
@@ -84,7 +84,7 @@ node test/support/feature-fixture.ts init --root "$zh_verify_root"
 
 以下命令在仓库根目录执行，使用同一 root。`--title` 必须精确匹配 inspect 中唯一的原生创建标题；不要复用名称。新建不再单独填标题：首条文字折叠空白后截取前 32 个 Unicode 字符作为标题，无文字为“新对话”。下文命令的示例标题都须替换成本轮 inspect 实际值；页面重命名只改产品标题，不能假定原生控制标题也改变。
 
-页内切换可用侧栏，也可直接改变地址。每个页面有自己的 hash：对话 `#<ID>`、草稿 `#new:<工作区ID>`、`#schedule[:标签]`、`#settings[:标签]`、`#archive`。已打开页面改变 hash（包括自动化工具的同文档导航）和浏览器后退、前进都会切换到对应页面，行为与验证见[界面 I07](interface.md)。判定仍以标题与内容的变化为准，不能只看地址变化。「对话操作」等菜单只响应真实的指针事件，页面脚本里的 `.click()` 打不开，用浏览器工具的点击。
+页内切换可用侧栏，也可直接改变地址。对话地址为 `#<对话ID>`，草稿为 `#draft/<草稿ID>`，其他页面使用 `#schedule[:标签]`、`#settings[:标签]` 或 `#archive`。旧 `#new:` 和 `#new:<工作区ID>` 是新建入口。改变 hash 和浏览器后退、前进均应显示对应页面，用标题和内容验证，见[界面 I07](interface.md)。用浏览器的指针点击打开「对话操作」等菜单。
 
 ```sh
 node test/support/feature-fixture.ts inspect --root "$zh_verify_root"

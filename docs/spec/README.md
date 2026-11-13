@@ -6,6 +6,7 @@ spec 是与用户讨论后确认的临时约定：它回答“接下来建什么
 
 | 切片 | 用户行为 | 状态 | 退出条件 | 证据 | 更新 |
 | --- | --- | --- | --- | --- | --- |
+| [独立新对话草稿与首发恢复](independent-conversation-drafts.md) | 同工作区可独立新建和继续草稿，首发待核对时仍可另开 | active | 独立验证旧草稿恢复、新稿首发、重复派发反例与归档删除 | [PR #74](https://github.com/Lanbasara/zhongshu/pull/74) | 2026-11-13 |
 | [对话状态提示与过程展示](conversation-status-and-process.md) | 过程默认收起、只在读者操作时展开；个别命令失败不被写成整批失败；原生状态无法核实时在正文顶部说清状态 | active | 三项体验问题按约定行为在真实页面验证，用户试用确认 | [PR #67](https://github.com/Lanbasara/zhongshu/pull/67)；真实 DSH 页面、可恢复未知状态实验与独立验证已取得，待用户试用确认 | 2026-11-10 |
 | [原生体验补齐](native-experience.md) | 正确阅读工具过程，使用 DSH 原生默认并在首发选技能 | active | 三项真实路径、恢复反例和独立验收通过，用户确认 | none yet；已授权实施，验收进行中 | 2026-11-06 |
 | [新对话草稿与思考深度](draft-first-conversation.md) | 直接进入草稿，输入区配置 Power/模型/深度，首次发送才创建 | active | 两端真实路径、旧数据兼容与独立验收通过 | [PR #34](https://github.com/Lanbasara/zhongshu/pull/34)，已实现并取得本地及独立验证证据，待用户试用 | 2026-11-06 |

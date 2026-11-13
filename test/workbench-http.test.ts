@@ -19,6 +19,26 @@ import { attentionSchema, changeEventSchema, conversationListSchema, conversatio
 const origin = 'https://workbench.example';
 const configuration = { modelId: 'synthetic-model', permissionId: 'workspace-write' };
 const nativeState: NativeState = { status: 'idle', pendingInputs: 0, configurationVerified: true };
+test('completed deletion is distinguishable from a missing draft or an unfinished deletion', async t => {
+  const f = await fixture(t);
+  const id = f.seed();
+  const body = { id, workspaceId: 'fixture', harnessId: 'dsh', configuration };
+  const get = (id: string) => f.request('/conversations/' + id);
+  const create = () => f.request('/conversations', { method: 'POST', body });
+  const absent = await get(randomUUID());
+  assert.deepEqual([absent.status, absent.body.error], [404, 'conversation_not_found']);
+  f.store.deletions.begin(id);
+  const inProgress = await create();
+  assert.deepEqual([inProgress.status, inProgress.body.error], [409, 'conversation_deleting']);
+  f.store.deletions.nativeDone(id);
+  f.store.deletions.complete(id);
+  const deleted = await get(id);
+  assert.deepEqual([deleted.status, deleted.body.error], [404, 'conversation_deleted']);
+  const retry = await create();
+  assert.deepEqual([retry.status, retry.body.error], [409, 'conversation_deleted']);
+  assert.equal(f.store.getConversation(id), null);
+  assert.equal((await f.request('/conversations/' + id, { authenticated: false })).status, 401);
+});
 async function eventually(check: () => Promise<boolean> | boolean, timeout = 4000): Promise<void> {
   const until = Date.now() + timeout;
   while (Date.now() < until) { if (await check()) return; await new Promise(resolve => setTimeout(resolve, 20)); }

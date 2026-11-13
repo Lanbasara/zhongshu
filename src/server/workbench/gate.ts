@@ -17,12 +17,14 @@ export class Gate {
   private readonly savingDirectories = new Set<string>();
   private readonly maintenancePhases = new Map<string, HostPhase | 'transition'>();
   private readonly deleting = new Set<string>();
+  private readonly store: WorkbenchStore;
   private deletionGuard: (id: string) => boolean;
   private readonly busyConversations = new Map<string, number>();
   private readonly preparingConversations = new Set<string>();
   private readonly draftPreparations = new Map<string, DraftPreparation>();
 
   constructor(store: WorkbenchStore, bindings: Bindings) {
+    this.store = store;
     this.bindings = bindings;
     this.deletionGuard = id => store.deletions.get(id) !== null;
   }
@@ -45,7 +47,10 @@ export class Gate {
   // Deletion (written by lifecycle).
   setDeletionGuard(guard: (id: string) => boolean): void { this.deletionGuard = guard; }
   isDeleting(id: string): boolean { return this.deleting.has(id) || this.deletionGuard(id); }
-  assertNotDeleting(id: string): void { if (this.isDeleting(id)) throw new StoreError('conversation_deleting', 409); }
+  assertNotDeleting(id: string, action?: 'create'): void {
+    if (this.isDeleting(id)) throw new StoreError(action === 'create' && this.store.deletions.get(id)?.status === 'completed'
+      ? 'conversation_deleted' : 'conversation_deleting', 409);
+  }
   fenceDeletion(id: string): void { this.deleting.add(id); }
   releaseDeletion(id: string): void { this.deleting.delete(id); }
 
