@@ -17,6 +17,7 @@ export type Conversation = {
   id: string; harnessId: HarnessId; workspaceId: string; cwd: string; title: string;
   configuration: Configuration; binding: Binding | null; readiness: Readiness;
   archived: boolean; state: NativeState; error: string | null; createdAt: number; lastActivityAt: number;
+  abandonedFirstOperationId?: string;
   usage?: ConversationUsage;
   subagents?: SubagentSummary;
   /** The native automation that created this conversation (ADR 0021). */
@@ -66,6 +67,7 @@ export interface WorkbenchStore {
   reservePreparation(workspaceId: string, cwd: string, id: string, expectedId?: string): { preparationId: string; nativeId: string };
   completePreparation(id: string): void;
   createConversation(input: CreateConversation): { conversation: Conversation; created: boolean };
+  abandonFirstSend(id: string, operationId: string): void;
   /**
    * Record a native session an automation created as a ready conversation (ADR 0021). It runs with the configuration
    * the Harness gave it; the native identity is its binding, and repeating the same adoption returns the same row.
@@ -244,6 +246,7 @@ function conversationFromRow(row: Row): Conversation {
     configuration: parseJson(configurationSchema, row.configuration_json), binding: row.binding_json === null ? null : parseJson(bindingSchema, row.binding_json),
     readiness: parse(z.enum(['preparing', 'ready', 'blocked']), row.readiness, 'corrupt_workbench_data'),
     state: parseJson(nativeStateSchema, row.state_json), error: row.error === null ? null : String(row.error), createdAt: Number(row.created_at), lastActivityAt: Number(row.last_activity_at ?? row.created_at),
+    ...(row.abandoned_first_operation_id == null ? {} : { abandonedFirstOperationId: parse(uuid, row.abandoned_first_operation_id, 'corrupt_workbench_data') }),
     ...(row.usage_json == null ? {} : { usage: parseJson(usageSchema, row.usage_json) }),
     ...(summarizeSubagents(row.subagents_json) ? { subagents: summarizeSubagents(row.subagents_json)! } : {}),
     ...(row.plan_mode === 1 ? { planMode: true as const } : {}),
@@ -631,6 +634,7 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
         const conversation = requireConversation(input.conversationId);
         assertWorkspaceActive(conversation.workspaceId);
         if (conversation.archived) throw new StoreError('conversation_archived', 409);
+        if (conversation.abandonedFirstOperationId === input.id) throw new StoreError('first_send_abandoned', 409);
         const count = Number(db.prepare('SELECT COUNT(*) AS count FROM workbench_operations WHERE conversation_id=?').get(input.conversationId)!.count);
         if (count >= 50_000) throw new StoreError('operation_capacity_reached', 409);
         if (input.type === 'message') for (const image of input.payload.images ?? []) resources.pin(input.conversationId, image.id, input.id);
@@ -644,6 +648,19 @@ export function createWorkbenchStore(db: DatabaseSync, options: { now?: () => nu
       });
     },
     getOperation(id) { parse(uuid, id); return storage(() => { const row = operationRow(id); return row ? operationFromRow(row) : null; }); },
+    abandonFirstSend(id, operationId) {
+      parse(uuid, id); parse(uuid, operationId);
+      mutate(changed => {
+        const conversation = requireConversation(id);
+        if (conversation.abandonedFirstOperationId === operationId) return;
+        if (conversation.harnessId !== 'codex' || !conversation.binding || conversation.abandonedFirstOperationId ||
+          conversation.error !== 'codex_configuration_mismatch' ||
+          db.prepare('SELECT 1 FROM workbench_operations WHERE conversation_id=? LIMIT 1').get(id))
+          throw new StoreError('first_send_cannot_be_abandoned', 409);
+        db.prepare('UPDATE workbench_conversations SET abandoned_first_operation_id=? WHERE id=?').run(operationId, id);
+        changed(id, undefined, 'state');
+      });
+    },
     isScheduledOperation(id) { return !!db.prepare('SELECT 1 FROM workbench_operations WHERE id=? AND automation_id IS NOT NULL').get(id); },
     isScheduledRun(conversationId, runId) {
       return !!db.prepare('SELECT 1 FROM workbench_operations WHERE conversation_id=? AND run_id=? AND automation_id IS NOT NULL').get(conversationId, runId);

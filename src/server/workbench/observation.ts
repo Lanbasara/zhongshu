@@ -83,6 +83,9 @@ export class Observation {
   messageAllowed(conversation: Conversation, current?: Operation, freshState = false): boolean {
     return this.ledger.messageAllowed(conversation, !!this.runtimes.get(conversation.id)?.dirty, current, freshState);
   }
+  idleWithConfigurationMismatch(conversation: Conversation): boolean {
+    return this.ledger.idleWithConfigurationMismatch(conversation, !!this.runtimes.get(conversation.id)?.dirty);
+  }
 
   /**
    * Native activity Zhongshu did not start, such as an automation delivery (ADR 0021). Observe it like a sent
@@ -253,7 +256,8 @@ export class Observation {
 
   private unknown(id: string, reason: string): void {
     const current = this.bindings.conversation(id);
-    this.store.setConversationState(id, { error: reason, state: { status: 'unknown', pendingInputs: current.state.pendingInputs,
+    this.store.setConversationState(id, { error: reason, ...(reason === 'codex_configuration_mismatch' ? { readiness: 'blocked' as const } : {}),
+      state: { status: 'unknown', pendingInputs: current.state.pendingInputs,
       configurationVerified: false, reason, ...(current.state.runId ? { runId: current.state.runId } : {}) } });
     // What came from the same lost observation can no longer be vouched for.
     for (const participant of this.participants) participant.lost?.(id);
@@ -428,7 +432,7 @@ export class Observation {
           // Text can arrive faster than native reads. It invalidates history, not a
           // verified state read; newer state/invalidate events still fence both.
           this.store.setConversationState(id, { state: state.value, readiness: state.value.configurationVerified ? 'ready' : 'blocked',
-            error: state.value.configurationVerified ? null : 'native_configuration_unverified' });
+            error: state.value.configurationVerified ? null : state.value.reason === 'codex_configuration_mismatch' ? state.value.reason : 'native_configuration_unverified' });
           for (const participant of this.participants) participant.verified?.(id, state.value, runtime.tail?.items ?? [], current);
           if (state.value.configurationVerified && history.status === 'fulfilled' && history.value.usage) this.store.setUsage(id, history.value.usage);
           if (runtime.flush) { clearTimeout(runtime.flush); this.flushLive(id, runtime); }

@@ -138,8 +138,17 @@ export class Subagents implements Participant {
     return entry.task;
   }
   /** Archive and deletion cascade natively; they wait until no sub-agent is running or unverified. */
-  async assertSettled(id: string): Promise<void> {
+  async assertSettled(id: string, requireComplete = false): Promise<void> {
     const conversation = this.bindings.conversation(id);
+    if (requireComplete) {
+      const { binding, adapter } = this.target(id);
+      if (!adapter.subagents) throw new StoreError('subagents_unverified', 409);
+      const snapshot = await adapter.subagents(binding, true).catch(() => { throw new StoreError('subagents_unverified', 409); });
+      if (snapshot.agents.some(agent => agent.status === 'unknown')) throw new StoreError('subagents_unverified', 409);
+      if (snapshot.agents.some(agent => agent.status === 'running') || this.store.subagents.pendingStops(id).length)
+        throw new StoreError('subagents_running', 409);
+      return;
+    }
     if (!conversation.binding || !this.bindings.adapters.get(conversation.harnessId)?.subagents) return;
     try { await this.refresh(id, true); }
     catch {

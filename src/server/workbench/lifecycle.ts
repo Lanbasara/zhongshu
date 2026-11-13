@@ -47,18 +47,28 @@ export class Lifecycle {
   async setArchived(id: string, archived: boolean) {
     this.tasks.assertOpen(); this.gate.assertNotDeleting(id);
     const current = this.bindings.conversation(id);
+    let mismatchSettled = false;
     if (archived && !current.archived && current.binding) {
       await this.observation.observe(id);
       await this.observation.sync(id);
       this.tasks.assertOpen();
       // Native archive stops the spawn tree; it must not hide running sub-agents. A busy main agent is reported first.
-      if (this.observation.messageAllowed(this.bindings.conversation(id))) await this.subagents.assertSettled(id);
+      const observed = this.bindings.conversation(id);
+      mismatchSettled = this.canManageMismatch(observed);
+      if (mismatchSettled || this.observation.messageAllowed(observed)) await this.subagents.assertSettled(id, mismatchSettled);
+      if (mismatchSettled) await this.observation.sync(id);
     }
-    this.gate.assertNotDeleting(id);
+    this.tasks.assertOpen(); this.gate.assertNotDeleting(id);
     return this.store.setArchived(id, archived, conversation =>
-      conversation.binding ? this.observation.messageAllowed(conversation) || neverRan(conversation) :
+      conversation.binding ? (mismatchSettled && this.canManageMismatch(conversation)) || this.observation.messageAllowed(conversation) ||
+        (conversation.error !== 'codex_configuration_mismatch' && neverRan(conversation)) :
         conversation.readiness === 'blocked' && conversation.state.pendingInputs === 0 &&
         !['running', 'waiting'].includes(conversation.state.status));
+  }
+  private canManageMismatch(conversation: Conversation): boolean {
+    const { id } = conversation;
+    return !this.gate.preparing(id) && !this.gate.busy(id) && !this.gate.executionBlocked(conversation.cwd) &&
+      this.observation.idleWithConfigurationMismatch(conversation);
   }
   /** ADR 0025: idle automation-run conversations free their capacity slot after the retention period. */
   archiveIdleAutomations(now = Date.now()): number {
@@ -89,11 +99,16 @@ export class Lifecycle {
       if (conversation.binding) await this.observation.sync(id);
       await this.observation.slot(id)?.reading?.catch(() => {});
       const current = this.bindings.conversation(id);
+      const mismatchSettled = this.canManageMismatch(current);
       if (this.gate.preparing(id) || this.gate.busy(id) ||
-        (current.binding ? !this.observation.messageAllowed(current) : current.readiness === 'preparing') || this.store.readQueue(id).entries.length)
+        (current.binding ? !mismatchSettled && !this.observation.messageAllowed(current) : current.readiness === 'preparing') || this.store.readQueue(id).entries.length)
         throw new StoreError('conversation_busy', 409);
       // Native deletion cascades to the spawn tree; running sub-agents keep the conversation busy.
-      if (current.binding) await this.subagents.assertSettled(id);
+      if (current.binding) await this.subagents.assertSettled(id, mismatchSettled);
+      if (mismatchSettled) {
+        await this.observation.sync(id);
+        if (!this.canManageMismatch(this.bindings.conversation(id))) throw new StoreError('conversation_busy', 409);
+      }
       this.readers.drop(id); this.observation.dispose(id); this.history.forget(id);
       return current;
     } catch (error) { this.gate.releaseDeletion(id); throw error; }

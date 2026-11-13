@@ -33,11 +33,16 @@ async function peer(t: TestContext) {
   const operationId = randomUUID();
   let status: 'inProgress' | 'interrupted' = 'inProgress';
   let waiting = false;
+  let empty = false;
+  let nativeId = 'thread-1';
+  let mismatch = false;
+  let children: 'empty' | 'running' | 'unavailable' = 'empty';
+  let deleted = false;
   let http: Server | undefined; let ws: WebSocketServer | undefined;
   const calls: string[] = [];
   const cleanups: (() => Promise<void>)[] = [];
-  const nativeConfiguration = () => ({ thread: { id: 'thread-1', status: { type: status === 'inProgress' ? 'active' : 'idle', activeFlags: waiting ? ['waitingOnUserInput'] : [] } },
-    cwd, model: configuration.modelId, activePermissionProfile: { id: configuration.permissionId }, approvalPolicy: 'never' });
+  const nativeConfiguration = () => ({ thread: { id: nativeId, status: { type: !empty && status === 'inProgress' ? 'active' : 'idle', activeFlags: waiting ? ['waitingOnUserInput'] : [] } },
+    cwd, model: mismatch ? 'default-model' : configuration.modelId, activePermissionProfile: { id: configuration.permissionId }, approvalPolicy: 'never' });
   async function start() {
     assert.equal(http, undefined);
     http = createServer(); ws = new WebSocketServer({ server: http });
@@ -50,10 +55,14 @@ async function peer(t: TestContext) {
         case 'initialize': result = {}; break;
         case 'thread/resume': result = nativeConfiguration(); break;
         case 'thread/read': result = { thread: nativeConfiguration().thread }; break;
-        case 'thread/turns/list': result = { data: [{ id: 'run-1', status }], nextCursor: null }; break;
-        case 'thread/queue/list': result = { data: status === 'inProgress' && !waiting ? [{ id: 'one' }, { id: 'two' }, { id: 'three' }] : [], nextCursor: null }; break;
-        case 'thread/items/list': result = { data: [{ turnId: 'run-1', completedAtMs: 1,
+        case 'thread/turns/list': result = { data: empty ? [] : [{ id: 'run-1', status }], nextCursor: null }; break;
+        case 'thread/queue/list': result = { data: !empty && status === 'inProgress' && !waiting ? [{ id: 'one' }, { id: 'two' }, { id: 'three' }] : [], nextCursor: null }; break;
+        case 'thread/items/list': result = { data: empty ? [] : [{ turnId: 'run-1', completedAtMs: 1,
           item: { id: 'user-1', type: 'userMessage', clientId: operationId, content: [{ type: 'text', text: 'Synthetic work' }] } }], nextCursor: null }; break;
+        case 'thread/list':
+          if (children === 'unavailable') { socket.send(JSON.stringify({ id: input.id, error: { code: -32603, message: 'Synthetic read failure' } })); return; }
+          result = { data: children === 'running' ? [{ id: 'thread-child', status: { type: 'active' } }] : [], nextCursor: null }; break;
+        case 'thread/delete': deleted = true; result = {}; break;
         case 'thread/unsubscribe': result = { status: 'unsubscribed' }; break;
         default: socket.send(JSON.stringify({ id: input.id, error: { code: -32601, message: 'Synthetic unsupported request' } })); return;
       }
@@ -79,6 +88,11 @@ async function peer(t: TestContext) {
   return { directory, cwd, socketPath, configuration, operationId, calls, start, stop,
     cleanup(close: () => Promise<void>) { cleanups.push(close); },
     waitForInput() { waiting = true; },
+    useThread(id: string) { nativeId = id; },
+    emptyMismatch() { empty = true; mismatch = true; },
+    restoreConfiguration() { mismatch = false; },
+    childState(value: typeof children) { children = value; },
+    deleted: () => deleted,
     interrupt() { waiting = false; status = 'interrupted'; },
     notify() { for (const socket of ws?.clients ?? []) socket.send(JSON.stringify({ method: 'synthetic/current', params: {} })); } };
 }
@@ -229,4 +243,59 @@ test('archive rejects Codex native waiting status and succeeds after interruptio
   const accepted = await archive();
   assert.equal(accepted.statusCode, 200);
   assert.equal((await read()).archived, true);
+});
+
+test('A Codex mismatch fences the abandoned first send and allows management only with proven idleness', async t => {
+  const p = await peer(t);
+  p.emptyMismatch(); await p.start();
+  const db = openDatabase(join(p.directory, 'data'), productMigrations);
+  const store = createWorkbenchStore(db);
+  const adapter = createCodexAdapter({ socketPath: p.socketPath });
+  const service = new Workbench(store, [{ id: 'fixture', label: 'Fixture', directory: p.cwd }], new Map([['codex', adapter]]));
+  p.cleanup(async () => { await service.close(); db.close(); });
+  const id = randomUUID();
+  const bind = (id: string, nativeId: string) => {
+    store.createConversation({ id, harnessId: 'codex', workspaceId: 'fixture', cwd: p.cwd, configuration: p.configuration });
+    store.saveBinding(id, { id: nativeId, cwd: p.cwd, configuration: p.configuration, details: { version: 1, approvalPolicy: 'never' } });
+  };
+  bind(id, 'thread-1');
+  await service.reconcile(id);
+  const blocked = store.getConversation(id)!;
+  assert.equal(blocked.readiness, 'blocked');
+  assert.equal(blocked.state.status, 'idle');
+  assert.equal(blocked.state.configurationVerified, false);
+  assert.equal(blocked.error, 'codex_configuration_mismatch');
+  const first = { id: randomUUID(), conversationId: id, type: 'message' as const, payload: { text: 'Synthetic first send' } };
+  await assert.rejects(service.enqueue(first), { code: 'operation_needs_reconciliation' });
+
+  store.enqueueOperation({ ...first, id: randomUUID() });
+  const pending = store.listOperations({ conversationId: id })[0]!;
+  store.claimOperation(pending.id);
+  store.settleOperation(pending.id, { outcome: 'unknown', reason: 'receipt_lost' });
+  assert.throws(() => service.abandonFirstSend(id, first.id), { code: 'first_send_cannot_be_abandoned' });
+  await assert.rejects(service.setArchived(id, true), { code: 'conversation_archive_busy' });
+  await assert.rejects(service.deleteConversation(id), { code: 'conversation_busy' });
+
+  const cleanId = randomUUID();
+  p.useThread('thread-2');
+  bind(cleanId, 'thread-2');
+  await service.reconcile(cleanId);
+  service.abandonFirstSend(cleanId, first.id);
+  p.restoreConfiguration();
+  await service.reconcile(cleanId);
+  service.abandonFirstSend(cleanId, first.id);
+  await assert.rejects(service.enqueue({ ...first, conversationId: cleanId }), { code: 'first_send_abandoned' });
+  assert.equal(store.listOperations({ conversationId: cleanId }).length, 0);
+  p.emptyMismatch();
+  p.childState('running');
+  await assert.rejects(service.setArchived(cleanId, true), { code: 'subagents_running' });
+  p.childState('unavailable');
+  await assert.rejects(service.deleteConversation(cleanId), { code: 'subagents_unverified' });
+  assert.equal(p.deleted(), false);
+  p.childState('empty');
+  assert.equal((await service.setArchived(cleanId, true)).archived, true);
+  await service.deleteConversation(cleanId);
+  assert.equal(store.getConversation(cleanId), null);
+  assert.equal(p.deleted(), true);
+  assert.equal(p.calls.includes('turn/start'), false);
 });

@@ -36,6 +36,7 @@ export const stateReasonText: Record<string, string> = {
   conversation_preparation_incomplete: '原生对话还没有准备完成。',
   native_creation_result_unknown: '上一次创建对话的过程被中断，结果还没有核实。',
   native_configuration_unverified: '原生服务还没有确认这段对话的模型与权限配置。',
+  codex_configuration_mismatch: 'Codex 返回的配置与这段对话保存的配置不一致。',
   native_receipt_unknown: '上一次操作的原生接收结果还没有确认。',
   native_run_changed: '这段对话对应的原生运行已经变化，需要重新核对。',
   workspace_restore_pending: '恢复后的工作区正在重新核实。',
@@ -89,6 +90,11 @@ const blockedReasons: Record<string, Omit<Attention, 'tone'>> = {
   native_configuration_unverified: {
     title: '配置还没有核实完成',
     detail: '原生服务还没有确认这段对话的模型与权限配置；核实前不能继续发送，已有内容都会保留。页面打开期间会继续核对。',
+    action: 'reconcile',
+  },
+  codex_configuration_mismatch: {
+    title: 'Codex 配置核验失败',
+    detail: 'Codex 返回的配置与这段对话保存的配置不一致。核实前暂停发送，已有内容会保留。',
     action: 'reconcile',
   },
   workspace_restore_pending: {

@@ -285,6 +285,7 @@ class CodexAdapter implements HarnessAdapter {
         response = await this.rpc.request('thread/resume', params);
       }
       const loaded = parse(configuredThread, response);
+      if (loaded.thread.id !== binding.id || loaded.cwd !== binding.cwd) throw new HarnessError('codex_native_identity_mismatch');
       const verified = matches(binding, loaded, this.workspaceToolsProfile) || await this.effortUnsetBeforeFirstTurn(binding, loaded);
       const watch = this.watches.get(binding.id);
       if (watch) watch.verified = verified;
@@ -497,7 +498,10 @@ class CodexAdapter implements HarnessAdapter {
       if (native.thread.id !== binding.id) throw new HarnessError('codex_native_identity_mismatch');
       const status = native.thread.status;
       const common = { pendingInputs, configurationVerified: verified, ...(latest ? { runId: latest.id } : {}), ...(terminalStatus ? { terminalRunId: targetRunId, terminalStatus } : {}) };
-      if (!verified) return { ...common, status: 'unknown', reason: 'codex_configuration_mismatch' };
+      if (!verified) {
+        // A configuration mismatch still allows a positive read of native idleness.
+        return { ...common, status: status.type === 'idle' && latest?.status !== 'inProgress' ? 'idle' : 'unknown', reason: 'codex_configuration_mismatch' };
+      }
       if (status.type === 'active') return { ...common, status: status.activeFlags?.length ? 'waiting' : 'running' };
       if (status.type === 'systemError') return { ...common, status: 'failed', reason: 'codex_native_failure' };
       if (status.type !== 'idle' || latest?.status === 'inProgress') return { ...common, status: 'unknown', reason: 'codex_state_unconfirmed' };
@@ -724,7 +728,7 @@ class CodexAdapter implements HarnessAdapter {
     const page = parse(z.object({ data: z.array(timedTurn).max(100) }), await this.rpc.request('thread/turns/list', { threadId, limit: 1, sortDirection: 'desc', itemsView: 'notLoaded' }));
     return page.data[0];
   }
-  async subagents(input: Binding): Promise<SubagentSnapshot> {
+  async subagents(input: Binding, requireComplete = false): Promise<SubagentSnapshot> {
     const binding = parse(bindingSchema, input);
     this.retain(binding.id);
     try {
@@ -735,10 +739,18 @@ class CodexAdapter implements HarnessAdapter {
         let next: string | undefined; const seen = new Set<string>();
         for (let page = 0; page < 3 && threads.length < subagentLimit; page++) {
           const result = parse(threadPage, await this.rpc.request('thread/list', { ancestorThreadId: binding.id, archived, limit: 100, sortKey: 'created_at', sortDirection: 'asc', ...(next ? { cursor: next } : {}) }));
-          for (const thread of result.data) if (thread.id !== binding.id && !ids.has(thread.id) && subagentIdSchema.safeParse(thread.id).success) { ids.add(thread.id); threads.push(thread); }
+          for (const thread of result.data) {
+            if (thread.id === binding.id || ids.has(thread.id)) continue;
+            if (!subagentIdSchema.safeParse(thread.id).success) {
+              if (requireComplete) throw new HarnessError('subagents_unverified');
+              continue;
+            }
+            ids.add(thread.id); threads.push(thread);
+          }
           next = result.nextCursor ?? undefined;
           if (!next || seen.has(next)) break; seen.add(next);
         }
+        if (requireComplete && (next || threads.length >= subagentLimit)) throw new HarnessError('subagents_unverified');
       }
       threads.sort((left, right) => (left.createdAt ?? 0) - (right.createdAt ?? 0));
       const agents: NativeSubagent[] = [];
@@ -751,7 +763,7 @@ class CodexAdapter implements HarnessAdapter {
         let status: NativeSubagent['status'] = 'unknown'; let endedAt: number | undefined;
         if (thread.status?.type === 'active') status = 'running';
         else if (thread.status?.type === 'systemError') status = 'failed';
-        else if (lookups++ < 64) {
+        else if ((!requireComplete || ['idle', 'notLoaded'].includes(thread.status?.type ?? '')) && lookups++ < 64) {
           // Idle or unloaded threads keep their last turn's outcome; reading it does not load or resume the child.
           const latest = await this.lastTurn(thread.id);
           status = !latest ? 'idle' : latest.status === 'inProgress' ? 'unknown' : latest.status;

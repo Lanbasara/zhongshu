@@ -179,6 +179,7 @@ export class Workbench {
 
   // Drafts and creation.
   catalogs(): Promise<Catalog[]> { return this.desks.creation.catalogs(); }
+  abandonFirstSend(id: string, operationId: string): void { this.desks.creation.abandonFirstSend(id, operationId); }
   conversationDefaults(workspaceId?: string): Conversation | null { return this.desks.creation.conversationDefaults(workspaceId); }
   draftSkills(workspaceId: string, harnessId: HarnessId) { return this.desks.creation.draftSkills(workspaceId, harnessId); }
   prepareDraft(workspaceId: string, harnessId: HarnessId, expectedId?: string) { return this.desks.creation.prepareDraft(workspaceId, harnessId, expectedId); }

@@ -382,6 +382,8 @@ export const productMigrations: Migration[] = [{ version: 2, sql: `
   CREATE INDEX plugin_operations_target ON plugin_operations(harness, plugin_id, sequence);
   CREATE UNIQUE INDEX plugin_operations_in_flight ON plugin_operations(harness)
     WHERE status IN ('applying', 'unknown', 'restart-required');
+` }, { version: 29, sql: `
+  ALTER TABLE workbench_conversations ADD COLUMN abandoned_first_operation_id TEXT;
 ` }];
 
 /** Runs inside restoreDatabase's private staging transaction, before the database is published. */

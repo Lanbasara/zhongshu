@@ -1,7 +1,7 @@
 // Layer 4 (ADR 0024): drafts and new conversations (ADR 0010, 0011, 0017). Nothing becomes a product conversation
 // before the first send; a DSH draft may hold one prepared native session per workspace.
 import { randomUUID } from 'node:crypto';
-import type { Catalog, HarnessId } from '../../harness/types.ts';
+import { HarnessError, type Catalog, type HarnessId } from '../../harness/types.ts';
 import { workspaceFiles } from '../resources.ts';
 import { StoreError, type Conversation, type CreateConversation, type WorkbenchStore } from '../workbench-store.ts';
 import type { Bindings } from './bindings.ts';
@@ -114,6 +114,10 @@ export class Creation {
     if (result.created) this.tasks.launch(this.prepare(result.conversation));
     return result.conversation;
   }
+  abandonFirstSend(id: string, operationId: string): void {
+    this.tasks.assertOpen(); this.gate.assertNotDeleting(id);
+    this.store.abandonFirstSend(id, operationId);
+  }
   /** Create the native session for a new conversation, then observe it. Also resumes an interrupted creation. */
   prepare(conversation: Conversation): Promise<void> {
     this.gate.assertNotDeleting(conversation.id);
@@ -144,8 +148,9 @@ export class Creation {
         this.store.completePreparation(conversation.id);
         if (this.tasks.closed) throw new StoreError('workbench_closed', 503);
         await this.observation.observe(conversation.id); await this.observation.sync(conversation.id);
-      } catch {
-        this.store.setConversationState(conversation.id, { readiness: 'blocked', error: 'conversation_preparation_incomplete' });
+      } catch (error) {
+        const mismatch = error instanceof HarnessError && error.code === 'codex_configuration_mismatch';
+        this.store.setConversationState(conversation.id, { readiness: 'blocked', error: mismatch ? error.code : 'conversation_preparation_incomplete' });
       } finally { acceptingBinding = false; this.gate.endPreparing(conversation.id); this.observation.release(conversation.id); }
     });
   }
