@@ -2,11 +2,13 @@
 // the back gesture closes it before leaving the page. Native <dialog> elements are left to the browser, which closes
 // them on back by itself.
 import { useEffect, useId, useRef } from 'react';
+import { workspaceIdSchema } from '../shared/workbench.ts';
 
 export type Route =
   | { kind: 'home' }
   | { kind: 'conversation'; id: string; notice?: string }
-  | { kind: 'draft'; workspaceId?: string }
+  | { kind: 'new'; workspaceId?: string }
+  | { kind: 'draft'; id: string }
   | { kind: 'schedule'; tab?: string }
   | { kind: 'settings'; tab?: string }
   | { kind: 'archive' };
@@ -14,6 +16,7 @@ export type Route =
 const uuid = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
 /** A conversation, optionally at the turn an agent notification points to (ADR 0021). */
 const conversationEntry = new RegExp(`^#(${uuid})(?::notice:(${uuid}))?$`);
+const draftEntry = new RegExp(`^#draft/(${uuid})$`);
 const tabbed = (name: string) => new RegExp(`^#${name}(?::([a-z]{1,32}))?$`);
 const scheduleEntry = tabbed('schedule');
 const settingsEntry = tabbed('settings');
@@ -21,10 +24,15 @@ const settingsEntry = tabbed('settings');
 export function parseRoute(hash: string): Route {
   const conversation = conversationEntry.exec(hash);
   if (conversation) return { kind: 'conversation', id: conversation[1]!, ...(conversation[2] ? { notice: conversation[2] } : {}) };
+  const draft = draftEntry.exec(hash);
+  if (draft) return { kind: 'draft', id: draft[1]! };
+  if (hash === '#new') return { kind: 'new' };
   if (hash.startsWith('#new:')) {
-    let workspaceId = '';
-    try { workspaceId = decodeURIComponent(hash.slice(5)); } catch { /* an unreadable workspace opens a plain draft */ }
-    return workspaceId ? { kind: 'draft', workspaceId } : { kind: 'draft' };
+    try {
+      const workspaceId = workspaceIdSchema.safeParse(decodeURIComponent(hash.slice(5)));
+      if (workspaceId.success) return { kind: 'new', workspaceId: workspaceId.data };
+    } catch { /* An unreadable workspace opens a plain draft. */ }
+    return { kind: 'new' };
   }
   const schedule = scheduleEntry.exec(hash);
   if (schedule) return schedule[1] ? { kind: 'schedule', tab: schedule[1] } : { kind: 'schedule' };
@@ -37,7 +45,8 @@ export function parseRoute(hash: string): Route {
 export function routeHash(route: Route): string {
   switch (route.kind) {
     case 'conversation': return `#${route.id}`;
-    case 'draft': return `#new:${encodeURIComponent(route.workspaceId ?? '')}`;
+    case 'new': return `#new:${encodeURIComponent(route.workspaceId ?? '')}`;
+    case 'draft': return `#draft/${route.id}`;
     case 'schedule': return route.tab && route.tab !== 'calendar' ? `#schedule:${route.tab}` : '#schedule';
     case 'settings': return route.tab && route.tab !== 'workspaces' ? `#settings:${route.tab}` : '#settings';
     case 'archive': return '#archive';

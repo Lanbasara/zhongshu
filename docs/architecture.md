@@ -56,7 +56,7 @@ Web manifest 提供独立窗口入口，推送与安装见下方[通知与安装
 
 ## 新建草稿与配置归属
 
-[new-conversation.tsx](../src/web/new-conversation.tsx) 管理每工作区草稿和首次发送：生成稳定对话/操作编号，创建、等待准备、上传并派发，失败后沿原编号核对。它通过 [new-conversation-state.ts](../src/web/new-conversation-state.ts) 在 sessionStorage 保留文字、材料引用、配置及首发状态，未上传图片在 IndexedDB；[conversation-preferences.ts](../src/web/conversation-preferences.ts) 的 localStorage 只记配置偏好，不存消息正文。首次发送前不创建正式产品对话；DSH 可提前准备原生空会话，Codex 不提前创建；零工作区入口引导登记。长期决定见 [ADR 0010](adr/0010-draft-first-conversation.md) 与 [ADR 0011](adr/0011-dsh-prepared-session.md)，复验入口见 [创建对话](features/conversations.md)。
+[new-conversation.tsx](../src/web/new-conversation.tsx) 管理草稿编辑和首次发送。[new-conversation-state.ts](../src/web/new-conversation-state.ts) 以草稿 ID 在 sessionStorage 保留文字、材料引用、配置及首发状态，暂存图片在 IndexedDB；[conversation-preferences.ts](../src/web/conversation-preferences.ts) 在 localStorage 保存配置偏好。首发生成对话和操作编号，创建、准备、上传、派发和核对沿用该组身份。DSH 可提前准备原生空会话；零工作区入口引导登记。边界见 [ADR 0027](adr/0027-independent-conversation-drafts.md)、[ADR 0010](adr/0010-draft-first-conversation.md) 和 [ADR 0011](adr/0011-dsh-prepared-session.md)，复验见[创建对话](features/conversations.md)。
 
 DSH 对话的 Agent 预设（标准或 PTC）是固定配置的一部分（[ADR 0017](adr/0017-dsh-agent-preset.md)）：模型目录给出可选预设与中书自己的默认（标准）；Workbench 只接受目录中可用的预设，Store 把它纳入创建身份（仅在选择时，旧对话的身份不变）；DSH 在新建或首发占用准备时设定，并以原生投影核对。
 
@@ -80,7 +80,7 @@ DSH 对话的 Agent 预设（标准或 PTC）是固定配置的一部分（[ADR 
 
 标题、控制与正文统一使用界面字体（长文正文 15px），等宽只用于代码与命令。组件只用语义颜色（surface/text/accent/status 等），以后加入暗色只需重定义语义层。状态各有一种形状与颜色：运行中为蓝色转圈，完成未读为绿点，执行失败为红点，等待处理为琥珀点，待核实与已中断分别为橙色、灰色空心圈，就绪不显示。输入与正文共用阅读宽度；窄屏为抽屉导航，标题栏提供搜索，浮层改为底部面板或全屏。响应、状态、表面切换分别使用 120/180/260ms 与同一缓动，系统减少动效时去除位移、持续旋转与流光。
 
-页面地址与浏览器历史只由 [navigation.ts](../src/web/navigation.ts) 写入：用户移到新页面时新增一条记录，同页更正（换标签、草稿换工作区、草稿首发成为对话、对话不可用回首页）替换当前记录；后退、前进和改变地址都按地址显示页面。窄屏上非原生浮层（导航抽屉、搜索、阅读器、子 Agent 面板、日程任务卡片）打开时各压入一条只属于浮层的记录，返回手势先关闭浮层；换页前先退掉这些记录，异步退回期间的写入排队，避免竞争。原生 `<dialog>` 交给浏览器关闭。
+页面地址与浏览器历史只由 [navigation.ts](../src/web/navigation.ts) 写入。新建或续写草稿时导航到草稿 ID，草稿改选工作区时地址保持。换标签、草稿交接为对话、对话不可用回首页均替换当前记录。后退、前进和改变地址都按地址显示页面。窄屏上非原生浮层（导航抽屉、搜索、阅读器、子 Agent 面板、日程任务卡片）打开时各压入一条只属于浮层的记录，返回手势先关闭浮层；换页前先退掉这些记录，异步退回期间的写入排队，避免竞争。原生 `<dialog>` 交给浏览器关闭。
 
 界面原型与组件示例的维护约定见 [ADR 0008](adr/0008-storybook-ui-prototypes.md)。启动命令见 [README](../README.md#ui-development)。
 

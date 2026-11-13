@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { Archive, CalendarDays, FolderOpen, MoreHorizontal, PanelLeft, Pencil, RefreshCw, Search, Settings, SquarePen } from 'lucide-react';
+import { Archive, CalendarDays, FileText, FolderOpen, MoreHorizontal, PanelLeft, Pencil, RefreshCw, Search, Settings, SquarePen } from 'lucide-react';
 import { Button, IconButton, Kbd, Menu, MenuItem, StatusDot, modifierKey, type StatusKind } from './ui/controls.tsx';
 import { WorkbenchFrame, useNarrow } from './patterns/workbench-frame.tsx';
 import { ConnectionStatus, SidebarAction, SidebarShell } from './patterns/sidebar.tsx';
@@ -33,7 +33,8 @@ import { ConversationNavigation, ManageDialog, useSidebarWidth } from './convers
 import type { MessageReference } from '../shared/content.ts';
 import { WorkspaceManagement, type WorkspaceAction } from './workspace-management.tsx';
 import { InputQueue } from './input-queue.tsx';
-import { NewConversation } from './new-conversation.tsx';
+import { ContinueDrafts, NewConversation } from './new-conversation.tsx';
+import { emptyNewDraft, listNewDrafts, readNewDraft, saveNewDraft, type NewDraft } from './new-conversation-state.ts';
 import { storageState, useStorage } from './storage-status.tsx';
 import { appendNewer, joinLatest, pageItems, preparePage, prependOlder, touchesWindow, trimOldest, type Page } from './history-window.ts';
 import { rememberConversation } from './conversation-preferences.ts';
@@ -91,6 +92,7 @@ const historyNotes: Record<string, string> = {
 const describe = (reason: string, fallback: string) => failures[reason] ?? (/^[a-z][a-z0-9_]*$/.test(reason) ? fallback : reason);
 /** A file opened from a turn's file list, or from elsewhere (a timeline entry) with no turn behind it. */
 type ReaderTarget = { conversationId: string; runId: string; workspaceId: string; path: string } | { conversationId?: undefined; runId?: undefined; workspaceId: string; path: string };
+type DraftPage = { id: string; initial?: NewDraft; notice?: string };
 
 export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf: string; logout(): void; expired(): void; busy: boolean; authError: string }) {
   const [configuration, setConfiguration] = useState<WorkbenchConfiguration>();
@@ -138,7 +140,8 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
   const [newer, setNewer] = useState<(string | null)[]>([]);
   const items = useMemo(() => pageItems(pages), [pages]);
   const [draft, setDraft] = useState<Draft>({ text: '' });
-  const [creating, setCreating] = useState<string | true | undefined>(() => opened.kind === 'draft' ? opened.workspaceId || true : undefined);
+  const [creating, setCreating] = useState<DraftPage | undefined>(() => opened.kind === 'draft' ? { id: opened.id } : undefined);
+  const [continuing, setContinuing] = useState<NewDraft[]>();
   const [addedWorkspace,setAddedWorkspace]=useState<string>();
   const [pickingFile, setPickingFile] = useState(false);
   const [navigation, setNavigation] = useState(false);
@@ -452,11 +455,17 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
   const choose = useCallback((id: string) => { pageHistory.page(routeHash({ kind: 'conversation', id }), 'push'); showConversation(id); }, [showConversation]);
   /** A draft that became a conversation takes over the draft's entry, so back does not return to an empty draft. */
   const adoptConversation = useCallback((id: string) => { pageHistory.page(routeHash({ kind: 'conversation', id }), 'replace'); showConversation(id); }, [showConversation]);
-  const showDraft = useCallback((id?: string) => { setUnavailableNotice(''); setSelected(undefined); setCreating(id || true); setView(undefined); setReader(false); setNavigation(false); }, []);
-  const draftHash = (id?: string) => routeHash(id ? { kind: 'draft', workspaceId: id } : { kind: 'draft' });
-  const startDraft = useCallback((id?: string) => { pageHistory.page(draftHash(id), 'push'); showDraft(id); }, [showDraft]);
-  /** Choosing another workspace inside a draft corrects the same page. */
-  const switchDraftWorkspace = useCallback((id?: string) => { pageHistory.page(draftHash(id), 'replace'); showDraft(id); }, [showDraft]);
+  const showDraft = useCallback((page: DraftPage) => { setUnavailableNotice(''); setSelected(undefined); setCreating(page); setView(undefined); setReader(false); setNavigation(false); }, []);
+  const openDraft = useCallback((page: DraftPage, mode: 'push' | 'replace' = 'push') => {
+    pageHistory.page(routeHash({ kind: 'draft', id: page.id }), mode);
+    showDraft(page);
+  }, [showDraft]);
+  const startDraft = useCallback((workspaceId = '', mode: 'push' | 'replace' = 'push') => {
+    const initial: NewDraft = { ...emptyNewDraft(workspaceId), configurationPending: true };
+    saveNewDraft(initial);
+    openDraft({ id: initial.id, initial }, mode);
+  }, [openDraft]);
+  useEffect(() => { if (opened.kind === 'new') startDraft(opened.workspaceId, 'replace'); }, [opened, startDraft]);
   const createInWorkspace = useCallback((id:string)=>startDraft(id),[startDraft]);
   const refreshNavigation = useCallback(() => {
     refreshList(value => value + 1);
@@ -738,7 +747,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
   const openFiles = () => {
     if (!configuration?.workspaces.length) return;
     // The reader opens beside a conversation or draft; from Settings, the archive or the schedule, go back to that page first.
-    if (view) { pageHistory.page(routeHash(creating ? (typeof creating === 'string' ? { kind: 'draft', workspaceId: creating } : { kind: 'draft' }) : selected ? { kind: 'conversation', id: selected } : { kind: 'home' }), 'push'); setView(undefined); }
+    if (view) { pageHistory.page(routeHash(creating ? { kind: 'draft', id: creating.id } : selected ? { kind: 'conversation', id: selected } : { kind: 'home' }), 'push'); setView(undefined); }
     setSubagentPanel(undefined); setReader(true); setNavigation(false);
   };
   const showSettings = (tab?: SettingsTab) => { if (tab) setSettingsTab(tab); setView('settings'); setReader(false); setSubagentPanel(undefined); setNavigation(false); };
@@ -762,11 +771,12 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
   const showHome = () => { setSelected(undefined); setCreating(undefined); setView(undefined); setNavigation(false); };
   /** The page this state shows, to tell a real page change from a step over an overlay entry. */
   const currentRoute: Route = view === 'settings' ? { kind: 'settings', tab: settingsTab } : view === 'schedule' ? { kind: 'schedule', tab: scheduleTab }
-    : view === 'archive' ? { kind: 'archive' } : creating ? (typeof creating === 'string' ? { kind: 'draft', workspaceId: creating } : { kind: 'draft' })
+    : view === 'archive' ? { kind: 'archive' } : creating ? { kind: 'draft', id: creating.id }
     : selected ? { kind: 'conversation', id: selected } : { kind: 'home' };
   const showRoute = (route: Route) => {
     if (route.kind === 'conversation') { showConversation(route.id); if (route.notice) setPendingNotice(route.notice); }
-    else if (route.kind === 'draft') showDraft(route.workspaceId);
+    else if (route.kind === 'draft') showDraft({ id: route.id });
+    else if (route.kind === 'new') startDraft(route.workspaceId, 'replace');
     else if (route.kind === 'schedule') showSchedule(scheduleTabs.find(tab => tab.id === route.tab)?.id ?? 'calendar');
     else if (route.kind === 'settings') showSettings(settingsTabs.find(tab => tab.id === route.tab)?.id ?? 'workspaces');
     else if (route.kind === 'archive') showArchive();
@@ -842,6 +852,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
     onClose={narrow ? () => setNavigation(false) : undefined} separator={narrow ? undefined : sidebarWidth.separator}
     actions={<>
       <SidebarAction icon={<SquarePen size={16}/>} label="新对话" current={!!creating && !view} onClick={() => startDraft()}/>
+      <SidebarAction icon={<FileText size={16}/>} label="继续草稿" onClick={() => { setNavigation(false); setContinuing(listNewDrafts()); }}/>
       <SidebarAction icon={<Search size={16}/>} label={narrow ? '搜索对话、工作区和操作' : '搜索与跳转'} ariaLabel="搜索与跳转" shortcut={narrow ? undefined : [modifierKey, 'K']} onClick={() => { setNavigation(false); setSearching(true); }}/>
       <SidebarAction icon={<CalendarDays size={16}/>} label="日程" current={view === 'schedule'} onClick={() => openSchedule()}/>
     </>}
@@ -871,7 +882,11 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
         : view === 'schedule' ? <ScheduleView csrf={csrf} report={report} configuration={configuration} revision={listRevision} tab={scheduleTab}
           onTab={changeScheduleTab} openConversation={choose} openFile={openWorkspaceFile}
           createFor={createFor} onCreateHandled={() => setCreateFor(undefined)}/>
-        : creating ? configuration ? <NewConversation key={String(creating)} configuration={configuration} initialWorkspace={typeof creating==='string'?creating:undefined} addedWorkspace={addedWorkspace} csrf={csrf} onWorkspace={switchDraftWorkspace} onAddWorkspace={()=>setWorkspaceAction({kind:'add'})} onCreated={(c,refused)=>{setError('');refreshList(value=>value+1);if(refused)arrivalNotice.current={id:c.id,message:failureText(refused)};adoptConversation(c.id);}} report={report}/> : <p className="view-status" role="status">正在读取工作区与配置…</p>
+        : creating ? configuration ? <NewConversation key={creating.id} configuration={configuration} id={creating.id} initial={creating.initial} notice={creating.notice}
+            addedWorkspace={addedWorkspace} csrf={csrf} onStart={() => startDraft()} onAddWorkspace={()=>setWorkspaceAction({kind:'add'})}
+            onRecovered={(id, notice) => openDraft({ id, notice }, 'replace')}
+            onView={choose}
+            onCreated={(c,refused)=>{setError('');refreshList(value=>value+1);if(refused)arrivalNotice.current={id:c.id,message:failureText(refused)};adoptConversation(c.id);}} report={report}/> : <p className="view-status" role="status">正在读取工作区与配置…</p>
         : !selected ? <section className="empty-workbench">
           <h2>选择一段对话，或开始新的工作</h2>
           <p>对话按工作区列在左侧。离开页面后 Agent 仍在工作，回来接着看就行。</p>
@@ -952,6 +967,7 @@ export function WorkbenchView({ csrf, logout, expired, busy, authError }: { csrf
     <WorkbenchSearch open={searching} onOpenChange={setSearching} configuration={configuration} attention={attention?.conversations} actions={searchActions} csrf={csrf}/>
     {managing && <ManageDialog conversation={managing} workspaceLabel={configuration?.workspaces.find(w => w.id === managing.workspaceId)?.label ?? configuration?.removedWorkspaces?.find(w => w.id === managing.workspaceId)?.label ?? '未登记工作区'}
       csrf={csrf} close={() => setManaging(undefined)} changed={message => { pushToast({ title: message }); refreshNavigation(); }} report={report}/>}
+    {continuing && <ContinueDrafts drafts={continuing} workspaces={configuration?.workspaces ?? []} onClose={() => setContinuing(undefined)} onOpen={id => { setContinuing(undefined); openDraft({ id }); }}/>}
     {pickingFile && selected && !workspaceRemoved && <FilePicker conversation={selected} onClose={() => setPickingFile(false)} onSelect={(reference: MessageReference) => { const next = { ...draft, text: draft.text.endsWith('@') ? draft.text.slice(0,-1) : draft.text, references: [...(draft.references ?? []), reference].slice(0,8) }; updateDraft(next); }}/ >}
     {workspaceAction && <WorkspaceManagement action={workspaceAction} roots={configuration?.workspaceRoots ?? []} csrf={csrf}
       close={() => setWorkspaceAction(undefined)} changed={id => { if(workspaceAction?.kind==='add')setAddedWorkspace(id);refreshConfiguration(); refreshNavigation(); }} report={report} />}

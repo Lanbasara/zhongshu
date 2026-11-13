@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import { normalizeDraftPreference } from '../src/web/conversation-configuration-label.ts';
 import assert from 'node:assert/strict';
 import { initialConversationTitle, readPreference, rememberConversation } from '../src/web/conversation-preferences.ts';
-import { emptyNewDraft, readNewDraft, saveNewDraft, removeNewDraft, clearNewDrafts } from '../src/web/new-conversation-state.ts';
+import { emptyNewDraft, listNewDrafts, readNewDraft, saveNewDraft, removeNewDraft, clearNewDrafts } from '../src/web/new-conversation-state.ts';
 
 // Enumerable keys match browser Storage, including the logout cleanup path.
 function storage() {
@@ -28,7 +28,8 @@ function withStorage(run: (local: Storage, session: Storage) => void) {
   }
 }
 const preferenceKey = 'zhongshu:conversation-preferences:v1';
-const draftKey = 'zhongshu:new-draft:v1:';
+const legacyDraftKey = 'zhongshu:new-draft:v1:';
+const draftKey = 'zhongshu:new-draft:v2:';
 const config = { modelId:'native-model', permissionId:'read-only', reasoningEffort:'high' };
 const first = { workspaceId:'first', harnessId:'codex' as const, configuration:config };
 const second = { workspaceId:'second', harnessId:'dsh' as const, configuration:{ modelId:'dsh-native', permissionId:'ask', reasoningEffort:'off' } };
@@ -70,11 +71,10 @@ test('fresh draft with incomplete selection survives reload without creating a c
   const draft = emptyNewDraft('first');
   draft.text = '尚未选择模型，但已有输入';
   assert.equal(saveNewDraft(draft), true);
-  assert.deepEqual(readNewDraft('first'), draft);
-  assert.equal(readNewDraft('second'), undefined);
+  assert.deepEqual(readNewDraft(draft.id), draft);
   const unassigned = emptyNewDraft('');
   assert.equal(saveNewDraft(unassigned), true);
-  assert.deepEqual(readNewDraft(''), unassigned);
+  assert.deepEqual(readNewDraft(unassigned.id), unassigned);
 }));
 
 test('draft restoration retains references, independent Power choices and accepted submission identity', () => withStorage(() => {
@@ -82,34 +82,37 @@ test('draft restoration retains references, independent Power choices and accept
   draft.text = '继续检查';
   draft.references = [{type:'file',path:'src/main.ts'}];
   draft.powers = { codex:config, dsh:second.configuration };
-  draft.submission = {creation:{id:draft.id,workspaceId:'first',harnessId:'codex',configuration:config,title:'继续检查'},operationId:crypto.randomUUID(),uploaded:{},dispatchStarted:true};
-  const other = emptyNewDraft('second', second);
+  draft.submission = {creation:{id:crypto.randomUUID(),workspaceId:'first',harnessId:'codex',configuration:config,title:'继续检查'},operationId:crypto.randomUUID(),uploaded:{},dispatchStarted:true};
+  const other = emptyNewDraft('first', first);
+  other.text = '独立输入';
   assert.equal(saveNewDraft(draft), true);
   assert.equal(saveNewDraft(other), true);
-  assert.deepEqual(readNewDraft('first'), draft);
-  assert.deepEqual(readNewDraft('second'), other);
-  removeNewDraft('first');
-  assert.equal(readNewDraft('first'), undefined);
-  assert.deepEqual(readNewDraft('second'), other);
+  assert.deepEqual(readNewDraft(draft.id), draft);
+  assert.deepEqual(readNewDraft(other.id), other);
+  assert.deepEqual(new Set(listNewDrafts()), new Set([draft, other]));
+  removeNewDraft(draft.id);
+  assert.equal(readNewDraft(draft.id), undefined);
+  assert.deepEqual(readNewDraft(other.id), other);
 }));
 
-test('draft cache rejects corrupt data and workspace mismatch rather than restoring another workspace content', () => withStorage((_local, session) => {
+test('draft cache rejects corrupt data or mismatched draft identity', () => withStorage((_local, session) => {
   const draft = emptyNewDraft('first', first);
-  for (const raw of ['{broken', 'x'.repeat(262145), JSON.stringify({...draft,workspaceId:'second'}), JSON.stringify({...draft,text:'x'.repeat(16001)}), JSON.stringify({...draft,skills:[{id:'a'.repeat(64),label:'skill',start:0,end:5}]})]) {
-    session.setItem(draftKey+'first',raw);
-    assert.equal(readNewDraft('first'),undefined);
+  for (const raw of ['{broken', 'x'.repeat(262145), JSON.stringify({...draft,id:crypto.randomUUID()}), JSON.stringify({...draft,text:'x'.repeat(16001)}), JSON.stringify({...draft,skills:[{id:'a'.repeat(64),label:'skill',start:0,end:5}]})]) {
+    session.setItem(draftKey+draft.id,raw);
+    assert.equal(readNewDraft(draft.id),undefined);
   }
 }));
 
 test('authentication exit clears drafts and preferences while preserving unrelated browser keys', () => withStorage((local, session) => {
   rememberConversation(first);
-  saveNewDraft(emptyNewDraft('first',first));
-  saveNewDraft(emptyNewDraft('second',second));
+  const draft=emptyNewDraft('first',first), legacy=emptyNewDraft('second',second);
+  saveNewDraft(draft);
+  session.setItem(legacyDraftKey+'second',JSON.stringify(legacy));
   local.setItem('unrelated','keep'); session.setItem('unrelated','keep');
   clearNewDrafts();
   assert.equal(readPreference(),undefined);
-  assert.equal(readNewDraft('first'),undefined);
-  assert.equal(readNewDraft('second'),undefined);
+  assert.equal(readNewDraft(draft.id),undefined);
+  assert.equal(readNewDraft(legacy.id),undefined);
   assert.equal(local.getItem('unrelated'),'keep');
   assert.equal(session.getItem('unrelated'),'keep');
 }));
@@ -119,9 +122,10 @@ test('unavailable browser storage degrades to in-memory behavior without throwin
   Object.defineProperty(globalThis,'sessionStorage',{configurable:true,get(){throw new Error('Storage disabled');}});
   assert.equal(readPreference(),undefined);
   assert.equal(rememberConversation(first),false);
-  assert.equal(readNewDraft('first'),undefined);
-  assert.equal(saveNewDraft(emptyNewDraft('first',first)),false);
-  assert.doesNotThrow(()=>removeNewDraft('first'));
+  const draft=emptyNewDraft('first',first);
+  assert.equal(readNewDraft(draft.id),undefined);
+  assert.equal(saveNewDraft(draft),false);
+  assert.doesNotThrow(()=>removeNewDraft(draft.id));
   assert.doesNotThrow(()=>clearNewDrafts());
 }));
 
@@ -142,12 +146,12 @@ test('legacy DSH browser preference initializes a compatible new draft while pre
 }));
 
 
-test('frozen submission cannot restore with a different conversation identity or configuration', () => withStorage((_local, session) => {
+test('frozen submission cannot restore with a mismatched workspace or configuration', () => withStorage((_local, session) => {
   const draft = emptyNewDraft('first', first);
-  const creation = {id:draft.id,workspaceId:'first',harnessId:'codex',configuration:config,title:'first'};
-  for (const wrong of [{...creation,id:crypto.randomUUID()}, {...creation,workspaceId:'second'}, {...creation,configuration:{...config,reasoningEffort:'low'}}]) {
-    session.setItem(draftKey+'first',JSON.stringify({...draft,submission:{creation:wrong,operationId:crypto.randomUUID(),uploaded:{},dispatchStarted:false}}));
-    assert.equal(readNewDraft('first'),undefined);
+  const creation = {id:crypto.randomUUID(),workspaceId:'first',harnessId:'codex',configuration:config,title:'first'};
+  for (const wrong of [{...creation,workspaceId:'second'}, {...creation,configuration:{...config,reasoningEffort:'low'}}]) {
+    session.setItem(draftKey+draft.id,JSON.stringify({...draft,submission:{creation:wrong,operationId:crypto.randomUUID(),uploaded:{},dispatchStarted:false}}));
+    assert.equal(readNewDraft(draft.id),undefined);
   }
 }));
 
@@ -156,12 +160,31 @@ test('DSH preparation survives refresh and Power switching, but a frozen first s
   draft.preparationId = crypto.randomUUID();
   draft.text = '首发技能材料';
   assert.equal(saveNewDraft(draft), true);
-  assert.deepEqual(readNewDraft('second'), draft);
+  assert.deepEqual(readNewDraft(draft.id), draft);
   assert.equal(saveNewDraft({...draft,harnessId:'codex',configuration:config}),true);
-  assert.equal(readNewDraft('second')?.preparationId,draft.preparationId);
+  assert.equal(readNewDraft(draft.id)?.preparationId,draft.preparationId);
   const frozen = {...draft,submission:{creation:{id:draft.id,workspaceId:draft.workspaceId,harnessId:'dsh' as const,configuration:draft.configuration,title:'首发技能材料',preparationId:draft.preparationId},operationId:crypto.randomUUID(),uploaded:{},dispatchStarted:false}};
   assert.equal(saveNewDraft(frozen),true);
-  assert.deepEqual(readNewDraft('second'),frozen);
-  session.setItem(draftKey+'second',JSON.stringify({...frozen,preparationId:crypto.randomUUID()}));
-  assert.equal(readNewDraft('second'),undefined);
+  assert.deepEqual(readNewDraft(draft.id),frozen);
+  session.setItem(draftKey+draft.id,JSON.stringify({...frozen,preparationId:crypto.randomUUID()}));
+  assert.equal(readNewDraft(draft.id),undefined);
+}));
+
+test('legacy drafts migrate idempotently with original image ownership and frozen operation identity', () => withStorage((_local, session) => {
+  const ordinary = { ...emptyNewDraft('first', first), text: '旧草稿' };
+  const pending = { ...emptyNewDraft('second', second), text: '等待原生回执' };
+  const operationId = crypto.randomUUID();
+  const frozen = { ...pending, submission: {
+    creation: { id: pending.id, workspaceId: 'second', harnessId: 'dsh', configuration: pending.configuration, title: pending.text },
+    operationId, uploaded: { [crypto.randomUUID()]: crypto.randomUUID() }, dispatchStarted: true,
+  } };
+  session.setItem(legacyDraftKey + 'first', JSON.stringify(ordinary));
+  session.setItem(legacyDraftKey + 'second', JSON.stringify(frozen));
+  assert.deepEqual(listNewDrafts(), [frozen, ordinary]);
+  assert.deepEqual(listNewDrafts(), [frozen, ordinary]);
+  assert.equal(session.getItem(legacyDraftKey + 'second'), null);
+  assert.deepEqual(readNewDraft(pending.id), frozen);
+  const edited = { ...ordinary, workspaceId: 'second' };
+  assert.equal(saveNewDraft(edited), true);
+  assert.deepEqual(readNewDraft(ordinary.id), edited);
 }));
