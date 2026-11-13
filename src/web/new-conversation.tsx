@@ -50,6 +50,9 @@ function withPreset(value:NewDraft,catalog?:Props['configuration']['harnesses'][
 const preparationClaimedMessage='原生准备已被使用，本次尚未发送。请重新准备并核验技能。';
 const unconfirmedMessage='网络暂时不可用或回执丢失。原配置和内容已保留，请重试核对。';
 const configurationFailedMessage='Codex 配置核验失败，首条消息未发送。可以核对原对话，或带着草稿另开对话。';
+function confirmedDeleted(error: unknown): boolean {
+  return error instanceof RequestError && error.code === 'conversation_deleted' && [404, 409].includes(error.status);
+}
 function canReuseUnsentDraft(value: NewDraft, snapshot: z.infer<typeof snapshotSchema>): boolean {
   return value.submission?.dispatchStarted === false && snapshot.conversation.id === value.id &&
     (snapshot.conversation.abandonedFirstOperationId === value.submission.operationId ||
@@ -66,6 +69,7 @@ export function NewConversation(props:Props) {
   const [initialized,setInitialized]=useState(false);const [uploads,setUploads]=useState<UploadDraft[]>([]);const [imagesReady,setImagesReady]=useState(false);
   const [busy,setBusy]=useState(false);const busyRef=useRef(false);
   const [configurationFailed,setConfigurationFailed]=useState(false);
+  const [conversationDeleted,setConversationDeleted]=useState(false);
   const [staging,setStaging]=useState(false);const stagingRef=useRef(false);
   const awaitingWorkspace=useRef<{previous?:string}|undefined>(undefined);const [status,setStatus]=useState('');const [error,setError]=useState('');const [picking,setPicking]=useState(false);
   const alive=useRef(true);const controller=useRef<AbortController|undefined>(undefined);
@@ -89,12 +93,15 @@ export function NewConversation(props:Props) {
   useEffect(()=>{let cancelled=false;setImagesReady(false);void (async()=>{await imageWrites.get(draft.id);return uploadDrafts(draft.id);})().then(items=>{if(!cancelled){setUploads(items);setImagesReady(true);}}).catch(()=>{if(!cancelled)setError('无法恢复图片暂存，请检查浏览器存储后刷新。');});return()=>{cancelled=true;};},[draft.id]);
   useEffect(() => {
     const value = current.current;
-    if (!initialized || busyRef.current || value.submission?.dispatchStarted !== false) return;
+    if (!initialized || busyRef.current || !value.submission) return;
     const abort = new AbortController();
     void request(`/conversations/${value.id}`, snapshotSchema, { signal: abort.signal }).then(snapshot => {
       if (abort.signal.aborted || busyRef.current || current.current.id !== value.id) return;
       if (canReuseUnsentDraft(current.current, snapshot)) setConfigurationFailed(true);
-    }).catch(() => { /* The explicit retry can report a failed read. */ });
+    }).catch(error => {
+      if (!abort.signal.aborted && !busyRef.current && current.current.id === value.id && confirmedDeleted(error))
+        setConversationDeleted(true);
+    });
     return () => abort.abort();
   }, [initialized, draft.id]);
   useEffect(()=>{
@@ -192,7 +199,7 @@ export function NewConversation(props:Props) {
     setStatus('发送结果仍待核对，原内容和发送编号已保留。');
   }
   async function send() {
-    if(busyRef.current||stagingRef.current||!initialized||!imagesReady)return;
+    if(conversationDeleted||busyRef.current||stagingRef.current||!initialized||!imagesReady)return;
     let value=current.current;
     const retrying = !!value.submission;
     if(!value.submission&&(!valid||(!value.text.trim()&&!uploads.length&&!value.references?.length)))return;
@@ -269,7 +276,8 @@ export function NewConversation(props:Props) {
       else await confirmFirstSend(value.id,submission.operationId,abort.signal);
     }catch(reason){
       if(!alive.current)return;
-      if(reason instanceof RequestError&&reason.code==='draft_preparation_claimed'&&!current.current.submission?.dispatchStarted){
+      if (confirmedDeleted(reason)) { setConversationDeleted(true); setStatus(''); }
+      else if(reason instanceof RequestError&&reason.code==='draft_preparation_claimed'&&!current.current.submission?.dispatchStarted){
         // The server only returns this rejection before creating this conversation.
         // An unknown response never enters this branch and keeps its frozen identity.
         persist({...current.current,submission:undefined});
@@ -284,34 +292,42 @@ export function NewConversation(props:Props) {
   }
   async function startOver() {
     const value = current.current;
-    if (busyRef.current || stagingRef.current || !imagesReady || value.submission?.dispatchStarted !== false) return;
+    const submission = value.submission;
+    if (busyRef.current || stagingRef.current || !imagesReady || !submission || (!conversationDeleted && submission.dispatchStarted)) return;
     busyRef.current = true;
     setBusy(true); setError('');
     const abort = new AbortController(); controller.current = abort;
     const copies: string[] = [];
     let saved = false;
     try {
-      const snapshot = await request(`/conversations/${value.id}`, snapshotSchema, { signal: abort.signal });
-      if (!canReuseUnsentDraft(value, snapshot)) {
+      const snapshot = await request(`/conversations/${value.id}`, snapshotSchema, { signal: abort.signal }).catch(error => {
+        if (confirmedDeleted(error)) return null;
+        throw error;
+      });
+      if (snapshot && !canReuseUnsentDraft(value, snapshot)) {
         setConfigurationFailed(false); setError('原对话状态已变化，请先核对首条消息。'); return;
       }
       const id = crypto.randomUUID();
       const staged = await uploadDrafts(value.id);
-      if (value.images?.some(image => !staged.some(item => value.submission!.uploaded[item.id] === image.id)))
-        throw Error('missing_staged_image');
+      const missingImages = value.images?.some(image => !staged.some(item => submission.uploaded[item.id] === image.id));
+      if (snapshot && missingImages) throw Error('missing_staged_image');
       for (const item of staged) {
         const copy = { ...item, id: crypto.randomUUID(), conversation: id };
         await putUpload(copy); copies.push(copy.id);
       }
       abort.signal.throwIfAborted();
       // Fence the original operation before assigning a new ID to the same input.
-      await request(`/conversations/${value.id}/abandon-first-send`, z.object({ status: z.literal('abandoned') }).strict(),
-        { csrf: props.csrf, body: { operationId: value.submission.operationId }, signal: abort.signal });
+      if (snapshot) await request(`/conversations/${value.id}/abandon-first-send`, z.object({ status: z.literal('abandoned') }).strict(),
+        { csrf: props.csrf, body: { operationId: submission.operationId }, signal: abort.signal });
       abort.signal.throwIfAborted();
       saved = persist({ ...value, id, images: undefined, submission: undefined, preparationId: undefined }, true);
       if (!saved) return;
       saveDraft(value.id, { text: '' });
-      setConfigurationFailed(false); setStatus('');
+      setConfigurationFailed(false); setConversationDeleted(false);
+      setStatus(snapshot ? '' : submission.dispatchStarted
+        ? '草稿已恢复。原对话的发送结果已无法核对，请确认后再发送。'
+        : '草稿已恢复，可以重新编辑和发送。');
+      if (missingImages) setError('原对话中的部分图片已删除，请重新添加。');
       await Promise.allSettled(staged.map(item => removeUpload(item.id)));
     } catch (reason) {
       if (!abort.signal.aborted) {
@@ -336,7 +352,8 @@ export function NewConversation(props:Props) {
     }catch(reason){
       if(!alive.current||abort.signal.aborted)return;
       // Nothing was created yet (the first send never reached the server): say so instead of reporting a failure.
-      if(reason instanceof RequestError&&reason.status===404)setError('这段对话还没有创建，内容已保留。请点“重试核对首条消息”。');
+      if (confirmedDeleted(reason)) { setConversationDeleted(true); setStatus(''); }
+      else if(reason instanceof RequestError&&reason.status===404)setError('这段对话还没有创建，内容已保留。请点“重试核对首条消息”。');
       else props.report(reason);
     }
     finally{busyRef.current=false;if(alive.current)setBusy(false);}
@@ -378,16 +395,18 @@ export function NewConversation(props:Props) {
     {!props.configuration.workspaces.length&&<div className="state-notice"><p>先添加工作区，再开始对话。</p>{props.configuration.workspaceRoots?.length?<Button onClick={()=>{awaitingWorkspace.current={previous:props.addedWorkspace};props.onAddWorkspace();}}>添加工作区</Button>:<p>管理员尚未配置允许添加的目录，请先完成工作区配置。</p>}</div>}
     <ComposerView value={draft.text} onChange={text=>edit(text,[])} renderEditor={editor=><SkillEditor editor={{...editor,placeholder:'你想从哪里开始？'}} spans={draft.skills} picker={workspace&&catalog?.available&&skillsSupported&&!locked?{load:loadSkills,format:skillLabelText,limit:skillLimit}:undefined} onEdit={edit}/>}
       onSend={()=>void send()} onStop={()=>{}} onImages={files=>void addImages(files)} onFiles={()=>setPicking(true)} editDisabled={locked||!initialized} imagesDisabled={locked||staging||!initialized||!imagesReady} filesDisabled={filesDisabled}
-      sendDisabled={busy||staging||!initialized||!imagesReady||(!draft.submission&&(!valid||(!draft.text.trim()&&!uploads.length&&!draft.references?.length)))} sending={busy} running={false} model={model?.label??'选择模型'} permission={catalog?.permissions.find(p=>p.id===draft.configuration.permissionId)?.label??'选择权限'} configurationNote="首次发送后配置固定。"
+      sendDisabled={conversationDeleted||busy||staging||!initialized||!imagesReady||(!draft.submission&&(!valid||(!draft.text.trim()&&!uploads.length&&!draft.references?.length)))} sending={busy} running={false} model={model?.label??'选择模型'} permission={catalog?.permissions.find(p=>p.id===draft.configuration.permissionId)?.label??'选择权限'} configurationNote="首次发送后配置固定。"
       configurationControls={<DraftConfiguration catalogs={props.configuration.harnesses} harnessId={draft.harnessId} configuration={draft.configuration} disabled={locked||!initialized} onPowerChange={switchPower} onConfigurationChange={configuration=>persist({...current.current,configuration})}/>}
       hasMaterials={!!uploads.length||!!draft.references?.length} error={error||(configurationFailed?configurationFailedMessage:'')} materials={<>{uploads.length>0&&<div className="attachment-tray">{uploads.map(item=><StagedImage key={item.id} item={item} disabled={locked||staging} onRemove={()=>void removeImage(item.id)}/>)}</div>}{draft.references?.map((r,index)=><div className="reference-card" key={index}><FileText size={14}/><span>{r.type==='file'?r.path:r.text}</span><button type="button" aria-label="移除引用" disabled={locked} onClick={()=>persist({...current.current,references:current.current.references?.filter((_,i)=>i!==index)})}><X size={14}/></button></div>)}</>}/>
     {skillsSupported===false&&<p className="new-draft-status">当前 Power 暂未提供首发技能目录。</p>}
     {!draft.submission&&preparationState==='loading'&&<p className="new-draft-status" role="status">正在准备首发技能…</p>}
     {!draft.submission&&preparationState==='failed'&&<div className="new-draft-status" role="status"><p>{preparationClaimed?'此准备已被另一份草稿用于创建对话。内容已保留，可重新准备并核验技能。':'首发技能准备未完成，内容已保留。可重试核对同一准备。'}</p><Button disabled={busy} onClick={()=>{if(preparationClaimed&&!persist({...current.current,preparationId:undefined},true))return;setPreparationRetry(value=>value+1);}}>{preparationClaimed?'重新准备首发技能':'重试准备首发技能'}</Button></div>}
-    <p className="new-draft-status" role="status">{status||(!initialized?'正在读取配置…':configurationFailed?'':draft.submission?'上次创建或发送尚待核对，重试会使用同一编号。':'首次发送时创建对话；配置在对话中保持不变。')}</p>
-    {configurationFailed&&!busy&&<Button disabled={staging||!imagesReady} onClick={()=>void startOver()}>保留草稿并另开对话</Button>}
-    {draft.submission&&!busy&&<Button onClick={()=>void send()}>重试核对首条消息</Button>}
-    {draft.submission&&!busy&&<Button disabled={staging} onClick={()=>void openCreated()}>查看已创建的对话</Button>}
+    <p className="new-draft-status" role="status">{conversationDeleted
+      ? draft.submission?.dispatchStarted ? '原对话已删除，首条消息的发送结果已无法核对。可以恢复草稿，再决定是否发送。' : '原对话已删除，首条消息尚未发送。可以恢复草稿并另开对话。'
+      : status||(!initialized?'正在读取配置…':configurationFailed?'':draft.submission?'上次创建或发送尚待核对，重试会使用同一编号。':'首次发送时创建对话；配置在对话中保持不变。')}</p>
+    {(configurationFailed||conversationDeleted)&&!busy&&<Button disabled={staging||!imagesReady} onClick={()=>void startOver()}>保留草稿并另开对话</Button>}
+    {draft.submission&&!conversationDeleted&&!busy&&<Button onClick={()=>void send()}>重试核对首条消息</Button>}
+    {draft.submission&&!conversationDeleted&&!busy&&<Button disabled={staging} onClick={()=>void openCreated()}>查看已创建的对话</Button>}
     {picking&&workspace&&<FilePicker draftScope={{workspaceId:draft.workspaceId,harnessId:draft.harnessId}} onClose={()=>setPicking(false)} onSelect={ref=>persist({...current.current,references:[...(current.current.references??[]),ref]})}/>}
   </div></section>;
 }

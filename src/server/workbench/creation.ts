@@ -98,7 +98,7 @@ export class Creation {
   }
 
   async create(input: Omit<CreateConversation, 'cwd'>): Promise<Conversation> {
-    this.tasks.assertOpen(); this.gate.assertNotDeleting(input.id);
+    this.tasks.assertOpen(); this.gate.assertNotDeleting(input.id, 'create');
     if (this.gate.removing(input.workspaceId)) throw new StoreError('workspace_remove_busy', 409);
     this.bindings.assertWorkspaceAvailable(input.workspaceId);
     const workspace = this.bindings.workspaces.find(item => item.id === input.workspaceId);
