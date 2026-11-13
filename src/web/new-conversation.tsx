@@ -49,6 +49,12 @@ function withPreset(value:NewDraft,catalog?:Props['configuration']['harnesses'][
 }
 const preparationClaimedMessage='原生准备已被使用，本次尚未发送。请重新准备并核验技能。';
 const unconfirmedMessage='网络暂时不可用或回执丢失。原配置和内容已保留，请重试核对。';
+const configurationFailedMessage='Codex 配置核验失败，首条消息未发送。可以核对原对话，或带着草稿另开对话。';
+function canReuseUnsentDraft(value: NewDraft, snapshot: z.infer<typeof snapshotSchema>): boolean {
+  return value.submission?.dispatchStarted === false && snapshot.conversation.id === value.id &&
+    (snapshot.conversation.abandonedFirstOperationId === value.submission.operationId ||
+      (snapshot.conversation.error === 'codex_configuration_mismatch' && !snapshot.operations.length));
+}
 /** Local draft owns preparation; existing server operations still own execution/reconciliation. */
 export function NewConversation(props:Props) {
   const [draft,setDraft]=useState<NewDraft>(()=>readNewDraft(props.initialWorkspace??'')??emptyNewDraft(props.initialWorkspace??''));
@@ -59,6 +65,7 @@ export function NewConversation(props:Props) {
   const [preparationClaimed,setPreparationClaimed]=useState(false);
   const [initialized,setInitialized]=useState(false);const [uploads,setUploads]=useState<UploadDraft[]>([]);const [imagesReady,setImagesReady]=useState(false);
   const [busy,setBusy]=useState(false);const busyRef=useRef(false);
+  const [configurationFailed,setConfigurationFailed]=useState(false);
   const [staging,setStaging]=useState(false);const stagingRef=useRef(false);
   const awaitingWorkspace=useRef<{previous?:string}|undefined>(undefined);const [status,setStatus]=useState('');const [error,setError]=useState('');const [picking,setPicking]=useState(false);
   const alive=useRef(true);const controller=useRef<AbortController|undefined>(undefined);
@@ -80,6 +87,16 @@ export function NewConversation(props:Props) {
     })();return()=>{cancelled=true;abort.abort();};
   },[]);
   useEffect(()=>{let cancelled=false;setImagesReady(false);void (async()=>{await imageWrites.get(draft.id);return uploadDrafts(draft.id);})().then(items=>{if(!cancelled){setUploads(items);setImagesReady(true);}}).catch(()=>{if(!cancelled)setError('无法恢复图片暂存，请检查浏览器存储后刷新。');});return()=>{cancelled=true;};},[draft.id]);
+  useEffect(() => {
+    const value = current.current;
+    if (!initialized || busyRef.current || value.submission?.dispatchStarted !== false) return;
+    const abort = new AbortController();
+    void request(`/conversations/${value.id}`, snapshotSchema, { signal: abort.signal }).then(snapshot => {
+      if (abort.signal.aborted || busyRef.current || current.current.id !== value.id) return;
+      if (canReuseUnsentDraft(current.current, snapshot)) setConfigurationFailed(true);
+    }).catch(() => { /* The explicit retry can report a failed read. */ });
+    return () => abort.abort();
+  }, [initialized, draft.id]);
   useEffect(()=>{
     const id=props.addedWorkspace;
     if(!initialized||!awaitingWorkspace.current||!id||id===awaitingWorkspace.current.previous||current.current.submission||!props.configuration.workspaces.some(w=>w.id===id))return;
@@ -177,8 +194,9 @@ export function NewConversation(props:Props) {
   async function send() {
     if(busyRef.current||stagingRef.current||!initialized||!imagesReady)return;
     let value=current.current;
+    const retrying = !!value.submission;
     if(!value.submission&&(!valid||(!value.text.trim()&&!uploads.length&&!value.references?.length)))return;
-    busyRef.current=true;setBusy(true);setError('');const abort=new AbortController();controller.current=abort;
+    busyRef.current=true;setBusy(true);setError('');setConfigurationFailed(false);const abort=new AbortController();controller.current=abort;
     try {
       if(!value.submission){
         if(value.harnessId==='dsh'){
@@ -195,15 +213,28 @@ export function NewConversation(props:Props) {
       setStatus('正在创建并核对对话…');
       await request('/conversations',conversationResponseSchema,{csrf:props.csrf,body:submission.creation,signal:abort.signal});
       let snapshot=await request(`/conversations/${value.id}`,snapshotSchema,{signal:abort.signal});
+      if (snapshot.conversation.abandonedFirstOperationId === submission.operationId && !submission.dispatchStarted) {
+        setConfigurationFailed(true); setStatus(''); return;
+      }
+      if (retrying && canReuseUnsentDraft(value, snapshot))
+        snapshot = await request(`/conversations/${value.id}/reconcile`, snapshotSchema, { csrf: props.csrf, body: {}, signal: abort.signal });
       const known=snapshot.operations.find(op=>op.id===submission.operationId);
       if(known?.status==='accepted'){await complete(snapshot.conversation);return;}
       if(submission.dispatchStarted){
-        // Reuse the exact persisted operation; server deduplication is authoritative.
-        if(known && known.status!=='rejected'){await confirmFirstSend(value.id,submission.operationId,abort.signal);return;}
         if(known?.status==='rejected')throw Error('首条消息未被接受，内容已保留。请打开已创建的对话处理。');
+        if (snapshot.conversation.abandonedFirstOperationId === submission.operationId) {
+          if (!persist({ ...value, submission: { ...submission, dispatchStarted: false } }, true)) return;
+          setConfigurationFailed(true); setStatus(''); return;
+        }
+        // A recorded dispatch is only reconciled. An unrecorded request can be retried
+        // with the same ID: the server commits that ID before submitting to the Harness.
+        if (known || snapshot.conversation.error === 'codex_configuration_mismatch') {
+          await confirmFirstSend(value.id,submission.operationId,abort.signal);return;
+        }
       }
       const deadline=Date.now()+30000;
       while(snapshot.conversation.readiness!=='ready'||!snapshot.conversation.state.configurationVerified){
+        if (canReuseUnsentDraft(value, snapshot)) { setConfigurationFailed(true); setStatus(''); return; }
         if(snapshot.conversation.readiness==='blocked')throw Error('对话准备未完成，内容已保留。可重试核对或打开已创建的对话处理。');
         if(Date.now()>deadline)throw Error('原生会话仍在准备，内容已保留，请稍后重试核对。');
         setStatus('正在准备原生会话…');await new Promise(resolve=>setTimeout(resolve,500));abort.signal.throwIfAborted();
@@ -225,6 +256,11 @@ export function NewConversation(props:Props) {
       try{response=await request(`/conversations/${value.id}/operations`,operationResponseSchema,{csrf:props.csrf,body:{id:submission.operationId,type:'message',payload},signal:abort.signal});}
       catch(reason){
         // Refused before it was recorded: nothing runs, so the created conversation takes the input back editable, like any other send.
+        if (reason instanceof RequestError && reason.code === 'first_send_abandoned') {
+          if (!persist({ ...value, submission: { ...value.submission!, dispatchStarted: false } }, true)) return;
+          saveDraft(value.id, { text: '' });
+          setConfigurationFailed(true); setStatus(''); return;
+        }
         if(sendRefused(reason)){await handOver(snapshot.conversation,value,false,reason);return;}
         throw reason;
       }
@@ -245,6 +281,47 @@ export function NewConversation(props:Props) {
       else if(!(reason instanceof DOMException&&reason.name==='AbortError'))setError(reason instanceof Error&&!(reason instanceof TypeError)&&!/^[a-z_]+$/.test(reason.message)?reason.message:unconfirmedMessage);
     }
     finally{busyRef.current=false;if(alive.current)setBusy(false);}
+  }
+  async function startOver() {
+    const value = current.current;
+    if (busyRef.current || stagingRef.current || !imagesReady || value.submission?.dispatchStarted !== false) return;
+    busyRef.current = true;
+    setBusy(true); setError('');
+    const abort = new AbortController(); controller.current = abort;
+    const copies: string[] = [];
+    let saved = false;
+    try {
+      const snapshot = await request(`/conversations/${value.id}`, snapshotSchema, { signal: abort.signal });
+      if (!canReuseUnsentDraft(value, snapshot)) {
+        setConfigurationFailed(false); setError('原对话状态已变化，请先核对首条消息。'); return;
+      }
+      const id = crypto.randomUUID();
+      const staged = await uploadDrafts(value.id);
+      if (value.images?.some(image => !staged.some(item => value.submission!.uploaded[item.id] === image.id)))
+        throw Error('missing_staged_image');
+      for (const item of staged) {
+        const copy = { ...item, id: crypto.randomUUID(), conversation: id };
+        await putUpload(copy); copies.push(copy.id);
+      }
+      abort.signal.throwIfAborted();
+      // Fence the original operation before assigning a new ID to the same input.
+      await request(`/conversations/${value.id}/abandon-first-send`, z.object({ status: z.literal('abandoned') }).strict(),
+        { csrf: props.csrf, body: { operationId: value.submission.operationId }, signal: abort.signal });
+      abort.signal.throwIfAborted();
+      saved = persist({ ...value, id, images: undefined, submission: undefined, preparationId: undefined }, true);
+      if (!saved) return;
+      saveDraft(value.id, { text: '' });
+      setConfigurationFailed(false); setStatus('');
+      await Promise.allSettled(staged.map(item => removeUpload(item.id)));
+    } catch (reason) {
+      if (!abort.signal.aborted) {
+        if (reason instanceof RequestError) props.report(reason);
+        setError('暂时无法另开对话，原草稿已保留。');
+      }
+    } finally {
+      if (!saved) await Promise.allSettled(copies.map(removeUpload));
+      busyRef.current = false; if (alive.current) setBusy(false);
+    }
   }
   async function openCreated(){
     if(busyRef.current||stagingRef.current||!current.current.submission)return;
@@ -303,11 +380,12 @@ export function NewConversation(props:Props) {
       onSend={()=>void send()} onStop={()=>{}} onImages={files=>void addImages(files)} onFiles={()=>setPicking(true)} editDisabled={locked||!initialized} imagesDisabled={locked||staging||!initialized||!imagesReady} filesDisabled={filesDisabled}
       sendDisabled={busy||staging||!initialized||!imagesReady||(!draft.submission&&(!valid||(!draft.text.trim()&&!uploads.length&&!draft.references?.length)))} sending={busy} running={false} model={model?.label??'选择模型'} permission={catalog?.permissions.find(p=>p.id===draft.configuration.permissionId)?.label??'选择权限'} configurationNote="首次发送后配置固定。"
       configurationControls={<DraftConfiguration catalogs={props.configuration.harnesses} harnessId={draft.harnessId} configuration={draft.configuration} disabled={locked||!initialized} onPowerChange={switchPower} onConfigurationChange={configuration=>persist({...current.current,configuration})}/>}
-      hasMaterials={!!uploads.length||!!draft.references?.length} error={error} materials={<>{uploads.length>0&&<div className="attachment-tray">{uploads.map(item=><StagedImage key={item.id} item={item} disabled={locked||staging} onRemove={()=>void removeImage(item.id)}/>)}</div>}{draft.references?.map((r,index)=><div className="reference-card" key={index}><FileText size={14}/><span>{r.type==='file'?r.path:r.text}</span><button type="button" aria-label="移除引用" disabled={locked} onClick={()=>persist({...current.current,references:current.current.references?.filter((_,i)=>i!==index)})}><X size={14}/></button></div>)}</>}/>
+      hasMaterials={!!uploads.length||!!draft.references?.length} error={error||(configurationFailed?configurationFailedMessage:'')} materials={<>{uploads.length>0&&<div className="attachment-tray">{uploads.map(item=><StagedImage key={item.id} item={item} disabled={locked||staging} onRemove={()=>void removeImage(item.id)}/>)}</div>}{draft.references?.map((r,index)=><div className="reference-card" key={index}><FileText size={14}/><span>{r.type==='file'?r.path:r.text}</span><button type="button" aria-label="移除引用" disabled={locked} onClick={()=>persist({...current.current,references:current.current.references?.filter((_,i)=>i!==index)})}><X size={14}/></button></div>)}</>}/>
     {skillsSupported===false&&<p className="new-draft-status">当前 Power 暂未提供首发技能目录。</p>}
     {!draft.submission&&preparationState==='loading'&&<p className="new-draft-status" role="status">正在准备首发技能…</p>}
     {!draft.submission&&preparationState==='failed'&&<div className="new-draft-status" role="status"><p>{preparationClaimed?'此准备已被另一份草稿用于创建对话。内容已保留，可重新准备并核验技能。':'首发技能准备未完成，内容已保留。可重试核对同一准备。'}</p><Button disabled={busy} onClick={()=>{if(preparationClaimed&&!persist({...current.current,preparationId:undefined},true))return;setPreparationRetry(value=>value+1);}}>{preparationClaimed?'重新准备首发技能':'重试准备首发技能'}</Button></div>}
-    <p className="new-draft-status" role="status">{status||(!initialized?'正在读取配置…':draft.submission?'上次创建或发送尚待核对，重试会使用同一编号。':'首次发送时创建对话；配置在对话中保持不变。')}</p>
+    <p className="new-draft-status" role="status">{status||(!initialized?'正在读取配置…':configurationFailed?'':draft.submission?'上次创建或发送尚待核对，重试会使用同一编号。':'首次发送时创建对话；配置在对话中保持不变。')}</p>
+    {configurationFailed&&!busy&&<Button disabled={staging||!imagesReady} onClick={()=>void startOver()}>保留草稿并另开对话</Button>}
     {draft.submission&&!busy&&<Button onClick={()=>void send()}>重试核对首条消息</Button>}
     {draft.submission&&!busy&&<Button disabled={staging} onClick={()=>void openCreated()}>查看已创建的对话</Button>}
     {picking&&workspace&&<FilePicker draftScope={{workspaceId:draft.workspaceId,harnessId:draft.harnessId}} onClose={()=>setPicking(false)} onSelect={ref=>persist({...current.current,references:[...(current.current.references??[]),ref]})}/>}

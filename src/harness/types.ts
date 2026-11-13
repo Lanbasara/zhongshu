@@ -242,7 +242,7 @@ export interface HarnessAdapter {
    * partial cleanup and unknown transport outcomes must remain retryable operations. */
   delete?(binding: Binding): Promise<void>;
   /** Read the verified sub-agent tree of this conversation. Never spawns or activates agents. */
-  subagents?(binding: Binding): Promise<SubagentSnapshot>;
+  subagents?(binding: Binding, requireComplete?: boolean): Promise<SubagentSnapshot>;
   /** Read one sub-agent's transcript after verifying it belongs to this binding's spawn tree. */
   subagentHistory?(binding: Binding, agentId: string, olderCursor?: string, limit?: number): Promise<SubagentHistory>;
   /** Keep live activity of one owned sub-agent flowing as `subagents` hints on this binding's watch. */

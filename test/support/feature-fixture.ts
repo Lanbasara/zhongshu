@@ -36,7 +36,7 @@ import { itemSchema, stateSchema, subagentStatusSchema, teamSchema, usageSchema 
 process.umask(0o077);
 const repository = fileURLToPath(new URL('../../', import.meta.url));
 const cliSchema = z.object({
-  command: z.enum(['serve', 'init', 'reset', 'inspect', 'inspect-deletions', 'reject-delete-next', 'complete', 'prove', 'seed', 'disconnect', 'reconnect', 'unknown-receipt', 'reject-next', 'fail-create', 'repair', 'disable-skills', 'usage-full', 'usage-compact', 'usage-total-only',
+  command: z.enum(['serve', 'init', 'reset', 'inspect', 'inspect-deletions', 'reject-delete-next', 'complete', 'prove', 'seed', 'disconnect', 'reconnect', 'unknown-receipt', 'reject-next', 'fail-create', 'mismatch-next-create', 'repair', 'disable-skills', 'usage-full', 'usage-compact', 'usage-total-only',
     'spawn-subagents', 'complete-subagents', 'subagent-team', 'unknown-subagent-stop', 'append', 'tool-step', 'fail']),
   root: z.string().min(1).max(4096).refine(isAbsolute),
   port: z.coerce.number().int().min(1024).max(65535).default(4391),
@@ -133,6 +133,7 @@ async function main() {
   if (input.command !== 'serve') {
     try {
       if (input.command === 'fail-create') { native.prepare('UPDATE settings SET fail_create = 1 WHERE id = 1').run(); }
+      else if (input.command === 'mismatch-next-create') { native.prepare('UPDATE settings SET fail_create = 2 WHERE id = 1').run(); }
       else if (input.command === 'inspect-deletions') {
         console.log(JSON.stringify(native.prepare('SELECT id,harness_id AS harnessId,calls,outcome FROM deletion_calls ORDER BY id').all()));
         return;
@@ -314,9 +315,13 @@ async function main() {
       } } : {}),
       async create(input, onBound) {
         if (input.preparedId) { const previous = load(input.preparedId); if (previous.cwd !== input.cwd || previous.harnessId !== id || previous.submissions.length) throw new Error('fixture_prepared_not_empty'); }
-        const fail = native.prepare('SELECT fail_create FROM settings WHERE id = 1').get()!.fail_create === 1;
+        const failure = native.prepare('SELECT fail_create FROM settings WHERE id = 1').get()!.fail_create;
+        const fail = failure === 1;
+        const mismatch = failure === 2;
         native.prepare('UPDATE settings SET fail_create = 0 WHERE id = 1').run();
-        const value: Native = { id: input.preparedId ?? randomUUID(), title: input.title ?? 'Untitled', harnessId: id, cwd: input.cwd, configuration: input.configuration, state: fail ? { ...idle(), status: 'unknown', configurationVerified: false } : idle(), items: [], submissions: [], rejectedOperationIds: [], rejectNext: false, submitCalls: 0, stopCalls: 0, offline: false, unknownReceipt: false, hidden: false, revision: 0, subagents: [], resultsPending: false, subagentStopCalls: 0, unknownSubagentStop: false };
+        const state: NativeState = fail ? { ...idle(), status: 'unknown', configurationVerified: false } :
+          mismatch ? { ...idle(), configurationVerified: false, reason: 'codex_configuration_mismatch' } : idle();
+        const value: Native = { id: input.preparedId ?? randomUUID(), title: input.title ?? 'Untitled', harnessId: id, cwd: input.cwd, configuration: input.configuration, state, items: [], submissions: [], rejectedOperationIds: [], rejectNext: false, submitCalls: 0, stopCalls: 0, offline: false, unknownReceipt: false, hidden: false, revision: 0, subagents: [], resultsPending: false, subagentStopCalls: 0, unknownSubagentStop: false };
         save(value);
         const binding: Binding = { id: value.id, cwd: input.cwd, configuration: input.configuration, details: {} };
         onBound(binding);

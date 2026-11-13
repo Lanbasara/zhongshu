@@ -40,6 +40,7 @@ function parse<T>(schema: z.ZodType<T>, value: unknown): T {
 function conversationView(value: Conversation, unread: boolean, plan: ConversationView['plan']): ConversationView {
   return { id: value.id, title: value.title, harnessId: value.harnessId, workspaceId: value.workspaceId, archived: value.archived,
     configuration: value.configuration, readiness: value.readiness, state: value.state, error: value.error, createdAt: value.createdAt,
+    ...(value.abandonedFirstOperationId ? { abandonedFirstOperationId: value.abandonedFirstOperationId } : {}),
     ...(value.subagents ? { subagents: value.subagents } : {}), ...(plan ? { plan } : {}), ...(value.automationId ? { automationId: value.automationId } : {}), unread };
 }
 function stopView(value: SubagentStop) {
@@ -376,6 +377,13 @@ export function createWorkbenchHttp(workbench: Workbench, input: Partial<z.input
         parse(noQuery, request.query);
         const conversation = await workbench.create(parse(createConversationSchema, request.body));
         return json(reply.code(202), { conversation: view(conversation) });
+      });
+      privateApp.post('/conversations/:id/abandon-first-send', { bodyLimit: 4096 }, async (request, reply) => {
+        parse(noQuery, request.query);
+        const { id } = parse(uuidParams, request.params);
+        const { operationId } = parse(z.object({ operationId: z.uuid() }).strict(), request.body);
+        workbench.abandonFirstSend(id, operationId);
+        return json(reply, { status: 'abandoned' });
       });
       privateApp.get('/conversations/:id', async (request, reply) => {
         parse(noQuery, request.query); const { id } = parse(uuidParams, request.params);

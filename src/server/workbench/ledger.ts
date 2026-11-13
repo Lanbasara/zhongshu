@@ -26,6 +26,15 @@ export class Ledger {
     if (this.pendingOperation(id)) return false;
     return !this.store.listOperations({ conversationId: id, status: 'accepted', type: 'message', order: 'desc', limit: 50 }).some(operation => operation.runId === runId);
   }
+  /** An idle native read may support management despite a failed configuration check. */
+  idleWithConfigurationMismatch(conversation: Conversation, dirty: boolean): boolean {
+    const { id, state } = conversation;
+    if (dirty || !conversation.binding || state.reason !== 'codex_configuration_mismatch' || state.status !== 'idle' ||
+      state.configurationVerified || state.pendingInputs || this.store.readQueue(id).entries.length ||
+      this.pendingOperation(id) || this.store.requests.busy(id)) return false;
+    const previous = this.latestAcceptedMessage(id);
+    return !previous || (previous.runId !== null && (previous.runId === state.runId || previous.runId === state.terminalRunId));
+  }
   /**
    * A new message may be sent: the conversation is ready and settled, nothing of Zhongshu's is still in flight,
    * and the latest accepted message belongs to the current run. `dirty` is the observation's unsynced flag;

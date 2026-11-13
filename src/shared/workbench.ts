@@ -49,6 +49,7 @@ export const conversationSchema = z.object({
   id: z.uuid(), title: boundedText(200), harnessId: z.enum(['codex', 'dsh']), workspaceId: identifierSchema,
   configuration: configurationSchema, readiness: z.enum(['preparing', 'ready', 'blocked']),
   archived: z.boolean().default(false), state: stateSchema, error: boundedText(4096).nullable(), createdAt: revisionSchema,
+  abandonedFirstOperationId: z.uuid().optional(),
   subagents: subagentSummarySchema.optional(),
   /** Plan mode, when the Harness offers it. `pending`: a requested change has not taken effect natively yet. */
   plan: z.object({ active: z.boolean(), pending: z.boolean().optional() }).strict().optional(),

@@ -30,6 +30,8 @@ fixture 可用 `node test/support/feature-fixture.ts reject-delete-next --root "
 
 M08：在运行、排队或未知状态尝试删除，应拒绝并保留可到达对话。空闲删除请求丢失响应或应用在原生清理后中断时，以同一对话再次删除/重启，核对持久阶段恢复和幂等结果。当前删除日志不保留正文，原生已完成后本地清理可独立恢复；失败的原生步骤可从管理入口重试。回归运行 `node --test test/conversation-deletions.test.ts test/workbench.test.ts`。本节是执行方法，不代表每个真实原生分支已取得证据。
 
+Codex 配置不一致的管理分支沿 [C12](conversations.md#c12--配置核验失败与未知发送) 取得空会话。先独立读回原生空闲、无待发送消息和运行子 Agent，再用 M03、M07 对同一身份归档、恢复并确认删除。另做一份唯一标题的故障草稿，在另开发送前对该原生标题用 `spawn-subagents` 或 `disconnect`，管理请求应拒绝并保留对话；用 `complete-subagents` 或 `reconnect` 解除后重试。真实 Codex 的原生身份、队列与子 Agent 读回须用独立 Host 核对。
+
 ### 存储预算与清理
 
 M09：中书数据库有实例预算（`ZHONGSHU_STORAGE_BUDGET`，默认 16 GiB；fixture 用 `serve --storage-budget`）。用较大预算启动隔离 fixture，在一段对话的输入框加入三张合成图片，每张不超过 2 MiB（例如 1.9 MiB，超过会被拒绝；上传即计入，草稿里移除图片不会立刻释放预算，未关联的上传 7 天后回收）；以相同 root 改用 `--storage-budget 4MiB` 重启。侧栏「设置」带“存储已满”徽标，打开设置的「存储」标签后核对用量、预算、各类别（上传与快照图片、可清理的图片缓存）和“已达到预算上限”说明；没有缓存时“清理图片缓存”不可用，并提示删除不再需要的 Codex 对话或调高预算。再验证：
