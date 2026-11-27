@@ -199,6 +199,18 @@ test('DSH permission setup context permits the first message without clearing na
   } finally { await context.close(); }
 });
 
+test('DSH forwards the full eight MiB attachment budget in a prompt request', async () => {
+  const context = await setup();
+  try {
+    const binding = await context.create();
+    const sizes = [5, 3].map(mib => mib * 1024 * 1024);
+    const imageData = sizes.map(size => ({ mediaType: 'image/png' as const, data: Buffer.alloc(size).toString('base64') }));
+    assert.equal((await context.adapter.submit(binding, { id: randomUUID(), text: '', imageData })).outcome, 'accepted');
+    const content = context.fixture.calls.find(call => call.method === 'session/prompt')?.args.request.content;
+    assert.deepEqual(content?.map((item: { type: string; data: string }) => [item.type, Buffer.from(item.data, 'base64').length]), sizes.map(size => ['image', size]));
+  } finally { await context.close(); }
+});
+
 test('DSH passive context never hides queued user work or unknown next-step inputs', async () => {
   const context = await setup();
   try {

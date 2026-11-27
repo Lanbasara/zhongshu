@@ -2,6 +2,7 @@
 // An operation is persisted before dispatch; an unknown receipt is settled by native reads, never by resending.
 import type { Receipt } from '../../harness/types.ts';
 import { nativeText } from '../../shared/content.ts';
+import { imageUploadLimit, messageImageLimit } from '../../shared/image-limits.ts';
 import type { WorkbenchItem } from '../../shared/workbench.ts';
 import { workspacePath } from '../resources.ts';
 import { StoreError, planView, type Conversation, type Operation, type OperationInput, type WorkbenchStore } from '../workbench-store.ts';
@@ -57,10 +58,11 @@ export class Execution implements Participant {
     let totalImageBytes = 0;
     for (const image of input.payload.images ?? []) {
       const saved = this.store.resources.get(conversation.id, image.id);
+      if (saved.data.length > imageUploadLimit) throw new StoreError('message_image_too_large', 413);
       totalImageBytes += saved.data.length;
       if (saved.name !== image.name || saved.mediaType !== image.mediaType) throw new StoreError('image_reference_changed', 409);
     }
-    if (totalImageBytes > 4 * 1024 * 1024) throw new StoreError('message_images_too_large', 413);
+    if (totalImageBytes > messageImageLimit) throw new StoreError('message_images_too_large', 413);
   }
   /** The native input for a message operation. */
   messageInput(operation: Extract<Operation, { type: 'message' }>) {

@@ -1,5 +1,16 @@
 /** Browser-only staging keeps failed/interrupted uploads recoverable across reload. */
-export type UploadDraft = { id: string; conversation: string; file: File };
+export type UploadDraft = { id: string; conversation: string; file: File; compressed?: Blob; compressionFailed?: boolean };
+// A composer remounted during preparation must read the finished stage, not the provisional original.
+const writes = new Map<string, Promise<void>>();
+export function trackImageWrite(conversation: string) {
+  let resolve!: () => void;
+  const promise = new Promise<void>(done => { resolve = done; });
+  writes.set(conversation, promise);
+  return () => {
+    if (writes.get(conversation) === promise) writes.delete(conversation);
+    resolve();
+  };
+}
 function database(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const request = indexedDB.open('zhongshu-upload-drafts', 1);
@@ -15,7 +26,10 @@ async function transaction<T>(mode: IDBTransactionMode, action: (store: IDBObjec
   try { return await new Promise<T | void>((resolve, reject) => { const tx = db.transaction('uploads', mode); const request = action(tx.objectStore('uploads')); tx.oncomplete = () => resolve(request?.result); tx.onerror = () => reject(Error('upload_draft_storage_failed')); tx.onabort = () => reject(Error('upload_draft_storage_failed')); }); }
   finally { db.close(); }
 }
-export async function uploadDrafts(conversation: string) { return (await transaction('readonly', s => s.getAll()) as UploadDraft[]).filter(u => u.conversation === conversation); }
+export async function uploadDrafts(conversation: string) {
+  await writes.get(conversation);
+  return (await transaction('readonly', s => s.getAll()) as UploadDraft[]).filter(u => u.conversation === conversation);
+}
 export async function putUpload(draft: UploadDraft) { await transaction('readwrite', s => s.put(draft)); }
 export async function removeUpload(id: string) { await transaction('readwrite', s => s.delete(id)); }
 /** Move staged files when the existing conversation composer takes over. */

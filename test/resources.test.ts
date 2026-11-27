@@ -65,6 +65,23 @@ test('resource HTTP keeps authentication, CSRF, content limits and conversation 
   const valid=await app.inject({url:read,headers:{cookie}});assert.equal(valid.statusCode,200);assert.deepEqual(valid.rawPayload,png);assert.equal(valid.headers['content-type'],'image/png');
   const foreign=read.replace(id,randomUUID());assert.equal((await app.inject({url:foreign,headers:{cookie}})).statusCode,404);
   assert.equal((await app.inject({method:'POST',url,headers:{origin,cookie,'x-csrf-token':csrf},payload:{name:'x.svg',data:Buffer.from('<svg onload="alert(1)"></svg>').toString('base64')}})).statusCode,400);
+
+  const mib = 1024 * 1024;
+  const fixtureImage = (size: number, fill: number) => { const data = Buffer.alloc(size, fill); png.copy(data); return data; };
+  const upload = (name: string, data: Buffer) => app.inject({ method: 'POST', url, headers: { origin, cookie, 'x-csrf-token': csrf }, payload: { name, data: data.toString('base64') } });
+  const atLimit = fixtureImage(5 * mib, 1);
+  const large = await upload('large.png', atLimit);
+  assert.equal(large.statusCode, 200);
+  assert.equal(large.json().byteSize, atLimit.length);
+  assert.deepEqual((await app.inject({ url: url + '/' + large.json().id, headers: { cookie } })).rawPayload, atLimit);
+  assert.ok((await upload('too-large.png', fixtureImage(5 * mib + 1, 1))).statusCode >= 400);
+  const second = store.resources.put(id, 'second.png', fixtureImage(3 * mib, 2));
+  const oneMore = store.resources.put(id, 'one-more.png', png);
+  const conversation = store.getConversation(id)!;
+  const operation = { id: randomUUID(), conversationId: id, type: 'message' as const, payload: { text: '', images: [large.json(), second] } };
+  await workbench.validateReferences(conversation, operation);
+  await assert.rejects(workbench.validateReferences(conversation, { ...operation, payload: { text: '', images: [large.json(), second, oneMore] } }), { code: 'message_images_too_large' });
+
   const revoked=await app.inject({method:'POST',url:'/api/private/logout',headers:{origin,cookie,'x-csrf-token':csrf},payload:{}});assert.equal(revoked.statusCode,200);
   assert.equal((await app.inject({url:read,headers:{cookie}})).statusCode,401);
 });

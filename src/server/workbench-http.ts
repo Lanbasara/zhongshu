@@ -13,6 +13,7 @@ import { SubagentStoreError, type SubagentStop } from './subagent-store.ts';
 import { StorageBudgetError } from './storage.ts';
 import { textLimit } from './workspace-documents.ts';
 import { imageSchema, skillCatalogSchema } from '../shared/content.ts';
+import { base64Length, imageUploadLimit } from '../shared/image-limits.ts';
 
 const uuidParams = z.object({ id: z.uuid() }).strict();
 const workspaceParams = z.object({ id: workspaceIdSchema }).strict();
@@ -438,11 +439,12 @@ export function createWorkbenchHttp(workbench: Workbench, input: Partial<z.input
         const image = await workbench.workspaceImage(id, item, source);
         return reply.type(image.mediaType).header('Content-Disposition', 'inline').send(image.data);
       });
-      privateApp.post('/conversations/:id/resources', { bodyLimit: 3 * 1024 * 1024 }, async (request, reply) => {
+      privateApp.post('/conversations/:id/resources', { bodyLimit: base64Length(imageUploadLimit) + 4096 }, async (request, reply) => {
         const { id } = parse(uuidParams, request.params);
         if (!workbench.store.getConversation(id)) throw new StoreError('conversation_not_found', 404);
-        const body = parse(z.object({ name: z.string().min(1).max(120), data: z.string().max(3 * 1024 * 1024) }).strict(), request.body);
-        return json(reply, imageSchema.parse(workbench.store.resources.put(id, body.name, decodeImage(body.data, 2 * 1024 * 1024))));
+        const body = parse(z.object({ name: z.string().min(1).max(120), data: z.string().max(base64Length(imageUploadLimit)) }).strict(), request.body);
+        const data = decodeImage(body.data, imageUploadLimit);
+        return json(reply, imageSchema.parse({ ...workbench.store.resources.put(id, body.name, data), byteSize: data.length }));
       });
       const resourceParams = z.object({ id: z.uuid(), resource: z.uuid() }).strict();
       privateApp.get('/conversations/:id/resources/:resource', async (request, reply) => {
