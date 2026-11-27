@@ -172,7 +172,7 @@ export function runConfigurationText(task: AutomationView, configuration?: Workb
     return [label.model, label.reasoningEffort, permission, label.agentPreset].filter(Boolean).join(' · ');
   }
   if (task.target.kind === 'new' || task.target.kind === 'new_once') {
-    if (task.harnessId === 'codex') return 'Codex · 默认模型 · 工作区读写';
+    if (task.harnessId === 'codex') return 'Codex · 默认模型 · 完全访问';
     const preset = task.target.preset ? harness?.presets?.find(item => item.id === task.target.preset)?.label ?? task.target.preset : '默认预设';
     return `${preset} · 模型、思考深度和权限用宿主默认`;
   }

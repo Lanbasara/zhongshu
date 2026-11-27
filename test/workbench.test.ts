@@ -17,7 +17,7 @@ function deferred<T>() { let resolve!: (value: T) => void; let reject!: (reason:
 const terminal = (runId?: string): NativeState => ({ status: 'idle', pendingInputs: 0, configurationVerified: true, ...(runId ? { runId } : {}) });
 const nativeItem = (id: string): NativeItem => ({ id, kind: 'assistant', text: 'full-' + id, status: 'completed' });
 const operation = (conversationId: string): OperationInput => ({ id: randomUUID(), conversationId, type: 'message', payload: { text: 'synthetic request' } });
-async function until(predicate: () => boolean) { const until = Date.now() + 2000; while (!predicate()) { if (Date.now() > until) throw new Error('condition_timeout'); await delay(1); } }
+async function until(predicate: () => boolean, timeout = 2000) { const until = Date.now() + timeout; while (!predicate()) { if (Date.now() > until) throw new Error('condition_timeout'); await delay(1); } }
 
 /** Deterministic native-contract peer. These fault tests do not claim real Harness or browser acceptance. */
 class Peer implements HarnessAdapter {
@@ -222,6 +222,51 @@ test('Codex scheduler recovers one due occurrence, reconciles a lost ACK and mar
     assert.equal(f.peer.submitCalls.length, 1);
     assert.equal((await f.service.open(f.id)).history.items.find(item => item.id === 'scheduled-input')?.automation?.messageId, f.peer.submitCalls[0]);
   } finally { await resumed.close(); }
+});
+
+test('Codex scheduled conversations default to full access and rotate only a legacy task-owned reuse target', async t => {
+  const f = fixture(t);
+  const clock = Date.parse('2027-01-01T00:00:00.000Z');
+  f.peer.catalog = async () => ({ id: 'codex', available: true, defaultModelId: 'model',
+    models: [{ id: 'model', label: 'model' }], permissions: [{ id: ':danger-full-access', label: 'full', description: 'fixture' }] });
+  f.peer.submitRead = async id => {
+    const runId = 'run-' + id;
+    f.peer.current = { ...terminal(runId), terminalRunId: runId, terminalStatus: 'completed' };
+    return { outcome: 'accepted', runId };
+  };
+  const scheduler = createCodexAutomations(f.db, f.service, f.peer, () => {}, () => clock);
+  const task = await scheduler.operations.create({ title: 'check', prompt: 'scheduled fixture',
+    timing: { kind: 'every', seconds: 3600 }, target: { kind: 'new_once', cwd: f.workspaces[0]!.directory } });
+  const legacyId = randomUUID();
+  const configuration = { modelId: 'model', permissionId: ':workspace' };
+  f.store.createConversation({ id: legacyId, harnessId: 'codex', workspaceId: 'fixture',
+    cwd: f.workspaces[0]!.directory, configuration, automationId: task.id });
+  f.store.saveBinding(legacyId, { id: 'native-legacy', cwd: f.workspaces[0]!.directory, configuration, details: {} });
+  f.db.prepare('UPDATE codex_automations SET reused_conversation_id=? WHERE id=?').run(legacyId, task.id);
+  const oldRunId = randomUUID();
+  f.db.prepare(`INSERT INTO codex_automation_runs
+    (id,task_id,conversation_id,scheduled_at,prompt,delivered_at,run_id,session_id,settled)
+    VALUES(?,?,?,?,?,?,?,?,1)`).run(oldRunId, task.id, legacyId, clock - 3600_000, 'old fixture', clock - 3600_000, 'legacy-run', 'native-legacy');
+  async function deliver(id: string, expectedCount: number) {
+    assert.notEqual(await scheduler.operations.run(id), 'pending');
+    await until(() => (f.db.prepare('SELECT COUNT(*) AS count FROM codex_automation_runs WHERE task_id=? AND settled=1').get(id)?.count ?? 0) === expectedCount, 5000);
+    return (await scheduler.operations.view(id))?.lastDelivery;
+  }
+  try {
+    scheduler.start();
+    const first = await deliver(task.id, 2);
+    const replacement = f.store.conversationForNative('codex', first!.sessionId);
+    assert.equal(replacement?.configuration.permissionId, ':danger-full-access');
+    assert.notEqual(replacement?.id, legacyId);
+    const second = await deliver(task.id, 3);
+    assert.equal(second?.sessionId, first?.sessionId);
+    assert.equal(f.store.getConversation(legacyId)?.configuration.permissionId, ':workspace');
+    assert.equal((await scheduler.operations.history(task.id, 10))?.records.find(run => run.messageId === oldRunId)?.sessionId, 'native-legacy');
+    const newTask = await scheduler.operations.create({ title: 'every run', prompt: 'fresh fixture',
+      timing: { kind: 'every', seconds: 3600 }, target: { kind: 'new', cwd: f.workspaces[0]!.directory } });
+    const fresh = await deliver(newTask.id, 1);
+    assert.equal(f.store.conversationForNative('codex', fresh!.sessionId)?.configuration.permissionId, ':danger-full-access');
+  } finally { await scheduler.close(); }
 });
 
 test('accepted ACK cannot open the next send until the same native run reaches a terminal state', async t => {

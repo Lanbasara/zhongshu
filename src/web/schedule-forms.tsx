@@ -160,8 +160,8 @@ export function CreateForm({ configuration, csrf, report, close, reload, convers
             <span><b>{targets[id][0]}</b><small>{targets[id][1]}</small></span>{target === id && <Check size={15} aria-hidden="true"/>}</button>)}
       </div>
       <Field label="Agent 配置" hint={target === 'conversation' ? undefined
-        : harness === 'codex' ? '到点后新开 Codex 对话，使用默认模型和工作区读写权限。'
-        : '运行到点时由宿主新开对话，只能选预设；模型、思考深度和权限用宿主默认。要用别的配置，先自己开一段配好的对话，再让任务投递到那里。'}>
+        : harness === 'codex' ? '到点后新开 Codex 执行对话，使用默认模型和完全访问权限。'
+        : '到点后由 DSH 新开执行对话，使用宿主默认的模型、思考深度和权限。中书部署的默认权限为完全访问。'}>
         {target === 'conversation' ? <p className="sch-static">沿用这段对话的配置。</p>
           : presets.length ? <Segments label="Agent 预设" value={preset} change={setPreset} options={presets.map(item => [item.id, item.label, !item.available] as const)}/>
           : <p className="sch-static">宿主默认</p>}
