@@ -18,6 +18,7 @@ type RunRow = {
 const iso = (at: number) => new Date(at).toISOString();
 const targetOf = (row: TaskRow) => JSON.parse(row.target_json) as AutomationTargetInput;
 const timingOf = (row: TaskRow) => JSON.parse(row.timing_json) as AutomationTimingInput;
+const automationPermission = ':danger-full-access';
 const BATCH = 12;
 export const isCodexAutomation = (id: string) => /^codex-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(id);
 
@@ -100,11 +101,17 @@ export function createCodexAutomations(db: DatabaseSync, workbench: Workbench, a
   function insertRun(row: TaskRow, at: number) {
     const target = targetOf(row);
     const id = randomUUID();
+    const previous = target.kind === 'new_once' && row.reused_conversation_id
+      ? workbench.store.getConversation(row.reused_conversation_id) : null;
+    // Keep admitted runs and their history on the original thread. Only future runs of a task-owned
+    // workspace thread move to a new conversation. Explicit existing-session targets keep their permissions.
+    const reusableId = previous?.automationId === row.id && !previous.archived && previous.configuration.permissionId === ':workspace'
+      ? null : row.reused_conversation_id;
     const conversationId = target.kind === 'session' ? workbench.store.conversationForNative('codex', target.sessionId)?.id ?? ''
-      : target.kind === 'new_once' ? row.reused_conversation_id ?? randomUUID() : randomUUID();
+      : target.kind === 'new_once' ? reusableId ?? randomUUID() : randomUUID();
     db.prepare('INSERT INTO codex_automation_runs(id,task_id,conversation_id,scheduled_at,prompt) VALUES(?,?,?,?,?)')
       .run(id, row.id, conversationId, at, row.prompt);
-    if (target.kind === 'new_once' && !row.reused_conversation_id)
+    if (target.kind === 'new_once' && row.reused_conversation_id !== conversationId)
       db.prepare('UPDATE codex_automations SET reused_conversation_id=? WHERE id=?').run(conversationId, row.id);
   }
   function claimDue() {
@@ -144,9 +151,9 @@ export function createCodexAutomations(db: DatabaseSync, workbench: Workbench, a
       const catalog = (await workbench.catalogs()).find(entry => entry.id === 'codex');
       if (closed || !exists(run)) return;
       const model = catalog?.models.find(entry => entry.id === catalog.defaultModelId);
-      if (!model || !catalog?.permissions.some(entry => entry.id === ':workspace')) return problem(run, 'automation_codex_defaults_unavailable');
+      if (!model || !catalog?.permissions.some(entry => entry.id === automationPermission)) return problem(run, 'automation_codex_defaults_unavailable');
       conversation = await workbench.create({ id: run.conversation_id, harnessId: 'codex', workspaceId: workspace.id, title: row.title,
-        automationId: row.id, configuration: { modelId: model.id, permissionId: ':workspace', ...(model.defaultReasoningEffort ? { reasoningEffort: model.defaultReasoningEffort } : {}) } });
+        automationId: row.id, configuration: { modelId: model.id, permissionId: automationPermission, ...(model.defaultReasoningEffort ? { reasoningEffort: model.defaultReasoningEffort } : {}) } });
       if (closed || !exists(run)) return;
     }
     if (conversation.archived || !workbench.workspaces.some(workspace => workspace.id === conversation.workspaceId && workspace.directory === conversation.cwd))
@@ -248,7 +255,9 @@ export function createCodexAutomations(db: DatabaseSync, workbench: Workbench, a
       const row = taskRow(id);
       if (!row) return 'notFound';
       if (pending(id)) return 'pending';
-      insertRun(row, now());
+      db.exec('BEGIN IMMEDIATE');
+      try { insertRun(row, now()); db.exec('COMMIT'); }
+      catch (error) { db.exec('ROLLBACK'); throw error; }
       changed();
       tick();
       return view(taskRow(id)!);

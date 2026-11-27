@@ -38,7 +38,7 @@ const presetId = z.string().regex(/^[a-z][a-z0-9-]{0,63}$/);
 export const automationTargetInputSchema = z.discriminatedUnion('kind', [
   /** Runs use that conversation's configuration. */
   z.object({ kind: z.literal('conversation'), conversationId: z.uuid() }).strict(),
-  /** The Harness creates each session with the workspace and preset; model, effort and permission are its defaults. */
+  /** Each delivery creates a session with the workspace and the automation's default execution settings. */
   z.object({ kind: z.literal('new'), workspaceId: z.string().min(1).max(64), preset: presetId.optional() }).strict(),
   /** The Harness opens one session at the first run and reuses it; like `new`, it takes only the workspace and preset.
    * Zhongshu never opens a conversation before a run (ADR 0021, 2026-11-09). */
