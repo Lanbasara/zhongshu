@@ -4,7 +4,8 @@ import { HarnessError } from '../types.ts';
 import type { AccountEvent, Binding, Catalog, Configuration, HarnessAdapter, LoginStart, HarnessInput, NativeAccount, HistoryPage, NativeChange, NativeItem, NativeRequest, NativeState, NativeSubagent, Receipt, SubagentHistory, SubagentSnapshot } from '../types.ts';
 import { CodexRpc, RpcError, type ServerRequest } from './rpc.ts';
 import { answerableMethods, parseServerRequest, type Parsed } from './requests.ts';
-import { inputFields } from '../../shared/content.ts';
+import { imageSchema, inputFields } from '../../shared/content.ts';
+import { base64Length, imageCountLimit, imageUploadLimit } from '../../shared/image-limits.ts';
 import { revisionSchema, skillRequiresNextTurn, subagentIdSchema, subagentLimit } from '../../shared/workbench.ts';
 import type { QueueDelivery, RequestAnswer } from '../../shared/workbench.ts';
 import { configuredThread, cursor, itemsPage, mapItem, nativeId, nativeItem, record, threadStatus, turn } from './protocol.ts';
@@ -16,7 +17,7 @@ const titleSchema = z.string().min(1).max(200).refine(value => Buffer.byteLength
 const bindingSchema = z.object({ id: nativeId, cwd: workspace, configuration, details: z.object({ version: z.literal(1), approvalPolicy: z.enum(['never', 'on-request']), title: titleSchema.optional() }) });
 /** ADR 0016: full access never asks; every other permission asks when the agent needs more. Fixed at creation. */
 const approvalPolicyFor = (permissionId: string) => permissionId === ':danger-full-access' ? 'never' as const : 'on-request' as const;
-const operationSchema = z.object({ id: nativeId, text: z.string().max(256_000), skills: inputFields.skills, imageData: z.array(z.object({ mediaType: z.enum(['image/png', 'image/jpeg', 'image/webp']), data: z.string().max(3 * 1024 * 1024) })).max(4).optional() }).refine(v => v.text.trim() || v.imageData?.length);
+const operationSchema = z.object({ id: nativeId, text: z.string().max(256_000), skills: inputFields.skills, imageData: z.array(z.object({ mediaType: imageSchema.shape.mediaType, data: z.string().max(base64Length(imageUploadLimit)) })).max(imageCountLimit).optional() }).refine(v => v.text.trim() || v.imageData?.length);
 const nativeSkillRow = z.object({
   name: z.string().min(1).max(120).regex(/^[\p{L}\p{N}_.:-]+$/u), description: z.string().max(16_000), enabled: z.literal(true),
   path: workspace.refine(path => basename(path) === 'SKILL.md'), interface: z.object({ displayName: z.string().nullish() }).nullish(),

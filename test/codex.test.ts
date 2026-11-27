@@ -506,6 +506,15 @@ test('Codex discovers effort options and pins selected effort at create, send an
   assert.equal(p.calls.filter(call => call.method === 'thread/start').length, 1);
 });
 
+test('Codex forwards the full eight MiB attachment budget as inline images', async t => {
+  const p = await peer(t);
+  const sizes = [5, 3].map(mib => mib * 1024 * 1024);
+  const imageData = sizes.map(size => ({ mediaType: 'image/png' as const, data: Buffer.alloc(size).toString('base64') }));
+  assert.equal((await p.adapter.submit(saved, { id: 'large-attachments', text: '', imageData })).outcome, 'accepted');
+  const input = p.calls.find(call => call.method === 'turn/start')?.params.input as { type: string; url: string }[];
+  assert.deepEqual(input.map(item => [item.type, Buffer.from(item.url.split(',')[1]!, 'base64').length]), sizes.map(size => ['image', size]));
+});
+
 test('Codex draft skill discovery creates no thread and selected references survive first binding', async t => {
   const path = saved.cwd + '/.agents/skills/proof/SKILL.md';
   let enabled = true;

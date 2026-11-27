@@ -18,7 +18,7 @@ type Session = { id: string; cwd: string; model: { provider: string; model: stri
 async function until(predicate: () => boolean, timeout = 4000): Promise<void> { const end = Date.now() + timeout; while (!predicate()) { if (Date.now() > end) assert.fail('condition did not become true'); await delay(10); } }
 
 /** Protocol fixture only. These tests make no claim about real model execution. */
-async function host() {
+async function host(requestLimit = 1024 * 1024) {
   const token = randomUUID(); const sessions = new Map<string, Session>(); const peers = new Map<string, WebSocket | null>();
   const follows = new Map<string, { socket: WebSocket; session: string }>();
   const calls: { method: string; args: Record<string, any> }[] = [];
@@ -62,7 +62,7 @@ async function host() {
     if (!cookie || !peers.get(cookie)) { response.writeHead(401).end(); return; }
     try {
       const chunks: Buffer[] = []; let bytes = 0;
-      for await (const chunk of request) { bytes += chunk.length; if (bytes > 1024 * 1024) throw new Error(); chunks.push(chunk); }
+      for await (const chunk of request) { bytes += chunk.length; if (bytes > requestLimit) throw new Error(); chunks.push(chunk); }
       const body = JSON.parse(Buffer.concat(chunks).toString()); const args = body.payload.args; calls.push({ method: body.method, args });
       const session = sessions.get(args.request?.sessionId ?? args.agentId ?? args.request?.address?.sessionId);
       let value: unknown;
@@ -175,8 +175,8 @@ async function host() {
     dropNextResult() { failNextResult = 'drop'; }, followCalls: () => followCalls, setCatalog(value: unknown) { catalog = value; }, signOut() { signedIn = false; }, signIn() { signedIn = true; }, signInAttempt: () => signIn, setPresets(ids: string[], broken: string[] = []) { presetIds = ids; brokenPresets.clear(); for (const id of broken) brokenPresets.add(id); }, lockedSelects: () => lockedSelects, setProfile(value: 'ready' | 'failed' | 'rejected') { profile = value; }, setBalance(value: 'ready' | 'failed' | 'rejected') { balance = value; }, onNextPage(hook: () => void) { nextPage = hook; }, exchanges: () => exchanges, rejectModel: () => { rejectModel = true; }, losePromptReceipt: () => { losePromptReceipt = true; }, live(session: string, frame: unknown) { for (const [streamId, follow] of follows) if (follow.session === session) follow.socket.send(JSON.stringify({ type: 'item', streamId, value: { type: 'assistant-stream', frame } })); }, disconnect() { for (const peer of peers.values()) peer?.terminate(); }, async close() { for (const peer of peers.values()) peer?.terminate(); await new Promise<void>(resolve => wss.close(() => resolve())); await new Promise<void>(resolve => server.close(() => resolve())); } };
 }
 
-async function setup() {
-  const fixture = await host(); const directory = await mkdtemp(join(tmpdir(), 'zhongshu-dsh-test-')); const file = join(directory, 'launch'); await writeFile(file, fixture.launch, { mode: 0o600 });
+async function setup(requestLimit?: number) {
+  const fixture = await host(requestLimit); const directory = await mkdtemp(join(tmpdir(), 'zhongshu-dsh-test-')); const file = join(directory, 'launch'); await writeFile(file, fixture.launch, { mode: 0o600 });
   const adapter = createDshAdapter({ launchFile: file });
   async function create(permissionId = 'workspace-write'): Promise<Binding> { const catalog = await adapter.catalog(); assert.ok(catalog.available); const model = catalog.models[0]; assert.ok(model); return adapter.create({ cwd: directory, configuration: { modelId: model.id, permissionId, reasoningEffort: 'high' } }, () => {}); }
   return { fixture, directory, file, adapter, create, async close() { await adapter.close(); await fixture.close(); await rm(directory, { recursive: true, force: true }); } };
@@ -196,6 +196,18 @@ test('DSH permission setup context permits the first message without clearing na
     assert.equal((await context.adapter.submit(binding, { id: randomUUID(), text: 'First message' })).outcome, 'accepted');
     assert.equal(context.fixture.calls.filter(call => call.method === 'session/prompt').length, 1);
     assert.deepEqual(native.stepInbox, retained, 'adapter must not delete native context');
+  } finally { await context.close(); }
+});
+
+test('DSH forwards the full eight MiB attachment budget in a prompt request', async () => {
+  const context = await setup(12 * 1024 * 1024);
+  try {
+    const binding = await context.create();
+    const sizes = [5, 3].map(mib => mib * 1024 * 1024);
+    const imageData = sizes.map(size => ({ mediaType: 'image/png' as const, data: Buffer.alloc(size).toString('base64') }));
+    assert.equal((await context.adapter.submit(binding, { id: randomUUID(), text: '', imageData })).outcome, 'accepted');
+    const content = context.fixture.calls.find(call => call.method === 'session/prompt')?.args.request.content;
+    assert.deepEqual(content?.map((item: { type: string; data: string }) => [item.type, Buffer.from(item.data, 'base64').length]), sizes.map(size => ['image', size]));
   } finally { await context.close(); }
 });
 

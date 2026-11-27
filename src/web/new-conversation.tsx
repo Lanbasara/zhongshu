@@ -2,14 +2,15 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react
 import { z } from 'zod';
 import { Folder, ImagePlus, X, FileText } from 'lucide-react';
 import { configurationSchema, conversationSchema, conversationResponseSchema, snapshotSchema, operationResponseSchema, type WorkbenchConfiguration, type Conversation } from '../shared/workbench.ts';
-import { imageSchema, skillCatalogSchema, skillLabelText, skillLimit, type SkillReference } from '../shared/content.ts';
+import { skillCatalogSchema, skillLabelText, skillLimit, type SkillReference } from '../shared/content.ts';
 import { ComposerView } from './patterns/composer.tsx';
 import { SkillEditor } from './patterns/composer-extras.tsx';
 import { DraftConfiguration } from './patterns/draft-configuration.tsx';
 import { Button } from './ui/controls.tsx';
 import { FilePicker } from './conversation-content.tsx';
 import { request, RequestError, readDraft, saveDraft, sendRefused } from './workbench-client.ts';
-import { handOverUploads, uploadDrafts, putUpload, removeUpload, type UploadDraft } from './upload-drafts.ts';
+import { handOverUploads, uploadDrafts, putUpload, removeUpload, trackImageWrite, type UploadDraft } from './upload-drafts.ts';
+import { attachmentBytes, compressionLabel, imageUploadProblem, sendImage, stageImages, uploadImage } from './image-uploads.ts';
 import { readNewDraft, saveNewDraft, removeNewDraft, type NewDraft } from './new-conversation-state.ts';
 import { readPreference, rememberConversation, initialConversationTitle } from './conversation-preferences.ts';
 import { normalizeDraftPreference } from './conversation-configuration-label.ts';
@@ -18,21 +19,18 @@ const draftSkillsSchema=z.discriminatedUnion('supported',[
   skillCatalogSchema.extend({supported:z.literal(true)}).strict(),
   z.object({supported:z.literal(false),skills:z.tuple([]),reason:z.literal('draft_skills_unavailable')}).strict(),
 ]);
-// Remounting a draft waits for its pending IndexedDB write before restoring.
-const imageWrites=new Map<string,Promise<void>>();
-function trackImageWrite(id:string){
-  let finish!:()=>void;const pending=new Promise<void>(resolve=>{finish=resolve;});
-  imageWrites.set(id,pending);
-  return()=>{if(imageWrites.get(id)===pending)imageWrites.delete(id);finish();};
-}
 const defaultsSchema=z.object({conversation:conversationSchema.nullable()}).strict();
 const preparationSchema=skillCatalogSchema.extend({preparationId:z.uuid()}).strict();
 type Props={ configuration:WorkbenchConfiguration; id:string; initial?:NewDraft; notice?:string; addedWorkspace?:string; csrf:string;
   onCreated(conversation:Conversation,refused?:RequestError):void; onView(id:string):void; onStart():void; onAddWorkspace():void;
   onRecovered(id:string,notice:string):void; report(error:unknown):void };
 function StagedImage({item,disabled,onRemove}:{item:UploadDraft;disabled:boolean;onRemove():void}) {
-  const [url,setUrl]=useState('');useEffect(()=>{const url=URL.createObjectURL(item.file);setUrl(url);return()=>URL.revokeObjectURL(url);},[item.file]);
-  return <div className="attachment-card"><img src={url} alt={item.file.name}/><span>{item.file.name}<small>发送时上传</small></span><button type="button" aria-label={`移除图片：${item.file.name}`} disabled={disabled} onClick={onRemove}><X size={14}/></button></div>;
+  const image=sendImage(item);
+  const [url,setUrl]=useState('');
+  useEffect(()=>{if(item.compressionFailed)return;const url=URL.createObjectURL(image);setUrl(url);return()=>URL.revokeObjectURL(url);},[image,item.compressionFailed]);
+  return <div className="attachment-card">{item.compressionFailed?<ImagePlus size={22}/>:<img src={url} alt={item.file.name}/>}
+    <span>{item.file.name}<small>{item.compressionFailed?'无法压缩到限额内 · 原图已保留':item.compressed?compressionLabel(item.file.size,image.size):'发送时上传'}</small></span>
+    <button type="button" aria-label={`移除图片：${item.file.name}`} disabled={disabled} onClick={onRemove}><X size={14}/></button></div>;
 }
 function initialConfig(catalog:WorkbenchConfiguration['harnesses'][number]|undefined) {
   const model=catalog?.models.find(m=>m.id===catalog.defaultModelId);
@@ -119,7 +117,7 @@ function DraftComposer(props:Props & { saved: NewDraft }) {
         harnessId:selected?.harnessId??catalog?.id??'codex', configuration:selected?.configuration??initialConfig(catalog)});
     })();return()=>{cancelled=true;abort.abort();};
   },[]);
-  useEffect(()=>{let cancelled=false;void (async()=>{await imageWrites.get(draft.id);return uploadDrafts(draft.id);})().then(items=>{if(!cancelled){setUploads(items);setImagesReady(true);}}).catch(()=>{if(!cancelled)setError('无法恢复图片暂存，请检查浏览器存储后刷新。');});return()=>{cancelled=true;};},[draft.id]);
+  useEffect(()=>{let cancelled=false;void uploadDrafts(draft.id).then(items=>{if(!cancelled){setUploads(items);setImagesReady(true);}}).catch(()=>{if(!cancelled)setError('无法恢复图片暂存，请检查浏览器存储后刷新。');});return()=>{cancelled=true;};},[draft.id]);
   useEffect(() => {
     const value = current.current;
     if (!initialized || busyRef.current || !value.submission) return;
@@ -197,27 +195,22 @@ function DraftComposer(props:Props & { saved: NewDraft }) {
   };
   async function addImages(files:File[]) {
     if(busyRef.current||stagingRef.current||current.current.submission||!imagesReady||!initialized)return;
-    if(uploads.length+files.length>4){setError('每条消息最多添加 4 张图片。');return;}
     const owner=current.current;
     if(!persist(owner,true))return;
     stagingRef.current=true;setStaging(true);const finishWrite=trackImageWrite(owner.id);
-    const added:UploadDraft[]=[];
     try {
-      for(const file of files){
-        if(!['image/png','image/jpeg','image/webp'].includes(file.type)||file.size>2*1024*1024){setError('请选择 2 MiB 以内的 PNG、JPEG 或 WebP 图片。');continue;}
-        const item={id:crypto.randomUUID(),conversation:owner.id,file};
-        try{await putUpload(item);added.push(item);}catch{if(alive.current)setError('无法暂存图片，本次未添加。');}
-      }
+      const stagedBytes=uploads.reduce((bytes,item)=>bytes+sendImage(item).size,0);
+      const {items,error}=await stageImages(owner.id,files,uploads.length,stagedBytes);
       // Writes belong to the captured draft even if navigation unmounted it.
       // Its next mount recovers them from IndexedDB; never inject them into a
       // different draft or allow first-send to snapshot a partially staged set.
-      if(alive.current&&current.current.id===owner.id)setUploads(old=>[...old,...added]);
+      if(alive.current&&current.current.id===owner.id){setUploads(old=>[...old,...items]);setError(error);}
     } finally {finishWrite();stagingRef.current=false;if(alive.current)setStaging(false);}
   }
   async function removeImage(id:string){
     if(busyRef.current||stagingRef.current||current.current.submission)return;
     const owner=current.current.id;stagingRef.current=true;setStaging(true);const finishWrite=trackImageWrite(owner);
-    try{await removeUpload(id);if(alive.current&&current.current.id===owner)setUploads(old=>old.filter(i=>i.id!==id));}
+    try{await removeUpload(id);if(alive.current&&current.current.id===owner){setUploads(old=>old.filter(i=>i.id!==id));setError('');}}
     catch{if(alive.current)setError('无法移除图片，请重试。');}
     finally{finishWrite();stagingRef.current=false;if(alive.current)setStaging(false);}
   }
@@ -241,6 +234,9 @@ function DraftComposer(props:Props & { saved: NewDraft }) {
     if(!value.submission&&(!valid||referencesNeedReview||(!value.text.trim()&&!uploads.length&&!value.references?.length)))return;
     busyRef.current=true;setBusy(true);setError('');setConfigurationFailed(false);const abort=new AbortController();controller.current=abort;
     try {
+      const pendingImages=(await uploadDrafts(value.id)).filter(item=>!value.submission?.uploaded[item.id]);
+      const imageProblem=imageUploadProblem(pendingImages,attachmentBytes(value.images));
+      if(imageProblem)throw Error(imageProblem);
       if(!value.submission){
         if(value.harnessId==='dsh'){
           setStatus('正在核对首发技能与原生准备…');
@@ -288,10 +284,8 @@ function DraftComposer(props:Props & { saved: NewDraft }) {
         snapshot=await request(`/conversations/${conversationId}`,snapshotSchema,{signal:abort.signal});
         abort.signal.throwIfAborted();
       }
-      const pendingImages=await uploadDrafts(value.id);
-      for(const item of pendingImages){if(submission.uploaded[item.id])continue;setStatus('正在上传首条消息的图片…');
-        const data=await new Promise<string>((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result).split(',')[1]!);reader.onerror=()=>reject(Error('无法读取图片'));reader.readAsDataURL(item.file);});
-        const image=await request(`/conversations/${conversationId}/resources`,imageSchema,{csrf:props.csrf,body:{name:item.file.name.slice(0,120)||'图片',data},signal:abort.signal});
+      for(const item of pendingImages){setStatus('正在上传首条消息的图片…');
+        const image=await uploadImage(conversationId,props.csrf,item,abort.signal);
         abort.signal.throwIfAborted();
         value={...value,images:[...(value.images??[]),image],submission:{...value.submission!,uploaded:{...value.submission!.uploaded,[item.id]:image.id}}};
         if(!persist(value,true))return;
@@ -442,14 +436,15 @@ function DraftComposer(props:Props & { saved: NewDraft }) {
     persist({...previous,harnessId,configuration:next,powers:{...previous.powers,[previous.harnessId]:previous.configuration}});
     if(previous.skills?.length)setError('已保留文字及技能标记；发送前会核验技能是否适用于当前 Power，不适用时请重新选择。');
   }
+  const imageProblem=draft.submission?'':imageUploadProblem(uploads,attachmentBytes(draft.images));
   return <section className="new-draft-page"><div className="new-draft-content"><div className="new-draft-intro"><h2>要做点什么？</h2><p>选好工作区，写下要做的事。第一次发送时才会创建对话。</p></div>
     <div className="new-draft-workspace"><Folder size={15}/><label className="sr-only" htmlFor="draft-workspace">工作区</label><select id="draft-workspace" value={draft.workspaceId} disabled={locked||staging||!initialized} onChange={e=>changeWorkspace(e.target.value)}><option value="">选择工作区</option>{draft.workspaceId&&!workspace&&<option value={draft.workspaceId} disabled>工作区不可用</option>}{props.configuration.workspaces.map(w=><option key={w.id} value={w.id}>{w.label}</option>)}</select></div>
     {!props.configuration.workspaces.length&&<div className="state-notice"><p>先添加工作区，再开始对话。</p>{props.configuration.workspaceRoots?.length?<Button onClick={()=>{awaitingWorkspace.current={previous:props.addedWorkspace};props.onAddWorkspace();}}>添加工作区</Button>:<p>管理员尚未配置允许添加的目录，请先完成工作区配置。</p>}</div>}
     <ComposerView value={draft.text} onChange={text=>edit(text,[])} renderEditor={editor=><SkillEditor editor={{...editor,placeholder:'你想从哪里开始？'}} spans={draft.skills} picker={workspace&&catalog?.available&&skillsSupported&&!locked?{load:loadSkills,format:skillLabelText,limit:skillLimit}:undefined} onEdit={edit}/>}
       onSend={()=>void send()} onStop={()=>{}} onImages={files=>void addImages(files)} onFiles={()=>setPicking(true)} editDisabled={locked} imagesDisabled={locked||staging||!initialized||!imagesReady} filesDisabled={filesDisabled}
-      sendDisabled={conversationDeleted||busy||staging||!initialized||!imagesReady||(!draft.submission&&(!valid||referencesNeedReview||(!draft.text.trim()&&!uploads.length&&!draft.references?.length)))} sending={busy} running={false} model={model?.label??'选择模型'} permission={catalog?.permissions.find(p=>p.id===draft.configuration.permissionId)?.label??'选择权限'} configurationNote="首次发送后配置固定。"
+      sendDisabled={conversationDeleted||busy||staging||!initialized||!imagesReady||!!imageProblem||(!draft.submission&&(!valid||referencesNeedReview||(!draft.text.trim()&&!uploads.length&&!draft.references?.length)))} sending={busy} running={false} model={model?.label??'选择模型'} permission={catalog?.permissions.find(p=>p.id===draft.configuration.permissionId)?.label??'选择权限'} configurationNote="首次发送后配置固定。"
       configurationControls={<DraftConfiguration catalogs={props.configuration.harnesses} harnessId={draft.harnessId} configuration={draft.configuration} disabled={locked||!initialized} onPowerChange={switchPower} onConfigurationChange={configuration=>persist({...current.current,configuration})}/>}
-      hasMaterials={!!uploads.length||!!draft.references?.length} error={error||(configurationFailed?configurationFailedMessage:'')} materials={<>{uploads.length>0&&<div className="attachment-tray">{uploads.map(item=><StagedImage key={item.id} item={item} disabled={locked||staging} onRemove={()=>void removeImage(item.id)}/>)}</div>}{draft.references?.map((r,index)=><div className="reference-card" key={index}><FileText size={14}/><span>{r.type==='file'?r.path:r.text}</span><button type="button" aria-label="移除引用" disabled={locked} onClick={()=>persist({...current.current,references:current.current.references?.filter((_,i)=>i!==index)})}><X size={14}/></button></div>)}</>}/>
+      hasMaterials={!!uploads.length||!!draft.references?.length} error={error||imageProblem||(configurationFailed?configurationFailedMessage:'')} materials={<>{uploads.length>0&&<div className="attachment-tray">{uploads.map(item=><StagedImage key={item.id} item={item} disabled={locked||staging} onRemove={()=>void removeImage(item.id)}/>)}</div>}{draft.references?.map((r,index)=><div className="reference-card" key={index}><FileText size={14}/><span>{r.type==='file'?r.path:r.text}</span><button type="button" aria-label="移除引用" disabled={locked} onClick={()=>persist({...current.current,references:current.current.references?.filter((_,i)=>i!==index)})}><X size={14}/></button></div>)}</>}/>
     {referencesNeedReview&&<p className="new-draft-status" role="status">文件引用来自原工作区。请切回原工作区，或移除旧引用后重新选择。</p>}
     {skillsSupported===false&&<p className="new-draft-status">当前 Power 暂未提供首发技能目录。</p>}
     {!draft.submission&&preparationState==='loading'&&<p className="new-draft-status" role="status">正在准备首发技能…</p>}
